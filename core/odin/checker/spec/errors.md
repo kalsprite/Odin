@@ -1,0 +1,322 @@
+# Odin Semantic Error Messages
+
+*Extracted from C++ checker implementation*
+
+## check_expr (362 error sites)
+
+- A branch statement's label name must be an identifier
+- A built-in procedure '%s' cannot be used as a runtime value
+- A labelled '%.*s' cannot be used within a 'defer'
+- All or none of the fields must be assigned to a struct with '#all_or_none' applied, missing fields:
+- All or none of the fields must be assigned to a struct with '#all_or_none' applied, missing fields: %s
+- Ambiguous call to a polymorphic variadic procedure with no variadic input
+- Ambiguous call to a polymorphic variadic procedure with no variadic input %s
+- Ambiguous procedure group call '%s' that match with the given arguments
+- A polymorphic type cannot be used in a type conversion
+- A procedure literal cannot have tags
+- A procedure literal must have a body
+- Array programming is not allowed with the operator '%.*s'
+- at caller location
+- A ternary expression must have an else clause
+- A ternary when expression must have an else clause
+- A type assertion cannot be applied to a constant expression: '%s'
+- A type assertion cannot be applied to an untyped expression: '%s'
+- A type '%s' cannot be used as a runtime value
+- A unsigned constant cannot be negated '%s'
+- Bit field value out of bounds, %s (%lld) not in the range %lld .. %lld
+- Bitwise not cannot be applied to untyped constants '%s'
+- #branch_location may only be used within a 'defer' statement
+- built-in expression in binary expression
+- Built-in procedures cannot be used within a ternary expression since they have no well-defined signature
+- Called procedure enables target feature '%.*s' which is invalid for the build target
+- Called procedure requires target feature '%.*s' which is invalid for the build target
+- #caller_expression may only be used as a default argument parameter
+- #caller_location may only be used as a default argument parameter
+- Calling a '#force_inline' procedure that enables target features is not allowed at file scope
+- Calling this procedure requires target feature '%.*s' to be enabled
+- Cannot access field '%s' from non-specialized polymorphic type '%s'
+- Cannot access non-constant field '%s' from '%s'
+- Cannot assign end value of type '%s' to '%s' in '%.*s'
+- Cannot assign to the %d-nested anonymous indirect field '%.*s' in a %.*s
+- '_' cannot be used as a value
+- Cannot call a non-procedure: '%s' of type '%s'
+- Cannot cast '%s' as '%s' from '%s'
+- Cannot compare expression. %s.
+- Cannot convert enum value to '%s'
+- Cannot convert numeric value '%s' from '%s' to '%s' from '%s'
+- Cannot convert '%s' to '%s' from '%s', got %s
+- Cannot convert untyped value '%s' to '%s' from '%s'%s
+- Cannot dereference '%s' because it is a type
+- Cannot dereference '%s' of type '%s'
+- Cannot determine type for implicit selector expression '%s'
+- Cannot index a constant '%s'
+- Cannot index a constant '%s' with index %lld
+- Cannot index constant matrix with non-constant indices '%s'
+- Cannot index constant '%s' of type '%s'
+- Cannot index '%s' of type '%s'
+
+## check_stmt (149 error sites)
+
+- A branch statement's label name must be an identifier
+- a compound literal of a slice
+- A foreign variable declaration cannot have a default value
+- A label is only allowed within a procedure
+- A labelled '%.*s' cannot be used within a 'defer'
+- A label's name cannot be a blank identifier
+- A label's name must be an identifier
+- An '#unroll for' expression must be known at compile time
+- a slice of a compound literal
+- a slice of a local variable
+- Assignment count mismatch '%td' = '%td'
+- Assignment operator '%.*s' requires single-valued operands
+- Assignments to named return values within 'defer' will not affect the value that is returned
+- Assignment to variable '%.*s' marked as @(rodata) is not allowed
+- A static variable declaration with a default value must be constant
+- A variable declaration must be an identifier, got '%s'
+- 'break' only allowed in non-inline loops or 'switch' statements
+- Cannot assign to '%s'
+- Cannot assign to struct field '%s' in map
+- Cannot assign to '%s' which is a procedure parameter
+- Cannot assign to '%s' which is from a 'using' procedure parameter
+- Cannot assign to the value of a map '%s'
+- Cannot iterate over '%s' of type '%s'
+- Cannot iterate over '%s' of type '%s' in an '#unroll for' statement
+- Cannot iterate over the type '%s'
+- 'continue' only allowed in non-inline loops
+- Diverging procedures may not return
+- Duplicate label with the name '%.*s'
+- Empty 'using' list
+- Expected 1 expression after 'in'
+- Expected 1 name before 'in'
+- Expected a constant integer >= 1 for #unroll, got %lld
+- Expected a constant integer for #unroll, got '%s'
+- Expected a maximum of %td identifier%s, got %td
+- Expected an identifier, got '%.*s'
+- Expected an 'in' assignment for this type switch statement
+- Expected a %td-valued expression on the rhs, got (%s)
+- Expected a type as a case, got %s
+- Expected %td return values, got %td
+- Expected %td return values, got %td (%s)
+- Expression is not used: '%s'
+- 'fallthrough' cannot have a label
+- 'fallthrough' statement in illegal position, expected at the end of a 'case' block
+- 'fallthrough' statement not allowed within a type switch statement
+- foreign library name must be an identifier
+- 'for' statement post statement must be a simple statement
+- Invalid AST: Branch Statement '%.*s'
+- Invalid AST - expected case clause
+- Invalid body for 'when' statement
+- Invalid 'else' statement in 'if' statement
+
+## check_type (187 error sites)
+
+- A bit_field's field must have a specified bit size
+- A bit_field's field must have a type
+- A bit_field's field name must be an identifier
+- A bit_field's specified bit size cannot be <= 0, got %lld
+- A bit_field's specified bit size cannot exceed 64 bits, got %lld
+- A bit_field's specified bit size cannot exceed its type, got %lld, expect <=%lld
+- A bit_field's specified bit size must be a constant
+- A boolean cannot be used as a key for a map, use an array instead for this case
+- A default value for a parameter must not be a polymorphic constant type, got %s
+- #align(%lld) is defined to be greater than #max_field_align(%lld)
+- #align(%lld) is defined to be less than #min_field_align(%lld)
+- All 'bit_field' field types must be of the same endian variety, i.e. all native, all little, or all big
+- All 'bit_field' field types must match the same endian kind as the backing type, i.e. all native, all little, or all big
+- An empty union cannot have a custom alignment
+- An enum field's name must be an identifier
+- '#any_int' can only be applied to variable fields
+- A parameter must be a valid constant type, got %s
+- A parameter with '#any_int' must be an integer, got %s
+- A polymorphic parameter cannot be variadic
+- A procedure type cannot have both an #optional_ok tag and #optional_allocator_error
+- A procedure type with the #optional_allocator_error expects a `runtime.Allocator_Error`, got '%s'
+- A procedure type with the #optional_allocator_error tag requires 2 return values, got %td
+- A procedure type with the #optional_ok tag requires 2 return values, got %td
+- Array count must be a constant integer
+- Array count must be a constant integer, got %s
+- Array count too large for an #soa struct, got %lld
+- Array count too large, %.*s
+- A type parameter may not have a default value
+- A union with #no_nil must have at least 2 variants
+- A variadic parameter may not have a default value
+- Backing type for a bit_field must be an integer or an array of an integer
+- Base type for enumeration cannot be a 128-bit integer
+- Base type for enumeration cannot be another enumeration
+- Base type for enumeration must be an integer
+- bit_set does not allow a negative lower bound (%lld) of the element type '%s' when an underlying type is set
+- bit_set does not allow a negative lower bound (%lld) when an underlying type is set
+- bit_set range is greater than %lld bits, %lld bits are required
+- bit_set range is greater than %lld bits, %lld bits are required (internally the lower bound was changed to 0 as an underlying type was set)
+- '#by_ptr' can only be applied to non-pointer-like parameters
+- '#by_ptr' can only be applied to variable fields
+- Calling convention does not support #c_vararg
+- Cannot assigned type to parameter, got type '%s', expected '%s'
+- Cannot convert type '%s' to the specialization '%s'
+- Cannot determine complete type of partial polymorphic procedure
+- Cannot determine parameter type from ---
+- Cannot determine parameter type from a nil
+- Cannot determine polymorphic type from parameter: '%s' to '%s'
+- Cannot determine type from the parameter, got '%s'
+- Cannot pass polymorphic type as a parameter, got '%s'
+- ? can only be used in conjunction with compound literals
+
+## check_decl (120 error sites)
+
+- A constant alias of a built-in procedure may not have a type initializer
+- A foreign procedure cannot be a polymorphic
+- A foreign procedure cannot have a body
+- A foreign procedure cannot have an 'export' tag
+- A foreign procedure may not have an \
+- A foreign variable declaration can not be scoped to a module and must be declared in a 'foreign {' (without a library) block
+- A foreign variable declaration cannot have a default value
+- An empty union '%s' cannot be instantiated in %.*s
+- 'any' cannot be aliased
+- A procedure cannot be both declared as @(init) and @(fini)
+- A procedure cannot be marked with both @(instrumentation_enter) and @(instrumentation_exit)
+- A procedure cannot have both @(require_target_feature=\
+- A procedure with a '#c_vararg' field cannot have a body and must be foreign
+- Assignment count mismatch '%td' = '%td'
+- Cannot apply @(objc_is_implement) to a procedure whose type does not also have @(objc_is_implement) set
+- Cannot assign a non-specialized polymorphic type '%s' to variable '%.*s'
+- Cannot assign a type '%s' to variable '%.*s'
+- Cannot determine type from overloaded procedure '%.*s'
+- Constant alias declarations cannot have attributes
+- Defer Use Checked: %.*s
+- 'distinct' cannot be applied to 'any'
+- 'distinct' cannot be applied to '%s'
+- 'distinct' cannot be applied to 'typeid'
+- @(enable_target_feature=\
+- Expected a procedure entity
+- Expected a procedure, got %s
+- Expected a procedure to check
+- Expected a procedure type, got '%s'
+- Expected a valid entity name in procedure group, got %.*s
+- Explicit export not allowed when @(objc_implement) is set. It set exported implicitly
+- Explicit linkage not allowed when @(objc_implement) is set. It set to \
+- #force_inline cannot be used in conjunction with the attribute 'optimization_mode' with neither \
+- foreign entities must declare which library they are from
+- Foreign export procedures must have a body
+- foreign library names must be an identifier
+- Illegal declaration cycle of `%.*s`
+- Illegal declaration of a constant procedure value
+- Imported Objective-C class '%.*s' must not declare context providers.
+- Imported Objective-C methods must use the \
+- Imported Objective-C methods used in a class with @(objc_implement) is not allowed.
+- @(instrumentation_enter) has already been set
+- @(instrumentation_enter) procedures must be declared at the file scope
+- @(instrumentation_enter) procedures must have the type '%s', got %s
+- @(instrumentation_exit) has already been set
+- @(instrumentation_exit) procedures must be declared at the file scope
+- @(instrumentation_exit) procedures must have the type '%s', got %s
+- Invalid declaration value '%s'
+- Invalid use of a non-specialized polymorphic type '%s' in %.*s
+- Invalid use of a polymorphic type '%s' in %.*s
+- Invalid use of inline asm in %.*s
+
+## check_builtin (510 error sites)
+
+- Alignment parameter to '%.*s' must be a power of 2 or 0, got %lld
+- Alignment parameter to '%.*s' must be constant
+- Alignment parameter to '%.*s' must be non-negative, got %lld
+- Alignment parameter to '%.*s' must not exceed '1<<29', got %lld
+- All simd vectors must be of the same length, got %lld vs %lld
+- All simd vectors must be of the same length, got %lld vs %lld vs %lld
+- Argument 0 must be of type 'uintptr', got %s
+- Argument has type '%s', expected a complex or quaternion type
+- Argument has type '%s', expected a quaternion type
+- Arguments have type '%s', expected a floating point
+- Arguments with a specified endian are not allow, expected a normal floating point, got '%s'
+- Argument %td must be of type 'uintptr', got %s
+- Array count too large for an #soa struct, got %lld
+- '#assert' expects either 1 or 2 arguments, got %td
+- Both parameters to '%.*s' must integers
+- '#caller_expression' expected an identifier
+- '#caller_expression' expected a valid earlier parameter name
+- '#caller_expression' expects either 0 or 1 arguments, got %td
+- Cannot use '%.*s' on an unspecialized polymorphic struct type, got '%s'
+- Cannot use '%.*s' on incomplete struct declaration, got '%s'
+- Compile time assertion: %s
+- Compile time assertion: %s (%s)
+- Compile time panic: %.*s
+- '#config' default value must be a constant
+- '#config' entity '%.*s' found but expected a constant
+- '#config' expects 2 arguments, got %td
+- '#config' expects an identifier, got %.*s
+- '#defined' expects 1 argument, got %td
+- '#defined' expects an identifier or selector expression, got %.*s
+- '#defined' is only allowed within a procedure, prefer the replacement '#config(NAME, default_value)'
+- '#exists' expected a constant string argument
+- '#exists' expects 1 argument, got %td
+- Expected a bit_set type for '%.*s'
+- Expected a bit_set type for '%.*s', got %s
+- Expected a call expression for '%.*s'
+- Expected a comparable type for '%.*s', got %s
+- Expected a complex or quaternion, got '%s'
+- Expected a compound literal value for '%.*s', got '%s'
+- Expected a constant Atomic_Memory_Order value for '%.*s', got %s
+- Expected a constant Atomic_Memory_Order value for the %s of '%.*s', got %s
+- Expected a constant integer for 'intrinsics.soa_struct'
+- Expected a constant integer for '%.*s
+- Expected a constant integer for '%.*s'
+- Expected a constant integer for the index of procedure parameter value
+- Expected a constant integer for the index of record parameter value
+- Expected a constant integer for the scale in '%.*s'
+- Expected a constant (non-empty) string for field argument
+- Expected a constant (not-empty) string for field argument
+- Expected a constant number for '%.*s'
+- Expected a constant string for field argument
+
+## checker (226 error sites)
+
+- A declaration's name must be an identifier, got %.*s
+- A foreign block variable cannot be thread local
+- An exported variable cannot be thread local
+- An @(fini) procedure must not use a blank identifier as its name
+- An @(init) procedure must not use a blank identifier as its name
+- A procedure cannot be both declared as @(init) and @(fini)
+- A thread local variable declaration cannot have initialization values
+- Attribute 'private' is not allowed on a non file scope entity
+- Attribute 'private' is not allowed on a test case
+- A variable declaration must be an identifer, got %s
+- Both @(instrumentation_enter) and @(instrumentation_exit) must be defined
+- 'builtin' cannot have a field value
+- Cannot inline recursive procedure '%.*s'
+- Cyclic importation of '%.*s'
+- Cyclic initialization of '%.*s'
+- Declaration of '%.*s' from 'using' shadows declaration at line %d
+- Declaration of '%.*s' shadows declaration at line %d
+- Deferred procedure must have parameters for %s
+- Deferred procedure '%.*s' must have no input parameters
+- Deferred procedure '%.*s' parameters do not match the inputs of initial procedure '%.*s'
+- Deferred procedure '%.*s' parameters do not match the inputs of initial procedure '%.*s':\n\t(%s) =/= (%s)
+- Deferred procedure '%.*s' parameters do not match the results of initial procedure '%.*s'
+- Deferred procedure '%.*s' parameters do not match the results of initial procedure '%.*s':\n\t(%s) =/= (%s)
+- Deprecation message cannot be an empty string
+- Duplicate declaration of 'package %.*s'
+- Expected a boolean value for '%.*s'
+- Expected a boolean value for '%.*s' or no value whatsoever
+- Expected a boolean value, or no value, for '%.*s'
+- Expected a constant attribute element
+- Expected a constant string value, got '%s'
+- Expected a constant string value, got value of type '%s'
+- Expected an integer value for '%.*s'
+- Expected a non-empty string for '%.*s'
+- Expected a non-empty string value for '%.*s'
+- Expected a procedure entity for '%.*s'
+- Expected a string for '%.*s'
+- Expected a string or no value for '%.*s'
+- Expected a string value for '%.*s'
+- Expected a type for '%.*s'
+- Expected a value for this constant value declaration
+- Expected either a boolean or no parameter for 'export'
+- Expected either a boolean or no parameter for 'require'
+- Expected either a boolean or no parameter for '%.*s'
+- Expected either a string 'linkage'
+- Expected either no value or a string for '%.*s'
+- Expected no parameter for '%.*s'
+- Expected no value for '%.*s'
+- Expected %td expressions on the right hand side, got %td
+- Extra initial expression
+- Extra initial expression '%s'
+

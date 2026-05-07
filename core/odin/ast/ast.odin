@@ -1,11 +1,15 @@
 // Abstract Syntax Tree for the `Odin` parser packages.
 package odin_ast
 
+import "core:container/queue"
 import "core:odin/tokenizer"
 
 Proc_Tag :: enum {
 	Bounds_Check,
 	No_Bounds_Check,
+	Type_Assert,
+	No_Type_Assert,
+	Require_Results,
 	Optional_Ok,
 	Optional_Allocator_Error,
 }
@@ -30,14 +34,66 @@ Node_State_Flag :: enum {
 	No_Bounds_Check,
 	Type_Assert,
 	No_Type_Assert,
+	Selector_Call_Expr,
+	Directive_Was_False,
+	Been_Handled,
 }
 Node_State_Flags :: distinct bit_set[Node_State_Flag]
+
+Node_Viral_State_Flag :: enum u8 {
+	Contains_Deferred_Procedure,
+	Contains_Or_Break,
+	Contains_Or_Return,
+}
+Node_Viral_State_Flags :: distinct bit_set[Node_Viral_State_Flag;u8]
+
+// File-level flags from directives (#private, #load, etc.)
+File_Flag :: enum u32 {
+	Is_Private_Pkg     = 0,  // From #private
+	Is_Private_File    = 1,  // From #private file
+	Is_Lazy            = 4,  // From #load with lazy flag
+	No_Instrumentation = 5,  // From #no_instrumentation
+}
+File_Flags :: bit_set[File_Flag; u32]
+
+// Vet flags for code quality warnings (#vet)
+Vet_Flag_Bit :: enum {
+	Shadowing           = 0,
+	Using_Stmt          = 1,
+	Using_Param         = 2,
+	Style               = 3,
+	Semicolon           = 4,
+	Unused_Variables    = 5,
+	Unused_Imports      = 6,
+	Deprecated          = 7,
+	Cast                = 8,
+	Tabs                = 9,
+	Unused_Procedures   = 10,
+	Explicit_Allocators = 11,
+}
+Vet_Flags :: distinct bit_set[Vet_Flag_Bit; u64]
+
+// Feature flags for opt-in language features (#feature)
+Feature_Flag_Bit :: enum {
+	Dynamic_Literals                  = 0,
+	Global_Context                    = 1,
+	Integer_Division_By_Zero_Trap     = 2,
+	Integer_Division_By_Zero_Zero     = 3,
+	Integer_Division_By_Zero_Self     = 4,
+	Integer_Division_By_Zero_All_Bits = 5,
+}
+Feature_Flags :: distinct bit_set[Feature_Flag_Bit; u64]
 
 Node :: struct {
 	pos:         tokenizer.Pos,
 	end:         tokenizer.Pos,
 	state_flags: Node_State_Flags,
 	derived:     Any_Node,
+
+	// Semantic Analysis Fields
+	viral_state_flags: Node_Viral_State_Flags, // Flags that propagate up the tree
+	file_id:           i32,                     // File ID for this node
+	tav:               Type_And_Value, 
 }
 
 Comment_Group :: struct {
@@ -51,6 +107,13 @@ Package_Kind :: enum {
 	Init,
 }
 
+// Package_Exported_Entity represents an exported entity from a package.
+// Used for multi-threaded entity collection during semantic analysis.
+Package_Exported_Entity :: struct {
+	identifier: ^Node,   // Identifier node for the exported entity
+	entity:     ^Entity, // The exported entity itself
+}
+
 Package :: struct {
 	using node: Node,
 	kind:     Package_Kind,
@@ -60,6 +123,15 @@ Package :: struct {
 	files:    map[string]^File,
 
 	user_data: rawptr,
+
+	// Semantic Analysis Fields
+	order:      int,        // Package order for dependency resolution
+	scope:      ^Scope,     // Package-level scope
+	decl_info:  ^Decl_Info, // Package declaration info
+	is_extra:   bool,       // Extra package flag (runtime, vendor, etc.)
+
+	// Exported entity queue for multi-threaded entity collection
+	exported_entity_queue: queue.MPMC_Queue(Package_Exported_Entity),
 }
 
 File :: struct {
@@ -85,6 +157,20 @@ File :: struct {
 
 	syntax_warning_count: int,
 	syntax_error_count:   int,
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // File-level lexical scope
+
+	flags:             File_Flags,  // File-level directive flags
+	vet_flags:         Vet_Flags,   // Vet directive flags
+	feature_flags:     Feature_Flags, // Feature directive flags
+	vet_flags_set:     bool,        // Whether vet flags were explicitly set
+	feature_flags_set: bool,        // Whether feature flags were explicitly set
+
+	// Delayed declaration queues (temporary checker working state)
+	delayed_decls_import:        [dynamic]^Stmt,  // Deferred import processing
+	delayed_decls_foreign_block: [dynamic]^Stmt,  // Deferred foreign block processing
+	delayed_decls_expr:          [dynamic]^Expr,  // Deferred directive expression processing
 }
 
 
@@ -111,6 +197,9 @@ Bad_Expr :: struct {
 Ident :: struct {
 	using node: Expr,
 	name: string,
+
+	// Semantic Analysis Fields
+	entity: ^Entity, 
 }
 
 Implicit :: struct {
@@ -149,6 +238,9 @@ Proc_Lit :: struct {
 	inlining:      Proc_Inlining,
 	where_token:   tokenizer.Token,
 	where_clauses: []^Expr,
+
+	// Semantic Analysis Fields
+	decl: ^Decl_Info, // Declaration information for this procedure
 }
 
 Comp_Lit :: struct {
@@ -248,13 +340,18 @@ Call_Expr :: struct {
 	args:     []^Expr,
 	ellipsis: tokenizer.Token,
 	close:    tokenizer.Pos,
+
+	// Semantic Analysis Fields
+	entity_procedure_of: ^Entity, // Entity of the procedure being called
 }
 
 Field_Value :: struct {
 	using node: Expr,
-	field: ^Expr,
-	sep:   tokenizer.Pos,
-	value: ^Expr,
+	field:   ^Expr,
+	sep:     tokenizer.Pos,
+	value:   ^Expr,
+	docs:    ^Comment_Group, // possibly nil
+	comment: ^Comment_Group, // possibly nil
 }
 
 Ternary_If_Expr :: struct {
@@ -302,6 +399,10 @@ Type_Assertion :: struct {
 	open:  tokenizer.Pos,
 	type:  ^Expr,
 	close: tokenizer.Pos,
+
+	// Semantic Analysis Fields
+	type_hint: ^Type, // Resolved type hint for optimization
+	ignores:   [2]bool, // Mark which values are ignored in optional-ok unpacking (backend optimization)
 }
 
 Type_Cast :: struct {
@@ -381,6 +482,9 @@ Block_Stmt :: struct {
 	stmts: []^Stmt,
 	close: tokenizer.Pos,
 	uses_do: bool,
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // Lexical scope for this block
 }
 
 If_Stmt :: struct {
@@ -392,6 +496,9 @@ If_Stmt :: struct {
 	body:      ^Stmt,
 	else_pos:  tokenizer.Pos,
 	else_stmt: ^Stmt, // possibly nil
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // Lexical scope for this if statement
 }
 
 When_Stmt :: struct {
@@ -400,6 +507,10 @@ When_Stmt :: struct {
 	cond:      ^Expr,
 	body:      ^Stmt,
 	else_stmt: ^Stmt, // possibly nil
+
+	// Semantic Analysis Fields
+	is_cond_determined: bool, // Whether condition has been evaluated
+	determined_cond:    bool, // Result of condition evaluation
 }
 
 Return_Stmt :: struct {
@@ -420,6 +531,9 @@ For_Stmt :: struct {
 	cond:      ^Expr, // possibly nil
 	post:      ^Stmt, // possibly nil
 	body:      ^Stmt,
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // Lexical scope for this for loop
 }
 
 Range_Stmt :: struct {
@@ -431,6 +545,9 @@ Range_Stmt :: struct {
 	expr:      ^Expr,
 	body:      ^Stmt,
 	reverse:   bool,
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // Lexical scope for this range loop
 }
 
 Inline_Range_Stmt :: Unroll_Range_Stmt
@@ -446,6 +563,9 @@ Unroll_Range_Stmt :: struct {
 	in_pos:     tokenizer.Pos,
 	expr:       ^Expr,
 	body:       ^Stmt,
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // Lexical scope for this unroll range loop
 }
 
 
@@ -457,6 +577,10 @@ Case_Clause :: struct {
 	list:       []^Expr,
 	terminator: tokenizer.Token,
 	body:       []^Stmt,
+
+	// Semantic Analysis Fields
+	scope:          ^Scope,  // Lexical scope for this case clause
+	implicit_entity: ^Entity, // Implicit variable entity for type switch cases
 }
 
 Switch_Stmt :: struct {
@@ -467,6 +591,9 @@ Switch_Stmt :: struct {
 	cond:       ^Expr,
 	body:       ^Stmt,
 	partial:    bool,
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // Lexical scope for this switch statement
 }
 
 Type_Switch_Stmt :: struct {
@@ -477,6 +604,9 @@ Type_Switch_Stmt :: struct {
 	expr:       ^Expr,
 	body:       ^Stmt,
 	partial:    bool,
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // Lexical scope for this type switch statement
 }
 
 Branch_Stmt :: struct {
@@ -527,6 +657,9 @@ Import_Decl :: struct {
 	relpath:     tokenizer.Token,
 	fullpath:    string,
 	comment:     ^Comment_Group, // possibly nil
+
+	// Semantic Analysis Fields
+	pkg: ^Package, // The resolved package this import refers to
 }
 
 Foreign_Block_Decl :: struct {
@@ -743,6 +876,9 @@ Proc_Type :: struct {
 	tags:      Proc_Tags,
 	generic:   bool,
 	diverging: bool,
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // Lexical scope for procedure type parameters
 }
 
 Pointer_Type :: struct {
@@ -793,6 +929,9 @@ Struct_Type :: struct {
 	is_all_or_none:  bool,
 	fields:          ^Field_List,
 	name_count:      int,
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // Lexical scope for struct fields and polymorphic parameters
 }
 
 Union_Type_Kind :: enum u8 {
@@ -811,6 +950,9 @@ Union_Type :: struct {
 	where_token:   tokenizer.Token,
 	where_clauses: []^Expr,
 	variants:      []^Expr,
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // Lexical scope for union variants and polymorphic parameters
 }
 
 Enum_Type :: struct {
@@ -822,6 +964,9 @@ Enum_Type :: struct {
 	close:     tokenizer.Pos,
 
 	is_using:  bool,
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // Lexical scope for enum fields
 }
 
 Bit_Set_Type :: struct {
@@ -862,6 +1007,9 @@ Bit_Field_Type :: struct {
 	open:         tokenizer.Pos,
 	fields:       []^Bit_Field_Field,
 	close:        tokenizer.Pos,
+
+	// Semantic Analysis Fields
+	scope: ^Scope, // Lexical scope for bit field fields
 }
 
 Bit_Field_Field :: struct {

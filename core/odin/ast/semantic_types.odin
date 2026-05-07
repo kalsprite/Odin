@@ -1,0 +1,1179 @@
+// Semantic analysis types for the Odin checker
+// These types are defined in the ast package to avoid circular imports
+// The AST nodes reference these types directly
+package odin_ast
+
+import "base:runtime"
+import "core:math/big"
+import "core:odin/tokenizer"
+import "core:sync"
+
+// ============================================================================
+// Basic Enums and Flags
+// ============================================================================
+
+// Addressing_Mode indicates how an expression can be used
+// C++ Reference: enum AddressingMode in parser.hpp:9-24
+Addressing_Mode :: enum u8 {
+	Invalid          = 0,
+	No_Value         = 1,
+	Value            = 2,  // computed value (rvalue)
+	Context          = 3,
+	Variable         = 4,
+	Constant         = 5,
+	Type             = 6,
+	Builtin          = 7,
+	Proc_Group       = 8,
+	Map_Index        = 9,
+	Optional_Ok      = 10,
+	Optional_Ok_Ptr  = 11,
+	Soa_Variable     = 12,
+	Swizzle_Value    = 13,
+	Swizzle_Variable = 14,
+}
+
+// Entity_State tracks entity resolution progress
+Entity_State :: enum u8 {
+	Unresolved,
+	In_Progress,
+	Resolved,
+}
+
+// Entity_Kind categorizes entity types
+Entity_Kind :: enum {
+	Invalid,
+	Constant,
+	Variable,
+	Type_Name,
+	Procedure,
+	Proc_Group,
+	Builtin,
+	Nil,
+	Label,
+	Package_Name,
+	Import_Name,
+	Library_Name,
+}
+
+// Scope_Flag controls scope behavior
+Scope_Flag :: distinct bit_set[Scope_Flag_Bit;i32]
+Scope_Flag_Bit :: enum {
+	Pkg,
+	Builtin,
+	Global,
+	File,
+	Init,
+	Proc,
+	Type,
+	Has_Been_Imported,
+	Context_Defined,
+}
+
+// Type_Kind categorizes type variants
+Type_Kind :: enum {
+	Invalid,
+	Basic,
+	Named,
+	Generic,
+	Pointer,
+	Multi_Pointer,
+	Soa_Pointer,
+	Array,
+	Enumerated_Array,
+	Slice,
+	Dynamic_Array,
+	Map,
+	Struct,
+	Union,
+	Enum,
+	Tuple,
+	Proc,
+	Bit_Set,
+	Bit_Field,
+	Simd_Vector,
+	Matrix,
+}
+
+// Type_Flag defines type-level flags
+Type_Flag :: enum {
+	In_Process_Of_Checking_Polymorphic,
+}
+
+Type_Flags :: bit_set[Type_Flag]
+
+// Basic_Kind enumerates basic type varieties
+Basic_Kind :: enum {
+	Invalid,
+	Llvm_Bool,
+	Bool,
+	B8,
+	B16,
+	B32,
+	B64,
+	I8,
+	U8,
+	I16,
+	U16,
+	I32,
+	U32,
+	I64,
+	U64,
+	I128,
+	U128,
+	Rune,
+	F16,
+	F32,
+	F64,
+	Complex32,
+	Complex64,
+	Complex128,
+	Quaternion64,
+	Quaternion128,
+	Quaternion256,
+	Int,
+	Uint,
+	Uintptr,
+	Rawptr,
+	String,
+	Cstring,
+	String16,
+	Cstring16,
+	Any,
+	Typeid,
+	I16le,
+	U16le,
+	I32le,
+	U32le,
+	I64le,
+	U64le,
+	I128le,
+	U128le,
+	I16be,
+	U16be,
+	I32be,
+	U32be,
+	I64be,
+	U64be,
+	I128be,
+	U128be,
+	F16le,
+	F32le,
+	F64le,
+	F16be,
+	F32be,
+	F64be,
+	Untyped_Bool,
+	Untyped_Integer,
+	Untyped_Float,
+	Untyped_Complex,
+	Untyped_Quaternion,
+	Untyped_String,
+	Untyped_Rune,
+	Untyped_Nil,
+	Untyped_Uninit,
+}
+
+// Basic_Flag categorizes basic types for efficient type category checking
+Basic_Flag :: enum u32 {
+	Boolean       = 0,
+	Integer       = 1,
+	Unsigned      = 2,
+	Float         = 3,
+	Complex       = 4,
+	Quaternion    = 5,
+	Pointer       = 6,
+	String        = 7,
+	Rune          = 8,
+	Untyped       = 9,
+	LLVM          = 11,
+	Endian_Little = 13,
+	Endian_Big    = 14,
+}
+
+Basic_Flags :: bit_set[Basic_Flag;u32]
+
+// Union_Kind categorizes union variants
+// Reference: parser.hpp UnionTypeKind enum
+Union_Kind :: enum {
+	Normal,
+	No_Nil,
+	Maybe,
+	Shared_Nil,
+}
+
+// Calling_Convention defines procedure calling conventions
+Calling_Convention :: enum {
+	Odin,
+	Contextless,
+	C,
+	Std,
+	Fast,
+	None,
+	Naked,
+	Inline_Asm,
+	Win64,
+	SysV,
+}
+
+// ============================================================================
+// Exact Values
+// ============================================================================
+
+// Exact_Value_Pointer represents a compile-time pointer value
+Exact_Value_Pointer :: struct {
+	address: i64,
+}
+
+// Exact_Value_Compound represents a compound literal expression
+Exact_Value_Compound :: struct {
+	expr: ^Expr,
+}
+
+// Exact_Value_Procedure represents a procedure constant
+Exact_Value_Procedure :: struct {
+	expr: ^Expr,
+}
+
+// Exact_Value_Typeid represents a typeid constant
+Exact_Value_Typeid :: struct {
+	type: ^Type,
+}
+
+// Exact_Value_String16 represents a UTF-16 string constant
+Exact_Value_String16 :: struct {
+	text: [^]u16,
+	len:  int,
+}
+
+// Exact_Value represents compile-time constant values
+Exact_Value :: union {
+	bool,
+	big.Int,
+	f64,
+	complex128,
+	string,
+	quaternion256,
+	Exact_Value_Pointer,
+	Exact_Value_Compound,
+	Exact_Value_Procedure,
+	Exact_Value_Typeid,
+	Exact_Value_String16,
+}
+
+// ============================================================================
+// Core Semantic Types
+// ============================================================================
+
+// Entity represents a declared symbol
+Entity :: struct {
+	kind:               Entity_Kind,
+	id:                 u64,
+	state:              Entity_State,
+	flags:              Entity_Flags, // bit_set[Entity_Flag;u64]
+	min_dep_count:      i32,
+	token:              tokenizer.Token,
+	scope:              ^Scope,
+	type:               ^Type,
+	identifier:         ^Node,
+	decl_info:          ^Decl_Info,
+	parent_proc_decl:   ^Decl_Info,
+	file:               ^File,
+	pkg:                ^Package,
+	using_parent:       ^Entity,
+	using_expr:         ^Expr,
+	aliased_of:         ^Entity,
+	order_in_src:       u64,
+	deprecated_message: string,
+	warning_message:    string,
+	variant:            Entity_Variant,
+}
+
+// Type represents Odin types
+Type :: struct {
+	kind:           Type_Kind,
+	flags:          Type_Flags,
+	variant:        Type_Variant,
+	canonical_hash: u64, // Cached hash for canonical name (C++ Reference: Type.canonical_hash)
+}
+
+// Scope manages hierarchical symbol visibility
+Scope :: struct {
+	node:       ^Node,
+	parent:     ^Scope,
+	next:       ^Scope,
+	head_child: ^Scope,
+	index:      i32,
+	elements:   map[string]^Entity,
+	imported:   map[^Scope]struct{},
+	mutex:      sync.RW_Mutex,
+	decl_info:  ^Decl_Info,
+	flags:      Scope_Flag,
+	pkg:        ^Package,
+	file:       ^File,
+	procedure:  ^Entity,
+}
+
+// Type_And_Value stores type and value information for expression nodes
+Type_And_Value :: struct {
+	type:         ^Type,
+	mode:         Addressing_Mode,
+	is_lhs:       bool,
+	is_bit_field: bool, // True if access goes through a bit field (cannot take address)
+	value:        Exact_Value,
+}
+
+// ============================================================================
+// Entity Support Types
+// ============================================================================
+
+// Entity_Flags (bit set definition)
+Entity_Flag :: enum u64 {
+	Visited                  = 0,
+	Used                     = 1,
+	Using                    = 2,
+	Field                    = 3, // Entity is a struct field
+	Param                    = 4,
+	Result                   = 5,
+	Array_Elem               = 6, // Entity is an array element
+	Array_Swizzle            = 7, // Entity is from swizzle operation
+	Ellipsis                 = 8,
+	No_Alias                 = 9, // #no_alias parameter attribute
+	Type_Field               = 10,
+	Value                    = 11, // Parameter passed by value
+	Bit_Field_Field          = 12, // Entity is a bit field
+	No_Capture               = 13, // #no_capture attribute
+	Poly_Const               = 14, // Polymorphic constant ($T: type)
+	Not_Exported             = 15, // Not exported from package
+	Const_Input              = 16, // Constant input parameter
+	Static                   = 17, // Static variable
+	Implicit_Reference       = 18, // Implicit reference (like C++ const &)
+	Soa_Ptr_Field            = 19, // SOA pointer field
+	Proc_Body_Checked        = 20, // Procedure body has been checked
+	C_Var_Arg                = 21, // C vararg parameter
+	No_Broadcast             = 22, // #no_broadcast attribute
+	Any_Int                  = 23, // Generic integer parameter
+	Disabled                 = 24,
+	Cold                     = 25, // Procedure is rarely called
+	Lazy                     = 26, // Lazily type checked
+	For_Value                = 27, // Value from for loop
+	Switch_Value             = 28, // Value from switch
+	Test                     = 29, // Test procedure
+	Init                     = 30, // Init procedure
+	Subtype                  = 31, // Subtype entity
+	Fini                     = 32, // Fini procedure
+	Require_Results          = 33, // Procedure requires results to be used
+	Custom_Link_Name         = 34, // Has custom link name
+	Custom_Linkage_Internal  = 35, // Internal linkage
+	Custom_Linkage_Strong    = 36, // Strong linkage
+	Custom_Linkage_Weak      = 37, // Weak linkage
+	Custom_Linkage_Link_Once = 38, // Link once
+	Require                  = 39, // Required dependency
+	By_Ptr                   = 40, // Parameter passed by pointer
+	Overridden               = 41, // Entity has been overridden
+	// Additional legacy flags for compatibility
+	Soa_Field                = 42, // SOA field
+	Custom_Align             = 43, // Custom alignment
+	Optional_Ok              = 44,
+	Optional_Allocator_Error = 45,
+	Warning                  = 46,
+	Deprecated               = 47,
+	Using_Scope              = 48,
+	Auto_Cast                = 49,
+	Foreign                  = 50,
+	Export                   = 51,
+	No_Nil                   = 52,
+	Swizzle                  = 53,
+	Swizzle_Lhs              = 54,
+}
+
+Entity_Flags :: bit_set[Entity_Flag;u64]
+
+// Parameter_Value_Kind categorizes parameter default values
+Parameter_Value_Kind :: enum {
+	Invalid,
+	Constant,
+	Nil,
+	Location,
+	Expression,
+	Value,
+}
+
+// Parameter_Value stores parameter default value information
+Parameter_Value :: struct {
+	kind:              Parameter_Value_Kind,
+	original_ast_expr: ^Expr,
+	value:             Exact_Value,
+	ast_value:         ^Expr,
+}
+
+// Deferred_Procedure_Kind tracks procedure defer attributes
+Deferred_Procedure_Kind :: enum {
+	None,
+	In,
+	Out,
+	In_Out,
+	In_By_Ptr,
+	Out_By_Ptr,
+	In_Out_By_Ptr,
+}
+
+Deferred_Procedure :: struct {
+	kind:   Deferred_Procedure_Kind,
+	entity: ^Entity,
+}
+
+// Procedure_Optimization_Mode controls procedure optimization level
+Procedure_Optimization_Mode :: enum u8 {
+	Default,
+	None,
+	Favor_Size,
+}
+
+// Gen_Procs_Data stores specialized polymorphic procedure instances
+Gen_Procs_Data :: struct {
+	procs: [dynamic]^Entity,
+	mutex: sync.RW_Mutex,
+}
+
+// Gen_Types_Data stores specialized polymorphic type instances
+Gen_Types_Data :: struct {
+	types: [dynamic]^Entity,
+	mutex: sync.Mutex,
+}
+
+// ============================================================================
+// Entity Variants
+// ============================================================================
+
+Entity_Constant_Flag :: enum u32 {
+	Implicit_Enum_Value = 0,
+}
+
+Entity_Constant_Flags :: bit_set[Entity_Constant_Flag;u32]
+
+Entity_Constant :: struct {
+	type:              ^Type,
+	value:             Exact_Value,
+	param_value:       Parameter_Value,
+	flags:             Entity_Constant_Flags,
+	field_group_index: i32,
+	docs:              ^Comment_Group,
+	comment:           ^Comment_Group,
+}
+
+Entity_Variable :: struct {
+	type:                  ^Type,
+	type_expr:             ^Node,
+	init_expr:             ^Node,
+	field_index:           i32,
+	field_group_index:     i32,
+	bit_field_bit_size:    u8,
+	param_value:           Parameter_Value,
+	for_loop_parent_type:  ^Type,
+	thread_local_model:    string,
+	foreign_library:       ^Entity,
+	foreign_library_ident: ^Expr,
+	link_name:             string,
+	link_prefix:           string,
+	link_suffix:           string,
+	link_section:          string,
+	docs:                  ^Comment_Group,
+	comment:               ^Comment_Group,
+	is_foreign:            bool,
+	is_export:             bool,
+	is_global:             bool,
+	is_static:             bool,
+	is_rodata:             bool,
+}
+
+Type_Name_ObjC_Metadata_Entry :: struct {
+	name:   string,
+	entity: ^Entity,
+}
+
+Type_Name_ObjC_Metadata :: struct {
+	mutex:         sync.Mutex,
+	type_entries:  [dynamic]Type_Name_ObjC_Metadata_Entry,
+	value_entries: [dynamic]Type_Name_ObjC_Metadata_Entry,
+}
+
+Entity_Type_Name :: struct {
+	type:                          ^Type,
+	type_parameter_specialization: ^Type,
+	original_type_for_parapoly:    ^Type,
+	ir_mangled_name:               string,
+	is_type_alias:                 bool,
+	objc_is_implementation:        bool,
+	objc_superclass:               ^Type,
+	objc_ivar:                     ^Type,
+	objc_context_provider:         ^Entity,
+	objc_class_name:               string,
+	objc_metadata:                 ^Type_Name_ObjC_Metadata,
+}
+
+Entity_Procedure :: struct {
+	type:                       ^Type,
+	body:                       ^Block_Stmt,
+	tags:                       u64,
+	foreign_library:            ^Entity,
+	foreign_library_ident:      ^Expr,
+	link_name:                  string,
+	link_prefix:                string,
+	link_suffix:                string,
+	objc_selector_name:         string,       // C++ Reference: entity.cpp:254
+	objc_class:                 ^Entity,      // C++ Reference: entity.cpp:255
+	deferred_procedure:         Deferred_Procedure,
+	gen_procs:                  ^Gen_Procs_Data,
+	gen_procs_mutex:            sync.Mutex,
+	optimization_mode:          Procedure_Optimization_Mode,
+	is_foreign:                 bool,
+	is_export:                  bool,
+	generated_from_polymorphic: bool,
+	entry_point_only:           bool,
+	has_instrumentation:        bool,
+	is_memcpy_like:             bool,
+	uses_branch_location:       bool,
+	is_anonymous:               bool,
+	no_sanitize_address:        bool,
+	no_sanitize_memory:         bool,
+	is_objc_impl_or_import:     bool,         // C++ Reference: entity.cpp:271
+	is_objc_class_method:       bool,         // C++ Reference: entity.cpp:272
+}
+
+Entity_Proc_Group :: struct {
+	procs: [dynamic]^Entity,
+}
+
+// Builtin_Proc_Id will be populated with all builtins
+Builtin_Proc_Id :: enum {
+	Invalid,
+	// Core builtins
+	Len,
+	Cap,
+	Size_Of,
+	Align_Of,
+	Offset_Of,
+	Offset_Of_By_String,
+	Type_Of,
+	Type_Info_Of,
+	Typeid_Of,
+	Swizzle,
+	Complex,
+	Real,
+	Imag,
+	Conj,
+	Quaternion,
+	Jmag,
+	Kmag,
+	// Expansion/compression
+	Expand_Values,
+	Compress_Values,
+	// SOA operations
+	Soa_Zip,
+	Soa_Unzip,
+	// Control flow
+	Unreachable,
+	// Data access
+	Raw_Data,
+	// Math operations
+	Min,
+	Max,
+	Abs,
+	Clamp,
+
+	// Bit manipulation intrinsics
+	Count_Ones,
+	Count_Zeros,
+	Count_Trailing_Zeros,
+	Count_Leading_Zeros,
+	Reverse_Bits,
+	Byte_Swap,
+
+	// Overflow-checking arithmetic
+	Overflow_Add,
+	Overflow_Sub,
+	Overflow_Mul,
+
+	// Saturating arithmetic
+	Saturating_Add,
+	Saturating_Sub,
+
+	// Floating-point intrinsics
+	Sqrt,
+	Fused_Mul_Add,
+
+	// Fixed-point arithmetic
+	Fixed_Point_Mul,
+	Fixed_Point_Div,
+	Fixed_Point_Mul_Sat,
+	Fixed_Point_Div_Sat,
+
+	// Atomic operations
+	Atomic_Type_Is_Lock_Free,
+	Atomic_Thread_Fence,
+	Atomic_Signal_Fence,
+	Atomic_Store,
+	Atomic_Store_Explicit,
+	Atomic_Load,
+	Atomic_Load_Explicit,
+	Atomic_Add,
+	Atomic_Add_Explicit,
+	Atomic_Sub,
+	Atomic_Sub_Explicit,
+	Atomic_And,
+	Atomic_And_Explicit,
+	Atomic_Nand,
+	Atomic_Nand_Explicit,
+	Atomic_Or,
+	Atomic_Or_Explicit,
+	Atomic_Xor,
+	Atomic_Xor_Explicit,
+	Atomic_Exchange,
+	Atomic_Exchange_Explicit,
+	Atomic_Compare_Exchange_Strong,
+	Atomic_Compare_Exchange_Strong_Explicit,
+	Atomic_Compare_Exchange_Weak,
+	Atomic_Compare_Exchange_Weak_Explicit,
+	// Objective-C runtime builtins
+	Objc_Send,
+	Objc_Find_Selector,
+	Objc_Find_Class,
+	Objc_Register_Selector,
+	Objc_Register_Class,
+	Objc_Ivar_Get,
+	Objc_Block,
+	Objc_Super,
+
+	// SIMD operations
+	// C++ Reference: /mnt/c/odin/src/checker_builtin_procs.hpp:140-220
+	Simd_Add,
+	Simd_Sub,
+	Simd_Mul,
+	Simd_Div,
+	Simd_Rem,
+	Simd_Shl, // Odin logic
+	Simd_Shr, // Odin logic
+	Simd_Shl_Masked, // C logic
+	Simd_Shr_Masked, // C logic
+	Simd_Saturating_Add, // saturation arithmetic
+	Simd_Saturating_Sub, // saturation arithmetic
+	Simd_Bit_And,
+	Simd_Bit_Or,
+	Simd_Bit_Xor,
+	Simd_Bit_And_Not,
+	Simd_Neg,
+	Simd_Abs,
+	Simd_Min,
+	Simd_Max,
+	Simd_Clamp,
+	Simd_Lanes_Eq,
+	Simd_Lanes_Ne,
+	Simd_Lanes_Lt,
+	Simd_Lanes_Le,
+	Simd_Lanes_Gt,
+	Simd_Lanes_Ge,
+	Simd_Extract,
+	Simd_Replace,
+	Simd_Reduce_Add_Bisect,
+	Simd_Reduce_Mul_Bisect,
+	Simd_Reduce_Add_Ordered,
+	Simd_Reduce_Mul_Ordered,
+	Simd_Reduce_Add_Pairs,
+	Simd_Reduce_Mul_Pairs,
+	Simd_Reduce_Min,
+	Simd_Reduce_Max,
+	Simd_Reduce_And,
+	Simd_Reduce_Or,
+	Simd_Reduce_Xor,
+	Simd_Reduce_Any,
+	Simd_Reduce_All,
+	Simd_Extract_Lsbs,
+	Simd_Extract_Msbs,
+	Simd_Shuffle,
+	Simd_Select,
+	Simd_Runtime_Swizzle,
+	Simd_Ceil,
+	Simd_Floor,
+	Simd_Trunc,
+	Simd_Nearest,
+	Simd_To_Bits,
+	Simd_Lanes_Reverse,
+	Simd_Lanes_Rotate_Left,
+	Simd_Lanes_Rotate_Right,
+	Simd_Gather,
+	Simd_Scatter,
+	Simd_Masked_Load,
+	Simd_Masked_Store,
+	Simd_Masked_Expand_Load,
+	Simd_Masked_Compress_Store,
+	Simd_Indices,
+
+	// Platform specific SIMD intrinsics
+	Simd_X86_MM_Shuffle,
+
+	// Type intrinsics - compile-time type information
+	Type_Base_Type,
+	Type_Core_Type,
+	Type_Elem_Type,
+	Type_Is_Boolean,
+	Type_Is_Integer,
+	Type_Is_Rune,
+	Type_Is_Float,
+	Type_Is_Complex,
+	Type_Is_Quaternion,
+	Type_Is_String,
+	Type_Is_Cstring,
+	Type_Is_Typeid,
+	Type_Is_Any,
+	Type_Is_Endian_Platform,
+	Type_Is_Endian_Little,
+	Type_Is_Endian_Big,
+	Type_Is_Unsigned,
+	Type_Is_Signed,
+	Type_Is_Ordered,
+	Type_Is_Comparable,
+	Type_Is_Numeric,
+	Type_Is_Ordered_Numeric,
+	Type_Is_Pointer,
+	Type_Is_Multi_Pointer,
+	Type_Is_Array,
+	Type_Is_Enumerated_Array,
+	Type_Is_Dynamic_Array,
+	Type_Is_Slice,
+	Type_Is_Struct,
+	Type_Is_Union,
+	Type_Is_Enum,
+	Type_Is_Proc,
+	Type_Is_Bit_Set,
+	Type_Is_Bit_Field,
+	Type_Is_Map,
+	Type_Is_Matrix,
+	Type_Is_Simd_Vector,
+	Type_Is_Soa_Pointer,
+	Type_Is_Subtype_Of,
+	Type_Has_Nil,
+	Type_Field_Index_Of,
+
+	// Advanced type intrinsics
+	Type_Bit_Set_Elem_Type,
+	Type_Bit_Set_Underlying_Type,
+	Type_Bit_Set_Backing_Type,
+	Type_Union_Variant_Count,
+	Type_Variant_Type_Of,
+	Type_Variant_Index_Of,
+	Type_Struct_Field_Count,
+	Type_Struct_Has_Implicit_Padding,
+	Type_Proc_Parameter_Count,
+	Type_Proc_Return_Count,
+	Type_Proc_Parameter_Type,
+	Type_Proc_Return_Type,
+	Type_Polymorphic_Record_Parameter_Count,
+	Type_Polymorphic_Record_Parameter_Value,
+	Type_Enum_Is_Contiguous,
+	Type_Equal_Proc,
+	Type_Hasher_Proc,
+	Type_Map_Info,
+	Type_Map_Cell_Info,
+	Type_Canonical_Name,
+
+	// Additional type intrinsics
+	Type_Field_Type,
+	Type_Has_Field,
+	Type_Has_Shared_Fields,
+	Type_Is_Named,
+	Type_Is_Cstring16,
+	Type_Is_String16,
+	Type_Is_Dereferenceable,
+	Type_Is_Sliceable,
+	Type_Is_Indexable,
+	Type_Is_Specialization_Of,
+	Type_Is_Specialized_Polymorphic_Record,
+	Type_Is_Unspecialized_Polymorphic_Record,
+	Type_Is_Valid_Map_Key,
+	Type_Is_Valid_Matrix_Elements,
+	Type_Is_Superset_Of,
+	Type_Is_Variant_Of,
+	Type_Is_Raw_Union,
+	Type_Integer_To_Signed,
+	Type_Integer_To_Unsigned,
+	Type_Merge,
+	Type_Convert_Variants_To_Pointers,
+	Type_Union_Base_Tag_Value,
+	Type_Union_Tag_Offset,
+	Type_Union_Tag_Type,
+
+	// Memory intrinsics
+	Alloca,
+	Cpu_Relax,
+	Trap,
+	Debug_Trap,
+	Mem_Copy,
+	Mem_Copy_Non_Overlapping,
+	Mem_Zero,
+	Mem_Zero_Volatile,
+	Ptr_Offset,
+	Ptr_Sub,
+	Volatile_Store,
+	Volatile_Load,
+	Unaligned_Store,
+	Unaligned_Load,
+	Non_Temporal_Store,
+	Non_Temporal_Load,
+	Prefetch_Read_Instruction,
+	Prefetch_Read_Data,
+	Prefetch_Write_Instruction,
+	Prefetch_Write_Data,
+
+	// Miscellaneous intrinsics
+	Is_Package_Imported,
+	Read_Cycle_Counter,
+	Read_Cycle_Counter_Frequency,
+	Expect,
+	Syscall,
+	Syscall_Bsd,
+
+	// WebAssembly intrinsics
+	Wasm_Memory_Grow,
+	Wasm_Memory_Size,
+	Wasm_Memory_Atomic_Wait32,
+	Wasm_Memory_Atomic_Notify32,
+
+	// Matrix operations
+	Hadamard_Product,
+	Matrix_Flatten,
+	Outer_Product,
+	Transpose,
+
+	// Constant operations (compile-time)
+	Constant_Ceil,
+	Constant_Floor,
+	Constant_Log2,
+	Constant_Round,
+	Constant_Trunc,
+	Constant_Utf16_Cstring,
+
+	// Platform-specific intrinsics
+	X86_Cpuid,
+	X86_Xgetbv,
+	Valgrind_Client_Request,
+	Has_Target_Feature,
+
+	// Additional core builtins
+	Concatenate,
+	Soa_Struct,
+	Procedure_Of,
+}
+
+Builtin_Proc_Pkg :: enum {
+	Builtin,
+	Intrinsics,
+}
+
+Entity_Builtin :: struct {
+	id:  Builtin_Proc_Id,
+	pkg: Builtin_Proc_Pkg,
+}
+
+Entity_Label :: struct {
+	name:   string,
+	node:   ^Stmt,
+	parent: ^Stmt,
+}
+
+Entity_Package_Name :: struct {
+	name: string,
+	pkg:  ^Package,
+}
+
+Entity_Import_Name :: struct {
+	name:  string,
+	path:  string,
+	scope: ^Scope,
+}
+
+Entity_Library_Name :: struct {
+	decl:               ^Stmt,
+	paths:              []string,
+	name:               string,
+	priority_index:     i64,
+	ignore_duplicates:  bool,
+	extra_linker_flags: string,
+}
+
+Entity_Variant :: union {
+	Entity_Constant,
+	Entity_Variable,
+	Entity_Type_Name,
+	Entity_Procedure,
+	Entity_Proc_Group,
+	Entity_Builtin,
+	i32, // Entity_Nil
+	Entity_Label,
+	Entity_Package_Name,
+	Entity_Import_Name,
+	Entity_Library_Name,
+}
+
+// ============================================================================
+// Type Variants
+// ============================================================================
+
+Type_Basic :: struct {
+	kind:  Basic_Kind,
+	flags: Basic_Flags,
+	size:  int,
+}
+
+Type_Named :: struct {
+	name:                 string,
+	base:                 ^Type,
+	type_name:            ^Entity,
+	gen_types_data:       ^Gen_Types_Data,
+	gen_types_data_mutex: sync.Mutex,
+}
+
+Type_Pointer :: struct {
+	elem: ^Type,
+}
+
+Type_Multi_Pointer :: struct {
+	elem: ^Type,
+}
+
+Type_Soa_Pointer :: struct {
+	elem: ^Type,
+}
+
+Type_Array :: struct {
+	elem:          ^Type,
+	count:         i64,
+	generic_count: ^Type,
+}
+
+Type_Enumerated_Array :: struct {
+	elem:      ^Type,
+	index:     ^Type,
+	count:     i64,
+	min_value: ^Exact_Value,
+	max_value: ^Exact_Value,
+	op:        tokenizer.Token_Kind,
+	is_sparse: bool,
+}
+
+Type_Slice :: struct {
+	elem: ^Type,
+}
+
+Type_Dynamic_Array :: struct {
+	elem: ^Type,
+}
+
+Type_Map :: struct {
+	key:                 ^Type,
+	value:               ^Type,
+	lookup_result_type:  ^Type,
+	// C++ Reference: types.cpp:250-255
+	// Used for DWARF debug info generation
+	debug_metadata_type: ^Type,
+}
+
+Type_Struct :: struct {
+	fields:                  [dynamic]^Entity,
+	names:                   map[string]^Entity,
+	tags:                    [dynamic]string,
+	node:                    ^Node,
+	scope:                   ^Scope,
+	// C++ Reference: types.cpp:139-169
+	// Cached field offsets for layout calculation
+	offsets:                 [dynamic]i64,
+	is_polymorphic:          bool,
+	is_poly_specialized:     bool,
+	polymorphic_params:      ^Type,
+	polymorphic_parent:      ^Type,
+	polymorphic_wait_signal: sync.Wait_Group,
+	fields_wait_signal:      sync.Wait_Group,
+	is_packed:               bool,
+	is_raw_union:            bool,
+	is_all_or_none:          bool,  // #all_or_none attribute
+	custom_align:            i64,
+	custom_min_field_align:  i64,
+	custom_max_field_align:  i64,
+	soa_kind:                runtime.Type_Info_Struct_Soa_Kind,
+	soa_elem:                ^Type,
+	soa_count:               i64,
+	soa_mutex:               ^sync.Mutex,
+}
+
+Type_Union :: struct {
+	variants:                [dynamic]^Type,
+	node:                    ^Node,
+	scope:                   ^Scope,
+	kind:                    Union_Kind,
+	is_polymorphic:          bool,
+	is_poly_specialized:     bool,
+	polymorphic_params:      ^Type,
+	polymorphic_parent:      ^Type,
+	polymorphic_wait_signal: sync.Wait_Group,
+	variant_block_size:      i64,
+	custom_align:            i64,
+	tag_size:                i16,
+}
+
+Type_Enum :: struct {
+	base_type:       ^Type,
+	fields:          [dynamic]^Entity,
+	node:            ^Node,
+	scope:           ^Scope,
+	min_value:       Exact_Value,
+	max_value:       Exact_Value,
+	min_value_index: i64,
+	max_value_index: i64,
+}
+
+Type_Tuple :: struct {
+	variables: [dynamic]^Entity,
+	is_packed: bool,
+}
+
+Type_Proc :: struct {
+	params:                 ^Type,
+	results:                ^Type,
+	node:                   ^Node,
+	scope:                  ^Scope,
+	param_count:            int,
+	result_count:           int,
+	variadic:               bool,
+	variadic_index:         int,
+	c_vararg:               bool,
+	optional_ok:            bool,
+	has_named_results:      bool,
+	require_results:        bool,
+	diverging:              bool,
+	return_by_pointer:      bool,
+	is_polymorphic:         bool,
+	is_poly_specialized:    bool,
+	specialization_count:   int,
+	calling_convention:     Calling_Convention,
+	require_target_feature: string,
+	enable_target_feature:  string,
+}
+
+Type_Bit_Set :: struct {
+	elem:       ^Type,
+	underlying: ^Type,
+	lower:      i64,
+	upper:      i64,
+	node:       ^Node,
+}
+
+Type_Bit_Field :: struct {
+	fields:       [dynamic]^Entity,
+	names:        map[string]^Entity,
+	backing_type: ^Type,
+	node:         ^Node,
+	bit_sizes:    [dynamic]int, // TODO: u8 and i64 iirc
+	bit_offsets:  [dynamic]int,
+}
+
+Type_Simd_Vector :: struct {
+	elem:          ^Type,
+	count:         i64,
+	generic_count: ^Type,
+}
+
+Type_Matrix :: struct {
+	elem:                 ^Type,
+	row_count:            i64,
+	column_count:         i64,
+	generic_row_count:    ^Type,
+	generic_column_count: ^Type,
+	stride_in_bytes:      int,
+	is_row_major:         bool,
+	node:                 ^Node,
+}
+
+Type_Generic :: struct {
+	id:          i64,
+	name:        string,
+	specialized: ^Type,
+	entity:      ^Entity,
+	scope:       ^Scope,
+}
+
+Type_Variant :: union {
+	Type_Basic,
+	Type_Named,
+	Type_Generic,
+	Type_Pointer,
+	Type_Multi_Pointer,
+	Type_Soa_Pointer,
+	Type_Array,
+	Type_Enumerated_Array,
+	Type_Slice,
+	Type_Dynamic_Array,
+	Type_Map,
+	Type_Struct,
+	Type_Union,
+	Type_Enum,
+	Type_Tuple,
+	Type_Proc,
+	Type_Bit_Set,
+	Type_Bit_Field,
+	Type_Simd_Vector,
+	Type_Matrix,
+}
+
+// ============================================================================
+// Decl_Info Support Types
+// ============================================================================
+
+Proc_Checked_State :: enum u8 {
+	Unchecked,
+	In_Progress,
+	Checked,
+}
+
+Block_Label :: struct {
+	name:  string,
+	label: ^Stmt,
+}
+
+// Variadic_Reuse_Data tracks variadic slice allocation reuse for stack optimization
+// C++ Reference: struct VariadicReuseData in checker.hpp:197-200
+Variadic_Reuse_Data :: struct {
+	slice_type: ^Type,  // The ..elem_type
+	max_count:  i64,
+}
+
+Decl_Info :: struct {
+	parent:                  ^Decl_Info,
+	next_child:              ^Decl_Info,
+	next_sibling:            ^Decl_Info,
+	next_mutex:              sync.Mutex,  // C++ Reference: checker.hpp:206 - for thread-safe child linkage
+	scope:                   ^Scope,
+	entity:                  ^Entity,
+	decl_node:               ^Stmt,
+	type_expr:               ^Expr,
+	init_expr:               ^Expr,
+	attributes:              []^Attribute,
+	proc_lit:                ^Proc_Lit,
+	gen_proc_type:           ^Type,
+	para_poly_original:      ^Entity,
+	is_using:                bool,
+	where_clauses_evaluated: bool,
+	foreign_require_results: bool,
+	proc_checked_state:      Proc_Checked_State,
+	defer_used:              int,
+	defer_use_checked:       bool,
+	comment:                 ^Comment_Group,
+	docs:                    ^Comment_Group,
+	deps_mutex:              sync.RW_Mutex,
+	deps:                    map[^Entity]struct{},
+	type_info_deps_mutex:    sync.RW_Mutex,
+	type_info_deps:          map[^Type]struct{},
+	labels:                  [dynamic]Block_Label,
+	variadic_reuses:         [dynamic]Variadic_Reuse_Data,  // C++ Reference: checker.hpp:247
+	variadic_reuse_max_bytes: i64,  // C++ Reference: checker.hpp:248 - max bytes for variadic stack allocation
+	variadic_reuse_max_align: i64,  // C++ Reference: checker.hpp:249 - max alignment for variadic stack allocation
+	scope_index:             i32,
+}

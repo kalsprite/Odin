@@ -1,0 +1,118 @@
+POINTER ADDRESSABILITY FIX REPORT
+==================================
+Date: 2025-10-02
+Task: Fix pointer addressability errors in switch statements (9 original locations + 3 additional)
+
+PROBLEM SUMMARY
+---------------
+Odin switch statements over Exact_Value unions cannot take addresses of variant bindings directly.
+The pattern `#partial switch val in v { case big.Int: f(&val) }` fails because `val` is a copy, not addressable.
+
+ROOT CAUSE
+----------
+In Odin, when you switch over a union type with a binding variable, the bound variable is a VALUE COPY of the variant, not a reference to it. Therefore, you cannot take its address directly with `&val`.
+
+SOLUTION PATTERN
+----------------
+The correct pattern for getting a pointer to a union variant in a switch statement is:
+
+```odin
+#partial switch _ in v {  // No binding variable
+case big.Int:
+    temp := v.(big.Int)     // Extract the value into a temporary
+    ptr := &temp            // Take address of temporary
+    f(ptr)                  // Use the pointer
+}
+```
+
+Or in compact form:
+```odin
+#partial switch _ in v {
+case big.Int:
+    temp := v.(big.Int); f(&temp)
+}
+```
+
+FIXED LOCATIONS
+---------------
+
+### exact_value.odin
+
+1. Line 62-66: exact_value_to_float
+   - Before: #partial switch val in v { case big.Int: f(&val) }
+   - After:  #partial switch _ in v { case big.Int: temp := v.(big.Int); f(&temp) }
+   
+2. Line 84-88: exact_value_to_complex
+   - Before: #partial switch val in v { case big.Int: f(&val) }
+   - After:  #partial switch _ in v { case big.Int: temp := v.(big.Int); f(&temp) }
+   
+3. Line 111-115: exact_value_to_quaternion
+   - Before: #partial switch val in v { case big.Int: f(&val) }
+   - After:  #partial switch _ in v { case big.Int: temp := v.(big.Int); f(&temp) }
+
+### check_expr.odin
+
+4. Line 860-862: Division by zero check
+   - Before: #partial switch v in y.value { case big.Int: big.is_zero(&v) }
+   - After:  #partial switch _ in y.value { case big.Int: temp_v := y.value.(big.Int); big.is_zero(&temp_v) }
+
+5. Line 1043-1070: exact_binary_operator_value (8 function calls)
+   - Before: #partial switch lhs in x { case big.Int: if rhs... { big.internal_int_add_signed(&result, &lhs, &rhs) }}
+   - After:  #partial switch _ in x { case big.Int: temp_lhs := x.(big.Int); lhs := &temp_lhs; if rhs... { big.internal_int_add_signed(&result, lhs, &rhs) }}
+   - Affected function calls:
+     - Line 1049: big.internal_int_add_signed
+     - Line 1052: big.internal_int_sub_signed
+     - Line 1055: big.internal_int_mul
+     - Line 1058: big.internal_int_div
+     - Line 1061: big.internal_int_mod
+     - Line 1064: big.internal_int_and
+     - Line 1067: big.internal_int_or
+     - Line 1070: big.internal_int_xor
+
+6. Line 1126-1131: exact_unary_operator_value
+   - Before: #partial switch v in x { case big.Int: big.internal_int_neg(&result, &v) }
+   - After:  #partial switch _ in x { case big.Int: temp_v := x.(big.Int); v := &temp_v; big.internal_int_neg(&result, v) }
+   - Also fixed return statement on line 1134 to return x instead of v^ (since v is now a pointer)
+
+7. Line 1167-1170: compare_exact_values
+   - Before: #partial switch lhs in x { case big.Int: big.internal_int_compare(&lhs, &rhs) }
+   - After:  #partial switch _ in x { case big.Int: temp_lhs := x.(big.Int); lhs := &temp_lhs; big.internal_int_compare(lhs, &rhs) }
+
+ADDITIONAL FIXES (not in original report)
+------------------------------------------
+While fixing the code, discovered 3 additional pointer addressability errors with the same pattern:
+
+8. Line 1807-1808: check_is_expressible_integer
+   - Fixed big.int_get_i64(&v) and big.int_get_u64(&v)
+
+9. Line 1964: check_is_expressible_float
+   - Fixed big.int_get_float(&v)
+
+10. Line 2028: check_is_expressible_complex
+    - Fixed big.int_get_float(&v)
+
+VERIFICATION
+------------
+Before fix: 9+ "Cannot take the pointer address" errors
+After fix:  0 "Cannot take the pointer address" errors
+
+Total compilation errors reduced from unknown baseline to 34 remaining errors (unrelated to pointer addressability).
+
+KEY LEARNINGS
+-------------
+1. Odin union switch bindings create VALUE COPIES, not references
+2. To get a pointer to a union variant, must:
+   - Extract the variant into a temporary variable
+   - Take the address of that temporary
+3. The pattern `#partial switch &val in v` is NOT valid syntax in Odin
+4. Always use `#partial switch _ in v` (with underscore) for unnamed switches
+
+FILES MODIFIED
+--------------
+- /mnt/d/dev/checker/exact_value.odin: 3 switch statements fixed
+- /mnt/d/dev/checker/check_expr.odin: 9 switch statements fixed (6 from original report + 3 additional)
+
+COMPILATION STATUS
+------------------
+All pointer addressability errors successfully resolved.
+Remaining errors are unrelated to this fix (mostly type system and missing functionality).

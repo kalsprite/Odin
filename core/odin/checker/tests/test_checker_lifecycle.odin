@@ -1,0 +1,91 @@
+package test_checker
+
+/*
+Test Suite: Checker Lifecycle
+
+Tests for basic checker initialization, destruction, and state management.
+These are foundational tests that must pass before more complex tests.
+
+Run with: odin test core/odin/checker/tests
+*/
+
+import "core:sync"
+import "core:testing"
+import checker ".."
+
+// =============================================================================
+// LIFECYCLE TESTS
+// =============================================================================
+
+@(test)
+test_init_destroy_checker :: proc(t: ^testing.T) {
+	// Test that we can create and destroy a checker without errors
+	c := &checker.Checker{}
+	checker.init_checker(c)
+	defer checker.destroy_checker(c)
+
+	// Verify basic state
+	testing.expect(t, c.info.checker == c, "Checker info should point back to checker")
+}
+
+@(test)
+test_init_destroy_error_collector :: proc(t: ^testing.T) {
+	// Serialize access to global error collector to avoid race conditions
+	sync.lock(&test_error_mutex)
+	defer sync.unlock(&test_error_mutex)
+
+	// Test error collector lifecycle
+	checker.init_error_collector(20)
+	defer checker.destroy_error_collector()
+
+	// Should start with no errors
+	testing.expect(t, checker.error_count() == 0, "Should start with zero errors")
+	testing.expect(t, checker.warning_count() == 0, "Should start with zero warnings")
+}
+
+@(test)
+test_checker_context_creation :: proc(t: ^testing.T) {
+	c := &checker.Checker{}
+	checker.init_checker(c)
+	defer checker.destroy_checker(c)
+
+	// Create a context
+	ctx := checker.make_checker_context(c)
+
+	testing.expect(t, ctx.checker == c, "Context should reference checker")
+	testing.expect(t, ctx.info == &c.info, "Context should reference checker info")
+}
+
+// =============================================================================
+// SCOPE TESTS
+// =============================================================================
+
+@(test)
+test_create_scope :: proc(t: ^testing.T) {
+	c := &checker.Checker{}
+	checker.init_checker(c)
+	defer checker.destroy_checker(c)
+
+	// Create a basic scope
+	scope := checker.create_scope(nil, c.allocator)
+	defer checker.destroy_scope(scope)
+
+	testing.expect(t, scope != nil, "Should create scope")
+	testing.expect(t, scope.parent == nil, "Root scope should have no parent")
+}
+
+@(test)
+test_scope_hierarchy :: proc(t: ^testing.T) {
+	c := &checker.Checker{}
+	checker.init_checker(c)
+	defer checker.destroy_checker(c)
+
+	// Create parent scope
+	parent := checker.create_scope(nil, c.allocator)
+	defer checker.destroy_scope(parent)
+
+	// Create child scope (will be destroyed recursively by parent)
+	child := checker.create_scope(parent, c.allocator)
+
+	testing.expect(t, child.parent == parent, "Child should reference parent")
+}

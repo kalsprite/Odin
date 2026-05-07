@@ -1,0 +1,1529 @@
+package checker
+
+/*
+Core compound literals (struct, array, slice).
+
+Reference: /mnt/c/odin/src/check_expr.cpp:9549-10728
+*/
+
+import "core:math/big"
+import "core:odin/ast"
+import "core:sync"
+
+// check_compound_literal_field_values checks named field values in struct literals
+// Reference: /mnt/c/odin/src/check_expr.cpp:9549-9702
+//
+// Validates:
+// - All elements are Field_Value nodes
+// - Field names exist in struct
+// - No duplicate fields
+// - Field value types match
+check_compound_literal_field_values :: proc(ctx: ^Checker_Context, elems: []^ast.Expr, o: ^Operand, type: ^Type, is_constant: ^bool) {
+	bt := base_type(type)
+
+	// Track visited fields
+	fields_visited := make(map[string]bool)
+	defer delete(fields_visited)
+
+	// Track fields visited through raw_union paths
+	// Maps field name -> name of raw_union field that initialized it
+	// C++ Reference: checker.cpp:9634-9635
+	fields_visited_through_raw_union := make(map[string]string)
+	defer delete(fields_visited_through_raw_union)
+
+	// Determine assignment context string based on type
+	// C++ Reference: checker.cpp:9637-9640
+	assignment_str := "structure literal"
+	if bt.kind == .Bit_Field {
+		assignment_str = "bit_field literal"
+	}
+
+	for elem in elems {
+		// Validate element is Field_Value
+		// Reference: C++ lines 9564-9567
+		fv, is_field_value := elem.derived.(^ast.Field_Value)
+		if !is_field_value {
+			error(elem, "Mixture of 'field = value' and value elements in a literal is not allowed")
+			continue
+		}
+
+		// Get field name
+		// Reference: C++ lines 9569-9583
+		field_expr := fv.field
+
+		// Handle implicit selector (e.g., .field)
+		// Reference: C++ lines 9570-9576
+		if implicit_sel, is_implicit := field_expr.derived.(^ast.Implicit_Selector_Expr); is_implicit {
+			expr_str := expr_to_string(field_expr)
+			error(field_expr, "Field names do not start with a '.', remove the '.' in structure literal")
+			field_expr = implicit_sel.field
+			_ = expr_str
+		}
+
+		// Validate field is identifier
+		// Reference: C++ lines 9577-9582
+		ident, is_ident := field_expr.derived.(^ast.Ident)
+		if !is_ident {
+			expr_str := expr_to_string(field_expr)
+			error(elem, "Invalid field name '%s' in structure literal", expr_str)
+			continue
+		}
+
+		field_name := ident.name
+
+		// Look up field in struct
+		// Reference: C++ lines 9585-9590
+		sel := lookup_field(type, field_name, o.mode == .Type)
+		if sel.entity == nil {
+			error(field_expr, "Unknown field '%s' in structure literal", field_name)
+			continue
+		}
+
+		// Get field entity
+		// Reference: C++ lines 9671-9678
+		field: ^Entity
+		#partial switch v in bt.variant {
+		case Type_Struct:
+			if len(sel.index) > 0 {
+				field = v.fields[sel.index[0]]
+			}
+		case Type_Bit_Field:
+			// C++ Reference: checker.cpp:9674-9675
+			if len(sel.index) > 0 {
+				field = v.fields[sel.index[0]]
+			}
+		case:
+			// Unknown type - should not happen if lookup_field succeeded
+			// C++ Reference: checker.cpp:9676-9677
+			assert(false, "Unknown type in compound literal field extraction")
+		}
+
+		if field == nil {
+			continue
+		}
+
+		// Track entity use
+		// Reference: C++ line 9602
+		add_entity_use(ctx, field_expr, field)
+
+		// Check for duplicate fields
+		// Reference: C++ lines 9682-9696
+		if field_name in fields_visited {
+			// Check if this is a nested field accessed through raw_union
+			// C++ Reference: checker.cpp:9683-9689
+			if len(sel.index) > 1 {
+				// Check if conflict due to raw_union path
+				if union_field, found := fields_visited_through_raw_union[sel.entity.token.text]; found {
+					error(field_expr, "Field '%s' is already initialized due to a previously assigned struct #raw_union field '%s'", sel.entity.token.text, union_field)
+				} else {
+					error(field_expr, "Duplicate or reused field '%s' in %s", sel.entity.token.text, assignment_str)
+				}
+			} else {
+				// Direct duplicate field
+				// C++ Reference: checker.cpp:9690
+				error(field_expr, "Duplicate field '%s' in %s", field.token.text, assignment_str)
+			}
+			continue
+		} else if union_field, found := fields_visited_through_raw_union[sel.entity.token.text]; found {
+			// Field was already initialized through a raw_union path
+			// C++ Reference: checker.cpp:9693-9696
+			error(field_expr, "Field '%s' is already initialized due to a previously assigned struct #raw_union field '%s'", sel.entity.token.text, union_field)
+			continue
+		}
+
+		// Check for indirect field
+		// Reference: C++ lines 9618-9621
+		if sel.indirect {
+			error(field_expr, "Cannot assign to the %d-nested anonymous indirect field '%s' in a %s", len(sel.index) - 1, field_name, assignment_str)
+			continue
+		}
+
+		// Handle nested anonymous fields
+		// Reference: C++ lines 9623-9678
+		if len(sel.index) > 1 {
+			// Multi-level field access through anonymous structs
+			// This affects constant-ness tracking
+
+			if is_constant^ {
+				// Check if path through nested fields can be constant
+				// Reference: C++ lines 9705-9732
+				ft := type
+				for index in sel.index {
+					bt_nested := base_type(ft)
+					#partial switch v in bt_nested.variant {
+					case Type_Struct:
+						if v.is_raw_union {
+							is_constant^ = false
+							break
+						}
+						ft = entity_type(v.fields[index])
+					case Type_Array:
+						ft = v.elem
+					case Type_Bit_Field:
+						// C++ Reference: checker.cpp:9720-9723
+						// Bit fields cannot be constant
+						is_constant^ = false
+						ft = entity_type(v.fields[index])
+					case:
+						// Unexpected type in nested path
+						// C++ Reference: checker.cpp:9724-9726
+						ft = t_invalid
+						break
+					}
+				}
+				if is_constant^ && elem_cannot_be_constant(ft) {
+					is_constant^ = false
+				}
+			}
+
+			// Track raw_union field access for conflict detection
+			// Reference: C++ lines 9734-9758
+			// When traversing nested anonymous structs, check if any level is a raw_union
+			// If so, mark all fields of that raw_union as "visited through" this field path
+			nested_ft := bt
+			for index in sel.index {
+				bt_nested := base_type(nested_ft)
+				#partial switch v in bt_nested.variant {
+				case Type_Struct:
+					// If this level is a raw_union, mark all its fields as visited through the current field
+					// C++ Reference: checker.cpp:9738-9743
+					if v.is_raw_union {
+						for re in v.fields {
+							// Map each raw_union field name to the final field name we're initializing
+							fields_visited_through_raw_union[re.token.text] = sel.entity.token.text
+						}
+					}
+					nested_ft = entity_type(v.fields[index])
+				case Type_Array:
+					nested_ft = v.elem
+				case Type_Bit_Field:
+					// C++ Reference: checker.cpp:9749-9751
+					nested_ft = entity_type(v.fields[index])
+				case:
+					// Unexpected type in nested path
+					// C++ Reference: checker.cpp:9752-9754
+					nested_ft = t_invalid
+					break
+				}
+			}
+
+			// Update field to actual nested entity
+			field = sel.entity
+		}
+
+		// Mark field as visited
+		fields_visited[field_name] = true
+
+		// Check field value type
+		// Reference: C++ lines 9666-9682
+		value_operand := Operand{}
+		check_expr_or_type(ctx, &value_operand, fv.value, entity_type(field))
+
+		// Check constant-ness
+		// Reference: C++ lines 9684-9694
+		if elem_cannot_be_constant(entity_type(field)) {
+			is_constant^ = false
+		}
+		if is_constant^ {
+			is_constant^ = check_is_operand_compound_lit_constant(ctx, &value_operand, entity_type(field))
+		}
+
+		// Handle bit field assignments
+		// Reference: C++ lines 9692-9700
+		prev_bit_field_bit_size := ctx.bit_field_bit_size
+		if field.kind == .Variable && field.variant.(Entity_Variable).bit_field_bit_size != 0 {
+			// Set bit_field_bit_size for assignment checking
+			// HACK NOTE(bill): This is a bit of a hack, but it will work fine for this use case
+			ctx.bit_field_bit_size = i64(field.variant.(Entity_Variable).bit_field_bit_size)
+		}
+
+		check_assignment(ctx, &value_operand, entity_type(field), assignment_str)
+
+		ctx.bit_field_bit_size = prev_bit_field_bit_size
+	}
+}
+
+// check_compound_literal checks compound literal expressions
+// Reference: /mnt/c/odin/src/check_expr.cpp:9763-10728
+//
+// Implemented:
+// - Struct literals with named or positional fields
+// - Array literals with positional and indexed elements
+// - Slice literals
+// - Empty literals (zero initialization)
+// - SOA struct literals (positional and indexed)
+// - Bit_set literals
+// - SIMD vector literals
+// - Matrix literals
+// - Bit_field literals
+// - EnumeratedArray literals
+// - Indexed/range array initialization ([0] = x, [1..5] = y)
+// - Map literals
+// - Dynamic array literals
+check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, type_hint: ^Type) -> Expr_Kind {
+	kind := Expr_Kind.Expr
+	cl := node.derived.(^ast.Comp_Lit)
+
+	// Initialize type from hint
+	// Reference: C++ lines 9767-9773
+	type := type_hint
+	if type != nil && is_type_untyped(type) {
+		type = nil
+	}
+
+	is_to_be_determined_array_count := false
+	is_constant := true
+	is_soa := false
+
+	// Get type expression
+	// Reference: C++ lines 9775-9833
+	type_expr := cl.type
+
+	// Use type_hint_expr if available for [?]T syntax
+	// Reference: C++ lines 9856-9862
+	used_type_hint_expr := false
+	if type_expr == nil && ctx.type_hint_expr != nil {
+		if is_expr_inferred_fixed_array(ctx.type_hint_expr) {
+			// C++ clones the AST, but in Odin core:odin/ast is immutable so we can reuse
+			type_expr = ctx.type_hint_expr
+			used_type_hint_expr = true
+		}
+	}
+
+	// Process type expression
+	if type_expr != nil {
+		type = nil
+
+		// Handle array type syntax
+		if array_type, ok := type_expr.derived.(^ast.Array_Type); ok {
+			// Handle [?]T syntax for inferred array count
+			// Reference: C++ lines 9867-9878
+			count := array_type.len
+			if count != nil {
+				// Check for [?] syntax
+				if unary, is_unary := count.derived.(^ast.Unary_Expr); is_unary {
+					if unary.op.kind == .Question {
+						// Inferred array count: [?]T{...}
+						elem_type := check_type(ctx, array_type.elem)
+						type = alloc_type_array(elem_type, -1)
+						is_to_be_determined_array_count = true
+					}
+				}
+			} else {
+				// Slice type (no count specified)
+				elem_type := check_type(ctx, array_type.elem)
+				type = alloc_type_slice(elem_type)
+			}
+
+			// Check for SOA tag
+			// Reference: C++ lines 9879-9895
+			if len(cl.elems) > 0 && array_type.tag != nil {
+				if tag_expr, ok2 := array_type.tag.derived.(^ast.Tag_Expr); ok2 {
+					if tag_expr.name == "soa" {
+						is_soa = true
+						// Check restrictions on SOA array literals
+						if count == nil {
+							// #soa slices not supported
+							// C++ Reference: checker.cpp:9886-9888
+							error(node, "#soa slices are not supported for compound literals")
+							return kind
+						} else if unary, is_unary := count.derived.(^ast.Unary_Expr); is_unary && unary.op.kind == .Question {
+							// #soa arrays cannot use [?] syntax
+							// C++ Reference: checker.cpp:9889-9892
+							error(node, "#soa fixed length arrays must specify their length and cannot use ?")
+						}
+					}
+				}
+			}
+		} else if dyn_array_type, ok2 := type_expr.derived.(^ast.Dynamic_Array_Type); ok2 {
+			// Handle dynamic array with SOA tag
+			// Reference: C++ lines 9896-9907
+			if len(cl.elems) > 0 && dyn_array_type.tag != nil {
+				if tag_expr, ok3 := dyn_array_type.tag.derived.(^ast.Tag_Expr); ok3 {
+					if tag_expr.name == "soa" {
+						is_soa = true
+						// #soa dynamic arrays not supported
+						// C++ Reference: checker.cpp:9901-9904
+						error(node, "#soa dynamic arrays are not supported for compound literals")
+						return kind
+					}
+				}
+			}
+		}
+
+		// Fall back to normal type checking
+		if type == nil {
+			type = check_type(ctx, type_expr)
+		}
+	}
+
+	// Require explicit type
+	// Reference: C++ lines 9835-9838
+	if type == nil {
+		error(node, "Missing type in compound literal")
+		return kind
+	}
+
+	// Get base type and validate
+	// Reference: C++ lines 9841-9849
+	t := base_type(type)
+	if is_type_polymorphic(t) {
+		type_str := type_to_string(type)
+		error(node, "Cannot use a polymorphic type for a compound literal, got '%s'", type_str)
+		o.expr = node
+		o.type = type
+		return kind
+	}
+
+	// Dispatch by type
+	// Reference: C++ lines 9852-10663
+	#partial switch variant in t.variant {
+
+	case Type_Struct:
+		// Struct literal checking
+		// Reference: C++ lines 9853-9942
+
+		if len(cl.elems) == 0 {
+			break // Empty literal OK
+		}
+
+		ts := variant
+
+		// Handle SOA struct literals
+		// Reference: C++ lines 10022-10026
+		if ts.soa_kind != .None {
+			if ts.soa_kind != .Fixed {
+				// Reject slices and dynamic arrays (soa_kind == 2 or 3)
+				// C++ Reference: checker.cpp:10022-10024
+				error(node, "#soa slices and dynamic arrays are not supported for compound literals")
+				break
+			}
+			// StructSoa_Fixed (soa_kind == 1) falls through to array handling in C++
+			// C++ Reference: checker.cpp:10025-10026 + 10037-10043
+			// In Odin, we can't fall through, so we handle it inline here
+			is_soa = true
+			elem_type := ts.soa_elem
+			context_name := "#soa array literal"
+			max_type_count: i64 = -1
+			if !is_to_be_determined_array_count {
+				max_type_count = ts.soa_count
+			}
+
+			// Process elements (same as array literal)
+			// Reference: C++ lines 10112-10142 + array validation
+			max: i64 = 0
+
+			bet := base_type(elem_type)
+			if !elem_type_can_be_constant(bet) {
+				is_constant = false
+			}
+
+			if bet == t_invalid {
+				break
+			}
+
+			// Check for indexed/range initialization vs positional elements
+			// Reference: C++ lines 10087-10187
+			if len(cl.elems) > 0 {
+				_, is_field_value := cl.elems[0].derived.(^ast.Field_Value)
+
+				if is_field_value {
+					// Indexed/range initialization: [0] = x, [1..3] = y
+					// C++ Reference: check_expr.cpp:10088-10187
+					rc := range_cache_make()
+					defer range_cache_destroy(&rc)
+
+					for elem in cl.elems {
+						fv, is_fv := elem.derived.(^ast.Field_Value)
+						if !is_fv {
+							error(elem, "Mixture of 'field = value' and value elements in a literal is not allowed")
+							continue
+						}
+
+						// Check if field is a range expression
+						if is_ast_range(fv.field) {
+							// Range initialization: [1..5] = value
+							// C++ Reference: check_expr.cpp:10098-10152
+							x := Operand{}
+							y := Operand{}
+							ok := check_array_range(ctx, fv.field, false, &x, &y, nil)
+							if !ok {
+								continue
+							}
+
+							if x.mode != .Constant || !is_type_integer(core_type(x.type)) {
+								error(x.expr, "Expected a constant integer as an array field")
+								continue
+							}
+							if y.mode != .Constant || !is_type_integer(core_type(y.type)) {
+								error(y.expr, "Expected a constant integer as an array field")
+								continue
+							}
+
+							lo := exact_value_to_i64(x.value)
+							hi := exact_value_to_i64(y.value)
+							max_index := hi
+
+							// Get the binary operator to check range type
+							binary := fv.field.derived.(^ast.Binary_Expr)
+							if binary.op.kind == .Range_Half {
+								// ..< (exclusive)
+								hi -= 1
+							} else {
+								// .. or ..= (inclusive)
+								max_index += 1
+							}
+
+							// Check for overlap with existing ranges
+							new_range := range_cache_add_range(&rc, lo, hi)
+							if !new_range {
+								error(elem, "Overlapping field range index %d %s %d for %s", lo, binary.op.text, hi, context_name)
+								continue
+							}
+
+							// Bounds checking
+							if max_type_count >= 0 && (lo < 0 || lo >= max_type_count) {
+								error(elem, "Index %d is out of bounds (0..<%d) for %s", lo, max_type_count, context_name)
+								continue
+							}
+							if max_type_count >= 0 && (hi < 0 || hi >= max_type_count) {
+								error(elem, "Index %d is out of bounds (0..<%d) for %s", hi, max_type_count, context_name)
+								continue
+							}
+
+							if max < hi {
+								max = max_index
+							}
+
+							// Check the value expression
+							operand := Operand{}
+							check_expr_with_type_hint(ctx, &operand, fv.value, elem_type)
+							check_assignment(ctx, &operand, elem_type, context_name)
+
+							if is_constant {
+								is_constant = check_is_operand_compound_lit_constant(ctx, &operand, elem_type)
+							}
+						} else {
+							// Single index initialization: [0] = value
+							// C++ Reference: check_expr.cpp:10153-10186
+							op_index := Operand{}
+							check_expr(ctx, &op_index, fv.field)
+
+							if op_index.mode != .Constant || !is_type_integer(core_type(op_index.type)) {
+								error(elem, "Expected a constant integer as an array field")
+								continue
+							}
+
+							index := exact_value_to_i64(op_index.value)
+
+							// Bounds checking
+							if max_type_count >= 0 && (index < 0 || index >= max_type_count) {
+								error(elem, "Index %d is out of bounds (0..<%d) for %s", index, max_type_count, context_name)
+								continue
+							}
+
+							// Check for duplicate index
+							new_index := range_cache_add_index(&rc, index)
+							if !new_index {
+								error(elem, "Duplicate field index %d for %s", index, context_name)
+								continue
+							}
+
+							if max < index + 1 {
+								max = index + 1
+							}
+
+							// Check the value expression
+							operand := Operand{}
+							check_expr_with_type_hint(ctx, &operand, fv.value, elem_type)
+							check_assignment(ctx, &operand, elem_type, context_name)
+
+							if is_constant {
+								is_constant = check_is_operand_compound_lit_constant(ctx, &operand, elem_type)
+							}
+						}
+					}
+				} else {
+					// Positional elements (non-indexed)
+					// Reference: C++ lines 10112-10142
+					for elem, index in cl.elems {
+						if elem == nil {
+							error(node, "Invalid literal element")
+							continue
+						}
+
+						if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
+							error(elem, "Mixture of 'field = value' and value elements in a literal is not allowed")
+							continue
+						}
+
+						if 0 <= max_type_count && max_type_count <= i64(index) {
+							error(elem, "Index %d is out of bounds (>= %d) for %s", index, max_type_count, context_name)
+						}
+
+						operand := Operand{}
+						check_expr_or_type(ctx, &operand, elem, elem_type)
+						check_assignment(ctx, &operand, elem_type, context_name)
+
+						if is_constant {
+							is_constant = check_is_operand_compound_lit_constant(ctx, &operand, elem_type)
+						}
+					}
+
+					if max < i64(len(cl.elems)) {
+						max = i64(len(cl.elems))
+					}
+				}
+			}
+
+			// Validate count for SOA Fixed arrays
+			if max_type_count >= 0 && len(cl.elems) > 0 {
+				if 0 < max && max < ts.soa_count {
+					error(node, "Expected %d values for this #soa array literal, got %d", ts.soa_count, max)
+				}
+			}
+
+			// Done with SOA Fixed struct literal
+			break
+		}
+
+		// Handle raw_union struct literals
+		// Reference: C++ lines 9937-9958
+		if ts.is_raw_union {
+			if len(cl.elems) > 0 {
+				// NOTE: unions cannot be constant
+				// C++ Reference: checker.cpp:9940-9941
+				is_constant = elem_type_can_be_constant(t)
+
+				// Check that all elements are Field_Value (no positional syntax)
+				// C++ Reference: checker.cpp:9943-9946
+				if len(cl.elems) > 0 {
+					if _, is_fv := cl.elems[0].derived.(^ast.Field_Value); !is_fv {
+						type_str := type_to_string(type)
+						error(node, "%s ('struct #raw_union') compound literals are only allowed to contain 'field = value' elements", type_str)
+					} else {
+						// Check that only 1 field is initialized
+						// C++ Reference: checker.cpp:9948-9954
+						if len(cl.elems) != 1 {
+							type_str := type_to_string(type)
+							error(node, "%s ('struct #raw_union') compound literals are only allowed to contain up to 1 'field = value' element, got %d", type_str, len(cl.elems))
+						} else {
+							// Use the standard field checking (already handles raw_union conflicts)
+							check_compound_literal_field_values(ctx, cl.elems, o, type, &is_constant)
+						}
+					}
+				}
+			}
+			break
+		}
+
+		// Wait for struct fields to be resolved
+		// Reference: C++ lines 9881-9892
+		sync.wait_group_wait(&ts.fields_wait_signal)
+
+		field_count := len(ts.fields)
+		min_field_count := field_count
+
+		// Count fields with default values to compute min_field_count
+		// Reference: C++ lines 9963-9971
+		// Fields with default values at the end don't need to be specified in literals
+		for i := min_field_count - 1; i >= 0; i -= 1 {
+			e := ts.fields[i]
+			assert(e.kind == .Variable, "Struct field must be a Variable entity")
+			if ev, ok := e.variant.(Entity_Variable); ok {
+				if ev.param_value.kind != .Invalid {
+					min_field_count -= 1
+				} else {
+					break
+				}
+			}
+		}
+
+		// Check if using named fields
+		if len(cl.elems) > 0 {
+			if _, is_field_value := cl.elems[0].derived.(^ast.Field_Value); is_field_value {
+				// Named field syntax
+				// Reference: C++ line 9895
+				check_compound_literal_field_values(ctx, cl.elems, o, type, &is_constant)
+			} else {
+				// Positional field syntax
+				// Reference: C++ lines 9896-9940
+
+				seen_field_value := false
+
+				for elem, index in cl.elems {
+					if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
+						seen_field_value = true
+						error(elem, "Mixture of 'field = value' and value elements in a literal is not allowed")
+						continue
+					} else if seen_field_value {
+						error(elem, "Value elements cannot be used after a 'field = value'")
+						continue
+					}
+
+					if index >= field_count {
+						error(elem, "Too many values in structure literal, expected %d, got %d", field_count, len(cl.elems))
+						break
+					}
+
+					field := ts.fields[index]
+
+					elem_operand := Operand{}
+					check_expr_or_type(ctx, &elem_operand, elem, entity_type(field))
+
+					// Check if can be constant
+					// Reference: C++ lines 9922-9927
+					if elem_cannot_be_constant(entity_type(field)) {
+						is_constant = false
+					}
+					if is_constant {
+						is_constant = check_is_operand_compound_lit_constant(ctx, &elem_operand, entity_type(field))
+					}
+
+					check_assignment(ctx, &elem_operand, entity_type(field), "structure literal")
+				}
+
+				// Validate element count
+				// Reference: C++ lines 9931-9939
+				if len(cl.elems) < field_count {
+					if min_field_count < field_count {
+						if len(cl.elems) < min_field_count {
+							error(node, "Too few values in structure literal, expected at least %d, got %d", min_field_count, len(cl.elems))
+						}
+					} else {
+						error(node, "Too few values in structure literal, expected %d, got %d", field_count, len(cl.elems))
+					}
+				}
+			}
+		}
+
+	case Type_Array, Type_Slice:
+		// Array and slice literal checking
+		// Reference: C++ lines 9949-10187
+
+		elem_type: ^Type
+		context_name: string
+		max_type_count: i64 = -1
+
+		if arr, is_array := variant.(Type_Array); is_array {
+			elem_type = arr.elem
+			context_name = "array literal"
+			if !is_to_be_determined_array_count {
+				max_type_count = arr.count
+			}
+		} else if slice, is_slice := variant.(Type_Slice); is_slice {
+			elem_type = slice.elem
+			context_name = "slice literal"
+		}
+
+		max: i64 = 0
+
+		bet := base_type(elem_type)
+		if !elem_type_can_be_constant(bet) {
+			is_constant = false
+		}
+
+		if bet == t_invalid {
+			break
+		}
+
+		// Check for indexed/range initialization vs positional elements
+		// Reference: C++ lines 10087-10187
+		if len(cl.elems) > 0 {
+			_, is_field_value := cl.elems[0].derived.(^ast.Field_Value)
+
+			if is_field_value {
+				// Indexed/range initialization: [0] = x, [1..3] = y
+				// C++ Reference: check_expr.cpp:10088-10187
+				rc := range_cache_make()
+				defer range_cache_destroy(&rc)
+
+				for elem in cl.elems {
+					fv, is_fv := elem.derived.(^ast.Field_Value)
+					if !is_fv {
+						error(elem, "Mixture of 'field = value' and value elements in a literal is not allowed")
+						continue
+					}
+
+					// Check if field is a range expression
+					if is_ast_range(fv.field) {
+						// Range initialization: [1..5] = value
+						// C++ Reference: check_expr.cpp:10098-10152
+						x := Operand{}
+						y := Operand{}
+						ok := check_array_range(ctx, fv.field, false, &x, &y, nil)
+						if !ok {
+							continue
+						}
+
+						if x.mode != .Constant || !is_type_integer(core_type(x.type)) {
+							error(x.expr, "Expected a constant integer as an array field")
+							continue
+						}
+						if y.mode != .Constant || !is_type_integer(core_type(y.type)) {
+							error(y.expr, "Expected a constant integer as an array field")
+							continue
+						}
+
+						lo := exact_value_to_i64(x.value)
+						hi := exact_value_to_i64(y.value)
+						max_index := hi
+
+						// Get the binary operator to check range type
+						binary := fv.field.derived.(^ast.Binary_Expr)
+						if binary.op.kind == .Range_Half {
+							// ..< (exclusive)
+							hi -= 1
+						} else {
+							// .. or ..= (inclusive)
+							max_index += 1
+						}
+
+						// Check for overlap with existing ranges
+						new_range := range_cache_add_range(&rc, lo, hi)
+						if !new_range {
+							error(elem, "Overlapping field range index %d %s %d for %s", lo, binary.op.text, hi, context_name)
+							continue
+						}
+
+						// Bounds checking
+						if max_type_count >= 0 && (lo < 0 || lo >= max_type_count) {
+							error(elem, "Index %d is out of bounds (0..<%d) for %s", lo, max_type_count, context_name)
+							continue
+						}
+						if max_type_count >= 0 && (hi < 0 || hi >= max_type_count) {
+							error(elem, "Index %d is out of bounds (0..<%d) for %s", hi, max_type_count, context_name)
+							continue
+						}
+
+						if max < hi {
+							max = max_index
+						}
+
+						// Check the value expression
+						operand := Operand{}
+						check_expr_with_type_hint(ctx, &operand, fv.value, elem_type)
+						check_assignment(ctx, &operand, elem_type, context_name)
+
+						if is_constant {
+							is_constant = check_is_operand_compound_lit_constant(ctx, &operand, elem_type)
+						}
+					} else {
+						// Single index initialization: [0] = value
+						// C++ Reference: check_expr.cpp:10153-10186
+						op_index := Operand{}
+						check_expr(ctx, &op_index, fv.field)
+
+						if op_index.mode != .Constant || !is_type_integer(core_type(op_index.type)) {
+							error(elem, "Expected a constant integer as an array field")
+							continue
+						}
+
+						index := exact_value_to_i64(op_index.value)
+
+						// Bounds checking
+						if max_type_count >= 0 && (index < 0 || index >= max_type_count) {
+							error(elem, "Index %d is out of bounds (0..<%d) for %s", index, max_type_count, context_name)
+							continue
+						}
+
+						// Check for duplicate index
+						new_index := range_cache_add_index(&rc, index)
+						if !new_index {
+							error(elem, "Duplicate field index %d for %s", index, context_name)
+							continue
+						}
+
+						if max < index + 1 {
+							max = index + 1
+						}
+
+						// Check the value expression
+						operand := Operand{}
+						check_expr_with_type_hint(ctx, &operand, fv.value, elem_type)
+						check_assignment(ctx, &operand, elem_type, context_name)
+
+						if is_constant {
+							is_constant = check_is_operand_compound_lit_constant(ctx, &operand, elem_type)
+						}
+					}
+				}
+			} else {
+				// Positional elements (non-indexed)
+				// Reference: C++ lines 10112-10142
+				for elem, index in cl.elems {
+					if elem == nil {
+						error(node, "Invalid literal element")
+						continue
+					}
+
+					if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
+						error(elem, "Mixture of 'field = value' and value elements in a literal is not allowed")
+						continue
+					}
+
+					if 0 <= max_type_count && max_type_count <= i64(index) {
+						error(elem, "Index %d is out of bounds (>= %d) for %s", index, max_type_count, context_name)
+					}
+
+					operand := Operand{}
+					check_expr_or_type(ctx, &operand, elem, elem_type)
+					check_assignment(ctx, &operand, elem_type, context_name)
+
+					if is_constant {
+						is_constant = check_is_operand_compound_lit_constant(ctx, &operand, elem_type)
+					}
+				}
+
+				if max < i64(len(cl.elems)) {
+					max = i64(len(cl.elems))
+				}
+			}
+		}
+
+		// Validate array count
+		// Reference: C++ lines 10224-10231
+		if arr, is_array := variant.(Type_Array); is_array {
+			if is_to_be_determined_array_count {
+				// Set inferred array count for [?]T syntax
+				// C++ Reference: checker.cpp:10226
+				arr_type := &t.variant.(Type_Array)
+				arr_type.count = max
+			} else if len(cl.elems) > 0 {
+				_, not_field_value := cl.elems[0].derived.(^ast.Field_Value)
+				if !not_field_value {
+					if 0 < max && max < arr.count {
+						error(node, "Expected %d values for this array literal, got %d", arr.count, max)
+					}
+				}
+			}
+		}
+
+	case Type_Map:
+		// Map literal: map[string]int{"a" = 1, "b" = 2}
+		// Reference: C++ lines 10535-10575
+		mp := variant
+		key_type := mp.key
+		value_type := mp.value
+
+		// Maps are never constant (require runtime allocation)
+		is_constant = false
+
+		// Empty map literal is OK
+		if len(cl.elems) == 0 {
+			break
+		}
+
+		// All elements must be key = value pairs
+		for elem in cl.elems {
+			fv, is_fv := elem.derived.(^ast.Field_Value)
+			if !is_fv {
+				error(elem, "Map literals require 'key = value' entries")
+				continue
+			}
+
+			// Check key expression
+			key_operand := Operand{}
+			check_expr(ctx, &key_operand, fv.field)
+
+			if key_operand.mode == .Invalid {
+				continue
+			}
+
+			// Key must be assignable to key type
+			if !check_is_assignable_to(ctx, &key_operand, key_type) {
+				key_type_str := type_to_string(key_type)
+				val_type_str := type_to_string(key_operand.type)
+				error(fv.field, "Cannot use '%s' as key in map[%s]", val_type_str, key_type_str)
+				continue
+			}
+
+			// Check value expression
+			value_operand := Operand{}
+			check_expr(ctx, &value_operand, fv.value)
+
+			if value_operand.mode == .Invalid {
+				continue
+			}
+
+			// Value must be assignable to value type
+			if !check_is_assignable_to(ctx, &value_operand, value_type) {
+				val_type_str := type_to_string(value_type)
+				given_type_str := type_to_string(value_operand.type)
+				error(fv.value, "Cannot use '%s' as value in map (expected '%s')", given_type_str, val_type_str)
+				continue
+			}
+		}
+
+	case Type_Bit_Set:
+		// Bit_set literal: bit_set[Enum]{.Value_A, .Value_B}
+		// Reference: C++ lines 10577-10635
+		bs := variant
+
+		// Get the element type for validation
+		elem_type := bs.elem
+
+		// Process each element in the bit_set literal
+		for elem in cl.elems {
+			// Bit_set literals cannot use named fields
+			// Reference: C++ lines 10579-10583
+			if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
+				error(elem, "Bit_set literals cannot contain 'field = value' entries")
+				continue
+			}
+
+			// Check if element is a range expression (e.g., .A..=.C)
+			// Reference: C++ lines 10585-10605
+			elem_expr := unparen_expr(elem)
+			if is_ast_range(cast(^ast.Expr)elem_expr) {
+				// Range expression in bit_set
+				if be, is_binary := elem_expr.derived.(^ast.Binary_Expr); is_binary {
+					// Check both endpoints
+					lhs_op, rhs_op: Operand
+					check_expr(ctx, &lhs_op, be.left)
+					check_expr(ctx, &rhs_op, be.right)
+
+					// Both must be assignable to elem_type
+					if lhs_op.mode != .Invalid && !check_is_assignable_to(ctx, &lhs_op, elem_type) {
+						error(be.left, "Cannot assign this value to bit_set element type")
+					}
+					if rhs_op.mode != .Invalid && !check_is_assignable_to(ctx, &rhs_op, elem_type) {
+						error(be.right, "Cannot assign this value to bit_set element type")
+					}
+
+					// Range elements are not constant-time computable in general
+					if lhs_op.mode != .Constant || rhs_op.mode != .Constant {
+						is_constant = false
+					}
+				}
+			} else {
+				// Single value element
+				// Reference: C++ lines 10607-10630
+				elem_operand := Operand{}
+				check_expr(ctx, &elem_operand, elem)
+
+				if elem_operand.mode == .Invalid {
+					continue
+				}
+
+				// Must be assignable to elem_type
+				if !check_is_assignable_to(ctx, &elem_operand, elem_type) {
+					elem_type_str := type_to_string(elem_type)
+					val_type_str := type_to_string(elem_operand.type)
+					error(elem, "Cannot use '%s' as an element in bit_set[%s]", val_type_str, elem_type_str)
+					continue
+				}
+
+				// Check constant-ness
+				if elem_operand.mode != .Constant {
+					is_constant = false
+				}
+			}
+		}
+
+	case Type_Enumerated_Array:
+		// EnumeratedArray literal: [Direction]int{.North = 1, .South = 2} or [Direction]int{1, 2, 3, 4}
+		// Reference: C++ lines 10190-10430
+		ea := variant
+		elem_type := ea.elem
+		index_type := ea.index
+		elem_count := ea.count
+
+		// Empty literal is OK
+		if len(cl.elems) == 0 {
+			break
+		}
+
+		// Determine if using named or positional syntax
+		has_named := false
+		has_positional := false
+		for elem in cl.elems {
+			if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
+				has_named = true
+			} else {
+				has_positional = true
+			}
+		}
+
+		// Cannot mix named and positional
+		if has_named && has_positional {
+			error(node, "Cannot mix named and positional elements in enumerated array literal")
+			break
+		}
+
+		// For non-sparse enumerated arrays, positional/bare elements are not allowed
+		// Must use named syntax: { .Field = value }
+		if has_positional && !ea.is_sparse {
+			error(node, "Bare elements are not allowed in enumerated array literal; use '.FieldName = value' syntax")
+			break
+		}
+
+		if has_named {
+			// Named syntax: [Enum]T{.A = val, .B = val}
+			// Reference: C++ lines 10200-10300
+			indices_visited := make(map[i64]bool, context.temp_allocator)
+
+			for elem in cl.elems {
+				fv := elem.derived.(^ast.Field_Value)
+
+				// Check index expression (should be enum value)
+				// Use index_type as hint for implicit selector resolution
+				index_operand := Operand{}
+				check_expr_with_type_hint(ctx, &index_operand, fv.field, index_type)
+
+				if index_operand.mode == .Invalid {
+					continue
+				}
+
+				// Must be assignable to index type
+				if !check_is_assignable_to(ctx, &index_operand, index_type) {
+					idx_type_str := type_to_string(index_type)
+					val_type_str := type_to_string(index_operand.type)
+					error(fv.field, "Index '%s' is not valid for enumerated array indexed by '%s'", val_type_str, idx_type_str)
+					continue
+				}
+
+				// Get index value for duplicate checking
+				if index_operand.mode == .Constant {
+					idx_val := exact_value_to_i64(index_operand.value)
+					if indices_visited[idx_val] {
+						error(fv.field, "Duplicate index in enumerated array literal")
+					}
+					indices_visited[idx_val] = true
+				}
+
+				// Check value expression
+				value_operand := Operand{}
+				check_expr(ctx, &value_operand, fv.value)
+
+				if value_operand.mode == .Invalid {
+					continue
+				}
+
+				// Must be assignable to element type
+				if !check_is_assignable_to(ctx, &value_operand, elem_type) {
+					elem_type_str := type_to_string(elem_type)
+					val_type_str := type_to_string(value_operand.type)
+					error(fv.value, "Cannot assign '%s' to enumerated array element of type '%s'", val_type_str, elem_type_str)
+					continue
+				}
+
+				// Check constant-ness
+				if value_operand.mode != .Constant {
+					is_constant = false
+				}
+			}
+
+			// For non-sparse enumerated arrays, all enum cases must be provided
+			if !ea.is_sparse {
+				cases_provided := i64(len(indices_visited))
+				if cases_provided != elem_count {
+					error(node, "Enumerated array literal is missing %d case(s); expected %d, got %d",
+						elem_count - cases_provided, elem_count, cases_provided)
+				}
+			}
+		} else {
+			// Positional syntax: [Enum]T{val1, val2, val3}
+			// Reference: C++ lines 10300-10400
+			for elem in cl.elems {
+				elem_operand := Operand{}
+				check_expr(ctx, &elem_operand, elem)
+
+				if elem_operand.mode == .Invalid {
+					continue
+				}
+
+				// Must be assignable to element type
+				if !check_is_assignable_to(ctx, &elem_operand, elem_type) {
+					elem_type_str := type_to_string(elem_type)
+					val_type_str := type_to_string(elem_operand.type)
+					error(elem, "Cannot assign '%s' to enumerated array element of type '%s'", val_type_str, elem_type_str)
+					continue
+				}
+
+				// Check constant-ness
+				if elem_operand.mode != .Constant {
+					is_constant = false
+				}
+			}
+
+			// Validate element count for positional syntax
+			if i64(len(cl.elems)) != elem_count {
+				error(node, "Expected %d values for enumerated array literal, got %d", elem_count, len(cl.elems))
+			}
+		}
+
+	case Type_Dynamic_Array:
+		// Dynamic array literal: [dynamic]int{1, 2, 3}
+		// Reference: C++ lines 10172-10177
+		da := variant
+		elem_type := da.elem
+
+		// Dynamic arrays are never constant (require runtime allocation)
+		is_constant = false
+
+		// Dynamic array literals cannot use named/indexed fields
+		for elem in cl.elems {
+			if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
+				error(elem, "Dynamic array literals cannot contain 'field = value' entries")
+				continue
+			}
+
+			// Check element value
+			elem_operand := Operand{}
+			check_expr(ctx, &elem_operand, elem)
+
+			if elem_operand.mode == .Invalid {
+				continue
+			}
+
+			// Must be assignable to element type
+			if !check_is_assignable_to(ctx, &elem_operand, elem_type) {
+				elem_type_str := type_to_string(elem_type)
+				val_type_str := type_to_string(elem_operand.type)
+				error(elem, "Cannot use '%s' as element in dynamic array of '%s'", val_type_str, elem_type_str)
+				continue
+			}
+		}
+
+	case Type_Simd_Vector:
+		// SIMD vector literal: #simd[4]f32{1, 2, 3, 4}
+		// Reference: C++ lines 9984-9994
+		sv := variant
+		elem_type := sv.elem
+		elem_count := sv.count
+
+		// SIMD vector literals cannot use named fields
+		// Reference: C++ lines 9985-9987
+		for elem in cl.elems {
+			if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
+				error(elem, "SIMD vector literals cannot contain 'field = value' entries")
+				continue
+			}
+
+			// Check element value
+			elem_operand := Operand{}
+			check_expr(ctx, &elem_operand, elem)
+
+			if elem_operand.mode == .Invalid {
+				continue
+			}
+
+			// Must be assignable to element type
+			if !check_is_assignable_to(ctx, &elem_operand, elem_type) {
+				elem_type_str := type_to_string(elem_type)
+				val_type_str := type_to_string(elem_operand.type)
+				error(elem, "Cannot use '%s' as element in SIMD vector of '%s'", val_type_str, elem_type_str)
+				continue
+			}
+
+			// Check constant-ness
+			if elem_operand.mode != .Constant {
+				is_constant = false
+			}
+		}
+
+		// Validate element count
+		// Reference: C++ lines 9990-9994
+		if i64(len(cl.elems)) != elem_count && len(cl.elems) != 0 {
+			error(node, "Expected %d values for SIMD vector literal, got %d", elem_count, len(cl.elems))
+		}
+
+	case Type_Matrix:
+		// Matrix literal: matrix[2, 3]f32{1, 2, 3, 4, 5, 6}
+		// Reference: C++ lines 9988-9994
+		mx := variant
+		elem_type := mx.elem
+		total_count := mx.row_count * mx.column_count
+
+		// Matrix literals cannot use named fields
+		for elem in cl.elems {
+			if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
+				error(elem, "Matrix literals cannot contain 'field = value' entries")
+				continue
+			}
+
+			// Check element value
+			elem_operand := Operand{}
+			check_expr(ctx, &elem_operand, elem)
+
+			if elem_operand.mode == .Invalid {
+				continue
+			}
+
+			// Must be assignable to element type
+			if !check_is_assignable_to(ctx, &elem_operand, elem_type) {
+				elem_type_str := type_to_string(elem_type)
+				val_type_str := type_to_string(elem_operand.type)
+				error(elem, "Cannot use '%s' as element in matrix of '%s'", val_type_str, elem_type_str)
+				continue
+			}
+
+			// Check constant-ness
+			if elem_operand.mode != .Constant {
+				is_constant = false
+			}
+		}
+
+		// Validate element count
+		if i64(len(cl.elems)) != total_count && len(cl.elems) != 0 {
+			error(node, "Expected %d values for matrix[%d, %d] literal, got %d", total_count, mx.row_count, mx.column_count, len(cl.elems))
+		}
+
+	case Type_Bit_Field:
+		// Bit_field literal: bit_field{field_a = value, field_b = value}
+		// Reference: C++ lines 10637-10650
+		bf := variant
+
+		// Empty literal is OK
+		if len(cl.elems) == 0 {
+			break
+		}
+
+		// Track visited fields to detect duplicates
+		fields_visited := make(map[string]bool, context.temp_allocator)
+
+		// Process each element
+		for elem in cl.elems {
+			// Bit_field literals must use named fields
+			fv, is_fv := elem.derived.(^ast.Field_Value)
+			if !is_fv {
+				error(elem, "Bit_field literals require 'field = value' entries")
+				continue
+			}
+
+			// Get field name
+			ident, is_ident := fv.field.derived.(^ast.Ident)
+			if !is_ident {
+				error(fv.field, "Expected identifier for bit_field field name")
+				continue
+			}
+			field_name := ident.name
+
+			// Look up field
+			field, has_field := bf.names[field_name]
+			if !has_field {
+				type_str := type_to_string(type)
+				error(fv.field, "'%s' has no field '%s'", type_str, field_name)
+				continue
+			}
+
+			// Check for duplicate
+			if fields_visited[field_name] {
+				error(fv.field, "Duplicate field '%s' in bit_field literal", field_name)
+				continue
+			}
+			fields_visited[field_name] = true
+
+			// Check field value type
+			field_type := entity_type(field)
+			value_operand := Operand{}
+			check_expr(ctx, &value_operand, fv.value)
+
+			if value_operand.mode == .Invalid {
+				continue
+			}
+
+			// Check assignability
+			if !check_is_assignable_to(ctx, &value_operand, field_type) {
+				field_type_str := type_to_string(field_type)
+				val_type_str := type_to_string(value_operand.type)
+				error(fv.value, "Cannot assign '%s' to bit_field field '%s' of type '%s'", val_type_str, field_name, field_type_str)
+				continue
+			}
+
+			// Check constant-ness
+			if value_operand.mode != .Constant {
+				is_constant = false
+			}
+		}
+
+	case Type_Basic:
+		// Handle `any` type compound literals
+		// Reference: C++ lines 10530-10610
+		if !is_type_any(type) {
+			// Non-any basic types cannot have compound literals with fields
+			// Reference: C++ lines 10452-10460
+			if len(cl.elems) != 0 {
+				type_str := type_to_string(type)
+				error(node, "Illegal compound literal, %s cannot be used as a compound literal with fields", type_str)
+				is_constant = false
+			}
+			break
+		}
+
+		// Handle `any` type literals: any{data, id}
+		if len(cl.elems) == 0 {
+			break // Empty any literal is OK
+		}
+
+		// Validate fields
+		// Reference: C++ lines 10464-10530
+		field_types := [2]^Type{t_rawptr, t_typeid}
+		field_count := 2
+
+		if len(cl.elems) > 0 {
+			if _, is_field_value := cl.elems[0].derived.(^ast.Field_Value); is_field_value {
+				// Named field syntax: any{data = ptr, id = typeid}
+				// Reference: C++ lines 10467-10505
+				fields_visited := [2]bool{}
+
+				for elem in cl.elems {
+					if fv, is_fv := elem.derived.(^ast.Field_Value); !is_fv {
+						error(elem, "Mixture of 'field = value' and value elements in a 'any' literal is not allowed")
+						continue
+					} else {
+						// Validate field name is identifier
+						ident, is_ident := fv.field.derived.(^ast.Ident)
+						if !is_ident {
+							expr_str := expr_to_string(fv.field)
+							error(elem, "Invalid field name '%s' in 'any' literal", expr_str)
+							continue
+						}
+
+						field_name := ident.name
+
+						// Look up field in any type
+						sel := lookup_field(type, field_name, o.mode == .Type)
+						if sel.entity == nil {
+							error(elem, "Unknown field '%s' in 'any' literal", field_name)
+							continue
+						}
+
+						index := sel.index[0]
+
+						// Check for duplicate fields
+						if fields_visited[index] {
+							error(elem, "Duplicate field '%s' in 'any' literal", field_name)
+							continue
+						}
+
+						fields_visited[index] = true
+
+						// Check field value
+						field_operand := Operand{}
+						check_expr(ctx, &field_operand, fv.value)
+
+						// NOTE: 'any' literals can never be constant
+						// Reference: C++ line 10501
+						is_constant = false
+
+						check_assignment(ctx, &field_operand, field_types[index], "'any' literal")
+					}
+				}
+			} else {
+				// Positional field syntax: any{ptr, typeid}
+				// Reference: C++ lines 10506-10528
+				for elem, index in cl.elems {
+					if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
+						error(elem, "Mixture of 'field = value' and value elements in a 'any' literal is not allowed")
+						continue
+					}
+
+					elem_operand := Operand{}
+					check_expr(ctx, &elem_operand, elem)
+
+					if index >= field_count {
+						error(elem_operand.expr, "Too many values in 'any' literal, expected %d", field_count)
+						break
+					}
+
+					// NOTE: 'any' literals can never be constant
+					// Reference: C++ line 10521
+					is_constant = false
+
+					check_assignment(ctx, &elem_operand, field_types[index], "'any' literal")
+				}
+
+				// Validate element count
+				if len(cl.elems) < field_count {
+					error(node, "Too few values in 'any' literal, expected %d, got %d", field_count, len(cl.elems))
+				}
+			}
+		}
+
+	case:
+		if len(cl.elems) == 0 {
+			break // Empty literal for any type
+		}
+
+		type_str := type_to_string(type)
+		error(node, "Invalid compound literal type '%s'", type_str)
+		return kind
+	}
+
+	// Set operand mode and exact value
+	// Reference: C++ lines 10665-10728
+	if is_constant {
+		o.mode = .Constant
+
+		// Special handling for bit sets (C++ lines 10843-10870)
+		if is_type_bit_set(type) {
+			// NOTE: Bit sets are encoded as integers
+			// C++ Reference: check_expr.cpp:10843-10870
+			bt := base_type(type)
+			bs := bt.variant.(Type_Bit_Set)
+
+			// Build integer value from bit fields
+			bits: big.Int
+			one: big.Int
+			big.int_set_from_integer(&one, 1)
+
+			for elem in cl.elems {
+				if elem == nil {
+					continue
+				}
+				// Get the stored type and value for this element
+				_, elem_value, elem_mode := type_and_value_of_expr(ctx, elem)
+				if elem_mode != .Constant {
+					continue
+				}
+				// Check if the value is an integer (stored as big.Int in Exact_Value)
+				if _, is_int := elem_value.(big.Int); is_int {
+					v := exact_value_to_i64(elem_value)
+					lower := bs.lower
+					index := int(v - lower)
+					bit: big.Int
+					big.int_shl(&bit, &one, index)
+					big.int_bit_or(&bits, &bits, &bit)
+				}
+			}
+			o.value = bits
+		} else if is_type_constant_type(type) && len(cl.elems) == 0 {
+			// Empty constant type literals get default zero values (C++ lines 10696-10722)
+			value := exact_value_compound(cast(^ast.Expr)node)
+			bt := core_type(type)
+			if basic, ok := bt.variant.(Type_Basic); ok {
+				#partial switch basic.kind {
+				case .Llvm_Bool, .Bool, .B8, .B16, .B32, .B64:
+					value = exact_value_bool(false)
+				case .I8, .U8, .I16, .U16, .I32, .U32, .I64, .U64, .I128, .U128, .Int, .Uint, .Uintptr, .I16le, .U16le, .I32le, .U32le, .I64le, .U64le, .I128le, .U128le, .I16be, .U16be, .I32be, .U32be, .I64be, .U64be, .I128be, .U128be:
+					value = exact_value_i64(0)
+				case .F16, .F32, .F64, .F16le, .F32le, .F64le, .F16be, .F32be, .F64be:
+					value = exact_value_float(0)
+				case .Complex32, .Complex64, .Complex128:
+					value = exact_value_complex(0, 0)
+				case .Quaternion64, .Quaternion128, .Quaternion256:
+					value = exact_value_quaternion(0, 0, 0, 0)
+				case .Rawptr:
+					value = exact_value_pointer(0)
+				case .String, .Cstring:
+					value = exact_value_string("")
+				case .Rune:
+					value = exact_value_i64(0)
+				}
+			}
+			o.value = value
+		} else {
+			// All other constant literals use compound marker (C++ line 10724)
+			o.value = exact_value_compound(cast(^ast.Expr)node)
+		}
+	} else {
+		o.mode = .Value
+	}
+
+	o.type = type
+	o.expr = node
+
+	return kind
+}

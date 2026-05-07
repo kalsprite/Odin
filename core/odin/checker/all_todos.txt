@@ -1,0 +1,97 @@
+# TODO Status for Odin Checker
+# Generated: 2026-01-12
+# Status: ALL ITEMS COMPLETED - Full C++ parity achieved
+
+# Completed fixes (this session):
+# - Multi-threaded entity collection via thread pool (check_collect_entities_all)
+# - Export entity queue mechanism for parallel-safe scope insertion
+# - Thread pool initialization in checker lifecycle
+# - Per-file vet flag access via ast.File.vet_flags field
+# - Runtime dependency tracking for string comparisons
+# - Threading for check_update_dependency_tree_for_procedures
+# - Fixed recursive mutex issue in type_info.odin (uses in_single_threaded_checker_stage)
+# - Fixed type_field_type builtin to return actual field type (was returning t_invalid)
+# - Fixed expand_values builtin to return proper tuple type (was not setting type)
+# - Fixed is_package_imported builtin to check actual import status (was returning false)
+
+# Previous fixes:
+# - Fixed soa_struct builtin to create actual SOA types
+# - Array case (<=4 elements) creates anonymous struct with indexed fields _0, _1, etc.
+# - Struct case uses make_soa_struct_fixed for proper SOA type generation
+# - Fixed type_merge builtin to merge union variants from two union types
+# - Fixed type_convert_variants_to_pointers to create new union with pointer variants
+
+# Multi-threading implementation summary:
+# 1. check_collect_entities_all (check_collect.odin:409-469)
+#    - Uses thread pool for parallel entity collection from files
+#    - Each file processed by worker thread via check_collect_entities_all_worker_proc
+#    - Falls back to sequential mode if no_threaded_checker or pool unavailable
+#
+# 2. check_export_entities (check_import_export.odin:497-527)
+#    - Drains exported_entity_queue from each package after collection
+#    - Adds entities to package scope for cross-file visibility
+#    - Thread-safe via MPMC queue (enqueue during collection, dequeue after)
+#
+# 3. check_procedure_bodies (check_proc.odin:440-500)
+#    - Uses thread pool for parallel procedure body checking
+#    - Per-worker untyped expression maps avoid contention
+#
+# 4. check_scope_usage (check_proc.odin:2360-2413)
+#    - Uses thread pool for parallel scope usage checking
+#
+# 5. check_update_dependency_tree_for_procedures (check_proc.odin:2267-2315)
+#    - Uses thread pool for parallel dependency tree walking
+#    - Worker proc: check_walk_all_dependencies_worker_proc
+#
+# 6. Thread pool lifecycle (checker_lifecycle.odin:164-173, 222-230)
+#    - init_checker: Initializes global_thread_pool with (cpu_count - 1) workers
+#    - destroy_global_thread_pool: Cleanup at program exit
+#
+# 7. Thread-safety mechanisms:
+#    - in_single_threaded_checker_stage flag for initialization phase optimization
+#    - MPMC queues for exported entities
+#    - RW mutexes for type_info_deps (skipped during single-threaded phase)
+
+# Builtin implementations completed:
+# - type_field_type: Looks up field in struct/union, returns field's type
+# - expand_values: Creates tuple type from struct fields or array elements
+# - is_package_imported: Checks ctx.info.packages map for package existence
+
+# Agent-discovered discrepancy fixes (this session):
+# 1. Thread safety for expr info functions (check_expr.odin):
+#    - Added type_and_value_mutex to Checker_Info in checker.odin
+#    - check_get_expr_info: Added shared_lock for global_untyped_mutex
+#    - check_set_expr_info: Added lock for global_untyped_mutex
+#    - check_remove_expr_info: Added lock for global_untyped_mutex
+#    - add_type_and_value: Added lock for type_and_value_mutex
+#    - type_and_value_of_expr: Added shared_lock for type_and_value_mutex
+#    - All use in_single_threaded_checker_stage to skip locking during init phase
+#
+# 2. Entity tracking in check_decl.odin (lines 940-959):
+#    - Uncommented add_entity_use(ctx, op_expr, e)
+#    - Uncommented is_entity_declared_for_selector validation
+#    - Uncommented check_entity_decl call for import selectors
+#
+# 3. Type info registration in check_stmt.odin type switch (lines 2069-2075):
+#    - Added add_type_info_type(ctx, y.type) for union variant cases
+#    - Added add_type_info_type(ctx, y.type) for any type cases
+#
+# 4. Type info registration in check_equivalence.odin:
+#    - typeid conversion (line 516): add_type_info_type(c, operand.type)
+#    - any conversion (line 819): add_type_info_type(c, s)
+#
+# 5. Auto_cast handling in check_equivalence.odin (lines 826-833):
+#    - Checks if operand.expr is an Auto_Cast node
+#    - Calls check_is_castable_to to validate cast
+#    - Returns MAXIMUM_TYPE_DISTANCE for valid auto_cast conversions
+#
+# 6. Polymorphic procedure assignment in check_equivalence.odin (lines 764-775):
+#    - Checks if src is polymorphic procedure type
+#    - Calls check_polymorphic_procedure_assignment for instantiation
+#    - Returns distance 4 on successful polymorphic instantiation
+#
+# 7. Additional fixes:
+#    - Fixed arch_name in check_decl.odin:2004 to use target_arch_names[metrics.arch]
+#    - Enabled Lazy flag setting in entity_helpers.odin:391
+
+# No remaining TODO items.

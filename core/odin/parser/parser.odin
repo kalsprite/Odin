@@ -1976,6 +1976,12 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 		tag: tokenizer.Token
 
 		expect_token_after(p, .Colon, "field list")
+
+		// Parse field flags that appear after the colon (e.g., dst: #no_alias ^int)
+		post_colon_flags := parse_field_prefixes(p)
+		post_colon_flags = check_field_flag_prefixes(p, len(names), allowed_flags, post_colon_flags)
+		flags += post_colon_flags
+
 		if p.curr_tok.kind != .Eq {
 			type = parse_var_type(p, allowed_flags)
 			tt := ast.unparen_expr(type)

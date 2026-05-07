@@ -1,0 +1,441 @@
+════════════════════════════════════════════════════════════════════════════════
+  NATIVE ODIN CHECKER - FEATURE DEPENDENCY GRAPH
+════════════════════════════════════════════════════════════════════════════════
+
+Legend:
+  [✓] = Implemented
+  [○] = Stubbed/Partial
+  [✗] = Not Implemented
+  → = Depends on
+  ⇒ = Enables/Unblocks
+
+═══════════════════════════════════════════════════════════════════════════════
+  INFRASTRUCTURE LAYER (Foundation)
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ TYPE PREDICATES (Priority: EXTREME ROI)                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [✓] is_type_polymorphic (10 LOC) - types.odin:258, check_type.odin:611     │
+│     ⇒ Polymorphic type checking (4 sites)                                   │
+│     ⇒ Type distance advanced cases                                          │
+│                                                                              │
+│ [✓] is_type_typeid (5 LOC) - types.odin:258                                │
+│     ⇒ Type mode to typeid assignment                                        │
+│     ⇒ typeid constant folding                                               │
+│                                                                              │
+│ [✓] is_type_u8_array (5 LOC)                                                │
+│     ⇒ String to byte array conversion                                       │
+│                                                                              │
+│ [✓] is_type_rune_array (5 LOC)                                              │
+│     ⇒ String to rune array conversion                                       │
+│                                                                              │
+│ [✓] is_type_u8_slice (5 LOC) - types.odin:425                              │
+│     ⇒ Cstring to slice conversion                                           │
+│                                                                              │
+│ [✓] is_type_uintptr (5 LOC) - types.odin:384                               │
+│     ⇒ Pointer to uintptr cast                                               │
+│                                                                              │
+│ [✓] is_type_soa_struct (10 LOC)                                             │
+│     ⇒ SOA slicing, SOA literals (3+ sites)                                  │
+│                                                                              │
+│ [✓] is_type_cstring16 (5 LOC)                                               │
+│     ⇒ Wide string support                                                   │
+│                                                                              │
+│ TOTAL IMPACT: 15+ features unblocked                                        │
+│ EFFORT: 4 hours                                                             │
+│ STATUS: Phase 17 - Task 1 (PARTIAL: 4/8 predicates implemented)            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ EXPRESSION HELPERS (Priority: HIGH ROI)                                     │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [✓] unparen_expr (20 LOC) - check_expr.odin:86                             │
+│     ⇒ Better error messages (40+ sites)                                     │
+│     ⇒ Expression unwrapping for validation                                  │
+│     → No dependencies                                                        │
+│                                                                              │
+│ [✓] expr_to_string (100 LOC) - check_expr_helpers.odin:78                  │
+│     ⇒ Error message quality (40+ sites)                                     │
+│     ⇒ Expression text in diagnostics                                        │
+│     → unparen_expr                                                           │
+│                                                                              │
+│ TOTAL IMPACT: 40+ error message sites improved                              │
+│ EFFORT: 13 hours                                                            │
+│ STATUS: Phase 17 - Tasks 2 & 4 (COMPLETE)                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ FIELD LOOKUP ADVANCED (Priority: MEDIUM-HIGH)                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [○] 'using' field traversal (100 LOC)                                       │
+│     ⇒ Embedded field access                                                 │
+│     ⇒ offset_of for embedded fields                                         │
+│     ⇒ Field inheritance semantics                                           │
+│     → Type predicates                                                        │
+│                                                                              │
+│ [○] Bit field lookup (30 LOC)                                               │
+│     ⇒ Bit field struct support                                              │
+│     ⇒ Low-level programming features                                        │
+│                                                                              │
+│ [○] SOA field mapping (50 LOC - stub)                                       │
+│     ⇒ SOA struct literals                                                   │
+│     → Defer to Phase 18                                                     │
+│                                                                              │
+│ [○] Polymorphic field handling (20 LOC - stub)                              │
+│     ⇒ Polymorphic struct field access                                       │
+│     → Defer to Phase 23                                                     │
+│                                                                              │
+│ TOTAL IMPACT: offset_of + advanced selectors                                │
+│ EFFORT: 16 hours                                                            │
+│ STATUS: Phase 17 - Task 3                                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+  CONSTANT EVALUATION LAYER (Phase 18)
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ EXPRESSION VALUE TRACKING (Priority: CRITICAL)                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [✓] add_type_and_value (200 LOC) - check_expr.odin:1345                    │
+│     ⇒ AST node annotation                                                   │
+│     ⇒ Value tracking infrastructure                                         │
+│     → No dependencies                                                        │
+│     │                                                                        │
+│     ├→ [✓] type_and_value_of_expr (100 LOC) - check_expr.odin:1442         │
+│     │   ⇒ Query expression constant values                                  │
+│     │   ⇒ Compile-time evaluation                                           │
+│     │   │                                                                    │
+│     │   ├→ [✓] check_is_expressible (150 LOC) - check_expr.odin:1988       │
+│     │   │   ⇒ Constant representability validation                          │
+│     │   │   ⇒ Overflow detection                                            │
+│     │   │   ⇒ Range validation                                              │
+│     │   │   │                                                                │
+│     │   │   └→ ENABLES:                                                     │
+│     │   │       • Ternary_when branch selection                             │
+│     │   │       • Constant string slicing                                   │
+│     │   │       • Constant array indexing                                   │
+│     │   │       • or_else constant folding                                  │
+│     │   │       • When statement execution                                  │
+│     │   │       • Enum range checking                                       │
+│     │   │       • Array bounds checking                                     │
+│     │   │       • Type inference for untyped                                │
+│     │   │       • Compile-time directive eval                               │
+│     │   │       • Safe type narrowing                                       │
+│     │   │                                                                    │
+│     │   └→ [✓] update_untyped_expr_type (50 LOC) - check_expr.odin:1463    │
+│     │   └→ [○] update_untyped_expr_value (50 LOC) - STUB PRESENT           │
+│     │                                                                        │
+│     └→ TOTAL IMPACT: 10+ features unblocked                                 │
+│                                                                              │
+│ EFFORT: 120 hours (3 weeks)                                                 │
+│ RISK: HIGH (complex infrastructure)                                         │
+│ STATUS: Phase 18 (LARGELY COMPLETE - core infrastructure implemented)      │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+  STATEMENT LAYER (Phase 19)
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ RANGE LOOPS (Priority: MEDIUM-HIGH)                                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [✗] Range_Stmt (200 LOC) - STUBBED check_stmt.odin:308, 414, 617           │
+│     ⇒ for-in array iteration                                                │
+│     ⇒ for-in slice iteration                                                │
+│     ⇒ for-in map iteration                                                  │
+│     ⇒ for-in string iteration                                               │
+│     → Type predicates                                                        │
+│     │                                                                        │
+│     └→ [✗] Inline_Range_Stmt (100 LOC) - STUBBED check_stmt.odin:410, 622  │
+│         ⇒ Unroll directive                                                  │
+│         ⇒ Compile-time range expansion                                      │
+│         → Range_Stmt                                                         │
+│                                                                              │
+│ TOTAL IMPACT: 90% of real loop patterns                                     │
+│ EFFORT: 48 hours                                                            │
+│ STATUS: Phase 19A (NOT STARTED - stubs present)                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ DECLARATION CHECKING (Priority: HIGH)                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [✗] Value_Decl (500 LOC) - STUBBED check_stmt.odin:649                     │
+│     ⇒ Variable declarations                                                 │
+│     ⇒ Constant declarations                                                 │
+│     ⇒ Type declarations                                                     │
+│     → Constant evaluation (Phase 18)                                        │
+│     │                                                                        │
+│     ├→ [✗] Using_Stmt (200 LOC) - STUBBED check_stmt.odin:644              │
+│     │   ⇒ Using imports in scope                                            │
+│     │   ⇒ Field embedding                                                   │
+│     │   → Value_Decl                                                         │
+│     │                                                                        │
+│     └→ [✗] Foreign_Block_Decl (100 LOC) - STUBBED check_stmt.odin:654      │
+│         ⇒ Foreign function interface                                        │
+│         ⇒ External library bindings                                         │
+│         → Value_Decl                                                         │
+│                                                                              │
+│ TOTAL IMPACT: Statement coverage → 85%                                      │
+│ EFFORT: 96 hours                                                            │
+│ STATUS: Phase 19B (NOT STARTED - stubs present)                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+  ADVANCED TYPE SYSTEM (Phases 20-23)
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ UNION TYPE OPERATIONS (Priority: MEDIUM)                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [○] type_has_nil (partial - 50 LOC more)                                    │
+│     ⇒ Union nil handling                                                    │
+│     ⇒ Type switch nil case                                                  │
+│     → Type predicates                                                        │
+│                                                                              │
+│ [○] Union variant checking (100 LOC)                                        │
+│     ⇒ Type switch validation                                                │
+│     ⇒ Duplicate type detection                                              │
+│     ⇒ Union completeness checking                                           │
+│     → type_has_nil                                                           │
+│                                                                              │
+│ EFFORT: 32 hours                                                            │
+│ STATUS: Phase 20                                                            │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ INTERFACE SATISFACTION (Priority: MEDIUM)                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [○] check_is_type_subtype_of (150 LOC) - STUB check_expr.odin:4157         │
+│     ⇒ Interface type assignments                                            │
+│     ⇒ Subtype polymorphism                                                  │
+│     → Type predicates, Union operations                                     │
+│                                                                              │
+│ [✗] check_is_assignable_to_using_subtype (100 LOC)                          │
+│     ⇒ 'using' field inheritance                                             │
+│     ⇒ Structural subtyping                                                  │
+│     → check_is_type_subtype_of                                              │
+│                                                                              │
+│ EFFORT: 40 hours                                                            │
+│ STATUS: Phase 21 (PARTIAL - stub present)                                   │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ POLYMORPHIC TYPE RESOLUTION (Priority: LOW - COMPLEX)                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [✗] is_polymorphic_type_assignable (150 LOC)                                │
+│     ⇒ Generic type parameter inference                                      │
+│     → is_type_polymorphic, Constant evaluation                              │
+│     │                                                                        │
+│     ├→ [✗] check_polymorphic_procedure_assignment (200 LOC)                 │
+│     │   ⇒ Polymorphic procedure calls                                       │
+│     │   ⇒ Type parameter specialization                                     │
+│     │   │                                                                    │
+│     │   └→ [✗] Polymorphic procedure instantiation (150 LOC)                │
+│     │       ⇒ Generic procedure code generation                             │
+│     │       ⇒ Type constraint validation                                    │
+│     │       ⇒ Instantiation cache                                           │
+│     │                                                                        │
+│     └→ TOTAL IMPACT: Generic programming support                            │
+│                                                                              │
+│ EFFORT: 80 hours                                                            │
+│ RISK: VERY HIGH                                                             │
+│ STATUS: Phase 23 (defer until late)                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+  RUNTIME INTEGRATION (Phases 24-25)
+═══════════════════════════════════════════════════════════════════════════════
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ RTTI INFRASTRUCTURE (Priority: LOW - COMPLEX)                               │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [✗] init_core_type_info (200 LOC)                                           │
+│     ⇒ Runtime type system initialization                                    │
+│     → Constant evaluation                                                    │
+│     │                                                                        │
+│     ├→ [✗] add_type_info_type (150 LOC)                                     │
+│     │   ⇒ Type registration for RTTI                                        │
+│     │   ⇒ Type info generation                                              │
+│     │   │                                                                    │
+│     │   ├→ [○] type_info_of builtin (complete)                              │
+│     │   │   ⇒ Runtime type information queries                              │
+│     │   │                                                                    │
+│     │   └→ [○] typeid_of builtin (complete)                                 │
+│     │       ⇒ Type ID constant folding                                      │
+│     │                                                                        │
+│     └→ [✗] Runtime dependency tracking (150 LOC)                            │
+│         ⇒ Package dependency injection                                      │
+│         ⇒ Type assertion runtime checks                                     │
+│                                                                              │
+│ EFFORT: 80 hours                                                            │
+│ RISK: VERY HIGH                                                             │
+│ STATUS: Phase 24 (defer until late)                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ PROCEDURE GROUP RESOLUTION (Priority: LOW - COMPLEX)                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ [✗] proc_group_entities (100 LOC)                                           │
+│     ⇒ Overload candidate collection                                         │
+│     → Type distance complete                                                │
+│     │                                                                        │
+│     ├→ [✗] Overload resolution (300 LOC)                                    │
+│     │   ⇒ Type distance scoring                                             │
+│     │   ⇒ Best match selection                                              │
+│     │   ⇒ Ambiguity detection                                               │
+│     │   → proc_group_entities, Type distance advanced                       │
+│     │                                                                        │
+│     └→ [✗] Named argument matching (200 LOC)                                │
+│         ⇒ Parameter name lookup                                             │
+│         ⇒ Mixed positional/named args                                       │
+│         → Overload resolution                                               │
+│                                                                              │
+│ EFFORT: 96 hours                                                            │
+│ RISK: VERY HIGH                                                             │
+│ STATUS: Phase 25 (defer until late)                                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+═══════════════════════════════════════════════════════════════════════════════
+  CRITICAL DEPENDENCY PATHS
+═══════════════════════════════════════════════════════════════════════════════
+
+Path 1: Quick Wins → Constant Evaluation
+────────────────────────────────────────────────────────────────────────────────
+Phase 17 (Quick Wins - 40 hours)
+    │
+    ├─ Type Predicates (4h)
+    ├─ unparen_expr (1h)
+    ├─ Field Lookup (16h)
+    └─ expr_to_string (12h)
+    │
+    └─→ Phase 18 (Constant Evaluation - 120 hours)
+        │
+        ├─ add_type_and_value (40h)
+        ├─ type_and_value_of_expr (20h)
+        ├─ check_is_expressible (16h)
+        └─ update_untyped_expr_* (20h)
+        │
+        └─→ UNLOCKS:
+            • Ternary_when complete
+            • Constant folding
+            • Compile-time eval
+            • 5+ features complete
+
+Path 2: Quick Wins → Statement Completion
+────────────────────────────────────────────────────────────────────────────────
+Phase 17 (Quick Wins - 40 hours)
+    │
+    └─→ Phase 19 (Statement Completion - 160 hours)
+        │
+        ├─ Range_Stmt (48h)
+        ├─ Inline_Range_Stmt (24h)
+        ├─ Value_Decl (96h)
+        ├─ Using_Stmt (32h)
+        └─ Foreign_Block_Decl (16h)
+        │
+        └─→ UNLOCKS:
+            • Statement coverage → 85%
+            • for-in loops
+            • Variable declarations
+            • Real program support
+
+Path 3: Infrastructure → Advanced Types
+────────────────────────────────────────────────────────────────────────────────
+Phase 18 (Constant Eval) + Phase 19 (Statements)
+    │
+    └─→ Phase 20 (Union/Interface - 120 hours)
+        └─→ Phase 21 (Advanced Types - 200 hours)
+            └─→ Phase 23 (Polymorphic - 200 hours)
+                └─→ Phase 24 (RTTI - 200 hours)
+                    └─→ Phase 25 (Proc Groups - 240 hours)
+                        └─→ Phase 26 (Polish - 160 hours)
+                            │
+                            └─→ 100% COMPLETION
+
+═══════════════════════════════════════════════════════════════════════════════
+  BLOCKER IMPACT MATRIX
+═══════════════════════════════════════════════════════════════════════════════
+
+Blocker                          | Features Blocked | LOC  | Effort | Priority
+─────────────────────────────────┼──────────────────┼──────┼────────┼─────────
+Type Predicates (8 functions)    | 15+              | 50   | 4h     | ⭐⭐⭐⭐⭐
+unparen_expr                      | 40+ sites        | 20   | 1h     | ⭐⭐⭐⭐⭐
+expr_to_string                    | 40+ sites        | 100  | 12h    | ⭐⭐⭐⭐
+Field Lookup Advanced             | offset_of + 5    | 200  | 16h    | ⭐⭐⭐⭐
+add_type_and_value                | 10 features      | 400  | 120h   | ⭐⭐⭐⭐⭐
+Range Loops                       | 6 features       | 300  | 48h    | ⭐⭐⭐⭐
+Declaration Checking              | 5 features       | 800  | 96h    | ⭐⭐⭐⭐
+Union Operations                  | 4 features       | 150  | 32h    | ⭐⭐⭐
+Interface Satisfaction            | 3 features       | 250  | 40h    | ⭐⭐⭐
+Polymorphic Types                 | 3 features       | 500  | 80h    | ⭐⭐
+RTTI Infrastructure               | 2 features       | 500  | 80h    | ⭐⭐
+Procedure Groups                  | 2 features       | 600  | 96h    | ⭐⭐
+
+═══════════════════════════════════════════════════════════════════════════════
+  PHASE EXECUTION ORDER (By ROI)
+═══════════════════════════════════════════════════════════════════════════════
+
+Phase | Name                  | Hours | Features | ROI  | Risk   | Status
+──────┼───────────────────────┼───────┼──────────┼──────┼────────┼────────────────────
+17    | Quick Wins Sprint     | 40    | 50+      | ⭐⭐⭐⭐⭐ | LOW    | IN PROGRESS (50%)
+18    | Constant Evaluation   | 120   | 10       | ⭐⭐⭐⭐ | HIGH   | MOSTLY DONE (90%)
+19    | Statement Completion  | 160   | 11       | ⭐⭐⭐⭐ | MEDIUM | Stubbed
+20    | Union/Interface       | 120   | 7        | ⭐⭐⭐  | MEDIUM | Blocked
+21    | Advanced Types        | 200   | 8        | ⭐⭐⭐  | HIGH   | Blocked
+22    | Error Polish          | 80    | Quality  | ⭐⭐⭐  | LOW    | Ready
+23    | Polymorphic Types     | 200   | 3        | ⭐⭐   | V.HIGH | Blocked
+24    | RTTI System           | 200   | 2        | ⭐⭐   | V.HIGH | Blocked
+25    | Procedure Groups      | 240   | 2        | ⭐⭐   | V.HIGH | Blocked
+26    | Final Polish          | 160   | Quality  | ⭐⭐   | LOW    | Blocked
+
+═══════════════════════════════════════════════════════════════════════════════
+  COMPLETION FORECAST
+═══════════════════════════════════════════════════════════════════════════════
+
+Current:  ████████████████████████████████▓░░░░░░░  85% (~14,000 LOC)
+          Phase 17: 50% complete (unparen_expr, expr_to_string done)
+          Phase 18: 90% complete (add_type_and_value, check_is_expressible done)
+
+Phase 17: ████████████████████████████████▓▓░░░░░  86% (+300 LOC)
+          Quick Wins Sprint complete (remaining type predicates)
+
+Phase 19: ████████████████████████████████▓▓▓░░░  90% (+2,500 LOC)
+          Statement checking complete (Range/Value/Using/Foreign)
+
+Phase 22: ████████████████████████████████▓▓▓▓░  95% (+2,000 LOC)
+          Error messages polished
+
+Phase 26: ████████████████████████████████▓▓▓▓▓ 100% (+2,500 LOC)
+          Full feature parity achieved
+
+════════════════════════════════════════════════════════════════════════════════
+
+CURRENT STATUS SUMMARY (as of Phase 17/18 work):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✓ COMPLETED:
+  - unparen_expr (check_expr.odin:86)
+  - expr_to_string (check_expr_helpers.odin:78)
+  - add_type_and_value (check_expr.odin:1345)
+  - type_and_value_of_expr (check_expr.odin:1442)
+  - check_is_expressible (check_expr.odin:1988)
+  - update_untyped_expr_type (check_expr.odin:1463)
+  - is_type_typeid, is_type_uintptr, is_type_u8_slice (types.odin)
+  - is_type_polymorphic (multiple locations)
+
+○ IN PROGRESS / STUBBED:
+  - Range_Stmt, Inline_Range_Stmt (check_stmt.odin - stubs present)
+  - Value_Decl, Using_Stmt, Foreign_Block_Decl (check_stmt.odin - stubs present)
+  - check_is_type_subtype_of (check_expr.odin:4157 - stub present)
+
+✗ REMAINING (Phase 17 completion):
+  - is_type_u8_array
+  - is_type_rune_array
+  - is_type_soa_struct
+  - is_type_cstring16
+
+NEXT PRIORITY: Complete Phase 17 type predicates (20 LOC, 2 hours remaining)
+
+════════════════════════════════════════════════════════════════════════════════
