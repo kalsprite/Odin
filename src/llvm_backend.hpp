@@ -4,6 +4,10 @@
 #include <llvm/Config/llvm-config.h>
 #endif
 
+#if LLVM_VERSION_MAJOR < 17
+#error "LLVM Version 17 is the minimum required"
+#endif
+
 #include <llvm-c/Core.h>
 #include <llvm-c/ExecutionEngine.h>
 #include <llvm-c/Target.h>
@@ -11,45 +15,13 @@
 #include <llvm-c/Object.h>
 #include <llvm-c/BitWriter.h>
 #include <llvm-c/DebugInfo.h>
-#if LLVM_VERSION_MAJOR >= 17
 #include <llvm-c/Transforms/PassBuilder.h>
-#else
-#include <llvm-c/Transforms/AggressiveInstCombine.h>
-#include <llvm-c/Transforms/InstCombine.h>
-#include <llvm-c/Transforms/IPO.h>
-#include <llvm-c/Transforms/PassManagerBuilder.h>
-#include <llvm-c/Transforms/Scalar.h>
-#include <llvm-c/Transforms/Utils.h>
-#include <llvm-c/Transforms/Vectorize.h>
-#endif
 
-#if LLVM_VERSION_MAJOR < 14
-#error "LLVM Version 14 is the minimum required"
-#endif
 
-#if LLVM_VERSION_MAJOR > 14 || (LLVM_VERSION_MAJOR == 14 && LLVM_VERSION_MINOR >= 0 && LLVM_VERSION_PATCH > 0)
-#define ODIN_LLVM_MINIMUM_VERSION_14 1
-#else
-#define ODIN_LLVM_MINIMUM_VERSION_14 0
-#endif
-
-#if LLVM_VERSION_MAJOR == 15 || LLVM_VERSION_MAJOR == 16
-#error "LLVM versions 15 and 16 are not supported"
-#endif
-
-#if LLVM_VERSION_MAJOR >= 17
-#define LB_USE_NEW_PASS_SYSTEM 1
-#else
-#define LB_USE_NEW_PASS_SYSTEM 0
-#endif
 
 #if LLVM_VERSION_MAJOR >= 19
 #define LLVMDIBuilderInsertDeclareAtEnd(...) LLVMDIBuilderInsertDeclareRecordAtEnd(__VA_ARGS__)
 #endif
-
-gb_internal bool lb_use_new_pass_system(void) {
-	return LB_USE_NEW_PASS_SYSTEM;
-}
 
 struct lbProcedure;
 
@@ -290,6 +262,7 @@ struct lbDefer {
 	isize       scope_index;
 	isize       context_stack_count;
 	lbBlock *   block;
+	TokenPos    pos;
 	union {
 		Ast *stmt;
 		struct {
@@ -345,6 +318,7 @@ struct lbProcedure {
 	Ast *        body;
 	u64          tags;
 	ProcInlining inlining;
+	ProcTailing  tailing;
 	bool         is_foreign;
 	bool         is_export;
 	bool         is_entry_point;
@@ -357,6 +331,7 @@ struct lbProcedure {
 	std::atomic<bool> is_done;
 
 	lbAddr           return_ptr;
+	Entity *         sret_rvo_entity; // Local aliases of `return_ptr`
 	Array<lbDefer>   defer_stmts;
 	Array<lbBlock *> blocks;
 	Array<lbBranchBlocks> branch_blocks;
@@ -405,13 +380,6 @@ struct lbProcedure {
 #define ABI_PKG_NAME_SEPARATOR "."
 #endif
 
-
-#if !ODIN_LLVM_MINIMUM_VERSION_14
-#define LLVMConstGEP2(Ty__, ConstantVal__, ConstantIndices__, NumIndices__) LLVMConstGEP(ConstantVal__, ConstantIndices__, NumIndices__)
-#define LLVMConstInBoundsGEP2(Ty__, ConstantVal__, ConstantIndices__, NumIndices__) LLVMConstInBoundsGEP(ConstantVal__, ConstantIndices__, NumIndices__)
-#define LLVMBuildPtrDiff2(Builder__, Ty__, LHS__, RHS__, Name__) LLVMBuildPtrDiff(Builder__, LHS__, RHS__, Name__)
-#endif
-
 gb_internal bool lb_init_generator(lbGenerator *gen, Checker *c);
 
 gb_internal String lb_mangle_name(Entity *e);
@@ -443,7 +411,7 @@ static lbConstContext const LB_CONST_CONTEXT_DEFAULT_NO_LOCAL = {false, false, {
 
 gb_internal lbValue lb_const_nil(lbModule *m, Type *type);
 gb_internal lbValue lb_const_undef(lbModule *m, Type *type);
-gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, lbConstContext cc = LB_CONST_CONTEXT_DEFAULT, Type *value_type=nullptr);
+gb_internal lbValue lb_const_value(lbModule *m, Type *type, ExactValue value, Type *value_type=nullptr, lbConstContext cc = LB_CONST_CONTEXT_DEFAULT);
 gb_internal lbValue lb_const_bool(lbModule *m, Type *type, bool value);
 gb_internal lbValue lb_const_int(lbModule *m, Type *type, u64 value);
 
@@ -484,7 +452,7 @@ gb_internal void lb_emit_defer_stmts(lbProcedure *p, lbDeferExitKind kind, lbBlo
 gb_internal void lb_emit_defer_stmts(lbProcedure *p, lbDeferExitKind kind, lbBlock *block, Ast *node);
 gb_internal lbValue lb_emit_transmute(lbProcedure *p, lbValue value, Type *t);
 gb_internal lbValue lb_emit_comp(lbProcedure *p, TokenKind op_kind, lbValue left, lbValue right);
-gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining = ProcInlining_none);
+gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining = ProcInlining_none, ProcTailing tailing = ProcTailing_none, lbValue *sret_dst = nullptr);
 gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t);
 gb_internal lbValue lb_emit_comp_against_nil(lbProcedure *p, TokenKind op_kind, lbValue x);
 
@@ -492,11 +460,10 @@ gb_internal void lb_emit_jump(lbProcedure *p, lbBlock *target_block);
 gb_internal void lb_emit_if(lbProcedure *p, lbValue cond, lbBlock *true_block, lbBlock *false_block);
 gb_internal void lb_start_block(lbProcedure *p, lbBlock *b);
 
-gb_internal lbValue lb_build_call_expr(lbProcedure *p, Ast *expr);
+gb_internal lbValue lb_build_call_expr(lbProcedure *p, Ast *expr, lbValue *sret_dst = nullptr);
 gb_internal lbProcedure *lb_create_dummy_procedure(lbModule *m, String link_name, Type *type);
 gb_internal void lb_begin_procedure_body(lbProcedure *p);
 gb_internal void lb_end_procedure_body(lbProcedure *p);
-gb_internal lbValue lb_emit_call(lbProcedure *p, lbValue value, Array<lbValue> const &args, ProcInlining inlining);
 
 gb_internal lbAddr lb_find_or_generate_context_ptr(lbProcedure *p);
 gb_internal lbContextData *lb_push_context_onto_stack(lbProcedure *p, lbAddr ctx);
@@ -531,6 +498,7 @@ gb_internal lbValue lb_dynamic_array_elem(lbProcedure *p, lbValue da);
 gb_internal lbValue lb_dynamic_array_len(lbProcedure *p, lbValue da);
 gb_internal lbValue lb_dynamic_array_cap(lbProcedure *p, lbValue da);
 gb_internal lbValue lb_dynamic_array_allocator(lbProcedure *p, lbValue da);
+gb_internal lbValue lb_fixed_capacity_dynamic_array_len(lbProcedure *p, lbValue da);
 gb_internal lbValue lb_map_len(lbProcedure *p, lbValue value);
 gb_internal lbValue lb_map_cap(lbProcedure *p, lbValue value);
 gb_internal lbValue lb_soa_struct_len(lbProcedure *p, lbValue value);
@@ -592,7 +560,7 @@ gb_internal lbValue lb_emit_logical_binary_expr(lbProcedure *p, TokenKind op, As
 gb_internal lbValue lb_build_cond(lbProcedure *p, Ast *cond, lbBlock *true_block, lbBlock *false_block);
 
 gb_internal LLVMValueRef llvm_const_named_struct(lbModule *m, Type *t, LLVMValueRef *values, isize value_count_);
-gb_internal LLVMValueRef llvm_const_named_struct_internal(lbModule *m, LLVMTypeRef t, LLVMValueRef *values, isize value_count_);
+gb_internal LLVMValueRef llvm_const_named_struct_internal(lbModule *m, LLVMTypeRef t, LLVMValueRef *values, isize value_count_, bool force_non_named=false);
 gb_internal void lb_set_entity_from_other_modules_linkage_correctly(lbModule *other_module, Entity *e, String const &name);
 
 gb_internal lbValue lb_expr_untyped_const_to_typed(lbModule *m, Ast *expr, Type *t);
@@ -618,7 +586,12 @@ gb_internal LLVMValueRef lb_mem_zero_ptr_internal(lbProcedure *p, LLVMValueRef p
 gb_internal LLVMValueRef lb_mem_zero_ptr_internal(lbProcedure *p, LLVMValueRef ptr, usize len, unsigned alignment, bool is_volatile);
 
 gb_internal gb_inline i64 lb_max_zero_init_size(void) {
-	return cast(i64)(4*build_context.int_size);
+	if (build_context.metrics.os == TargetOs_darwin && build_context.metrics.arch == TargetArch_arm64) {
+		// https://github.com/odin-lang/Odin/issues/6347
+		return cast(i64)(4*build_context.int_size);
+	} else {
+		return cast(i64)(8);
+	}
 }
 
 gb_internal LLVMTypeRef OdinLLVMGetArrayElementType(LLVMTypeRef type);
@@ -633,12 +606,13 @@ gb_internal lbValue lb_emit_source_code_location_as_global_ptr(lbProcedure *p, S
 gb_internal LLVMMetadataRef lb_debug_location_from_token_pos(lbProcedure *p, TokenPos pos);
 
 gb_internal LLVMTypeRef llvm_array_type(LLVMTypeRef ElementType, uint64_t ElementCount) {
-#if LB_USE_NEW_PASS_SYSTEM
 	return LLVMArrayType2(ElementType, ElementCount);
-#else
-	return LLVMArrayType(ElementType, cast(unsigned)ElementCount);
-#endif
 }
+
+gb_internal lbValue lb_emit_struct_iv(lbProcedure *p, lbValue agg, lbValue field, i32 index);
+gb_internal lbValue lb_build_struct_value(lbProcedure *p, Type *type, lbValue *fields, isize count);
+gb_internal lbValue lb_make_slice_value(lbProcedure *p, Type *slice_type, lbValue elem, lbValue len);
+gb_internal lbValue lb_make_string_value(lbProcedure *p, Type *string_type, lbValue elem, lbValue len);
 
 
 gb_internal String lb_internal_gen_name_from_type(char const *prefix, Type *type);
@@ -670,6 +644,7 @@ enum lbCallingConventionKind : unsigned {
 	lbCallingConvention_PreserveAll = 15,
 	lbCallingConvention_Swift = 16,
 	lbCallingConvention_CXX_FAST_TLS = 17,
+	lbCallingConvention_PreserveNone = 21,
 	lbCallingConvention_FirstTargetCC = 64,
 	lbCallingConvention_X86_StdCall = 64,
 	lbCallingConvention_X86_FastCall = 65,
@@ -722,6 +697,10 @@ lbCallingConventionKind const lb_calling_convention_map[ProcCC_MAX] = {
 
 	lbCallingConvention_Win64,        // ProcCC_Win64,
 	lbCallingConvention_X86_64_SysV,  // ProcCC_SysV,
+
+	lbCallingConvention_PreserveNone,  // ProcCC_PreserveNone,
+	lbCallingConvention_PreserveMost,  // ProcCC_PreserveMost,
+	lbCallingConvention_PreserveAll,   // ProcCC_PreserveAll,
 
 };
 

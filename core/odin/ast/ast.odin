@@ -21,6 +21,11 @@ Proc_Inlining :: enum u32 {
 	No_Inline = 2,
 }
 
+Proc_Tailing :: enum u32 {
+	None      = 0,
+	Must_Tail = 1,
+}
+
 Proc_Calling_Convention_Extra :: enum i32 {
 	Foreign_Block_Default,
 }
@@ -236,6 +241,7 @@ Proc_Lit :: struct {
 	body:          ^Stmt, // nil when it represents a foreign procedure
 	tags:          Proc_Tags,
 	inlining:      Proc_Inlining,
+	tailing:       Proc_Tailing,
 	where_token:   tokenizer.Token,
 	where_clauses: []^Expr,
 
@@ -335,6 +341,7 @@ Matrix_Index_Expr :: struct {
 Call_Expr :: struct {
 	using node: Expr,
 	inlining: Proc_Inlining,
+	tailing:  Proc_Tailing,
 	expr:     ^Expr,
 	open:     tokenizer.Pos,
 	args:     []^Expr,
@@ -539,6 +546,7 @@ For_Stmt :: struct {
 Range_Stmt :: struct {
 	using node: Stmt,
 	label:     ^Expr, // possibly nil
+	init:      ^Stmt,
 	for_pos:   tokenizer.Pos,
 	vals:      []^Expr,
 	in_pos:    tokenizer.Pos,
@@ -914,6 +922,16 @@ Dynamic_Array_Type :: struct {
 	elem:        ^Expr,
 }
 
+Fixed_Capacity_Dynamic_Array_Type :: struct {
+	using node:  Expr,
+	tag:         ^Expr, // possibly nil
+	open:        tokenizer.Pos,
+	dynamic_pos: tokenizer.Pos,
+	capacity:    ^Expr,
+	close:       tokenizer.Pos,
+	elem:        ^Expr,
+}
+
 Struct_Type :: struct {
 	using node: Expr,
 	tok_pos:         tokenizer.Pos,
@@ -927,6 +945,7 @@ Struct_Type :: struct {
 	is_raw_union:    bool,
 	is_no_copy:      bool,
 	is_all_or_none:  bool,
+	is_simple:       bool,
 	fields:          ^Field_List,
 	name_count:      int,
 
@@ -1070,6 +1089,7 @@ Any_Node :: union {
 	^Multi_Pointer_Type,
 	^Array_Type,
 	^Dynamic_Array_Type,
+	^Fixed_Capacity_Dynamic_Array_Type,
 	^Struct_Type,
 	^Union_Type,
 	^Enum_Type,
@@ -1156,6 +1176,7 @@ Any_Expr :: union {
 	^Multi_Pointer_Type,
 	^Array_Type,
 	^Dynamic_Array_Type,
+	^Fixed_Capacity_Dynamic_Array_Type,
 	^Struct_Type,
 	^Union_Type,
 	^Enum_Type,

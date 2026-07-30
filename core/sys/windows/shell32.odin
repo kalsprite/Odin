@@ -31,11 +31,15 @@ foreign shell32 {
 	SHSetKnownFolderPath   :: proc(rfid: REFKNOWNFOLDERID, dwFlags: /* KNOWN_FOLDER_FLAG */ DWORD, hToken: HANDLE, pszPath: PCWSTR ) -> HRESULT ---
 	SHGetKnownFolderPath   :: proc(rfid: REFKNOWNFOLDERID, dwFlags: /* KNOWN_FOLDER_FLAG */ DWORD, hToken: HANDLE, ppszPath: ^LPWSTR) -> HRESULT ---
 
+	SHCreateItemFromParsingName :: proc(pszPath: PCWSTR, pbc: ^IBindCtx, riid: REFIID, ppv: ^rawptr) -> HRESULT ---
+
 	ExtractIconExW  :: proc(pszFile: LPCWSTR, nIconIndex: INT, phiconLarge: ^HICON, phiconSmall: ^HICON, nIcons: UINT) -> UINT ---
 	DragAcceptFiles :: proc(hWnd: HWND, fAccept: BOOL) ---
 	DragQueryPoint  :: proc(hDrop: HDROP, ppt: ^POINT) -> BOOL ---
 	DragQueryFileW  :: proc(hDrop: HDROP, iFile: UINT, lpszFile: LPWSTR, cch: UINT) -> UINT ---
 	DragFinish      :: proc(hDrop: HDROP) --- // @New
+
+	AssocCreateForClasses :: proc (rgClasses: [^]ASSOCIATIONELEMENT, cClasses: ULONG, riid: REFIID, ppv: ^rawptr) -> HRESULT ---
 }
 
 APPBARDATA :: struct {

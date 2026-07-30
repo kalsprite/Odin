@@ -1,16 +1,16 @@
 package test_core_flags
 
-import "base:runtime"
-import "core:bytes"
-import "core:flags"
-import "core:fmt"
-@require import "core:log"
-import "core:math"
-@require import "core:net"
-import "core:os"
-import "core:strings"
-import "core:testing"
-import "core:time/datetime"
+import            "base:runtime"
+import            "core:bytes"
+import            "core:flags"
+import            "core:fmt"
+@(require) import "core:log"
+import            "core:math"
+@(require) import "core:net"
+import            "core:os"
+import            "core:strings"
+import            "core:testing"
+import            "core:time/datetime"
 
 Custom_Data :: struct {
 	a: int,
@@ -307,7 +307,7 @@ test_all_bit_sets :: proc(t: ^testing.T) {
 			"-a:10101",
 			"-b:0000_0000_0000_0001",
 			"-c:11",
-			"-d:___1",
+			"-d:1",
 			"-e:00000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
 			"-f:1",
 			"-g:01",
@@ -327,6 +327,65 @@ test_all_bit_sets :: proc(t: ^testing.T) {
 	{
 		args := [?]string { "-d:11" }
 		result := flags.parse(&s, args[:])
+		err, ok := result.(flags.Parse_Error)
+		testing.expectf(t, ok, "unexpected result: %v", result)
+		if ok {
+			testing.expect_value(t, err.reason, flags.Parse_Error_Reason.Bad_Value)
+		}
+	}
+	{
+		// Starting a binary string with underscore is disallowed.
+		args := [?]string { "-d:_1" }
+		result := flags.parse(&s, args[:])
+		err, ok := result.(flags.Parse_Error)
+		testing.expectf(t, ok, "unexpected result: %v", result)
+		if ok {
+			testing.expect_value(t, err.reason, flags.Parse_Error_Reason.Bad_Value)
+		}
+	}
+
+	E2 :: enum {
+		Option_A=5,
+		Option_B,
+		Option_C=3,
+		Option_D,
+	}
+	R :: struct {
+		a: bit_set[E2],
+	}
+	r: R
+	{
+		// Least significant bit > 0
+		args := [?]string {
+			"-a:Option_A,Option_D",
+		}
+		result := flags.parse(&r, args[:])
+		testing.expect_value(t, result, nil)
+		testing.expect_value(t, r.a, bit_set[E2]{E2.Option_A, E2.Option_D})
+	}
+	{
+		args := [?]string { "-a:Option_Non_Existent" }
+		result := flags.parse(&r, args[:])
+		err, ok := result.(flags.Parse_Error)
+		testing.expectf(t, ok, "unexpected result: %v", result)
+		if ok {
+			testing.expect_value(t, err.reason, flags.Parse_Error_Reason.Bad_Value)
+		}
+	}
+	{
+		// Value names list must be strictly comma-separated.
+		args := [?]string { "-a:Option_A, Option_B" }
+		result := flags.parse(&r, args[:])
+		err, ok := result.(flags.Parse_Error)
+		testing.expectf(t, ok, "unexpected result: %v", result)
+		if ok {
+			testing.expect_value(t, err.reason, flags.Parse_Error_Reason.Bad_Value)
+		}
+	}
+	{
+		// Value names list must not end with a comma.
+		args := [?]string { "-a:Option_A,Option_B," }
+		result := flags.parse(&r, args[:])
 		err, ok := result.(flags.Parse_Error)
 		testing.expectf(t, ok, "unexpected result: %v", result)
 		if ok {
@@ -1249,7 +1308,7 @@ test_os_handle :: proc(t: ^testing.T) {
 	test_data := "Hellope!"
 
 	W :: struct {
-		outf: os.Handle `args:"file=cw"`,
+		outf: ^os.File `args:"file=cw"`,
 	}
 	w: W
 
@@ -1263,7 +1322,7 @@ test_os_handle :: proc(t: ^testing.T) {
 	os.write_string(w.outf, test_data)
 
 	R :: struct {
-		inf: os.Handle `args:"file=r"`,
+		inf: ^os.File `args:"file=r"`,
 	}
 	r: R
 
@@ -1274,8 +1333,8 @@ test_os_handle :: proc(t: ^testing.T) {
 		return
 	}
 	defer os.close(r.inf)
-	data, read_ok := os.read_entire_file_from_handle(r.inf, context.temp_allocator)
-	testing.expect_value(t, read_ok, true)
+	data, read_err := os.read_entire_file(r.inf, context.temp_allocator)
+	testing.expect_value(t, read_err, nil)
 	file_contents_equal := 0 == bytes.compare(transmute([]u8)test_data, data)
 	testing.expectf(t, file_contents_equal, "expected file contents to be the same, got %v", data)
 }
@@ -1288,13 +1347,11 @@ test_distinct_types :: proc(t: ^testing.T) {
 		unmodified_i: I,
 	}
 	s: S
-
 	{
 		args := [?]string {"-base-i:1"}
 		result := flags.parse(&s, args[:])
 		testing.expect_value(t, result, nil)
 	}
-
 	{
 		args := [?]string {"-unmodified-i:1"}
 		result := flags.parse(&s, args[:])

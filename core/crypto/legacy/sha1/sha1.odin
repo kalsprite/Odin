@@ -19,9 +19,10 @@ package sha1
         zhibog, dotbmp:  Initial implementation.
 */
 
+import "base:intrinsics"
+import "core:crypto"
 import "core:encoding/endian"
 import "core:math/bits"
-import "core:mem"
 
 // DIGEST_SIZE is the SHA1 digest size in bytes.
 DIGEST_SIZE :: 20
@@ -76,7 +77,7 @@ update :: proc(ctx: ^Context, data: []byte) {
 // final finalizes the Context, writes the digest to hash, and calls
 // reset on the Context.
 //
-// Iff finalize_clone is set, final will work on a copy of the Context,
+// If and only if (⟺) finalize_clone is set, final will work on a copy of the Context,
 // which is useful for for calculating rolling digests.
 final :: proc(ctx: ^Context, hash: []byte, finalize_clone: bool = false) {
 	ensure(ctx.is_initialized)
@@ -107,7 +108,7 @@ final :: proc(ctx: ^Context, hash: []byte, finalize_clone: bool = false) {
 			i += 1
 		}
 		transform(ctx, ctx.data[:])
-		mem.set(&ctx.data, 0, 56)
+		intrinsics.mem_zero(&ctx.data, 56)
 	}
 
 	ctx.bitlen += u64(ctx.datalen * 8)
@@ -131,7 +132,7 @@ reset :: proc(ctx: ^$T) {
 		return
 	}
 
-	mem.zero_explicit(ctx, size_of(ctx^))
+	crypto.zero_explicit(ctx, size_of(ctx^))
 }
 
 /*

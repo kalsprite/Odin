@@ -194,27 +194,27 @@ ICompiler :: struct #raw_union {
 ICompiler_VTable :: struct {
 	using iunknown_vtable: IUnknown_VTable,
 	Compile: proc "system" (
-		this: ^ICompiler, 
-		pSource: ^IBlob,
-		pSourceName: wstring,
-		pEntryPoint: wstring,
-		pTargetProfile: wstring,
-		pArguments: [^]wstring,
-		argCount: u32,
-		pDefines: [^]Define,
-		defineCount: u32,
+		this:            ^ICompiler,
+		pSource:         ^IBlob,
+		pSourceName:     wstring,
+		pEntryPoint:     wstring,
+		pTargetProfile:  wstring,
+		pArguments:      [^]wstring,
+		argCount:        u32,
+		pDefines:        [^]Define,
+		defineCount:     u32,
 		pIncludeHandler: ^IIncludeHandler,
-		ppResult: ^^IOperationResult) -> HRESULT,
+		ppResult:        ^^IOperationResult) -> HRESULT,
 	Preprocess: proc "system" (
-		this: ^ICompiler, 
-		pSource: ^IBlob,
-		pSourceName: wstring,
-		pArguments: [^]wstring,
-		argCount: u32,
-		pDefines: [^]Define,
-		defineCount: u32,
+		this:            ^ICompiler,
+		pSource:         ^IBlob,
+		pSourceName:     wstring,
+		pArguments:      [^]wstring,
+		argCount:        u32,
+		pDefines:        [^]Define,
+		defineCount:     u32,
 		pIncludeHandler: ^IIncludeHandler,
-		ppResult: ^^IOperationResult) -> HRESULT,
+		ppResult:        ^^IOperationResult) -> HRESULT,
 	Disassemble: proc "system" (this: ^ICompiler, pSource: ^Buffer, ppDisassembly: ^IBlobEncoding) -> HRESULT,
 }
 
@@ -303,7 +303,6 @@ DXC_OUT_KIND :: enum u32 {
 	REFLECTION      = 8,
 	ROOT_SIGNATURE  = 9,
 	EXTRA_OUTPUTS   = 10,
-	FORCE_DWORD     = 0xFFFFFFFF,
 }
 
 IResult_UUID_STRING :: "58346CDA-DDE7-4497-9461-6F87AF5E0659"

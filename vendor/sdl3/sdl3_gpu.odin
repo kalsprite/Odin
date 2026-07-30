@@ -781,8 +781,11 @@ PROP_GPU_DEVICE_CREATE_SHADERS_MSL_BOOLEAN                          :: "SDL.gpu.
 PROP_GPU_DEVICE_CREATE_SHADERS_METALLIB_BOOLEAN                     :: "SDL.gpu.device.create.shaders.metallib"
 PROP_GPU_DEVICE_CREATE_D3D12_ALLOW_FEWER_RESOURCE_SLOTS_BOOLEAN     :: "SDL.gpu.device.create.d3d12.allowtier1resourcebinding"
 PROP_GPU_DEVICE_CREATE_D3D12_SEMANTIC_NAME_STRING                   :: "SDL.gpu.device.create.d3d12.semantic"
+PROP_GPU_DEVICE_CREATE_D3D12_AGILITY_SDK_VERSION_NUMBER             :: "SDL.gpu.device.create.d3d12.agility_sdk_version"
+PROP_GPU_DEVICE_CREATE_D3D12_AGILITY_SDK_PATH_STRING                :: "SDL.gpu.device.create.d3d12.agility_sdk_path"
 PROP_GPU_DEVICE_CREATE_VULKAN_REQUIRE_HARDWARE_ACCELERATION_BOOLEAN :: "SDL.gpu.device.create.vulkan.requirehardwareacceleration"
 PROP_GPU_DEVICE_CREATE_VULKAN_OPTIONS_POINTER                       :: "SDL.gpu.device.create.vulkan.options"
+PROP_GPU_DEVICE_CREATE_METAL_ALLOW_MACFAMILY1_BOOLEAN               :: "SDL.gpu.device.create.metal.allowmacfamily1"
 
 GPUVulkanOptions :: struct {
 	vulkan_api_version:                 Uint32,       /**< The Vulkan API version to request for the instance. Use Vulkan's VK_MAKE_VERSION or VK_MAKE_API_VERSION. */
@@ -824,6 +827,7 @@ foreign lib {
 	GetGPUDriver                          :: proc(index: c.int) -> cstring ---
 	GetGPUDeviceDriver                    :: proc(device: ^GPUDevice) -> cstring ---
 	GetGPUShaderFormats                   :: proc(device: ^GPUDevice) -> GPUShaderFormat ---
+	GetGPUDeviceProperties                :: proc(device: ^GPUDevice) -> PropertiesID ---
 	CreateGPUComputePipeline              :: proc(device: ^GPUDevice, #by_ptr createinfo: GPUComputePipelineCreateInfo) -> ^GPUComputePipeline ---
 	CreateGPUGraphicsPipeline             :: proc(device: ^GPUDevice, #by_ptr createinfo: GPUGraphicsPipelineCreateInfo) -> ^GPUGraphicsPipeline ---
 	CreateGPUSampler                      :: proc(device: ^GPUDevice, #by_ptr createinfo: GPUSamplerCreateInfo) -> ^GPUSampler ---

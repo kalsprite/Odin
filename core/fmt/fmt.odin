@@ -1456,9 +1456,11 @@ fmt_float :: proc(fi: ^Info, v: f64, bit_size: int, verb: rune) {
 		prev_fi := fi^
 		defer fi^ = prev_fi
 		fi.hash = false
-		fi.width = bit_size
 		fi.zero = true
 		fi.plus = false
+		// force the width to always be bit_size/4 to accurately represent the number
+		fi.width = bit_size/4
+		fi.width_set = true
 
 		u: u64
 		switch bit_size {
@@ -2592,11 +2594,19 @@ fmt_named_buitlin_custom_formatters :: proc(fi: ^Info, v: any, verb: rune, info:
 				prec = 6
 				buf[w] = 'm'
 			}
+			if fi.space {
+				w -= 1
+				buf[w] = ' '
+			}
 			w, u = ffrac(buf[:w], u, prec)
 			w = fint(buf[:w], u)
 		} else {
 			w -= 1
 			buf[w] = 's'
+			if fi.space {
+				w -= 1
+				buf[w] = ' '
+			}
 			w, u = ffrac(buf[:w], u, 9)
 			w = fint(buf[:w], u%60)
 			u /= 60
@@ -3124,12 +3134,14 @@ fmt_map :: proc(fi: ^Info, v: any, info: runtime.Type_Info_Map, verb: rune) {
 				value := runtime.map_cell_index_dynamic(vs, info.map_info.vs, bucket_index)
 
 				fmt_arg(&Info{writer = fi.writer}, any{rawptr(key), info.key.id}, verb)
-				if hash {
-					io.write_string(fi.writer, " = ", &fi.n)
-				} else {
-					io.write_string(fi.writer, "=", &fi.n)
+				if info.value.size > 0 {
+					if hash {
+						io.write_string(fi.writer, " = ", &fi.n)
+					} else {
+						io.write_string(fi.writer, "=", &fi.n)
+					}
+					fmt_arg(fi, any{rawptr(value), info.value.id}, verb)
 				}
-				fmt_arg(fi, any{rawptr(value), info.value.id}, verb)
 
 				if do_trailing_comma { io.write_string(fi.writer, ",\n", &fi.n) }
 			}
@@ -3228,6 +3240,21 @@ fmt_value :: proc(fi: ^Info, v: any, verb: rune) {
 		array := cast(^mem.Raw_Dynamic_Array)v.data
 		n := array.len
 		ptr := array.data
+		if ol, ok := fi.optional_len.?; ok {
+			fi.optional_len = nil
+			n = min(n, ol)
+		} else if fi.use_nul_termination {
+			fi.use_nul_termination = false
+			fmt_array_nul_terminated(fi, ptr, n, info.elem_size, info.elem, verb)
+			return
+		}
+		fmt_array(fi, ptr, n, info.elem_size, info.elem, verb)
+
+
+	case runtime.Type_Info_Fixed_Capacity_Dynamic_Array:
+		n := (^int)(uintptr(v.data) + info.len_offset)^
+
+		ptr := v.data // data is stored at the start
 		if ol, ok := fi.optional_len.?; ok {
 			fi.optional_len = nil
 			n = min(n, ol)

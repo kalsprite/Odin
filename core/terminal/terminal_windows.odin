@@ -5,9 +5,8 @@ import "base:runtime"
 import "core:os"
 import "core:sys/windows"
 
-_is_terminal :: proc "contextless" (handle: os.Handle) -> bool {
-	is_tty := windows.GetFileType(windows.HANDLE(handle)) == windows.FILE_TYPE_CHAR
-	return is_tty
+_is_terminal :: proc "contextless" (f: ^os.File) -> bool {
+	return os.is_tty(f)
 }
 
 old_modes: [2]struct{
@@ -18,7 +17,6 @@ old_modes: [2]struct{
 	{windows.STD_ERROR_HANDLE, 0},
 }
 
-@(init)
 _init_terminal :: proc "contextless" () {
 	vtp_enabled: bool
 
@@ -50,7 +48,6 @@ _init_terminal :: proc "contextless" () {
 	}
 }
 
-@(fini)
 _fini_terminal :: proc "contextless" () {
 	for v in old_modes {
 		handle := windows.GetStdHandle(v.handle)

@@ -134,6 +134,7 @@ register_user_marshaler :: proc(id: typeid, marshaler: User_Marshaler) -> Regist
 	return .None
 }
 
+@(require_results)
 marshal :: proc(v: any, opt: Marshal_Options = {}, allocator := context.allocator, loc := #caller_location) -> (data: []byte, err: Marshal_Error) {
 	b := strings.builder_make(allocator, loc)
 	defer if err != nil {
@@ -316,6 +317,16 @@ marshal_to_writer :: proc(w: io.Writer, v: any, opt: ^Marshal_Options) -> (err: 
 		for i in 0..<array.len {
 			opt_write_iteration(w, opt, i == 0) or_return
 			data := uintptr(array.data) + uintptr(i*info.elem_size)
+			marshal_to_writer(w, any{rawptr(data), info.elem.id}, opt) or_return
+		}
+		opt_write_end(w, opt, ']') or_return
+
+	case runtime.Type_Info_Fixed_Capacity_Dynamic_Array:
+		opt_write_start(w, opt, '[') or_return
+		len := (^int)(uintptr(v.data) + info.len_offset)^
+		for i in 0..<len {
+			opt_write_iteration(w, opt, i == 0) or_return
+			data := uintptr(v.data) + uintptr(i*info.elem_size)
 			marshal_to_writer(w, any{rawptr(data), info.elem.id}, opt) or_return
 		}
 		opt_write_end(w, opt, ']') or_return

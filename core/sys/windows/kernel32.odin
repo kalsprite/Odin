@@ -30,6 +30,18 @@ EV_RXCHAR                  :: DWORD(0x0001)
 EV_RXFLAG                  :: DWORD(0x0002)
 EV_TXEMPTY                 :: DWORD(0x0004)
 
+WAITORTIMERCALLBACK :: #type proc "system" (lpParameter: PVOID, TimerOrWaitFired: BOOLEAN)
+
+PAPCFUNC :: #type proc "system" (Parameter: ULONG_PTR)
+
+WT_EXECUTEDEFAULT            :: 0x00000000
+WT_EXECUTEINIOTHREAD         :: 0x00000001
+WT_EXECUTEINPERSISTENTTHREAD :: 0x00000080
+WT_EXECUTEINWAITTHREAD       :: 0x00000004
+WT_EXECUTELONGFUNCTION       :: 0x00000010
+WT_EXECUTEONLYONCE           :: 0x00000008
+WT_TRANSFER_IMPERSONATION    :: 0x00000100
+
 @(default_calling_convention="system")
 foreign kernel32 {
 	OutputDebugStringA :: proc(lpOutputString: LPCSTR) --- // The only A thing that is allowed
@@ -213,6 +225,16 @@ foreign kernel32 {
 	) -> BOOL ---
 	WaitForSingleObject :: proc(hHandle: HANDLE, dwMilliseconds: DWORD) -> DWORD ---
 	WaitForSingleObjectEx :: proc(hHandle: HANDLE, dwMilliseconds: DWORD, bAlterable: BOOL) -> DWORD ---
+	EnterSynchronizationBarrier :: proc(
+		lpBarrier: ^SYNCHRONIZATION_BARRIER,
+		dwFlags: SYNCHRONIZATION_BARRIER_FLAGS,
+	) -> BOOL ---
+	InitializeSynchronizationBarrier :: proc(
+		lpBarrier: ^SYNCHRONIZATION_BARRIER,
+		lTotalThreads: LONG,
+		lSpinCount: LONG,
+	) -> BOOL ---
+	DeleteSynchronizationBarrier :: proc(lpBarrier: ^SYNCHRONIZATION_BARRIER) -> BOOL ---
 	Sleep :: proc(dwMilliseconds: DWORD) ---
 	GetProcessId :: proc(handle: HANDLE) -> DWORD ---
 	CopyFileW :: proc(
@@ -348,14 +370,14 @@ foreign kernel32 {
 		dwReserved: DWORD,
 		nNumberOfBytesToLockLow: DWORD,
 		nNumberOfBytesToLockHigh: DWORD,
-		lpOverlapped: ^LPOVERLAPPED,
+		lpOverlapped: LPOVERLAPPED,
 	) -> BOOL ---
 	UnlockFileEx :: proc(
 		hFile: HANDLE,
 		dwReserved: DWORD,
 		nNumberOfBytesToUnlockLow: DWORD,
 		nNumberOfBytesToLockHigh: DWORD,
-		lpOverlapped: ^LPOVERLAPPED,
+		lpOverlapped: LPOVERLAPPED,
 	) -> BOOL --- 
 
 	GetFileTime :: proc(
@@ -448,6 +470,7 @@ foreign kernel32 {
 	GlobalAlloc   :: proc(flags: UINT, bytes: SIZE_T) -> LPVOID ---
 	GlobalReAlloc :: proc(mem: LPVOID, bytes: SIZE_T, flags: UINT) -> LPVOID ---
 	GlobalFree    :: proc(mem: LPVOID) -> LPVOID ---
+	GlobalSize    :: proc(Mem: LPVOID) -> SIZE_T ---
 	
 	GlobalLock   :: proc(hMem: HGLOBAL) -> LPVOID ---
 	GlobalUnlock :: proc(hMem: HGLOBAL) -> BOOL ---
@@ -461,6 +484,17 @@ foreign kernel32 {
 		lpBytesReturned: LPDWORD,
 		lpOverlapped: LPOVERLAPPED,
 		lpCompletionRoutine: LPOVERLAPPED_COMPLETION_ROUTINE,
+	) -> BOOL ---
+	ReadDirectoryChangesExW :: proc(
+		hDirectory: HANDLE,
+		lpBuffer: LPVOID,
+		nBufferLength: DWORD,
+		bWatchSubtree: BOOL,
+		dwNotifyFilter: DWORD,
+		lpBytesReturned: LPDWORD,
+		lpOverlapped: LPOVERLAPPED,
+		lpCompletionRoutine: LPOVERLAPPED_COMPLETION_ROUTINE,
+		ReadDirectoryNotifyInformationClass: READ_DIRECTORY_NOTIFY_INFORMATION_CLASS,
 	) -> BOOL ---
 	FindFirstChangeNotificationW :: proc(
 		lpPathName: LPWSTR,
@@ -505,7 +539,7 @@ foreign kernel32 {
 	LoadLibraryW               :: proc(c_str: LPCWSTR) -> HMODULE ---
 	LoadLibraryExW             :: proc(c_str: LPCWSTR, hFile: HANDLE, dwFlags: LoadLibraryEx_Flags) -> HMODULE ---
 	FreeLibrary                :: proc(h: HMODULE) -> BOOL ---
-	FreeLibraryAndExitThread   :: proc(hLibModule: HMODULE, dwExitCode: DWORD) -> VOID ---
+	FreeLibraryAndExitThread   :: proc(hLibModule: HMODULE, dwExitCode: DWORD) ---
 	GetProcAddress             :: proc(h: HMODULE, c_str: LPCSTR) -> rawptr ---
 
 	LoadResource                :: proc(hModule: HMODULE, hResInfo: HRSRC) -> HGLOBAL ---
@@ -537,17 +571,18 @@ foreign kernel32 {
 	DisconnectNamedPipe :: proc(hNamedPipe: HANDLE) -> BOOL ---
 	WaitNamedPipeW      :: proc(lpNamedPipeName: LPCWSTR, nTimeOut: DWORD) -> BOOL ---
 
-	AllocConsole               :: proc() -> BOOL ---
-	AttachConsole              :: proc(dwProcessId: DWORD) -> BOOL ---
-	SetConsoleCtrlHandler      :: proc(HandlerRoutine: PHANDLER_ROUTINE, Add: BOOL) -> BOOL ---
-	GenerateConsoleCtrlEvent   :: proc(dwCtrlEvent: DWORD, dwProcessGroupId: DWORD) -> BOOL ---
-	FreeConsole                :: proc() -> BOOL ---
-	GetConsoleWindow           :: proc() -> HWND ---
-	GetConsoleScreenBufferInfo :: proc(hConsoleOutput: HANDLE, lpConsoleScreenBufferInfo: PCONSOLE_SCREEN_BUFFER_INFO) -> BOOL ---
-	SetConsoleScreenBufferSize :: proc(hConsoleOutput: HANDLE, dwSize: COORD) -> BOOL ---
-	SetConsoleWindowInfo       :: proc(hConsoleOutput: HANDLE, bAbsolute: BOOL, lpConsoleWindow: ^SMALL_RECT) -> BOOL ---
-	GetConsoleCursorInfo       :: proc(hConsoleOutput: HANDLE, lpConsoleCursorInfo: PCONSOLE_CURSOR_INFO) -> BOOL ---
-	SetConsoleCursorInfo       :: proc(hConsoleOutput: HANDLE, lpConsoleCursorInfo: PCONSOLE_CURSOR_INFO) -> BOOL ---
+	AllocConsole                 :: proc() -> BOOL ---
+	AttachConsole                :: proc(dwProcessId: DWORD) -> BOOL ---
+	SetConsoleCtrlHandler        :: proc(HandlerRoutine: PHANDLER_ROUTINE, Add: BOOL) -> BOOL ---
+	GenerateConsoleCtrlEvent     :: proc(dwCtrlEvent: DWORD, dwProcessGroupId: DWORD) -> BOOL ---
+	FreeConsole                  :: proc() -> BOOL ---
+	GetConsoleWindow             :: proc() -> HWND ---
+	GetConsoleScreenBufferInfo   :: proc(hConsoleOutput: HANDLE, lpConsoleScreenBufferInfo: PCONSOLE_SCREEN_BUFFER_INFO) -> BOOL ---
+	GetConsoleScreenBufferInfoEx :: proc(hConsoleOutput: HANDLE, lpConsoleScreenBufferInfoEx: PCONSOLE_SCREEN_BUFFER_INFOEX) -> BOOL ---
+	SetConsoleScreenBufferSize   :: proc(hConsoleOutput: HANDLE, dwSize: COORD) -> BOOL ---
+	SetConsoleWindowInfo         :: proc(hConsoleOutput: HANDLE, bAbsolute: BOOL, lpConsoleWindow: ^SMALL_RECT) -> BOOL ---
+	GetConsoleCursorInfo         :: proc(hConsoleOutput: HANDLE, lpConsoleCursorInfo: PCONSOLE_CURSOR_INFO) -> BOOL ---
+	SetConsoleCursorInfo         :: proc(hConsoleOutput: HANDLE, lpConsoleCursorInfo: PCONSOLE_CURSOR_INFO) -> BOOL ---
 
 	GetDiskFreeSpaceExW :: proc(
 		lpDirectoryName: LPCWSTR,
@@ -567,7 +602,7 @@ foreign kernel32 {
 	// [MS-Docs](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-getqueuedcompletionstatusex)
 	GetQueuedCompletionStatusEx        :: proc(CompletionPort: HANDLE, lpCompletionPortEntries: ^OVERLAPPED_ENTRY, ulCount: c_ulong, ulNumEntriesRemoved: ^c_ulong, dwMilliseconds: DWORD, fAlertable: BOOL) -> BOOL ---
 	// [MS-Docs](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-postqueuedcompletionstatus)
-	PostQueuedCompletionStatus         :: proc(CompletionPort: HANDLE, dwNumberOfBytesTransferred: DWORD, dwCompletionKey: c_ulong, lpOverlapped: ^OVERLAPPED) -> BOOL ---
+	PostQueuedCompletionStatus         :: proc(CompletionPort: HANDLE, dwNumberOfBytesTransferred: DWORD, dwCompletionKey: ULONG_PTR, lpOverlapped: ^OVERLAPPED) -> BOOL ---
 	// [MS-Docs](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-gethandleinformation)
 	GetHandleInformation               :: proc(hObject: HANDLE, lpdwFlags: ^DWORD) -> BOOL ---
 
@@ -575,6 +610,19 @@ foreign kernel32 {
 	RtlNtStatusToDosError :: proc(status: NTSTATUS) -> ULONG ---
 
 	GetSystemPowerStatus :: proc(lpSystemPowerStatus: ^SYSTEM_POWER_STATUS) -> BOOL ---
+
+	RegisterWaitForSingleObject :: proc(
+		phNewWaitObject: PHANDLE,
+		hObject: HANDLE,
+		Callback: WAITORTIMERCALLBACK,
+		Context: PVOID,
+		dwMilliseconds: ULONG,
+		dwFlags: ULONG,
+	) -> BOOL ---
+
+	UnregisterWaitEx :: proc(WaitHandle: HANDLE, CompletionEvent: HANDLE) -> BOOL ---
+
+	QueueUserAPC :: proc(pfnAPC: PAPCFUNC, hThread: HANDLE, dwData: ULONG_PTR) -> DWORD ---
 }
 
 DEBUG_PROCESS                    :: 0x00000001
@@ -1148,6 +1196,79 @@ foreign kernel32 {
 		product_type:   ^Windows_Product_Type,
 	) -> BOOL ---
 }
+
+
+MEM_REPLACE_PLACEHOLDER  :: 0x00004000
+MEM_RESERVE_PLACEHOLDER  :: 0x00040000
+MEM_PRESERVE_PLACEHOLDER :: 0x00000002
+MEM_RESET_UNDO           ::  0x1000000
+MEM_64K_PAGES            :: 0x20400000
+MEM_PHYSICAL             :: 0x00400000
+
+MEM_EXTENDED_PARAMETER_TYPE :: enum c_int {
+	MemExtendedParameterInvalidType = 0,
+	MemExtendedParameterAddressRequirements,
+	MemExtendedParameterNumaNode,
+	MemExtendedParameterPartitionHandle,
+	MemExtendedParameterUserPhysicalHandle,
+	MemExtendedParameterAttributeFlags,
+	MemExtendedParameterImageMachine,
+}
+
+MEM_EXTENDED_PARAMETER_NONPAGED	      :: 0x02
+MEM_EXTENDED_PARAMETER_NONPAGED_LARGE :: 0x08
+MEM_EXTENDED_PARAMETER_NONPAGED_HUGE  :: 0x10
+MEM_EXTENDED_PARAMETER_EC_CODE        :: 0x40
+
+MEM_ADDRESS_REQUIREMENTS :: struct {
+	LowestStartingAddress: PVOID,
+	HighestEndingAddress:  PVOID,
+	Alignment:             SIZE_T,
+}
+PMEM_ADDRESS_REQUIREMENTS :: ^MEM_ADDRESS_REQUIREMENTS
+
+MEM_EXTENDED_PARAMETER_TYPE_BITS :: 8
+
+MEM_EXTENDED_PARAMETER :: struct {
+	using DUMMYSTRUCTNAME: bit_field DWORD64 {
+		Type:        MEM_EXTENDED_PARAMETER_TYPE | MEM_EXTENDED_PARAMETER_TYPE_BITS,
+		Reserved:    DWORD64                     | 64 - MEM_EXTENDED_PARAMETER_TYPE_BITS,
+	},
+	using DUMMYUNIONNAME: struct #raw_union {
+		ULong64: DWORD64,
+		Pointer: PVOID,
+		Size:    SIZE_T,
+		Handle:  HANDLE,
+		ULong:   DWORD,
+	},
+}
+
+
+@(default_calling_convention="system")
+foreign one_core {
+	VirtualAlloc2 :: proc(
+		Process:            HANDLE,
+		BaseAddress:        LPVOID,
+		Size:               SIZE_T,
+		AllocationType:     ULONG,
+		PageProtection:     ULONG,
+		ExtendedParameters: ^MEM_EXTENDED_PARAMETER,
+		ParameterCount:     ULONG,
+	) -> LPVOID ---
+
+	MapViewOfFile3 :: proc(
+		FileMappingHandle:  HANDLE,
+		ProcessHandle:      HANDLE,
+		BaseAddress:        PVOID,
+		Offset:             ULONG64,
+		ViewSize:           SIZE_T,
+		AllocationType:     ULONG,
+		PageProtection:     ULONG,
+		ExtendedParameters: ^MEM_EXTENDED_PARAMETER,
+		ParameterCount:     ULONG,
+	) -> PVOID ---
+}
+
 
 HandlerRoutine :: proc "system" (dwCtrlType: DWORD) -> BOOL
 PHANDLER_ROUTINE :: HandlerRoutine

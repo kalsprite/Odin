@@ -1,6 +1,10 @@
 #!/usr/bin/env sh
 set -eu
 
+SUPPORTED_LLVM_VERSIONS="22 21 20 19 18 17"
+SUGGESTED_LLVM_VERSION="22"
+MINIMUM_LLVM_VERSION="17"
+
 : ${CPPFLAGS=}
 : ${CXXFLAGS=}
 : ${LDFLAGS=}
@@ -13,8 +17,10 @@ OS_ARCH="$(uname -m)"
 OS_NAME="$(uname -s)"
 
 if [ -d ".git" ] && [ -n "$(command -v git)" ]; then
-	GIT_SHA=$(git show --pretty='%h' --no-patch --no-notes HEAD)
-	GIT_DATE=$(git show "--pretty=%cd" "--date=format:%Y-%m" --no-patch --no-notes HEAD)
+	# Counter the user's git config to show the signature in logs.
+	gitnosig="-c log.showSignature=false"
+	GIT_SHA=$(git $gitnosig show --pretty='%h' --no-patch --no-notes HEAD)
+	GIT_DATE=$(git $gitnosig show "--pretty=%cd" "--date=format:%Y-%m" --no-patch --no-notes HEAD)
 	CPPFLAGS="$CPPFLAGS -DGIT_SHA=\"$GIT_SHA\""
 else
 	GIT_DATE=$(date +"%Y-%m")
@@ -28,34 +34,53 @@ error() {
 
 # Brew advises people not to add llvm to their $PATH, so try and use brew to find it.
 if [ -z "$LLVM_CONFIG" ] &&  [ -n "$(command -v brew)" ]; then
-    if   [ -n "$(command -v $(brew --prefix llvm@21)/bin/llvm-config)" ]; then LLVM_CONFIG="$(brew --prefix llvm@21)/bin/llvm-config"
-    elif [ -n "$(command -v $(brew --prefix llvm@20)/bin/llvm-config)" ]; then LLVM_CONFIG="$(brew --prefix llvm@20)/bin/llvm-config"
-    elif [ -n "$(command -v $(brew --prefix llvm@19)/bin/llvm-config)" ]; then LLVM_CONFIG="$(brew --prefix llvm@19)/bin/llvm-config"
-    elif [ -n "$(command -v $(brew --prefix llvm@18)/bin/llvm-config)" ]; then LLVM_CONFIG="$(brew --prefix llvm@18)/bin/llvm-config"
-    elif [ -n "$(command -v $(brew --prefix llvm@17)/bin/llvm-config)" ]; then LLVM_CONFIG="$(brew --prefix llvm@17)/bin/llvm-config"
-    elif [ -n "$(command -v $(brew --prefix llvm@14)/bin/llvm-config)" ]; then LLVM_CONFIG="$(brew --prefix llvm@14)/bin/llvm-config"
-    fi
+	for V in $SUPPORTED_LLVM_VERSIONS; do
+		if [ -n "$(command -v $(brew --prefix llvm@$V)/bin/llvm-config)" ]; then
+			LLVM_CONFIG="$(brew --prefix llvm@$V)/bin/llvm-config"
+			break
+		fi
+	done
 fi
 
 if [ -z "$LLVM_CONFIG" ]; then
-	# darwin, linux, openbsd
-	if   [ -n "$(command -v llvm-config-21)" ]; then LLVM_CONFIG="llvm-config-21"
-	elif [ -n "$(command -v llvm-config-20)" ]; then LLVM_CONFIG="llvm-config-20"
-	elif [ -n "$(command -v llvm-config-19)" ]; then LLVM_CONFIG="llvm-config-19"
-	elif [ -n "$(command -v llvm-config-18)" ]; then LLVM_CONFIG="llvm-config-18"
-	elif [ -n "$(command -v llvm-config-17)" ]; then LLVM_CONFIG="llvm-config-17"
-	elif [ -n "$(command -v llvm-config-14)" ]; then LLVM_CONFIG="llvm-config-14"
-	# freebsd
-	elif [ -n "$(command -v llvm-config21)" ]; then  LLVM_CONFIG="llvm-config21"
-	elif [ -n "$(command -v llvm-config20)" ]; then  LLVM_CONFIG="llvm-config20"
-	elif [ -n "$(command -v llvm-config19)" ]; then  LLVM_CONFIG="llvm-config19"
-	elif [ -n "$(command -v llvm-config18)" ]; then  LLVM_CONFIG="llvm-config18"
-	elif [ -n "$(command -v llvm-config17)" ]; then  LLVM_CONFIG="llvm-config17"
-	elif [ -n "$(command -v llvm-config14)" ]; then  LLVM_CONFIG="llvm-config14"
-	# fallback
-	elif [ -n "$(command -v llvm-config)" ]; then LLVM_CONFIG="llvm-config"
-	else
-		error "No llvm-config command found. Set LLVM_CONFIG to proceed."
+	DEFAULT_VERSION=""
+
+	if [ -n "$(command -v llvm-config)" ]; then
+		DEFAULT_VERSION=$(llvm-config --version | awk -F. '{print $1}')
+	fi
+
+	for V in $SUPPORTED_LLVM_VERSIONS; do
+		if [ "$DEFAULT_VERSION" = "$V" ]; then
+			LLVM_CONFIG="llvm-config"
+			break
+		# darwin, linux, openbsd
+		elif [ -n "$(command -v "llvm-config-$V")" ]; then
+			LLVM_CONFIG="llvm-config-$V"
+			break
+		# freebsd
+		elif [ -n "$(command -v "llvm-config$V")" ]; then
+			LLVM_CONFIG="llvm-config$V"
+			break
+		fi
+	done
+
+	if [ -z "$LLVM_CONFIG" ]; then
+		if [ -f "/etc/os-release" ]; then
+			. /etc/os-release
+			case "$ID" in
+			ubuntu|debian|linuxmint|pop|zorin|kali|elementary|raspbian)
+				echo "ERROR: No supported llvm-config command found. Set LLVM_CONFIG to proceed."
+				echo "We suggest installing LLVM $SUGGESTED_LLVM_VERSION from https://apt.llvm.org"
+				exit 1
+				;;
+			fedora|centos|rocky|almalinux|rhel|amzn|ol|centos-stream)
+				echo "ERROR: No supported llvm-config command found. Set LLVM_CONFIG to proceed."
+				echo "We suggest installing LLVM $SUGGESTED_LLVM_VERSION via COPR, e.g. dnf copr enable fedora-llvm-team/llvm-snapshots"
+				exit 1
+				;;
+			esac
+		fi
+		error "No supported llvm-config command found. Set LLVM_CONFIG to proceed. We suggest LLVM $SUGGESTED_LLVM_VERSION."
 	fi
 fi
 
@@ -72,8 +97,8 @@ LLVM_VERSION_MAJOR="$(echo $LLVM_VERSION | awk -F. '{print $1}')"
 LLVM_VERSION_MINOR="$(echo $LLVM_VERSION | awk -F. '{print $2}')"
 LLVM_VERSION_PATCH="$(echo $LLVM_VERSION | awk -F. '{print $3}')"
 
-if [ $LLVM_VERSION_MAJOR -lt 14 ] || ([ $LLVM_VERSION_MAJOR -gt 14 ] && [ $LLVM_VERSION_MAJOR -lt 17 ]) || [ $LLVM_VERSION_MAJOR -gt 21 ]; then
-	error "Invalid LLVM version $LLVM_VERSION: must be 14, 17, 18, 19, 20, or 21"
+if [ $LLVM_VERSION_MAJOR -lt $MINIMUM_LLVM_VERSION ]; then
+	error "Unsupported LLVM version $LLVM_VERSION: must be 17, 18, 19, 20, 21 or 22"
 fi
 
 case "$OS_NAME" in
@@ -108,12 +133,7 @@ Linux)
 	;;
 OpenBSD)
 	CXXFLAGS="$CXXFLAGS -I/usr/local/include $($LLVM_CONFIG --cxxflags --ldflags)"
-	LDFLAGS="$LDFLAGS -lstdc++ -L/usr/local/lib -liconv"
-	LDFLAGS="$LDFLAGS $($LLVM_CONFIG --libs core native --system-libs)"
-	;;
-Haiku)
-	CXXFLAGS="$CXXFLAGS -D_GNU_SOURCE $($LLVM_CONFIG --cxxflags --ldflags) -I/system/develop/headers/private/shared -I/system/develop/headers/private/kernel"
-	LDFLAGS="$LDFLAGS -lstdc++ -liconv"
+	LDFLAGS="$LDFLAGS -lstdc++ -L/usr/local/lib -Wl,-rpath,$($LLVM_CONFIG --libdir) -liconv"
 	LDFLAGS="$LDFLAGS $($LLVM_CONFIG --libs core native --system-libs)"
 	;;
 *)

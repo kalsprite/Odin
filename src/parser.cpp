@@ -353,12 +353,14 @@ gb_internal Ast *clone_ast(Ast *node, AstFile *f) {
 		break;
 	case Ast_RangeStmt:
 		n->RangeStmt.label = clone_ast(n->RangeStmt.label, f);
+		n->RangeStmt.init  = clone_ast(n->RangeStmt.init, f);
 		n->RangeStmt.vals  = clone_ast_array(n->RangeStmt.vals, f);
 		n->RangeStmt.expr  = clone_ast(n->RangeStmt.expr, f);
 		n->RangeStmt.body  = clone_ast(n->RangeStmt.body, f);
 		break;
 	case Ast_UnrollRangeStmt:
 		n->UnrollRangeStmt.args = clone_ast_array(n->UnrollRangeStmt.args, f);
+		n->UnrollRangeStmt.init = clone_ast(n->UnrollRangeStmt.init, f);
 		n->UnrollRangeStmt.val0 = clone_ast(n->UnrollRangeStmt.val0, f);
 		n->UnrollRangeStmt.val1 = clone_ast(n->UnrollRangeStmt.val1, f);
 		n->UnrollRangeStmt.expr = clone_ast(n->UnrollRangeStmt.expr, f);
@@ -454,6 +456,12 @@ gb_internal Ast *clone_ast(Ast *node, AstFile *f) {
 		break;
 	case Ast_DynamicArrayType:
 		n->DynamicArrayType.elem = clone_ast(n->DynamicArrayType.elem, f);
+		n->DynamicArrayType.tag  = clone_ast(n->DynamicArrayType.tag, f);
+		break;
+	case Ast_FixedCapacityDynamicArrayType:
+		n->FixedCapacityDynamicArrayType.elem     = clone_ast(n->FixedCapacityDynamicArrayType.elem, f);
+		n->FixedCapacityDynamicArrayType.capacity = clone_ast(n->FixedCapacityDynamicArrayType.capacity, f);
+		n->FixedCapacityDynamicArrayType.tag      = clone_ast(n->FixedCapacityDynamicArrayType.tag, f);
 		break;
 	case Ast_StructType:
 		n->StructType.fields             = clone_ast_array(n->StructType.fields, f);
@@ -510,6 +518,22 @@ gb_internal void error(Ast *node, char const *fmt, ...) {
 	va_end(va);
 	if (node != nullptr && node->file_id != 0) {
 		AstFile *f = node->thread_safe_file();
+		f->error_count += 1;
+	}
+}
+
+gb_internal void error_range(TokenPos start, TokenPos end, char const *fmt, ...) {
+	GB_ASSERT(start.file_id == end.file_id);
+	GB_ASSERT(start.line == end.line);
+	GB_ASSERT(start.column <= end.column);
+	GB_ASSERT(start.offset <= end.offset);
+
+	va_list va;
+	va_start(va, fmt);
+	error_va(start, end, fmt, va);
+	va_end(va);
+	if (start.file_id != 0) {
+		AstFile *f = thread_safe_get_ast_file_from_id(start.file_id);
 		f->error_count += 1;
 	}
 }
@@ -749,8 +773,9 @@ gb_internal Ast *ast_matrix_index_expr(AstFile *f, Ast *expr, Token open, Token 
 
 gb_internal Ast *ast_ident(AstFile *f, Token token) {
 	Ast *result = alloc_ast_node(f, Ast_Ident);
-	result->Ident.token = token;
-	result->Ident.hash = string_hash(token.string);
+	result->Ident.token    = token;
+	result->Ident.hash     = string_hash(token.string);
+	result->Ident.interned = string_interner_insert(token.string);
 	return result;
 }
 
@@ -767,6 +792,7 @@ gb_internal Ast *ast_uninit(AstFile *f, Token token) {
 
 gb_internal ExactValue exact_value_from_token(AstFile *f, Token const &token) {
 	String s = token.string;
+	string_interner_insert(s);
 	switch (token.kind) {
 	case Token_Rune:
 		if (!unquote_string(ast_allocator(f), &s, 0)) {
@@ -786,7 +812,12 @@ gb_internal ExactValue exact_value_from_token(AstFile *f, Token const &token) {
 			syntax_error(token, "Invalid integer literal");
 			break;
 		case Token_Float:
-			syntax_error(token, "Invalid float literal");
+			// NOTE(Jeroen): Could be an integer, see `exact_value_float_from_string`
+			if (!string_contains_char(s, '.') && !string_contains_char(s, '-')) {
+				syntax_error(token, "Invalid integer literal");
+			} else {
+				syntax_error(token, "Invalid float literal");
+			}
 			break;
 		default:
 			syntax_error(token, "Invalid token literal");
@@ -818,6 +849,7 @@ gb_internal Ast *ast_basic_directive(AstFile *f, Token token, Token name) {
 	Ast *result = alloc_ast_node(f, Ast_BasicDirective);
 	result->BasicDirective.token = token;
 	result->BasicDirective.name = name;
+	string_interner_insert(name.string);
 	if (string_starts_with(name.string, str_lit("load"))) {
 		f->seen_load_directive_count++;
 	}
@@ -1039,9 +1071,10 @@ gb_internal Ast *ast_for_stmt(AstFile *f, Token token, Ast *init, Ast *cond, Ast
 	return result;
 }
 
-gb_internal Ast *ast_range_stmt(AstFile *f, Token token, Slice<Ast *> vals, Token in_token, Ast *expr, Ast *body) {
+gb_internal Ast *ast_range_stmt(AstFile *f, Token token, Ast *init, Slice<Ast *> vals, Token in_token, Ast *expr, Ast *body) {
 	Ast *result = alloc_ast_node(f, Ast_RangeStmt);
 	result->RangeStmt.token = token;
+	result->RangeStmt.init = init;
 	result->RangeStmt.vals = vals;
 	result->RangeStmt.in_token = in_token;
 	result->RangeStmt.expr  = expr;
@@ -1049,9 +1082,10 @@ gb_internal Ast *ast_range_stmt(AstFile *f, Token token, Slice<Ast *> vals, Toke
 	return result;
 }
 
-gb_internal Ast *ast_unroll_range_stmt(AstFile *f, Token unroll_token, Slice<Ast *> args, Token for_token, Ast *val0, Ast *val1, Token in_token, Ast *expr, Ast *body) {
+gb_internal Ast *ast_unroll_range_stmt(AstFile *f, Token unroll_token, Ast *init, Slice<Ast *> args, Token for_token, Ast *val0, Ast *val1, Token in_token, Ast *expr, Ast *body) {
 	Ast *result = alloc_ast_node(f, Ast_UnrollRangeStmt);
 	result->UnrollRangeStmt.unroll_token = unroll_token;
+	result->UnrollRangeStmt.init      = init;
 	result->UnrollRangeStmt.args      = args;
 	result->UnrollRangeStmt.for_token = for_token;
 	result->UnrollRangeStmt.val0      = val0;
@@ -1229,8 +1263,16 @@ gb_internal Ast *ast_dynamic_array_type(AstFile *f, Token token, Ast *elem) {
 	return result;
 }
 
+gb_internal Ast *ast_fixed_capacity_dynamic_array_type(AstFile *f, Token token, Ast *capacity, Ast *elem) {
+	Ast *result = alloc_ast_node(f, Ast_FixedCapacityDynamicArrayType);
+	result->FixedCapacityDynamicArrayType.token    = token;
+	result->FixedCapacityDynamicArrayType.capacity = capacity;
+	result->FixedCapacityDynamicArrayType.elem     = elem;
+	return result;
+}
+
 gb_internal Ast *ast_struct_type(AstFile *f, Token token, Slice<Ast *> fields, isize field_count,
-                     Ast *polymorphic_params, bool is_packed, bool is_raw_union, bool is_all_or_none,
+                     Ast *polymorphic_params, bool is_packed, bool is_raw_union, bool is_all_or_none, bool is_simple,
                      Ast *align, Ast *min_field_align, Ast *max_field_align,
                      Token where_token, Array<Ast *> const &where_clauses) {
 	Ast *result = alloc_ast_node(f, Ast_StructType);
@@ -1241,6 +1283,7 @@ gb_internal Ast *ast_struct_type(AstFile *f, Token token, Slice<Ast *> fields, i
 	result->StructType.is_packed          = is_packed;
 	result->StructType.is_raw_union       = is_raw_union;
 	result->StructType.is_all_or_none     = is_all_or_none;
+	result->StructType.is_simple          = is_simple;
 	result->StructType.align              = align;
 	result->StructType.min_field_align    = min_field_align;
 	result->StructType.max_field_align    = max_field_align;
@@ -1413,9 +1456,6 @@ gb_internal Token consume_comment(AstFile *f, isize *end_line_) {
 	if (end_line_) *end_line_ = end_line;
 
 	next_token0(f);
-	if (f->curr_token.pos.line > tok.pos.line || tok.kind == Token_EOF) {
-		end_line++;
-	}
 	return tok;
 }
 
@@ -1439,7 +1479,7 @@ gb_internal CommentGroup *consume_comment_group(AstFile *f, isize n, isize *end_
 
 	CommentGroup *comments = nullptr;
 	if (list.count > 0) {
-		comments = gb_alloc_item(permanent_allocator(), CommentGroup);
+		comments = permanent_alloc_item<CommentGroup>();
 		comments->list = slice_from_array(list);
 		array_add(&f->comments, comments);
 	}
@@ -1489,6 +1529,9 @@ gb_internal Token advance_token(AstFile *f) {
 		switch (f->curr_token.kind) {
 		case Token_Comment:
 			consume_comment_groups(f, prev);
+			if (f->curr_token.kind == Token_Semicolon && ignore_newlines(f) && f->curr_token.string == "\n") {
+				advance_token(f);
+			}
 			break;
 		case Token_Semicolon:
 			if (ignore_newlines(f) && f->curr_token.string == "\n") {
@@ -1999,9 +2042,6 @@ gb_internal Ast *parse_literal_value(AstFile *f, Ast *type) {
 }
 
 gb_internal Ast *parse_value(AstFile *f) {
-	if (f->curr_token.kind == Token_OpenBrace) {
-		return parse_literal_value(f, nullptr);
-	}
 	Ast *value;
 	bool prev_allow_range = f->allow_range;
 	f->allow_range = true;
@@ -2018,54 +2058,6 @@ gb_internal void check_proc_add_tag(AstFile *f, Ast *tag_expr, u64 *tags, ProcTa
 		syntax_error(tag_expr, "Procedure tag already used: %.*s", LIT(tag_name));
 	}
 	*tags |= tag;
-}
-
-gb_internal bool is_foreign_name_valid(String const &name) {
-	if (name.len == 0) {
-		return false;
-	}
-	isize offset = 0;
-	while (offset < name.len) {
-		Rune rune;
-		isize remaining = name.len - offset;
-		isize width = utf8_decode(name.text+offset, remaining, &rune);
-		if (rune == GB_RUNE_INVALID && width == 1) {
-			return false;
-		} else if (rune == GB_RUNE_BOM && remaining > 0) {
-			return false;
-		}
-
-		if (offset == 0) {
-			switch (rune) {
-			case '-':
-			case '$':
-			case '.':
-			case '_':
-				break;
-			default:
-				if (!gb_char_is_alpha(cast(char)rune))
-					return false;
-				break;
-			}
-		} else {
-			switch (rune) {
-			case '-':
-			case '$':
-			case '.':
-			case '_':
-				break;
-			default:
-				if (!gb_char_is_alphanumeric(cast(char)rune)) {
-					return false;
-				}
-				break;
-			}
-		}
-
-		offset += width;
-	}
-
-	return true;
 }
 
 gb_internal void parse_proc_tags(AstFile *f, u64 *tags) {
@@ -2176,7 +2168,7 @@ gb_internal bool ast_on_same_line(Token const &x, Ast *yp) {
 	return x.pos.line == y.pos.line;
 }
 
-gb_internal Ast *parse_force_inlining_operand(AstFile *f, Token token) {
+gb_internal Ast *parse_inlining_or_tailing_operand(AstFile *f, Token token) {
 	Ast *expr = parse_unary_expr(f, false);
 	Ast *e = strip_or_return_expr(expr);
 	if (e == nullptr) {
@@ -2187,11 +2179,14 @@ gb_internal Ast *parse_force_inlining_operand(AstFile *f, Token token) {
 		return ast_bad_expr(f, token, f->curr_token);
 	}
 	ProcInlining pi = ProcInlining_none;
+	ProcTailing  pt = ProcTailing_none;
 	if (token.kind == Token_Ident) {
 		if (token.string == "force_inline") {
 			pi = ProcInlining_inline;
 		} else if (token.string == "force_no_inline") {
 			pi = ProcInlining_no_inline;
+		} else if (token.string == "must_tail") {
+			pt = ProcTailing_must_tail;
 		}
 	}
 
@@ -2208,6 +2203,15 @@ gb_internal Ast *parse_force_inlining_operand(AstFile *f, Token token) {
 				syntax_error(expr, "Cannot apply both '#force_inline' and '#force_no_inline' to a procedure call");
 			}
 			e->CallExpr.inlining = pi;
+		}
+	}
+
+	if (pt != ProcTailing_none) {
+		if (e->kind == Ast_ProcLit) {
+			syntax_error(expr, "'#must_call' can only be applied to a procedure call, not the procedure literal");
+			e->ProcLit.tailing = pt;
+		} else if (e->kind == Ast_CallExpr) {
+			e->CallExpr.tailing = pt;
 		}
 	}
 
@@ -2435,9 +2439,10 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 			Ast *original_type = parse_type(f);
 			Ast *type = unparen_expr(original_type);
 			switch (type->kind) {
-			case Ast_ArrayType:        type->ArrayType.tag        = tag; break;
-			case Ast_DynamicArrayType: type->DynamicArrayType.tag = tag; break;
-			case Ast_PointerType:      type->PointerType.tag      = tag; break;
+			case Ast_ArrayType:                     type->ArrayType.tag        = tag; break;
+			case Ast_DynamicArrayType:              type->DynamicArrayType.tag = tag; break;
+			case Ast_PointerType:                   type->PointerType.tag      = tag; break;
+			case Ast_FixedCapacityDynamicArrayType: type->FixedCapacityDynamicArrayType.tag = tag; break;
 			default:
 				syntax_error(type, "Expected an array or pointer type after #%.*s, got %.*s", LIT(name.string), LIT(ast_strings[type->kind]));
 				break;
@@ -2507,8 +2512,9 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 			syntax_error(tag, "#relative types have now been removed in favour of \"core:relative\"");
 			return ast_relative_type(f, tag, type);
 		} else if (name.string == "force_inline" ||
-		           name.string == "force_no_inline") {
-			return parse_force_inlining_operand(f, name);
+		           name.string == "force_no_inline" ||
+		           name.string == "must_tail") {
+			return parse_inlining_or_tailing_operand(f, name);
 		}
 		return ast_basic_directive(f, token, name);
 	}
@@ -2525,8 +2531,14 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 			while (f->curr_token.kind != Token_CloseBrace &&
 			       f->curr_token.kind != Token_EOF) {
 				Ast *elem = parse_expr(f, false);
-				array_add(&args, elem);
 
+				if (f->curr_token.kind == Token_where) {
+					Token where = expect_token(f, Token_where);
+					Ast *cond = parse_expr(f, false);
+					elem = ast_binary_expr(f, where, elem, cond);
+				}
+
+				array_add(&args, elem);
 				if (!allow_field_separator(f)) {
 					break;
 				}
@@ -2666,8 +2678,25 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 		} else if (f->curr_token.kind == Token_Question) {
 			count_expr = ast_unary_expr(f, expect_token(f, Token_Question), nullptr);
 		} else if (allow_token(f, Token_dynamic)) {
+			Ast *capacity = nullptr;
+			if (f->curr_token.kind == Token_Semicolon && f->curr_token.string == ";") {
+				expect_token(f, Token_Semicolon);
+				capacity = parse_expr(f, false);
+			} else if (allow_token(f, Token_Comma) || allow_token(f, Token_Semicolon)) {
+				String p = token_to_string(f->prev_token);
+				syntax_error(token_end_of_line(f, f->prev_token), "Expected a semicolon, got a %.*s", LIT(p));
+
+				capacity = parse_expr(f, false);
+			}
 			expect_token(f, Token_CloseBracket);
-			return ast_dynamic_array_type(f, token, parse_type(f));
+
+			Ast *elem = parse_type(f);
+
+			if (capacity == nullptr) {
+				return ast_dynamic_array_type(f, token, elem);
+			} else {
+				return ast_fixed_capacity_dynamic_array_type(f, token, capacity, elem);
+			}
 		} else if (f->curr_token.kind != Token_CloseBracket) {
 			f->expr_level++;
 			count_expr = parse_expr(f, false);
@@ -2775,6 +2804,7 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 		bool is_packed          = false;
 		bool is_all_or_none     = false;
 		bool is_raw_union       = false;
+		bool is_simple          = false;
 		Ast *align              = nullptr;
 		Ast *min_field_align    = nullptr;
 		Ast *max_field_align    = nullptr;
@@ -2856,11 +2886,16 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 					error_line("\tSuggestion: #max_field_align(%s)", s);
 					gb_string_free(s);
 				}
-			}else if (tag.string == "raw_union") {
+			} else if (tag.string == "raw_union") {
 				if (is_raw_union) {
 					syntax_error(tag, "Duplicate struct tag '#%.*s'", LIT(tag.string));
 				}
 				is_raw_union = true;
+			} else if (tag.string == "simple") {
+				if (is_simple) {
+					syntax_error(tag, "Duplicate struct tag '#%.*s'", LIT(tag.string));
+				}
+				is_simple = true;
 			} else {
 				syntax_error(tag, "Invalid struct tag '#%.*s'", LIT(tag.string));
 			}
@@ -2868,10 +2903,6 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 
 		f->expr_level = prev_level;
 
-		if (is_raw_union && is_packed) {
-			is_packed = false;
-			syntax_error(token, "'#raw_union' cannot also be '#packed'");
-		}
 		if (is_raw_union && is_all_or_none) {
 			is_all_or_none = false;
 			syntax_error(token, "'#raw_union' cannot also be '#all_or_none'");
@@ -2906,7 +2937,7 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 		parser_check_polymorphic_record_parameters(f, polymorphic_params);
 
 		return ast_struct_type(f, token, decls, name_count,
-		                       polymorphic_params, is_packed, is_raw_union, is_all_or_none,
+		                       polymorphic_params, is_packed, is_raw_union, is_all_or_none, is_simple,
 		                       align, min_field_align, max_field_align,
 		                       where_token, where_clauses);
 	} break;
@@ -3110,6 +3141,8 @@ gb_internal Ast *parse_operand(AstFile *f, bool lhs) {
 					} else {
 						dialect = InlineAsmDialect_Intel;
 					}
+				} else {
+					syntax_error(token, "Invalid directive on inline asm expression: '#%.*s'", LIT(token.string));
 				}
 			} else {
 				syntax_error(f->curr_token, "Expected an identifier after hash");
@@ -3142,6 +3175,7 @@ gb_internal bool is_literal_type(Ast *node) {
 	case Ast_StructType:
 	case Ast_UnionType:
 	case Ast_EnumType:
+	case Ast_FixedCapacityDynamicArrayType:
 	case Ast_DynamicArrayType:
 	case Ast_MapType:
 	case Ast_BitSetType:
@@ -3445,9 +3479,13 @@ gb_internal Ast *parse_unary_expr(AstFile *f, bool lhs) {
 	case Token_Xor:
 	case Token_And:
 	case Token_Not:
+	case Token_MulMul: // 'expand_values' operator
 	case Token_Mul: // Used for error handling when people do C-like things
 	{
 		Token token = advance_token(f);
+		if (token.kind == Token_Not) {
+			skip_possible_newline(f);
+		}
 		Ast *expr = parse_unary_expr(f, lhs);
 		return ast_unary_expr(f, token, expr);
 	}
@@ -3547,7 +3585,9 @@ gb_internal Ast *parse_binary_expr(AstFile *f, bool lhs, i32 prec_in) {
 		case Token_when:
 			if (prev.pos.line < op.pos.line) {
 				// NOTE(bill): Check to see if the `if` or `when` is on the same line of the `lhs` condition
-				goto loop_end;
+				if (f->expr_level <= 0) {
+					goto loop_end;
+				}
 			}
 			break;
 		}
@@ -4008,6 +4048,10 @@ gb_internal ProcCallingConvention string_to_calling_convention(String const &s) 
 	if (s == "win64")	return ProcCC_Win64;
 	if (s == "sysv")        return ProcCC_SysV;
 
+	if (s == "preserve/none") return ProcCC_PreserveNone;
+	if (s == "preserve/most") return ProcCC_PreserveMost;
+	if (s == "preserve/all")  return ProcCC_PreserveAll;
+
 	if (s == "system") {
 		if (build_context.metrics.os == TargetOs_windows) {
 			return ProcCC_StdCall;
@@ -4017,6 +4061,71 @@ gb_internal ProcCallingConvention string_to_calling_convention(String const &s) 
 
 
 	return ProcCC_Invalid;
+}
+
+gb_internal bool is_ast_generic(Ast *a) {
+	bool is_generic = false;
+	if (a != nullptr) {
+		switch (a->kind) {
+		case Ast_TypeidType:
+			is_generic = a->TypeidType.specialization != nullptr;
+			break;
+		case Ast_PolyType:
+			is_generic = true;
+			break;
+		case Ast_ProcType:
+			is_generic = a->ProcType.generic;
+			break;
+		case Ast_PointerType:
+			is_generic = is_ast_generic(a->PointerType.type);
+			break;
+		case Ast_MultiPointerType:
+			is_generic = is_ast_generic(a->MultiPointerType.type);
+			break;
+		case Ast_ArrayType:
+			is_generic = is_ast_generic(a->ArrayType.elem) || is_ast_generic(a->ArrayType.count);
+			break;
+		case Ast_DynamicArrayType:
+			is_generic = is_ast_generic(a->DynamicArrayType.elem);
+			break;
+		case Ast_FixedCapacityDynamicArrayType:
+			is_generic = is_ast_generic(a->FixedCapacityDynamicArrayType.elem) || is_ast_generic(a->FixedCapacityDynamicArrayType.capacity);
+			break;
+		case Ast_BitSetType:
+			is_generic = is_ast_generic(a->BitSetType.elem);
+			break;
+		case Ast_MapType:
+			is_generic = is_ast_generic(a->MapType.key) || is_ast_generic(a->MapType.value);
+			break;
+		case Ast_MatrixType:
+			is_generic = is_ast_generic(a->MatrixType.row_count) || is_ast_generic(a->MatrixType.column_count) || is_ast_generic(a->MatrixType.elem);
+			break;
+		}
+	}
+	return is_generic;
+}
+
+gb_internal bool is_field_list_generic(AstFieldList *field_list, bool check_names) {
+	bool is_generic = false;
+
+	for (Ast *param : field_list->list) {
+		ast_node(field, Field, param);
+		if (is_ast_generic(field->type)) {
+			is_generic = true;
+			goto end;
+		}
+		if (!check_names || field->type == nullptr) {
+			continue;
+		}
+		for (Ast *name : field->names) {
+			if (name->kind == Ast_PolyType) {
+				is_generic = true;
+				goto end;
+			}
+		}
+	}
+end:
+	return is_generic;
 }
 
 gb_internal Ast *parse_proc_type(AstFile *f, Token proc_token) {
@@ -4054,24 +4163,11 @@ gb_internal Ast *parse_proc_type(AstFile *f, Token proc_token) {
 	results = parse_results(f, &diverging);
 
 	u64 tags = 0;
-	bool is_generic = false;
-
-	for (Ast *param : params->FieldList.list) {
-		ast_node(field, Field, param);
-		if (field->type != nullptr) {
-		    if (field->type->kind == Ast_PolyType) {
-				is_generic = true;
-				goto end;
-			}
-			for (Ast *name : field->names) {
-				if (name->kind == Ast_PolyType) {
-					is_generic = true;
-					goto end;
-				}
-			}
-		}
+	bool is_generic = is_field_list_generic(&params->FieldList, true);
+	if (!is_generic && (results != nullptr)) {
+		is_generic = is_field_list_generic(&results->FieldList, false);
 	}
-end:
+
 	return ast_proc_type(f, proc_token, params, results, tags, cc, is_generic, diverging);
 }
 
@@ -4129,18 +4225,33 @@ gb_internal FieldFlag is_token_field_prefix(AstFile *f) {
 		return FieldFlag_using;
 
 	case Token_Hash:
-		advance_token(f);
-		switch (f->curr_token.kind) {
-		case Token_Ident:
-			for (i32 i = 0; i < gb_count_of(parse_field_prefix_mappings); i++) {
-				auto const &mapping = parse_field_prefix_mappings[i];
-				if (mapping.token_kind == Token_Hash) {
-					if (f->curr_token.string == mapping.name) {
-						return mapping.flag;
-					}
+		{
+			// Check for types first before fields
+			Token tok = peek_token(f);
+			if (tok.kind == Token_Ident) {
+				if (tok.string == "simd" ||
+				    tok.string == "type" ||
+				    tok.string == "row_major" ||
+				    tok.string == "column_major" ||
+				    tok.string == "sparse" ||
+				    tok.string == "soa") {
+					return FieldFlag_Invalid;
 				}
 			}
-			break;
+
+			advance_token(f);
+			switch (f->curr_token.kind) {
+			case Token_Ident:
+				for (i32 i = 0; i < gb_count_of(parse_field_prefix_mappings); i++) {
+					auto const &mapping = parse_field_prefix_mappings[i];
+					if (mapping.token_kind == Token_Hash) {
+						if (f->curr_token.string == mapping.name) {
+							return mapping.flag;
+						}
+					}
+				}
+				break;
+			}
 		}
 		return FieldFlag_Unknown;
 	}
@@ -4841,7 +4952,7 @@ gb_internal Ast *parse_for_stmt(AstFile *f) {
 				body = parse_block_stmt(f, false);
 			}
 
-			return ast_range_stmt(f, token, {}, in_token, rhs, body);
+			return ast_range_stmt(f, token, init, {}, in_token, rhs, body);
 		}
 
 		if (f->curr_token.kind != Token_Semicolon) {
@@ -4856,9 +4967,21 @@ gb_internal Ast *parse_for_stmt(AstFile *f) {
 			cond = nullptr;
 
 			if (f->curr_token.kind == Token_OpenBrace || f->curr_token.kind == Token_do) {
-				syntax_error(f->curr_token, "Expected ';', followed by a condition expression and post statement, got %.*s", LIT(token_strings[f->curr_token.kind]));
+				syntax_error(f->curr_token, "Expected ';', followed by a condition expression and post statement, or 'x in y' style loop, got %.*s", LIT(token_strings[f->curr_token.kind]));
 			} else {
 				if (f->curr_token.kind != Token_Semicolon) {
+					if (f->curr_token.kind == Token_Ident) {
+						// for init; x in y { }
+						Token next_token = peek_token(f);
+						if (next_token.kind == Token_in || next_token.kind == Token_Comma) {
+							cond = parse_simple_stmt(f, StmtAllowFlag_In);
+							if (cond->kind == Ast_AssignStmt && cond->AssignStmt.op.kind == Token_in) {
+								is_range = true;
+							}
+							goto range_skip;
+						}
+					}
+
 					cond = parse_simple_stmt(f, StmtAllowFlag_None);
 				}
 
@@ -4876,6 +4999,7 @@ gb_internal Ast *parse_for_stmt(AstFile *f) {
 		}
 	}
 
+range_skip:;
 
 	if (allow_token(f, Token_do)) {
 		body = parse_do_body(f, token, "the for statement");
@@ -4891,7 +5015,7 @@ gb_internal Ast *parse_for_stmt(AstFile *f) {
 		if (cond->AssignStmt.rhs.count > 0) {
 			rhs = cond->AssignStmt.rhs[0];
 		}
-		return ast_range_stmt(f, token, vals, in_token, rhs, body);
+		return ast_range_stmt(f, token, init, vals, in_token, rhs, body);
 	}
 
 	cond = convert_stmt_to_expr(f, cond, str_lit("boolean expression"));
@@ -5052,6 +5176,10 @@ gb_internal Ast *parse_import_decl(AstFile *f, ImportDeclKind kind) {
 
 	if (kind != ImportDecl_Standard) {
 		syntax_error(import_name, "'using import' is not allowed, please use the import name explicitly");
+	}
+
+	if (file_path.string == "\".\"") {
+		// syntax_error(import_name, "Cannot cyclicly import packages");
 	}
 
 	expect_semicolon(f);
@@ -5221,6 +5349,7 @@ gb_internal Ast *parse_unrolled_for_loop(AstFile *f, Token unroll_token) {
 	}
 
 	Token for_token = expect_token(f, Token_for);
+	Ast *init = nullptr;
 	Ast *val0 = nullptr;
 	Ast *val1 = nullptr;
 	Token in_token = {};
@@ -5263,7 +5392,7 @@ gb_internal Ast *parse_unrolled_for_loop(AstFile *f, Token unroll_token) {
 	if (bad_stmt) {
 		return ast_bad_stmt(f, unroll_token, f->curr_token);
 	}
-	return ast_unroll_range_stmt(f, unroll_token, slice_from_array(args), for_token, val0, val1, in_token, expr, body);
+	return ast_unroll_range_stmt(f, unroll_token, init, slice_from_array(args), for_token, val0, val1, in_token, expr, body);
 }
 
 gb_internal Ast *parse_stmt(AstFile *f) {
@@ -5288,7 +5417,10 @@ gb_internal Ast *parse_stmt(AstFile *f) {
 	case Token_Xor:
 	case Token_Not:
 	case Token_And:
-	case Token_Mul: // Used for error handling when people do C-like things
+	// Used for error handling when people do C-like things
+	case Token_Mul:
+	case Token_Increment:
+	case Token_Decrement:
 		s = parse_simple_stmt(f, StmtAllowFlag_Label);
 		expect_semicolon(f);
 		return s;
@@ -5381,9 +5513,15 @@ gb_internal Ast *parse_stmt(AstFile *f) {
 			s = parse_stmt(f);
 			switch (s->kind) {
 			case Ast_SwitchStmt:
+				if (s->SwitchStmt.partial) {
+					syntax_error(token, "#partial already applied to a switch statement");
+				}
 				s->SwitchStmt.partial = true;
 				break;
 			case Ast_TypeSwitchStmt:
+				if (s->TypeSwitchStmt.partial) {
+					syntax_error(token, "#partial already applied to a switch statement");
+				}
 				s->TypeSwitchStmt.partial = true;
 				break;
 			case Ast_EmptyStmt:
@@ -5399,8 +5537,9 @@ gb_internal Ast *parse_stmt(AstFile *f) {
 			expect_semicolon(f);
 			return stmt;
 		} else if (name.string == "force_inline" ||
-		           name.string == "force_no_inline") {
-			Ast *expr = parse_force_inlining_operand(f, name);
+		           name.string == "force_no_inline" ||
+		           name.string == "must_tail") {
+			Ast *expr = parse_inlining_or_tailing_operand(f, name);
 			Ast *stmt =  ast_expr_stmt(f, expr);
 			expect_semicolon(f);
 			return stmt;
@@ -5689,7 +5828,7 @@ gb_internal WORKER_TASK_PROC(parser_worker_proc) {
 	ParserWorkerData *wd = cast(ParserWorkerData *)data;
 	ParseFileError err = process_imported_file(wd->parser, wd->imported_file);
 	if (err != ParseFile_None) {
-		auto *node = gb_alloc_item(permanent_allocator(), ParseFileErrorNode);
+		auto *node = permanent_alloc_item<ParseFileErrorNode>();
 		node->err = err;
 
 		MUTEX_GUARD_BLOCK(&wd->parser->file_error_mutex) {
@@ -5709,7 +5848,7 @@ gb_internal WORKER_TASK_PROC(parser_worker_proc) {
 gb_internal void parser_add_file_to_process(Parser *p, AstPackage *pkg, FileInfo fi, TokenPos pos) {
 	ImportedFile f = {pkg, fi, pos, p->file_to_process_count++};
 	f.pos.file_id = cast(i32)(f.index+1);
-	auto wd = gb_alloc_item(permanent_allocator(), ParserWorkerData);
+	auto wd = permanent_alloc_item<ParserWorkerData>();
 	wd->parser = p;
 	wd->imported_file = f;
 	thread_pool_add_task(parser_worker_proc, wd);
@@ -5746,7 +5885,7 @@ gb_internal void parser_add_foreign_file_to_process(Parser *p, AstPackage *pkg, 
 	// TODO(bill): Use a better allocator
 	ImportedFile f = {pkg, fi, pos, p->file_to_process_count++};
 	f.pos.file_id = cast(i32)(f.index+1);
-	auto wd = gb_alloc_item(permanent_allocator(), ForeignFileWorkerData);
+	auto wd = permanent_alloc_item<ForeignFileWorkerData>();
 	wd->parser = p;
 	wd->imported_file = f;
 	wd->foreign_kind = kind;
@@ -5766,7 +5905,7 @@ gb_internal AstPackage *try_add_import_path(Parser *p, String path, String const
 
 	path = copy_string(permanent_allocator(), path);
 
-	AstPackage *pkg = gb_alloc_item(permanent_allocator(), AstPackage);
+	AstPackage *pkg = permanent_alloc_item<AstPackage>();
 	pkg->kind = kind;
 	pkg->fullpath = path;
 	array_init(&pkg->files, permanent_allocator());
@@ -5915,6 +6054,19 @@ gb_internal bool is_import_path_valid(String const &path) {
 	return false;
 }
 
+gb_internal bool is_import_path_absolute(String const &path) {
+	if (path.len > 0 && path[0] == '/') {
+		return true;
+	}
+	if (path.len > 2 &&
+	    gb_char_is_alpha(path[0]) &&
+	    path[1] == ':' &&
+	    (path[2] == '/' || path[2] == '\\')) {
+		return true;
+	}
+	return false;
+}
+
 gb_internal bool is_build_flag_path_valid(String const &path) {
 	if (path.len > 0) {
 		u8 *start = path.text;
@@ -5977,12 +6129,13 @@ gb_internal bool determine_path_from_string(BlockingMutex *file_mutex, Ast *node
 	do_warning = &syntax_warning;
 	if (use_check_errors) {
 		do_error = &error;
-		do_error = &warning;
+		do_warning = &warning;
 	}
 
 	// NOTE(bill): if file_mutex == nullptr, this means that the code is used within the semantics stage
 
 	String collection_name = {};
+	bool is_import_decl_path = node->kind == Ast_ImportDecl || node->kind == Ast_ForeignImportDecl;
 
 	isize colon_pos = -1;
 	for (isize j = 0; j < original_string.len; j++) {
@@ -5995,10 +6148,18 @@ gb_internal bool determine_path_from_string(BlockingMutex *file_mutex, Ast *node
 	bool has_windows_drive = false;
 #if defined(GB_SYSTEM_WINDOWS)
 	if (file_mutex == nullptr) {
-		if (colon_pos == 1 && original_string.len > 2) {
-			if (original_string[2] == '/' || original_string[2] == '\\') {
-				colon_pos = -1;
-				has_windows_drive = true;
+		if (!is_import_decl_path &&
+		    colon_pos == 1 &&
+		    original_string.len > 2 &&
+		    gb_char_is_alpha(original_string[0]) &&
+		    (original_string[2] == '/' || original_string[2] == '\\')) {
+			colon_pos = -1;
+			has_windows_drive = true;
+		}
+
+		for (isize i = 0; i < original_string.len; i++) {
+			if (original_string.text[i] == '\\') {
+				original_string.text[i] = '/';
 			}
 		}
 	}
@@ -6017,6 +6178,10 @@ gb_internal bool determine_path_from_string(BlockingMutex *file_mutex, Ast *node
 		file_str = original_string;
 	}
 
+	if (is_import_decl_path && is_import_path_absolute(file_str)) {
+		do_error(node, "Invalid import path: '%.*s'", LIT(file_str));
+		return false;
+	}
 
 	if (has_windows_drive) {
 		String sub_file_path = substring(file_str, 3, file_str.len);
@@ -6089,8 +6254,7 @@ gb_internal bool determine_path_from_string(BlockingMutex *file_mutex, Ast *node
 	if (has_windows_drive) {
 		*path = file_str;
 	} else {
-		bool ok = false;
-		String fullpath = string_trim_whitespace(get_fullpath_relative(permanent_allocator(), base_dir, file_str, &ok));
+		String fullpath = string_trim_whitespace(get_fullpath_relative(permanent_allocator(), base_dir, file_str, nullptr));
 		*path = fullpath;
 	}
 	return true;
@@ -6142,6 +6306,12 @@ gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &bas
 			ast_node(id, ImportDecl, node);
 
 			String original_string = string_trim_whitespace(string_value_from_token(f, id->relpath));
+			if (is_import_path_absolute(original_string)) {
+				syntax_error(node, "Invalid import path: '%.*s'", LIT(original_string));
+				decls[i] = ast_bad_decl(f, id->relpath, id->relpath);
+				continue;
+			}
+
 			String import_path = {};
 			bool ok = determine_path_from_string(&p->file_decl_mutex, node, base_dir, original_string, &import_path);
 			if (!ok) {
@@ -6168,6 +6338,12 @@ gb_internal void parse_setup_file_decls(Parser *p, AstFile *f, String const &bas
 				GB_ASSERT(fp->kind == Ast_BasicLit);
 				Token fp_token = fp->BasicLit.token;
 				String file_str = string_trim_whitespace(string_value_from_token(f, fp_token));
+				if (is_import_path_absolute(file_str)) {
+					syntax_error(node, "Invalid import path: '%.*s'", LIT(file_str));
+					decls[i] = ast_bad_decl(f, fp_token, fp_token);
+					goto end;
+				}
+
 				String fullpath = file_str;
 				if (!is_arch_wasm() || string_ends_with(fullpath, str_lit(".o"))) {
 					String foreign_path = {};
@@ -6210,9 +6386,28 @@ gb_internal String build_tag_get_token(String s, String *out) {
 	return s;
 }
 
+// returns true on failure
+gb_internal bool build_require_space_after(String s, String prefix) {
+	GB_ASSERT(string_starts_with(s, prefix));
+
+	if (s.len == prefix.len) {
+		return false;
+	}
+	String stripped = string_trim_whitespace(substring(s, prefix.len, s.len));
+
+	if (s[prefix.len] != ' ' && stripped.len != 0) {
+		return true;
+	}
+	return false;
+}
+
 gb_internal bool parse_build_tag(Token token_for_pos, String s) {
 	String const prefix = str_lit("build");
 	GB_ASSERT(string_starts_with(s, prefix));
+	if (build_require_space_after(s, prefix)) {
+		syntax_error(token_for_pos, "Expected a space after #+%.*s", LIT(prefix));
+		return true;
+	}
 	s = string_trim_whitespace(substring(s, prefix.len, s.len));
 
 	if (s.len == 0) {
@@ -6248,6 +6443,11 @@ gb_internal bool parse_build_tag(Token token_for_pos, String s) {
 			}
 			if (p == "ignore") {
 				this_kind_correct = false;
+				continue;
+			}
+
+			if (p == "bedrock") {
+				this_kind_correct = build_context.bedrock == !is_notted;
 				continue;
 			}
 
@@ -6336,18 +6536,20 @@ gb_internal String vet_tag_get_token(String s, String *out, bool allow_colon) {
 }
 
 
-gb_internal u64 parse_vet_tag(Token token_for_pos, String s) {
+gb_internal u64 parse_vet_tag(Token token_for_pos, String s, u64 base_vet_flags) {
 	String const prefix = str_lit("vet");
 	GB_ASSERT(string_starts_with(s, prefix));
+	if (build_require_space_after(s, prefix)) {
+		syntax_error(token_for_pos, "Expected a space after #+%.*s", LIT(prefix));
+		return true;
+	}
 	s = string_trim_whitespace(substring(s, prefix.len, s.len));
 
+	u64 vet_flags = base_vet_flags;
+
 	if (s.len == 0) {
-		return VetFlag_All;
+		vet_flags |= VetFlag_All;
 	}
-
-
-	u64 vet_flags = 0;
-	u64 vet_not_flags = 0;
 
 	while (s.len > 0) {
 		String p = string_trim_whitespace(vet_tag_get_token(s, &s, /*allow_colon*/false));
@@ -6361,16 +6563,16 @@ gb_internal u64 parse_vet_tag(Token token_for_pos, String s) {
 			p = substring(p, 1, p.len);
 			if (p.len == 0) {
 				syntax_error(token_for_pos, "Expected a vet flag name after '!'");
-				return build_context.vet_flags;
+				return vet_flags;
 			}
 		}
 
 		u64 flag = get_vet_flag_from_name(p);
 		if (flag != VetFlag_NONE) {
 			if (is_notted) {
-				vet_not_flags |= flag;
+				vet_flags = vet_flags &~ flag;
 			} else {
-				vet_flags     |= flag;
+				vet_flags |= flag;
 			}
 		} else {
 			ERROR_BLOCK();
@@ -6388,26 +6590,20 @@ gb_internal u64 parse_vet_tag(Token token_for_pos, String s) {
 			error_line("\tcast\n");
 			error_line("\ttabs\n");
 			error_line("\texplicit-allocators\n");
-			return build_context.vet_flags;
+			return vet_flags;
 		}
 	}
 
-	if (vet_flags == 0 && vet_not_flags == 0) {
-		return build_context.vet_flags;
-	}
-	if (vet_flags == 0 && vet_not_flags != 0) {
-		return build_context.vet_flags &~ vet_not_flags;
-	}
-	if (vet_flags != 0 && vet_not_flags == 0) {
-		return vet_flags;
-	}
-	GB_ASSERT(vet_flags != 0 && vet_not_flags != 0);
-	return vet_flags &~ vet_not_flags;
+	return vet_flags;
 }
 
 gb_internal u64 parse_feature_tag(Token token_for_pos, String s) {
 	String const prefix = str_lit("feature");
 	GB_ASSERT(string_starts_with(s, prefix));
+	if (build_require_space_after(s, prefix)) {
+		syntax_error(token_for_pos, "Expected a space after #+%.*s", LIT(prefix));
+		return true;
+	}
 	s = string_trim_whitespace(substring(s, prefix.len, s.len));
 
 	if (s.len == 0) {
@@ -6454,6 +6650,8 @@ gb_internal u64 parse_feature_tag(Token token_for_pos, String s) {
 			syntax_error(token_for_pos, "Invalid feature flag name: %.*s", LIT(p));
 			error_line("\tExpected one of the following\n");
 			error_line("\tdynamic-literals\n");
+			error_line("\tglobal-context\n");
+			error_line("\tusing-stmt\n");
 			error_line("\tinteger-division-by-zero:trap\n");
 			error_line("\tinteger-division-by-zero:zero\n");
 			error_line("\tinteger-division-by-zero:self\n");
@@ -6581,7 +6779,7 @@ gb_internal bool parse_file_tag(const String &lc, const Token &tok, AstFile *f) 
 			return false;
 		}
 	} else if (string_starts_with(lc, str_lit("vet"))) {
-		f->vet_flags = parse_vet_tag(tok, lc);
+		f->vet_flags = parse_vet_tag(tok, lc, ast_file_vet_flags(f));
 		f->vet_flags_set = true;
 	} else if (string_starts_with(lc, str_lit("test"))) {
 		if ((build_context.command_kind & Command_test) == 0) {
@@ -6632,11 +6830,6 @@ gb_internal bool parse_file(Parser *p, AstFile *f) {
 
 	String filepath = f->tokenizer.fullpath;
 	String base_dir = dir_from_path(filepath);
-	if (f->curr_token.kind == Token_Comment) {
-		consume_comment_groups(f, f->prev_token);
-	}
-
-	CommentGroup *docs = f->lead_comment;
 
 	Array<Token> tags = array_make<Token>(temporary_allocator());
 	bool first_invalid_token_set = false;
@@ -6657,6 +6850,8 @@ gb_internal bool parse_file(Parser *p, AstFile *f) {
 			advance_token(f);
 		}
 	}
+
+	CommentGroup *docs = f->lead_comment;
 
 	if (f->curr_token.kind != Token_package) {
 		ERROR_BLOCK();
@@ -6697,37 +6892,12 @@ gb_internal bool parse_file(Parser *p, AstFile *f) {
 	}
 	f->package_name = package_name.string;
 
-	{
-		if (docs != nullptr && docs->list.count > 0) {
-			for (Token const &tok : docs->list) {
-				GB_ASSERT(tok.kind == Token_Comment);
-				String str = tok.string;
-
-				if (!string_starts_with(str, str_lit("//"))) {
-					continue;
-				}
-
-				String lc = string_trim_whitespace(substring(str, 2, str.len));
-				if (string_starts_with(lc, str_lit("+"))) {
-					syntax_warning(tok, "'//+' is deprecated: Use '#+' instead");
-					String lt = substring(lc, 1, lc.len);
-					if (parse_file_tag(lt, tok, f) == false) {
-						return false;
-					}
-				}
-			}
-		}
-
-		for (Token const &tok : tags) {
-			GB_ASSERT(tok.kind == Token_FileTag);
-			String str = tok.string;
-
-			if (string_starts_with(str, str_lit("#+"))) {
-				String lt = string_trim_whitespace(substring(str, 2, str.len));
-				if (parse_file_tag(lt, tok, f) == false) {
-					return false;
-				}
-			}
+	for (Token const &tok : tags) {
+		GB_ASSERT(tok.kind == Token_FileTag);
+		GB_ASSERT(string_starts_with(tok.string, str_lit("#+")));
+		String lt = string_trim_whitespace(substring(tok.string, 2, tok.string.len));
+		if (parse_file_tag(lt, tok, f) == false) {
+			return false;
 		}
 	}
 
@@ -6777,7 +6947,7 @@ gb_internal ParseFileError process_imported_file(Parser *p, ImportedFile importe
 	FileInfo    fi  = imported_file.fi;
 	TokenPos    pos = imported_file.pos;
 
-	AstFile *file = gb_alloc_item(permanent_allocator(), AstFile);
+	AstFile *file = permanent_alloc_item<AstFile>();
 	file->pkg = pkg;
 	file->id = cast(i32)(imported_file.index+1);
 	TokenPos err_pos = {0};
@@ -6961,4 +7131,3 @@ gb_internal ParseFileError parse_packages(Parser *p, String init_filename) {
 
 	return ParseFile_None;
 }
-

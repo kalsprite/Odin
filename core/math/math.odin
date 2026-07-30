@@ -418,7 +418,7 @@ remap_clamped :: proc "contextless" (old_value, old_min, old_max, new_min, new_m
 }
 
 @(require_results)
-wrap :: proc "contextless" (x, y: $T) -> T where intrinsics.type_is_numeric(T), !intrinsics.type_is_array(T) {
+wrap :: proc "contextless" (x, y: $T) -> T where intrinsics.type_is_numeric(T), intrinsics.type_is_float(T), !intrinsics.type_is_array(T) {
 	tmp := mod(x, y)
 	return y + tmp if tmp < 0 else tmp
 }
@@ -1613,17 +1613,11 @@ is_power_of_two :: proc "contextless" (x: int) -> bool {
 
 @(require_results)
 next_power_of_two :: proc "contextless" (x: int) -> int {
-	k := x -1
-	when size_of(int) == 8 {
-		k = k | (k >> 32)
+	if x <= 1 {
+		return 1
 	}
-	k = k | (k >> 16)
-	k = k | (k >> 8)
-	k = k | (k >> 4)
-	k = k | (k >> 2)
-	k = k | (k >> 1)
-	k += 1 + int(x <= 0)
-	return k
+	n := uint(size_of(x) * 8) - uint(intrinsics.count_leading_zeros(uint(x) - 1))
+	return int(1) << n
 }
 
 @(require_results)

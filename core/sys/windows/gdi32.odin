@@ -1,8 +1,6 @@
 #+build windows
 package sys_windows
 
-import "core:math/fixed"
-
 foreign import gdi32 "system:Gdi32.lib"
 
 @(default_calling_convention="system")
@@ -21,9 +19,10 @@ foreign gdi32 {
 	RestoreDC          :: proc(hdc: HDC, nSavedDC: INT) -> BOOL ---
 
 	CreateDIBPatternBrush :: proc(h: HGLOBAL, iUsage: UINT) -> HBRUSH ---
-	CreateDIBitmap        :: proc(hdc: HDC, pbmih: ^BITMAPINFOHEADER, flInit: DWORD, pjBits: VOID, pbmi: ^BITMAPINFO, iUsage: UINT) -> HBITMAP ---
-	CreateDIBSection      :: proc(hdc: HDC, pbmi: ^BITMAPINFO, usage: UINT, ppvBits: ^^VOID, hSection: HANDLE, offset: DWORD) -> HBITMAP ---
-	StretchDIBits         :: proc(hdc: HDC, xDest, yDest, DestWidth, DestHeight, xSrc, ySrc, SrcWidth, SrcHeight: INT, lpBits: VOID, lpbmi: ^BITMAPINFO, iUsage: UINT, rop: DWORD) -> INT ---
+	CreateBitmap          :: proc(nWidth: INT, nHeight: INT, nPlanes: UINT, nBitCount: UINT, lpBits: LPVOID) -> HBITMAP ---
+	CreateDIBitmap        :: proc(hdc: HDC, pbmih: ^BITMAPINFOHEADER, flInit: DWORD, pjBits: PVOID, pbmi: ^BITMAPINFO, iUsage: UINT) -> HBITMAP ---
+	CreateDIBSection      :: proc(hdc: HDC, pbmi: ^BITMAPINFO, usage: UINT, ppvBits: ^PVOID, hSection: HANDLE, offset: DWORD) -> HBITMAP ---
+	StretchDIBits         :: proc(hdc: HDC, xDest, yDest, DestWidth, DestHeight, xSrc, ySrc, SrcWidth, SrcHeight: INT, lpBits: LPVOID, lpbmi: ^BITMAPINFO, iUsage: UINT, rop: DWORD) -> INT ---
 	StretchBlt            :: proc(hdcDest: HDC, xDest, yDest, wDest, hDest: INT, hdcSrc: HDC, xSrc, ySrc, wSrc, hSrc: INT, rop: DWORD) -> BOOL ---
 
 	SetPixelFormat      :: proc(hdc: HDC, format: INT, ppfd: ^PIXELFORMATDESCRIPTOR) -> BOOL ---
@@ -34,7 +33,6 @@ foreign gdi32 {
 	SetDCBrushColor :: proc(hdc: HDC, color: COLORREF) -> COLORREF ---
 	GetDCBrushColor :: proc(hdc: HDC) -> COLORREF ---
 	PatBlt          :: proc(hdc: HDC, x, y, w, h: INT, rop: DWORD) -> BOOL ---
-	Rectangle       :: proc(hdc: HDC, left, top, right, bottom: INT) -> BOOL ---
 
 	CreateFontW           :: proc(cHeight, cWidth, cEscapement, cOrientation, cWeight: INT, bItalic, bUnderline, bStrikeOut, iCharSet, iOutPrecision: DWORD, iClipPrecision, iQuality, iPitchAndFamily: DWORD, pszFaceName: LPCWSTR) -> HFONT ---
 	CreateFontIndirectW   :: proc(lplf: ^LOGFONTW) -> HFONT ---
@@ -56,7 +54,7 @@ foreign gdi32 {
 	CreateCompatibleBitmap :: proc(hdc: HDC, cx, cy: INT) -> HBITMAP ---
 	BitBlt                 :: proc(hdc: HDC, x, y, cx, cy: INT, hdcSrc: HDC, x1, y1: INT, rop: DWORD) -> BOOL ---
 	GetDIBits              :: proc(hdc: HDC, hbm: HBITMAP, start, cLines: UINT, lpvBits: LPVOID, lpbmi: ^BITMAPINFO, usage: UINT) -> INT ---
-	SetDIBits              :: proc(hdc: HDC, hbm: HBITMAP, start: UINT, cLines: UINT, lpBits: VOID, lpbmi: ^BITMAPINFO, ColorUse: UINT) -> INT ---
+	SetDIBits              :: proc(hdc: HDC, hbm: HBITMAP, start: UINT, cLines: UINT, lpBits: PVOID, lpbmi: ^BITMAPINFO, ColorUse: UINT) -> INT ---
 	SetDIBColorTable       :: proc(hdc: HDC, iStart: UINT, cEntries: UINT, prgbq: ^RGBQUAD) -> UINT ---
 	GetDIBColorTable       :: proc(hdc: HDC, iStart: UINT, cEntries: UINT, prgbq: ^RGBQUAD) -> UINT ---
 
@@ -70,12 +68,20 @@ foreign gdi32 {
 	RealizePalette :: proc(hdc: HDC) -> UINT ---
 
 	SetTextColor :: proc(hdc: HDC, color: COLORREF) -> COLORREF ---
-	RoundRect    :: proc(hdc: HDC, left: INT, top: INT, right: INT, bottom: INT, width: INT, height: INT) -> BOOL ---
 	SetPixel     :: proc(hdc: HDC, x: INT, y: INT, color: COLORREF) -> COLORREF ---
 
 	GdiTransparentBlt :: proc(hdcDest: HDC, xoriginDest, yoriginDest, wDest, hDest: INT, hdcSrc: HDC, xoriginSrc, yoriginSrc, wSrc, hSrc: INT, crTransparent: UINT) -> BOOL ---
 	GdiGradientFill   :: proc(hdc: HDC, pVertex: PTRIVERTEX, nVertex: ULONG, pMesh: PVOID, nCount: ULONG, ulMode: ULONG) -> BOOL ---
 	GdiAlphaBlend     :: proc(hdcDest: HDC, xoriginDest, yoriginDest, wDest, hDest: INT, hdcSrc: HDC, xoriginSrc, yoriginSrc, wSrc, hSrc: INT, ftn: BLENDFUNCTION) -> BOOL ---
+
+	// Filled Shape Functions
+	Rectangle   :: proc(hdc: HDC, left, top, right, bottom: c_int) -> BOOL ---
+	Ellipse     :: proc(hdc: HDC, left, top, right, bottom: c_int) -> BOOL ---
+	RoundRect   :: proc(hdc: HDC, left, top, right, bottom, width, height: c_int) -> BOOL ---
+	Pie         :: proc(hdc: HDC, left, right, top, bottom, xr1, yr1, xr2, yr2: c_int) -> BOOL ---
+	Chord       :: proc(hdc: HDC, x1, y1, x2, y2, x3, y3, x4, y4: c_int) -> BOOL ---
+	Polygon     :: proc(hdc: HDC, apt: [^]POINT, cpt: c_int) -> BOOL ---
+	PolyPolygon :: proc(hdc: HDC, apt: [^]POINT, asz: [^]c_int, csz: c_int) -> BOOL ---
 }
 
 @(require_results)
@@ -93,7 +99,7 @@ PALETTEINDEX :: #force_inline proc "contextless" (#any_int i: int) -> COLORREF {
 	return COLORREF(DWORD(0x01000000) | DWORD(WORD(i)))
 }
 
-FXPT2DOT30 :: distinct fixed.Fixed(i32, 30)
+FXPT2DOT30 :: distinct i32 // fixed.Fixed(i32, 30)
 
 CIEXYZ :: struct {
 	ciexyzX, ciexyzY, ciexyzZ: FXPT2DOT30,
@@ -145,6 +151,13 @@ BKMODE :: enum {
 	TRANSPARENT = 1,
 	OPAQUE      = 2,
 }
+
+ICONINFO :: struct {
+	fIcon:              BOOL,
+	xHotspot, yHotspot: DWORD,
+	hbmMask, hbmColor:  HBITMAP,
+}
+PICONINFO :: ^ICONINFO
 
 ICONINFOEXW :: struct {
 	cbSize:             DWORD,

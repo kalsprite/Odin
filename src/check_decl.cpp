@@ -156,9 +156,12 @@ gb_internal void override_entity_in_scope(Entity *original_entity, Entity *new_e
 	// NOTE(bill): The original_entity's scope may not be same scope that it was inserted into
 	// e.g. file entity inserted into its package scope
 	String original_name = original_entity->token.string;
+	auto original_intern = entity_interned_name(original_entity);
+	u32 hash = original_entity->interned_name_hash.load();
+
 	Scope *found_scope = nullptr;
 	Entity *found_entity = nullptr;
-	scope_lookup_parent(original_entity->scope, original_name, &found_scope, &found_entity);
+	scope_lookup_parent(original_entity->scope, original_intern, &found_scope, &found_entity, hash);
 	if (found_scope == nullptr) {
 		return;
 	}
@@ -171,7 +174,7 @@ gb_internal void override_entity_in_scope(Entity *original_entity, Entity *new_e
 	// has been "evaluated" and the variant data can be copied across
 
 	rw_mutex_lock(&found_scope->mutex);
-	string_map_set(&found_scope->elements, original_name, new_entity);
+	scope_map_insert(&found_scope->elements, original_intern, hash, new_entity);
 	rw_mutex_unlock(&found_scope->mutex);
 
 	original_entity->flags |= EntityFlag_Overridden;
@@ -517,6 +520,8 @@ gb_internal void check_type_decl(CheckerContext *ctx, Entity *e, Ast *init_expr,
 	if (decl != nullptr) {
 		AttributeContext ac = {};
 		check_decl_attributes(ctx, decl->attributes, type_decl_attribute, &ac);
+
+		e->deprecated_message = ac.deprecated_message;
 
 		if (e->kind == Entity_TypeName && ac.objc_class != "") {
 
@@ -990,7 +995,7 @@ gb_internal Entity *init_entity_foreign_library(CheckerContext *ctx, Entity *e) 
 		error(ident, "foreign library names must be an identifier");
 	} else {
 		String name = ident->Ident.token.string;
-		Entity *found = scope_lookup(ctx->scope, name, ident->Ident.hash);
+		Entity *found = scope_lookup(ctx->scope, ident->Ident.interned, ident->Ident.hash);
 
 		if (found == nullptr) {
 			if (is_blank_ident(name)) {
@@ -1189,26 +1194,26 @@ gb_internal void check_objc_methods(CheckerContext *ctx, Entity *e, AttributeCon
 		if (!ac.objc_is_class_method) {
 			bool ok = true;
 			for (TypeNameObjCMetadataEntry const &entry : md->value_entries) {
-				if (entry.name == ac.objc_name) {
+				if (entry.interned.string() == ac.objc_name) {
 					error(e->token, "Previous declaration of @(objc_name=\"%.*s\")", LIT(ac.objc_name));
 					ok = false;
 					break;
 				}
 			}
 			if (ok) {
-				array_add(&md->value_entries, TypeNameObjCMetadataEntry{ac.objc_name, e});
+				array_add(&md->value_entries, TypeNameObjCMetadataEntry{string_interner_insert(ac.objc_name), e});
 			}
 		} else {
 			bool ok = true;
 			for (TypeNameObjCMetadataEntry const &entry : md->type_entries) {
-				if (entry.name == ac.objc_name) {
+				if (entry.interned.string() == ac.objc_name) {
 					error(e->token, "Previous declaration of @(objc_name=\"%.*s\")", LIT(ac.objc_name));
 					ok = false;
 					break;
 				}
 			}
 			if (ok) {
-				array_add(&md->type_entries, TypeNameObjCMetadataEntry{ac.objc_name, e});
+				array_add(&md->type_entries, TypeNameObjCMetadataEntry{string_interner_insert(ac.objc_name), e});
 			}
 		}
 	}
@@ -1327,6 +1332,10 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 		e->flags |= EntityFlag_Init;
 	} else if (ac.fini) {
 		e->flags |= EntityFlag_Fini;
+	}
+
+	if (build_context.disable_init_fini && (e->flags & (EntityFlag_Init|EntityFlag_Fini))) {
+		error(e->token, "@(init) and @(fini) have been disabled with '-disable-init-fini'");
 	}
 
 	if (ac.set_cold) {
@@ -1473,10 +1482,18 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 
 	e->Procedure.no_sanitize_address = ac.no_sanitize_address;
 	e->Procedure.no_sanitize_memory  = ac.no_sanitize_memory;
+	e->Procedure.no_sanitize_thread  = ac.no_sanitize_thread;
+
+	e->Procedure.fast_math_flags = ac.fast_math_flags;
 
 	e->deprecated_message = ac.deprecated_message;
 	e->warning_message = ac.warning_message;
 	ac.link_name = handle_link_name(ctx, e->token, ac.link_name, ac.link_prefix, ac.link_suffix);
+
+	if (ac.link_section.len > 0) {
+		e->Procedure.link_section = ac.link_section;
+	}
+
 	if (ac.has_disabled_proc) {
 		if (ac.disabled_proc) {
 			e->flags |= EntityFlag_Disabled;
@@ -1517,10 +1534,26 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 				error(e->token, "Procedure type of 'main' was expected to be 'proc()', got %s", str);
 				gb_string_free(str);
 			}
-			if (pt->calling_convention != default_calling_convention()) {
-				error(e->token, "Procedure 'main' cannot have a custom calling convention");
+			if (build_context.bedrock) {
+				switch (pt->calling_convention) {
+				case ProcCC_Odin:
+				case ProcCC_Contextless:
+					// Okay
+					break;
+				default:
+					error(e->token, "Procedure 'main' cannot have a custom calling convention beyond \"odin\" and \"contextless\" with '-bedrock'");
+					pt->calling_convention = ProcCC_Odin;
+					break;
+				}
+
+			} else {
+				if (pt->calling_convention != default_calling_convention()) {
+					error(e->token, "Procedure 'main' cannot have a custom calling convention");
+				}
+				pt->calling_convention = default_calling_convention();
+
 			}
-			pt->calling_convention = default_calling_convention();
+
 			if (e->pkg->kind == Package_Init) {
 				if (ctx->info->entry_point != nullptr) {
 					error(e->token, "Redeclaration of the entry pointer procedure 'main'");
@@ -1550,9 +1583,9 @@ gb_internal void check_proc_decl(CheckerContext *ctx, Entity *e, DeclInfo *d) {
 		if (is_foreign) {
 			error(pl->body, "A foreign procedure cannot have a body");
 		}
-		if (proc_type->Proc.c_vararg) {
-			error(pl->body, "A procedure with a '#c_vararg' field cannot have a body and must be foreign");
-		}
+		// if (proc_type->Proc.c_vararg) {
+		// 	error(pl->body, "A procedure with a '#c_vararg' field cannot have a body and must be foreign");
+		// }
 
 		d->scope = ctx->scope;
 
@@ -1765,6 +1798,12 @@ gb_internal void check_global_variable_decl(CheckerContext *ctx, Entity *e, Ast 
 
 	Operand o = {};
 	check_expr_with_type_hint(ctx, &o, init_expr, e->type);
+	if (check_vet_shadowing_assignment(ctx->checker, e, init_expr)) {
+		error(e->token, "Illegal declaration cycle of `%.*s`", LIT(e->token.string));
+		o.mode = Addressing_Invalid;
+		o.type = t_invalid;
+		e->type = t_invalid;
+	}
 	check_init_variable(ctx, e, &o, str_lit("variable declaration"));
 	if (e->Variable.is_rodata && o.mode != Addressing_Constant) {
 		ERROR_BLOCK();
@@ -1810,9 +1849,25 @@ gb_internal void check_proc_group_decl(CheckerContext *ctx, Entity *pg_entity, D
 	PtrSet<Entity *> entity_set = {};
 	ptr_set_init(&entity_set, 2*pg->args.count);
 
-	for (Ast *arg : pg->args) {
+	for (Ast *arg_ : pg->args) {
+		Ast *arg = arg_;
 		Entity *e = nullptr;
 		Operand o = {};
+		if (arg->kind == Ast_BinaryExpr && arg->BinaryExpr.op.kind == Token_where) {
+			Ast *cond_expr = arg->BinaryExpr.right;
+			Operand cond = {};
+			check_expr(ctx, &cond, cond_expr);
+			if (cond.mode != Addressing_Invalid) {
+				if (cond.mode != Addressing_Constant || !is_type_boolean(cond.type) || cond.value.kind != ExactValue_Bool) {
+					error(arg, "Expected a constant binary expression for the 'where' clause");
+				} else if (!cond.value.value_bool) {
+					continue;
+				}
+			}
+
+			arg = arg->BinaryExpr.left;
+		}
+
 		if (arg->kind == Ast_Ident) {
 			e = check_ident(ctx, &o, arg, nullptr, nullptr, true);
 		} else if (arg->kind == Ast_SelectorExpr) {
@@ -1877,7 +1932,8 @@ gb_internal void check_proc_group_decl(CheckerContext *ctx, Entity *pg_entity, D
 
 			ProcTypeOverloadKind kind = are_proc_types_overload_safe(p->type, q->type);
 			bool both_have_where_clauses = false;
-			if (p->decl_info->proc_lit != nullptr && q->decl_info->proc_lit != nullptr) {
+			if (p->decl_info != nullptr && q->decl_info != nullptr &&
+			    p->decl_info->proc_lit != nullptr && q->decl_info->proc_lit != nullptr) {
 				GB_ASSERT(p->decl_info->proc_lit->kind == Ast_ProcLit);
 				GB_ASSERT(q->decl_info->proc_lit->kind == Ast_ProcLit);
 				auto pl = &p->decl_info->proc_lit->ProcLit;
@@ -1974,6 +2030,20 @@ gb_internal void check_entity_decl(CheckerContext *ctx, Entity *e, DeclInfo *d, 
 
 		e->parent_proc_decl = c.curr_proc_decl;
 		e->state = EntityState_InProgress;
+		bool track_cycle_path = false;
+		switch (e->kind) {
+		case Entity_Variable:
+		case Entity_Constant:
+		case Entity_TypeName:
+			track_cycle_path = true;
+			break;
+		}
+		if (track_cycle_path) {
+			check_type_path_push(&c, e);
+		}
+		defer (if (track_cycle_path) {
+			check_type_path_pop(&c);
+		});
 
 		switch (e->kind) {
 		case Entity_Variable:
@@ -2154,7 +2224,7 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 	rw_mutex_unlock(&ctx->scope->mutex);
 
 
-	bool where_clause_ok = evaluate_where_clauses(ctx, nullptr, decl->scope, &decl->proc_lit->ProcLit.where_clauses, !decl->where_clauses_evaluated);
+	bool where_clause_ok = evaluate_where_clauses(ctx, nullptr, decl->scope, &decl->proc_lit->ProcLit.where_clauses, !decl->where_clauses_evaluated.load(std::memory_order_relaxed));
 	if (!where_clause_ok) {
 		// NOTE(bill, 2019-08-31): Don't check the body as the where clauses failed
 		return false;
@@ -2172,15 +2242,15 @@ gb_internal bool check_proc_body(CheckerContext *ctx_, Token token, DeclInfo *de
 		}
 
 		GB_ASSERT(decl->proc_checked_state != ProcCheckedState_Checked);
-		if (decl->defer_use_checked) {
+		if (decl->defer_use_checked.load(std::memory_order_relaxed)) {
 			GB_ASSERT(is_type_polymorphic(type, true));
 			error(token, "Defer Use Checked: %.*s", LIT(decl->entity.load()->token.string));
-			GB_ASSERT(decl->defer_use_checked == false);
+			GB_ASSERT(decl->defer_use_checked.load(std::memory_order_relaxed) == false);
 		}
 
 		check_stmt_list(ctx, bs->stmts, Stmt_CheckScopeDecls);
 
-		decl->defer_use_checked = true;
+		decl->defer_use_checked.store(true, std::memory_order_relaxed);
 
 		for (Ast *stmt : bs->stmts) {
 			if (stmt->kind == Ast_ValueDecl) {

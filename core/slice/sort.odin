@@ -300,7 +300,9 @@ Example:
 	import "core:slice"
 	import "core:fmt"
 	
-	main :: proc() {
+	stable_sort_by_example :: proc() {
+		Example :: struct { n: int, s: string }
+
 		arr := []Example {
 			{2, "name"},
 			{3, "Bill"},
@@ -312,10 +314,9 @@ Example:
 		})
 		
 		for e in arr do  fmt.printf("%s ", e.s)
+		fmt.println()
 	}
 	
-	Example :: struct { n: int, s: string }
-
 Output:
 	My name is Bill 
 */
@@ -335,7 +336,9 @@ Example:
 	import "core:slice"
 	import "core:fmt"
 	
-	main :: proc() {
+	stable_sort_by_cmp_example :: proc() {
+		Example :: struct { n: int, s: string }
+
 		arr := []Example {
 			{2, "name"},
 			{3, "Bill"},
@@ -347,9 +350,9 @@ Example:
 		})
 		
 		for e in arr do  fmt.printf("%s ", e.s)
+		fmt.println()
 	}
 	
-	Example :: struct { n: int, s: string }
 Output:
 	My name is Bill 
 */
@@ -413,7 +416,7 @@ reverse_sort_by_cmp :: proc(data: $T/[]$E, cmp: proc(i, j: E) -> Ordering) {
 	sort_by_cmp_with_data(data, proc(i, j: E, user_data: rawptr) -> Ordering {
 		k := (proc(i, j: E) -> Ordering)(user_data)
 		return k(j, i)
-	}, rawptr(data))
+	}, rawptr(cmp))
 }
 
 

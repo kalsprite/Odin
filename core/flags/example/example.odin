@@ -20,6 +20,14 @@ Optimization_Level :: enum {
 	Ludicrous_Speed,
 }
 
+Vet_Flag :: enum {
+	Unused,
+	Unused_Variables,
+	Unused_Imports,
+	Shadowing,
+	Using_Stmt,
+}
+
 // It's simple but powerful.
 my_custom_type_setter :: proc(
 	data: rawptr,
@@ -76,13 +84,15 @@ Distinct_Int :: distinct int
 main :: proc() {
 	Options :: struct {
 
-		file: os.Handle `args:"pos=0,required,file=r" usage:"Input file."`,
-		output: os.Handle `args:"pos=1,file=cw" usage:"Output file."`,
+		file: ^os.File `args:"pos=0,required,file=r" usage:"Input file."`,
+		output: ^os.File `args:"pos=1,file=cw" usage:"Output file."`,
 
 		hub: net.Host_Or_Endpoint `usage:"Internet address to contact for updates."`,
 		schedule: datetime.DateTime `usage:"Launch tasks at this time."`,
 
 		opt: Optimization_Level `usage:"Optimization level."`,
+		vet_flags: bit_set[Vet_Flag] `usage:"Vet flags. Example usage:
+			-vet-flags:Unused,Shadowing"`,
 		todo: [dynamic]string `usage:"Todo items."`,
 
 		accuracy: Fixed_Point1_1 `args:"required" usage:"Lenience in FLOP calculations."`,
@@ -126,7 +136,7 @@ main :: proc() {
 
 	fmt.printfln("%#v", opt)
 
-	if opt.output != 0 {
+	if opt.output != nil {
 		os.write_string(opt.output, "Hellope!\n")
 	}
 }

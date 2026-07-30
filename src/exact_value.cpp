@@ -1,8 +1,6 @@
 #include <math.h>
 #include <stdlib.h>
 
-gb_global BlockingMutex hash_exact_value_mutex;
-
 struct Ast;
 struct HashKey;
 struct Type;
@@ -34,6 +32,22 @@ enum ExactValueKind {
 	ExactValue_Count,
 };
 
+gb_global char const *exact_value_kind_string[ExactValue_Count] = {
+	"Invalid",
+
+	"Bool",
+	"String",
+	"Integer",
+	"Float",
+	"Complex",
+	"Quaternion",
+	"Pointer",
+	"Compound",
+	"Procedure",
+	"Typeid",
+	"String16",
+};
+
 struct ExactValue {
 	ExactValueKind kind;
 	union {
@@ -54,9 +68,6 @@ struct ExactValue {
 gb_global ExactValue const empty_exact_value = {};
 
 gb_internal uintptr hash_exact_value(ExactValue v) {
-	mutex_lock(&hash_exact_value_mutex);
-	defer (mutex_unlock(&hash_exact_value_mutex));
-
 	uintptr res = 0;
 	
 	switch (v.kind) {
@@ -151,7 +162,7 @@ gb_internal ExactValue exact_value_float(f64 f) {
 
 gb_internal ExactValue exact_value_complex(f64 real, f64 imag) {
 	ExactValue result = {ExactValue_Complex};
-	result.value_complex = gb_alloc_item(permanent_allocator(), Complex128);
+	result.value_complex = permanent_alloc_item<Complex128>();
 	result.value_complex->real = real;
 	result.value_complex->imag = imag;
 	return result;
@@ -159,7 +170,7 @@ gb_internal ExactValue exact_value_complex(f64 real, f64 imag) {
 
 gb_internal ExactValue exact_value_quaternion(f64 real, f64 imag, f64 jmag, f64 kmag) {
 	ExactValue result = {ExactValue_Quaternion};
-	result.value_quaternion = gb_alloc_item(permanent_allocator(), Quaternion256);
+	result.value_quaternion = permanent_alloc_item<Quaternion256>();
 	result.value_quaternion->real = real;
 	result.value_quaternion->imag = imag;
 	result.value_quaternion->jmag = jmag;
@@ -342,7 +353,10 @@ gb_internal ExactValue exact_value_float_from_string(String string) {
 			f64 f = bit_cast<f64>(u);
 			return exact_value_float(f);
 		} else {
-			GB_PANIC("Invalid hexadecimal float, expected 8 or 16 digits, got %td", digit_count);
+			// GB_PANIC("Invalid hexadecimal float, expected 4, 8, or 16 digits, got %td", digit_count);
+			// NOTE(bill): This should be caught by the tokenizer, so just pretend it's an f64
+			f64 f = bit_cast<f64>(u);
+			return exact_value_float(f);
 		}
 	}
 
@@ -443,7 +457,7 @@ gb_internal ExactValue exact_value_to_complex(ExactValue v) {
 		// return exact_value_complex(v.value_quaternion.real, v.value_quaternion.imag);
 	}
 	ExactValue r = {ExactValue_Invalid};
-	v.value_complex = gb_alloc_item(permanent_allocator(), Complex128);
+	v.value_complex = permanent_alloc_item<Complex128>();
 	return r;
 }
 gb_internal ExactValue exact_value_to_quaternion(ExactValue v) {
@@ -458,7 +472,7 @@ gb_internal ExactValue exact_value_to_quaternion(ExactValue v) {
 		return v;
 	}
 	ExactValue r = {ExactValue_Invalid};
-	v.value_quaternion = gb_alloc_item(permanent_allocator(), Quaternion256);
+	v.value_quaternion = permanent_alloc_item<Quaternion256>();
 	return r;
 }
 
@@ -782,7 +796,7 @@ gb_internal ExactValue exact_binary_operator_value(TokenKind op, ExactValue x, E
 		case Token_Quo:    return exact_value_float(fmod(big_int_to_f64(a), big_int_to_f64(b)));
 		case Token_QuoEq:  big_int_quo(&c, a, b); break; // NOTE(bill): Integer division
 		case Token_Mod:    big_int_rem(&c, a, b); break;
-		case Token_ModMod: big_int_euclidean_mod(&c, a, b); break;
+		case Token_ModMod: big_int_mod_mod(&c, a, b); break;
 		case Token_And:    big_int_and(&c, a, b);     break;
 		case Token_Or:     big_int_or(&c, a, b);      break;
 		case Token_Xor:    big_int_xor(&c, a, b);     break;
@@ -947,7 +961,7 @@ gb_internal gb_inline i32 cmp_f64(f64 a, f64 b) {
 	return (a > b) - (a < b);
 }
 
-gb_internal bool compare_exact_values_compound_lit(TokenKind op, ExactValue x, ExactValue y, bool *do_break_);
+gb_internal bool compare_exact_values_compound_lit(TokenKind op, ExactValue x, ExactValue y);
 
 gb_internal bool compare_exact_values(TokenKind op, ExactValue x, ExactValue y) {
 	match_exact_values(&x, &y);
@@ -1053,25 +1067,20 @@ gb_internal bool compare_exact_values(TokenKind op, ExactValue x, ExactValue y) 
 
 	case ExactValue_Procedure:
 		switch (op) {
-		case Token_CmpEq: return x.value_typeid == y.value_typeid;
-		case Token_NotEq: return x.value_typeid != y.value_typeid;
+		case Token_CmpEq: return x.value_procedure == y.value_procedure;
+		case Token_NotEq: return x.value_procedure != y.value_procedure;
 		}
 		break;
 
 	case ExactValue_Compound:
 		if (op != Token_CmpEq && op != Token_NotEq) {
-			break;
+			return false;
 		}
 
 		if (x.kind != y.kind) {
-			break;
+			return false;
 		}
-		bool do_break = false;
-		bool res = compare_exact_values_compound_lit(op, x, y, &do_break);
-		if (do_break) {
-			break;
-		}
-		return res;
+		return compare_exact_values_compound_lit(op, x, y);
 	}
 
 	GB_PANIC("Invalid comparison: %d", x.kind);
@@ -1123,12 +1132,13 @@ gb_internal gbString write_exact_value_to_string(gbString str, ExactValue const 
 		gb_free(heap_allocator(), s.text);
 		return str;
 	}
+	// NOTE(tf2spi): %.17g is specific enough to canonically serialize f64
 	case ExactValue_Float:
-		return gb_string_append_fmt(str, "%f", v.value_float);
+		return gb_string_append_fmt(str, "%.17g", v.value_float);
 	case ExactValue_Complex:
-		return gb_string_append_fmt(str, "%f+%fi", v.value_complex->real, v.value_complex->imag);
+		return gb_string_append_fmt(str, "%.17g+%.17gi", v.value_complex->real, v.value_complex->imag);
 	case ExactValue_Quaternion:
-		return gb_string_append_fmt(str, "%f+%fi+%fj+%fk", v.value_quaternion->real, v.value_quaternion->imag, v.value_quaternion->jmag, v.value_quaternion->kmag);
+		return gb_string_append_fmt(str, "%.17g+%.17gi+%.17gj+%.17gk", v.value_quaternion->real, v.value_quaternion->imag, v.value_quaternion->jmag, v.value_quaternion->kmag);
 
 	case ExactValue_Pointer:
 		return str;

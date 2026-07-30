@@ -66,6 +66,19 @@ gb_internal String get_final_microarchitecture() {
 gb_internal String get_default_features() {
 	BuildContext *bc = &build_context;
 
+	if (bc->microarch == str_lit("native")) {
+		String features = make_string_c(LLVMGetHostCPUFeatures());
+
+		// Update the features string so LLVM uses it later.
+		if (bc->target_features_string.len > 0) {
+			bc->target_features_string = concatenate3_strings(permanent_allocator(), features, str_lit(","), bc->target_features_string);
+		} else {
+			bc->target_features_string = features;
+		}
+
+		return features;
+	}
+
 	int off = 0;
 	for (int i = 0; i < bc->metrics.arch; i += 1) {
 		off += target_microarch_counts[i];
@@ -171,7 +184,7 @@ gb_internal void lb_correct_entity_linkage(lbGenerator *gen) {
 		LLVMValueRef other_global = nullptr;
 		if (ec.e->kind == Entity_Variable) {
 			other_global = LLVMGetNamedGlobal(ec.other_module->mod, ec.cname);
-			if (other_global) {
+			if (other_global && (LLVMGetInitializer(other_global) != nullptr || LLVMIsExternallyInitialized(other_global))) {
 				LLVM_SET_INTERNAL_WEAK_LINKAGE(other_global);
 				if (!ec.e->Variable.is_export && !ec.e->Variable.is_foreign) {
 					LLVMSetVisibility(other_global, LLVMHiddenVisibility);
@@ -179,7 +192,7 @@ gb_internal void lb_correct_entity_linkage(lbGenerator *gen) {
 			}
 		} else if (ec.e->kind == Entity_Procedure) {
 			other_global = LLVMGetNamedFunction(ec.other_module->mod, ec.cname);
-			if (other_global) {
+			if (other_global && LLVMCountBasicBlocks(other_global) != 0) {
 				LLVM_SET_INTERNAL_WEAK_LINKAGE(other_global);
 				if (!ec.e->Procedure.is_export && !ec.e->Procedure.is_foreign) {
 					LLVMSetVisibility(other_global, LLVMHiddenVisibility);
@@ -239,9 +252,9 @@ gb_internal lbContextData *lb_push_context_onto_stack(lbProcedure *p, lbAddr ctx
 
 gb_internal String lb_internal_gen_name_from_type(char const *prefix, Type *type) {
 	gbString str = gb_string_make(permanent_allocator(), prefix);
-	u64 hash = type_hash_canonical_type(type);
-	str = gb_string_appendc(str, "-");
-	str = gb_string_append_fmt(str, "%llu", cast(unsigned long long)hash);
+	str = gb_string_appendc(str, "$$");
+	gbString ct = temp_canonical_string(type);
+	str = gb_string_append_length(str, ct, gb_string_length(ct));
 	String proc_name = make_string(cast(u8 const *)str, gb_string_length(str));
 	return proc_name;
 }
@@ -1333,12 +1346,12 @@ String lb_get_objc_type_encoding(Type *t, isize pointer_depth = 0) {
 			s = gb_string_append_length(s, "=", 1);
 
 			if (!is_union) {
-				for( auto& f : base->Struct.fields ) {
+				for (auto &f : base->Struct.fields) {
 					String field_type = lb_get_objc_type_encoding(f->type, pointer_depth);
 					s = gb_string_append_length(s, field_type.text, field_type.len);
 				}
 			} else {
-				for( auto& v : base->Union.variants ) {
+				for (auto &v : base->Union.variants) {
 					String variant_type = lb_get_objc_type_encoding(v, pointer_depth);
 					s = gb_string_append_length(s, variant_type.text, variant_type.len);
 				}
@@ -1505,7 +1518,7 @@ gb_internal void lb_register_objc_thing(
 		auto &tn = g.class_impl_type->Named.type_name->TypeName;
 		Type *superclass = tn.objc_superclass;
 		if (superclass != nullptr) {
-			auto& superclass_global = string_map_must_get(&class_map, superclass->Named.type_name->TypeName.objc_class_name);
+			auto &superclass_global = string_map_must_get(&class_map, superclass->Named.type_name->TypeName.objc_class_name);
 			lb_register_objc_thing(handled, m, args, class_impls, class_map, p, superclass_global.g, call);
 			GB_ASSERT(superclass_global.class_global.addr.value);
 		}
@@ -1558,6 +1571,10 @@ gb_internal void lb_finalize_objc_names(lbGenerator *gen, lbProcedure *p) {
 	for (Entity *e = {}; mpsc_dequeue(&gen->info->objc_class_implementations, &e); /**/) {
 		GB_ASSERT(e->kind == Entity_TypeName && e->TypeName.objc_is_implementation);
 		lb_handle_objc_find_or_register_class(p, e->TypeName.objc_class_name, e->type);
+
+		if (build_context.bedrock) {
+			error(e->token, "Objective-C related things are not allowed with '-bedrock'");
+		}
 	}
 
 	// Ensure classes that have been implicitly referenced through
@@ -1582,12 +1599,18 @@ gb_internal void lb_finalize_objc_names(lbGenerator *gen, lbProcedure *p) {
 	}
 
 	for (auto pair : class_set) {
-		auto& tn = pair.type->Named.type_name->TypeName;
+		Entity *e = pair.type->Named.type_name;
+		GB_ASSERT(e->kind == Entity_TypeName);
+		auto &tn = e->TypeName;
 		Type *class_impl = !tn.objc_is_implementation ? nullptr : pair.type;
 		lb_handle_objc_find_or_register_class(p, tn.objc_class_name, class_impl);
+
+		if (build_context.bedrock) {
+			error(e->token, "Objective-C related things are not allowed with '-bedrock'");
+		}
 	}
 	for (lbObjCGlobal g = {}; mpsc_dequeue(&gen->objc_classes, &g); /**/) {
-		array_add( &referenced_classes, g );
+		array_add(&referenced_classes, g);
 	}
 
 	// Add all class globals to a map so that we can look them up dynamically
@@ -1605,21 +1628,21 @@ gb_internal void lb_finalize_objc_names(lbGenerator *gen, lbProcedure *p) {
 	lb_begin_procedure_body(p);
 
 	// Register class globals, gathering classes that must be implemented
-	for (auto& kv : global_class_map) {
+	for (auto &kv : global_class_map) {
 		lb_register_objc_thing(handled, m, args, class_impls, global_class_map, p, kv.value.g, "objc_lookUpClass");
 	}
 
 	// Prefetch selectors for implemented methods so that they can also be registered.
-	for (const auto& cd : class_impls) {
-		auto& g = cd.g;
+	for (auto const &cd : class_impls) {
+		auto &g = cd.g;
 		Type *class_type = g.class_impl_type;
 
-		Array<ObjcMethodData>* methods = map_get(&m->info->objc_method_implementations, class_type);
+		Array<ObjcMethodData> *methods = map_get(&m->info->objc_method_implementations, class_type);
 		if (!methods) {
 			continue;
 		}
 
-		for (const ObjcMethodData& md : *methods) {
+		for (ObjcMethodData const &md : *methods) {
 			lb_handle_objc_find_or_register_selector(p, md.ac.objc_selector);
 		}
 	}
@@ -1642,11 +1665,17 @@ gb_internal void lb_finalize_objc_names(lbGenerator *gen, lbProcedure *p) {
 		map_set(&ivar_map, g.class_impl_type, g);
 	}
 
-	for (const auto &cd : class_impls) {
+	for (auto const &cd : class_impls) {
 		auto &g = cd.g;
 
 		Type *class_type     = g.class_impl_type;
 		Type *class_ptr_type = alloc_type_pointer(class_type);
+		Entity *e = class_type->Named.type_name;
+		GB_ASSERT(e->kind == Entity_TypeName);
+
+		if (build_context.bedrock) {
+			error(e->token, "Objective-C related things are not allowed with '-bedrock'");
+		}
 
 		// Begin class registration: create class pair and update global reference
 		lbValue class_value = {};
@@ -1654,11 +1683,11 @@ gb_internal void lb_finalize_objc_names(lbGenerator *gen, lbProcedure *p) {
 		{
 			lbValue superclass_value = lb_const_nil(m, t_objc_Class);
 
-			auto& tn = class_type->Named.type_name->TypeName;
+			auto &tn = e->TypeName;
 			Type *superclass = tn.objc_superclass;
 
 			if (superclass != nullptr) {
-				auto& superclass_global = string_map_must_get(&global_class_map, superclass->Named.type_name->TypeName.objc_class_name);
+				auto &superclass_global = string_map_must_get(&global_class_map, superclass->Named.type_name->TypeName.objc_class_name);
 				superclass_value = superclass_global.class_value;
 			}
 
@@ -1714,13 +1743,13 @@ gb_internal void lb_finalize_objc_names(lbGenerator *gen, lbProcedure *p) {
 		}
 
 		for (const ObjcMethodData &md : *methods) {
-			GB_ASSERT( md.proc_entity->kind == Entity_Procedure);
+			GB_ASSERT(md.proc_entity->kind == Entity_Procedure);
 			Type *method_type = md.proc_entity->type;
 
 			String proc_name = make_string_c("__$objc_method::");
 			proc_name = concatenate_strings(temporary_allocator(), proc_name, g.name);
 			proc_name = concatenate_strings(temporary_allocator(), proc_name, str_lit("::"));
-			proc_name = concatenate_strings( permanent_allocator(), proc_name, md.ac.objc_name);
+			proc_name = concatenate_strings(permanent_allocator(), proc_name, md.ac.objc_name);
 
 			wrapper_args.count = 2;
 			wrapper_args[0] = md.ac.objc_is_class_method ? t_objc_Class : class_ptr_type;
@@ -1921,7 +1950,10 @@ gb_internal void lb_finalize_objc_names(lbGenerator *gen, lbProcedure *p) {
 			ivar_addr = lb_addr(global);
 		}
 
-		String class_name = g.class_impl_type->Named.type_name->TypeName.objc_class_name;
+		Entity *e = g.class_impl_type->Named.type_name;
+		GB_ASSERT(e->kind == Entity_TypeName);
+
+		String class_name = e->TypeName.objc_class_name;
 		lbValue class_value = string_map_must_get(&global_class_map, class_name).class_value;
 
 		args.count = 2;
@@ -1935,6 +1967,10 @@ gb_internal void lb_finalize_objc_names(lbGenerator *gen, lbProcedure *p) {
 		lbValue ivar_offset_int = lb_emit_conv(p, ivar_offset, t_int);
 
 		lb_addr_store(p, ivar_addr, ivar_offset_int);
+
+		if (build_context.bedrock) {
+			error(e->token, "Objective-C related things are not allowed with '-bedrock'");
+		}
 	}
 
 	lb_end_procedure_body(p);
@@ -2030,7 +2066,8 @@ gb_internal bool lb_init_global_var(lbModule *m, lbProcedure *p, Entity *e, Ast 
 		GB_ASSERT(!var.is_initialized);
 		Type *t = type_deref(var.var.type);
 
-		if (is_type_any(t)) {
+		// NOTE: 'any' literals or 'any's that point to other variables can be handled by the generic path
+		if (is_type_any(t) && !is_type_any(var.init.type) && init_expr->tav.mode != Addressing_Variable) {
 			// NOTE(bill): Edge case for 'any' type
 			Type *var_type = default_type(var.init.type);
 			gbString var_name = gb_string_make(permanent_allocator(), "__$global_any::");
@@ -2045,6 +2082,11 @@ gb_internal bool lb_init_global_var(lbModule *m, lbProcedure *p, Entity *e, Ast 
 			lb_emit_store(p, data, lb_emit_conv(p, gp, t_rawptr));
 			lb_emit_store(p, ti,   lb_typeid(p->module, var_type));
 		} else {
+			i64 sz = type_size_of(e->type);
+			if (sz >= 4 * 1024) {
+				warning(init_expr, "[Possible Code Generation Issue] Non-constant initialization is large (%lld bytes), and might cause problems with LLVM", cast(long long)sz);
+			}
+
 			LLVMTypeRef vt = llvm_addr_type(p->module, var.var);
 			lbValue src0 = lb_emit_conv(p, var.init, t);
 			LLVMValueRef src = OdinLLVMBuildTransmute(p, src0.value, vt);
@@ -2053,6 +2095,10 @@ gb_internal bool lb_init_global_var(lbModule *m, lbProcedure *p, Entity *e, Ast 
 		}
 
 		var.is_initialized = true;
+
+		if (build_context.disable_non_constant_globals) {
+			error(e->token, "Non-constant initialization of a global variable is disallowed with '-disable_non_constant_globals'");
+		}
 	}
 	return false;
 }
@@ -2111,7 +2157,7 @@ gb_internal void lb_create_startup_runtime_generate_body(lbModule *m, lbProcedur
 
 	for (Entity *e : info->init_procedures) {
 		lbValue value = lb_find_procedure_value_from_entity(m, e);
-		lb_emit_call(p, value, {}, ProcInlining_none);
+		lb_emit_call(p, value, {}, ProcInlining_none, ProcTailing_none);
 	}
 
 
@@ -2124,6 +2170,9 @@ gb_internal lbProcedure *lb_create_startup_runtime(lbModule *main_module, lbProc
 
 	lbProcedure *p = lb_create_dummy_procedure(main_module, str_lit(LB_STARTUP_RUNTIME_PROC_NAME), proc_type);
 	p->is_startup = true;
+	if (build_context.no_plt) {
+		lb_add_attribute_to_proc(p->module, p->value, "nonlazybind");
+	}
 	lb_add_attribute_to_proc(p->module, p->value, "optnone");
 	lb_add_attribute_to_proc(p->module, p->value, "noinline");
 
@@ -2144,6 +2193,9 @@ gb_internal lbProcedure *lb_create_cleanup_runtime(lbModule *main_module) { // C
 
 	lbProcedure *p = lb_create_dummy_procedure(main_module, str_lit(LB_CLEANUP_RUNTIME_PROC_NAME), proc_type);
 	p->is_startup = true;
+	if (build_context.no_plt) {
+		lb_add_attribute_to_proc(p->module, p->value, "nonlazybind");
+	}
 	lb_add_attribute_to_proc(p->module, p->value, "optnone");
 	lb_add_attribute_to_proc(p->module, p->value, "noinline");
 
@@ -2157,7 +2209,7 @@ gb_internal lbProcedure *lb_create_cleanup_runtime(lbModule *main_module) { // C
 
 	for (Entity *e : info->fini_procedures) {
 		lbValue value = lb_find_procedure_value_from_entity(main_module, e);
-		lb_emit_call(p, value, {}, ProcInlining_none);
+		lb_emit_call(p, value, {}, ProcInlining_none, ProcTailing_none);
 	}
 
 	lb_end_procedure_body(p);
@@ -2327,7 +2379,12 @@ gb_internal WORKER_TASK_PROC(lb_llvm_emit_worker_proc) {
 
 	auto wd = cast(lbLLVMEmitWorker *)data;
 
-	if (LLVMTargetMachineEmitToFile(wd->target_machine, wd->m->mod, cast(char *)wd->filepath_obj.text, wd->code_gen_file_type, &llvm_error)) {
+	if (build_context.lto_kind != LTO_None) {
+		if (LLVMWriteBitcodeToFile(wd->m->mod, cast(char *)wd->filepath_obj.text)) {
+			gb_printf_err("Failed to write bitcode file: %.*s\n", LIT(wd->filepath_obj));
+			exit_with_errors();
+		}
+	} else if (LLVMTargetMachineEmitToFile(wd->target_machine, wd->m->mod, cast(char *)wd->filepath_obj.text, wd->code_gen_file_type, &llvm_error)) {
 		gb_printf_err("LLVM Error: %s\n", llvm_error);
 		exit_with_errors();
 	}
@@ -2353,10 +2410,6 @@ gb_internal WORKER_TASK_PROC(lb_llvm_function_pass_per_module) {
 		for (i32 i = 0; i < lbFunctionPassManager_COUNT; i++) {
 			LLVMInitializeFunctionPassManager(m->function_pass_managers[i]);
 		}
-
-		lb_populate_function_pass_manager(m, m->function_pass_managers[lbFunctionPassManager_default],                false, build_context.optimization_level);
-		lb_populate_function_pass_manager(m, m->function_pass_managers[lbFunctionPassManager_default_without_memcpy], true,  build_context.optimization_level);
-		lb_populate_function_pass_manager_specific(m, m->function_pass_managers[lbFunctionPassManager_none],      -1);
 
 		for (i32 i = 0; i < lbFunctionPassManager_COUNT; i++) {
 			LLVMFinalizeFunctionPassManager(m->function_pass_managers[i]);
@@ -2426,11 +2479,8 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 	auto wd = cast(lbLLVMModulePassWorkerData *)data;
 
 	LLVMPassManagerRef module_pass_manager = LLVMCreatePassManager();
-	lb_populate_module_pass_manager(wd->target_machine, module_pass_manager, build_context.optimization_level);
 	LLVMRunPassManager(module_pass_manager, wd->m->mod);
 
-
-#if LB_USE_NEW_PASS_SYSTEM
 	auto passes = array_make<char const *>(heap_allocator(), 0, 64);
 	defer (array_free(&passes));
 
@@ -2444,14 +2494,21 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 	// tsan - Linux, Darwin
 	// ubsan - Linux, Darwin, Windows (NOT SUPPORTED WITH LLVM C-API)
 
-	if (build_context.sanitizer_flags & SanitizerFlag_Address) {
-		array_add(&passes, "asan");
-	}
-	if (build_context.sanitizer_flags & SanitizerFlag_Memory) {
-		array_add(&passes, "msan");
-	}
-	if (build_context.sanitizer_flags & SanitizerFlag_Thread) {
-		array_add(&passes, "tsan");
+	// With LTO, sanitizer passes run at link time (via -fsanitize= linker flags)
+	// where the linker has whole-program visibility. Running them here too would
+	// double-instrument every module, producing "Redundant instrumentation" warnings.
+	// Per-function sanitize attributes in the bitcode are preserved and respected
+	// by the linker's sanitizer pass.
+	if (build_context.lto_kind == LTO_None) {
+		if (build_context.sanitizer_flags & SanitizerFlag_Address) {
+			array_add(&passes, "asan");
+		}
+		if (build_context.sanitizer_flags & SanitizerFlag_Memory) {
+			array_add(&passes, "msan");
+		}
+		if (build_context.sanitizer_flags & SanitizerFlag_Thread) {
+			array_add(&passes, "tsan");
+		}
 	}
 
 	if (passes.count == 0) {
@@ -2499,7 +2556,6 @@ gb_internal WORKER_TASK_PROC(lb_llvm_module_pass_worker_proc) {
 		exit_with_errors();
 		return 1;
 	}
-#endif
 
 	if (LLVM_IGNORE_VERIFICATION) {
 		return 0;
@@ -2617,7 +2673,7 @@ gb_internal void lb_llvm_module_passes_and_verification(lbGenerator *gen, bool d
 	if (do_threading) {
 		for (auto const &entry : gen->modules) {
 			lbModule *m = entry.value;
-			auto wd = gb_alloc_item(permanent_allocator(), lbLLVMModulePassWorkerData);
+			auto wd = permanent_alloc_item<lbLLVMModulePassWorkerData>();
 			wd->m = m;
 			wd->target_machine = m->target_machine;
 			wd->do_threading = true;
@@ -2628,7 +2684,7 @@ gb_internal void lb_llvm_module_passes_and_verification(lbGenerator *gen, bool d
 	} else {
 		for (auto const &entry : gen->modules) {
 			lbModule *m = entry.value;
-			auto wd = gb_alloc_item(permanent_allocator(), lbLLVMModulePassWorkerData);
+			auto wd = permanent_alloc_item<lbLLVMModulePassWorkerData>();
 			wd->m = m;
 			wd->target_machine = m->target_machine;
 			wd->do_threading = false;
@@ -2652,9 +2708,12 @@ gb_internal String lb_filepath_ll_for_module(lbModule *m) {
 		s.len  -= prefix.len;
 	}
 
-	path = concatenate_strings(permanent_allocator(), path, s);
-	path = concatenate_strings(permanent_allocator(), s, STR_LIT(".ll"));
-
+	if (build_context.out_filepath.len > 0) {
+		path = concatenate_strings(permanent_allocator(), path, s);
+		path = concatenate_strings(permanent_allocator(), path, STR_LIT(".ll"));
+	} else {
+		path = concatenate_strings(permanent_allocator(), s, STR_LIT(".ll"));
+	}
 	return path;
 }
 
@@ -2674,6 +2733,8 @@ gb_internal String lb_filepath_obj_for_module(lbModule *m) {
 
 	gbString path = gb_string_make_length(heap_allocator(), basename.text, basename.len);
 	path = gb_string_appendc(path, "/");
+
+	bool output_is_directory = path_is_directory(build_context.build_paths[BuildPath_Output]);
 
 	if (USE_SEPARATE_MODULES) {
 		GB_ASSERT(m->module_name != nullptr);
@@ -2696,11 +2757,17 @@ gb_internal String lb_filepath_obj_for_module(lbModule *m) {
 
 	String ext = {};
 
-	if (build_context.build_mode == BuildMode_Assembly) {
-		ext = STR_LIT("S");
+	if (build_context.lto_kind != LTO_None) {
+		ext = STR_LIT("bc");
+	} else if (build_context.build_mode == BuildMode_Assembly) {
+		// Allow a user override for the asm extension.
+		// If that's a directory, we force the `.S` extension
+		ext = output_is_directory ? STR_LIT("S") : build_context.build_paths[BuildPath_Output].ext;
 	} else if (build_context.build_mode == BuildMode_Object) {
 		// Allow a user override for the object extension.
-		ext = build_context.build_paths[BuildPath_Output].ext;
+		// If that's a directory, we force the `.obj` extension
+		ext = output_is_directory ? STR_LIT("obj") : build_context.build_paths[BuildPath_Output].ext;
+
 	} else {
 		ext = infer_object_extension_from_build_context();
 	}
@@ -2746,7 +2813,7 @@ gb_internal bool lb_llvm_object_generation(lbGenerator *gen, bool do_threading) 
 			array_add(&gen->output_object_paths, filepath_obj);
 			array_add(&gen->output_temp_paths, filepath_ll);
 
-			auto *wd = gb_alloc_item(permanent_allocator(), lbLLVMEmitWorker);
+			auto *wd = permanent_alloc_item<lbLLVMEmitWorker>();
 			wd->target_machine = m->target_machine;
 			wd->code_gen_file_type = code_gen_file_type;
 			wd->filepath_obj = filepath_obj;
@@ -2771,7 +2838,13 @@ gb_internal bool lb_llvm_object_generation(lbGenerator *gen, bool do_threading) 
 
 			TIME_SECTION_WITH_LEN(section_name, gb_string_length(section_name));
 
-			if (LLVMTargetMachineEmitToFile(m->target_machine, m->mod, cast(char *)filepath_obj.text, code_gen_file_type, &llvm_error)) {
+			if (build_context.lto_kind != LTO_None) {
+				if (LLVMWriteBitcodeToFile(m->mod, cast(char *)filepath_obj.text)) {
+					gb_printf_err("Failed to write bitcode file: %.*s\n", LIT(filepath_obj));
+					exit_with_errors();
+					return false;
+				}
+			} else if (LLVMTargetMachineEmitToFile(m->target_machine, m->mod, cast(char *)filepath_obj.text, code_gen_file_type, &llvm_error)) {
 				gb_printf_err("LLVM Error: %s\n", llvm_error);
 				exit_with_errors();
 				return false;
@@ -2786,7 +2859,6 @@ gb_internal bool lb_llvm_object_generation(lbGenerator *gen, bool do_threading) 
 
 gb_internal lbProcedure *lb_create_main_procedure(lbModule *m, lbProcedure *startup_runtime, lbProcedure *cleanup_runtime) {
 	LLVMPassManagerRef default_function_pass_manager = LLVMCreateFunctionPassManagerForModule(m->mod);
-	lb_populate_function_pass_manager(m, default_function_pass_manager, false, build_context.optimization_level);
 	LLVMFinalizeFunctionPassManager(default_function_pass_manager);
 
 	Type *params  = alloc_type_tuple();
@@ -2850,7 +2922,7 @@ gb_internal lbProcedure *lb_create_main_procedure(lbModule *m, lbProcedure *star
 	}
 
 	lbValue startup_runtime_value = {startup_runtime->value, startup_runtime->type};
-	lb_emit_call(p, startup_runtime_value, {}, ProcInlining_none);
+	lb_emit_call(p, startup_runtime_value, {}, ProcInlining_none, ProcTailing_none);
 
 	if (build_context.command_kind == Command_test) {
 		Type *t_Internal_Test = find_type_in_pkg(m->info, str_lit("testing"), str_lit("Internal_Test"));
@@ -2908,7 +2980,7 @@ gb_internal lbProcedure *lb_create_main_procedure(lbModule *m, lbProcedure *star
 			AstPackage *pkg = get_runtime_package(m->info);
 
 			String name = str_lit("exit");
-			Entity *e = scope_lookup_current(pkg->scope, name);
+			Entity *e = scope_lookup_current(pkg->scope, string_interner_insert(name));
 			if (e == nullptr) {
 				compiler_error("Could not find type declaration for '%.*s.%.*s'\n", LIT(pkg->name), LIT(name));
 			}
@@ -2917,16 +2989,16 @@ gb_internal lbProcedure *lb_create_main_procedure(lbModule *m, lbProcedure *star
 
 		auto exit_args = array_make<lbValue>(temporary_allocator(), 1);
 		exit_args[0] = lb_emit_select(p, result, lb_const_int(m, t_int, 0), lb_const_int(m, t_int, 1));
-		lb_emit_call(p, exit_runner, exit_args, ProcInlining_none);
+		lb_emit_call(p, exit_runner, exit_args, ProcInlining_none, ProcTailing_none);
 	} else {
 		if (m->info->entry_point != nullptr) {
 			lbValue entry_point = lb_find_procedure_value_from_entity(m, m->info->entry_point);
-			lb_emit_call(p, entry_point, {}, ProcInlining_no_inline);
+			lb_emit_call(p, entry_point, {}, ProcInlining_no_inline, ProcTailing_none);
 		}
 
 		if (call_cleanup) {
 			lbValue cleanup_runtime_value = {cleanup_runtime->value, cleanup_runtime->type};
-			lb_emit_call(p, cleanup_runtime_value, {}, ProcInlining_none);
+			lb_emit_call(p, cleanup_runtime_value, {}, ProcInlining_none, ProcTailing_none);
 		}
 
 		if (is_dll_main) {
@@ -3095,9 +3167,6 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 	// GB_ASSERT_MSG(LLVMTargetHasAsmBackend(target));
 
 	LLVMCodeGenOptLevel code_gen_level = LLVMCodeGenLevelNone;
-	if (!LB_USE_NEW_PASS_SYSTEM) {
-		build_context.optimization_level = gb_clamp(build_context.optimization_level, -1, 2);
-	}
 	switch (build_context.optimization_level) {
 	default:/*fallthrough*/
 	case 0: code_gen_level = LLVMCodeGenLevelNone;       break;
@@ -3110,46 +3179,18 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 	// NOTE(bill, 2021-05-04): Target machines must be unique to each module because they are not thread safe
 	auto target_machines = array_make<LLVMTargetMachineRef>(permanent_allocator(), 0, gen->modules.count);
 
-	// NOTE(dweiler): Dynamic libraries require position-independent code.
-	LLVMRelocMode reloc_mode = LLVMRelocDefault;
-	if (build_context.build_mode == BuildMode_DynamicLibrary) {
-		reloc_mode = LLVMRelocPIC;
-	}
-
-	switch (build_context.reloc_mode) {
-	case RelocMode_Default:
-		if (build_context.metrics.os == TargetOs_openbsd || build_context.metrics.os == TargetOs_haiku) {
-			// Always use PIC for OpenBSD and Haiku: they default to PIE
-			reloc_mode = LLVMRelocPIC;
-		}
-
-		if (build_context.metrics.arch == TargetArch_riscv64) {
-			// NOTE(laytan): didn't seem to work without this.
-			reloc_mode = LLVMRelocPIC;
-		}
-
-		break;
-	case RelocMode_Static:
-		reloc_mode = LLVMRelocStatic;
-		break;
-	case RelocMode_PIC:
-		reloc_mode = LLVMRelocPIC;
-		break;
-	case RelocMode_DynamicNoPIC:
-		reloc_mode = LLVMRelocDynamicNoPic;
-		break;
-	}
-
 	for (auto const &entry : gen->modules) {
 		LLVMTargetMachineRef target_machine = LLVMCreateTargetMachine(
 			target, target_triple, (const char *)llvm_cpu.text,
 			llvm_features,
 			code_gen_level,
-			reloc_mode,
+			get_reloc_mode(),
 			code_mode);
 		lbModule *m = entry.value;
 		m->target_machine = target_machine;
-		LLVMSetModuleDataLayout(m->mod, LLVMCreateTargetDataLayout(target_machine));
+		LLVMTargetDataRef data_layout = LLVMCreateTargetDataLayout(target_machine);
+		LLVMSetModuleDataLayout(m->mod, data_layout);
+		LLVMDisposeTargetData(data_layout);
 
 	#if LLVM_VERSION_MAJOR >= 18
 		if (build_context.fast_isel) {
@@ -3381,7 +3422,8 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 						cc.link_section = e->Variable.link_section;
 
 						ExactValue v = tav.value;
-						lbValue init = lb_const_value(m, tav.type, v, cc);
+						lbValue init = lb_const_value(m, e->type, v, tav.type, cc);
+
 
 						LLVMDeleteGlobal(g.value);
 						g.value = nullptr;
@@ -3558,6 +3600,7 @@ gb_internal bool lb_generate_code(lbGenerator *gen) {
 			lb_add_raddbg_string(m, "type_view: {type: \"[]?\",        expr: \"array(data, len)\"}");
 			lb_add_raddbg_string(m, "type_view: {type: \"string\",     expr: \"array(data, len)\"}");
 			lb_add_raddbg_string(m, "type_view: {type: \"[dynamic]?\", expr: \"rows($, array(data, len), len, cap, allocator)\"}");
+			lb_add_raddbg_string(m, "type_view: {type: \"[dynamic;?]?\", expr: \"rows($, array(data, len), len)\"}");
 
 			// column major matrices
 			lb_add_raddbg_string(m, "type_view: {type: \"matrix[1, ?]?\",  expr: \"columns($.data, $[0])\"}");
