@@ -527,7 +527,25 @@ is_ast_type :: proc(node: ^ast.Node) -> bool {
 	// In the Odin AST, type nodes are directly in the Any_Node union
 	#partial switch _ in node.derived {
 	// Type expressions
-	case ^ast.Pointer_Type, ^ast.Multi_Pointer_Type, ^ast.Array_Type, ^ast.Dynamic_Array_Type, ^ast.Struct_Type, ^ast.Union_Type, ^ast.Enum_Type, ^ast.Bit_Set_Type, ^ast.Map_Type, ^ast.Proc_Type, ^ast.Typeid_Type, ^ast.Helper_Type, ^ast.Poly_Type, ^ast.Matrix_Type, ^ast.Distinct_Type:
+	// C++ Reference: parser.hpp:926-928 — is_ast_type is a RANGE check over every kind
+	// between Ast__TypeBegin and Ast__TypeEnd, so C++ picks up new type nodes for free.
+	// This port enumerates them, and three were missing: Bit_Field_Type,
+	// Relative_Type and Fixed_Capacity_Dynamic_Array_Type. A declaration whose
+	// initialiser is one of those was therefore not recognised as a TYPE declaration and
+	// was collected as a constant, reporting
+	// "Invalid declaration value '<unprintable Any_Node>'" and leaving the name bound to
+	// an invalid type — so every later use reported 'X' of type '^invalid type' has no
+	// field 'Y'. core/mem/rollback_stack_allocator.odin is the clearest case:
+	// Rollback_Stack_Header :: bit_field u64 {...} fails at its declaration and its three
+	// field names then account for 186 further diagnostics.
+	//
+	// Keep this list in sync with core/odin/ast's type nodes; a range check is not
+	// available here because the port's Any_Node is a tagged union, not an ordered enum.
+	case ^ast.Pointer_Type, ^ast.Multi_Pointer_Type, ^ast.Array_Type, ^ast.Dynamic_Array_Type,
+	     ^ast.Fixed_Capacity_Dynamic_Array_Type, ^ast.Struct_Type, ^ast.Union_Type,
+	     ^ast.Enum_Type, ^ast.Bit_Set_Type, ^ast.Bit_Field_Type, ^ast.Map_Type,
+	     ^ast.Proc_Type, ^ast.Typeid_Type, ^ast.Helper_Type, ^ast.Poly_Type,
+	     ^ast.Relative_Type, ^ast.Matrix_Type, ^ast.Distinct_Type:
 		return true
 	}
 

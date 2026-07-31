@@ -1939,16 +1939,34 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 				continue
 			}
 
-			// C++ Reference: check_stmt.cpp:1277-1292
-			// Perform comparison check and update untyped expression type
+			// C++ Reference: check_stmt.cpp:1314-1329, which carries the comment
+			// "NOTE(bill): the ordering here matters":
+			//     convert_to_typed(ctx, &y, x.type);
+			//     Operand z = y;                                  // a COPY
+			//     check_comparison(ctx, expr, &z, &x, Token_CmpEq);
+			//     ... add_to_seen_map(ctx, &seen, y);             // records y, not z
+			//
+			// check_comparison OVERWRITES its first operand with the comparison result.
+			// This port passed &y, so by the time the duplicate/exhaustiveness recording
+			// below read `y` it held an `untyped bool` in mode .Value — never .Constant —
+			// so seen_cases stayed EMPTY and every enum switch reported all of its members
+			// as unhandled. Verified by instrumentation: `[CASE] mode=Value type=untyped bool`
+			// and `seen_cases_len=0`.
 			if !is_typeid_switch && y.mode != .Type {
-				// Check that case value is comparable with switch expression
-				check_comparison(ctx, case_expr, &y, &x, .Cmp_Eq)
-
-				// Convert untyped case value to switch expression type
-				if is_type_untyped(y.type) {
-					update_untyped_expr_type(ctx, case_expr, x.type, true)
+				convert_to_typed(ctx, &y, x.type)
+				if y.mode == .Invalid {
+					continue
 				}
+
+				z := y
+				check_comparison(ctx, case_expr, &z, &x, .Cmp_Eq)
+				if z.mode == .Invalid {
+					continue
+				}
+				if y.mode != .Constant {
+					continue
+				}
+				update_untyped_expr_type(ctx, z.expr, x.type, !is_type_untyped(x.type))
 			}
 
 			// Ensure case value is not a type (except for typeid switches)
@@ -2799,8 +2817,17 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 	}
 
 	// Check initialization values
-	// C++ Reference: check_stmt.cpp line 2226
+	// C++ Reference: check_stmt.cpp:2295-2301. The type_hint_expr save/set/restore is
+	// part of this call, not decoration — it is what makes `x: [?]T = {...}` work, by
+	// letting the untyped compound literal borrow the declaration's type expression
+	// (read at check_compound_lit.odin:287, mirroring check_expr.cpp:10566).
+	// The port declared the field but never wrote it, so that reader was dead.
+	prev_type_hint_expr := ctx.type_hint_expr
+	ctx.type_hint_expr = vd.type
+
 	check_init_variables(ctx, entities[:], vd.values, "variable declaration")
+
+	ctx.type_hint_expr = prev_type_hint_expr
 
 	// Check arity match
 	// C++ Reference: check_stmt.cpp line 2230

@@ -684,9 +684,18 @@ correct_single_type_alias :: proc(ctx: ^Checker_Context, e: ^Entity) -> bool {
 			// This handles: A :: SomeType
 			alias_of := check_entity_from_ident_or_selector(ctx, init, true)
 			if alias_of != nil && alias_of.kind == .Type_Name {
-				// This constant is actually a type alias
+				// This constant is actually a type alias.
+				//
+				// C++ (checker.cpp:5126) only flips e->kind, because Entity's payload is a
+				// union and the existing fields stay put. This port has a tagged variant, so
+				// the variant must be replaced — but it must CARRY THE STATE OVER, not be
+				// zeroed. Writing Entity_Type_Name{} discarded the entity's type and left
+				// is_type_alias false, which is not what flipping a union tag does.
 				e.kind = .Type_Name
-				e.variant = Entity_Type_Name{}  // Update variant to match kind
+				e.variant = Entity_Type_Name {
+					type          = e.type,
+					is_type_alias = true,
+				}
 				return true
 			}
 		}

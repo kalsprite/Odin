@@ -1055,8 +1055,11 @@ Checker_Info :: struct {
 	// but ast.Type_And_Value is not defined in core:odin/ast. External map required until type is defined.
 	// C++ Reference: checker.cpp:1773-1817 (add_type_and_value)
 	// In C++, this is stored directly on expr->tav, but we need external map for now
-	type_and_value_map:                           map[rawptr]Type_And_Value,
-	type_and_value_mutex:                         sync.RW_Mutex, // Thread safety for type_and_value_map
+	// Type and value information lives on the AST node itself (ast.Node.tav), exactly as in
+	// C++ (`expr->tav`). The former `type_and_value_map: map[rawptr]Type_And_Value` and its
+	// RW mutex are gone: a field write cannot race a rehash, so no lock is needed, and a
+	// reader can no longer find an entry "missing" - a state C++ cannot represent and which
+	// was aborting check_stmt.odin's .Map_Index assertion. See tav_lookup.
 
 	// AST state flags - EXTERNAL MAP REQUIRED
 	// NOTE: ast.Node has state_flags field, but Been_Handled flag needs separate tracking

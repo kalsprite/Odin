@@ -554,6 +554,29 @@ check_export_entities :: proc(c: ^Checker) {
 	for pkg in sorted_packages(&c.info) {
 		check_export_entities_in_pkg(c, pkg)
 	}
+
+	// C++ Reference: checker.cpp:6266 — correct_type_aliases_in_scope over pkg->scope.
+	//
+	// This pass already ran during collection (check_collect.odin:281/287), but that runs
+	// against the FILE scope, and this port queues package-level entities for export instead
+	// of inserting them directly. So a package-level `N :: E` is not in any scope the earlier
+	// pass can see; it only lands in pkg.scope here. Without this second sweep every
+	// package-level alias of a named type stays a Constant and never reaches
+	// check_type_decl's alias handling — `x: N = .A` and `bit_set[N]{.A}` then fail while the
+	// `E` equivalents work.
+	//
+	// Must run AFTER the drain loop above, not interleaved: an alias can name a type exported
+	// by a package drained later.
+	for pkg in sorted_packages(&c.info) {
+		if pkg == nil || pkg.scope == nil {
+			continue
+		}
+		ctx := make_checker_context(c)
+		defer destroy_checker_context(&ctx)
+		ctx.scope = pkg.scope
+		ctx.pkg = pkg
+		correct_type_aliases_in_scope(&ctx, pkg.scope)
+	}
 }
 
 // check_export_entities_in_pkg drains one package's exported entity queue into its scope.
@@ -716,3 +739,4 @@ reset_checker_context :: proc(ctx: ^Checker_Context, file: ^ast.File) {
 
 // make_checker_context is defined in check_collect.odin
 // add_entity_use is defined in check_decl_helpers.odin
+

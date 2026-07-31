@@ -1019,7 +1019,16 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		bs := variant
 
 		// Get the element type for validation
+		// C++ Reference: check_expr.cpp:11420-11460.
+		//
+		// Two DIFFERENT types are in play and using one for both is what produced ~2,888
+		// spurious "Cannot use 'X' as an element in bit_set[...]" errors:
+		//   elem_hint — base_type(BitSet.elem), pushed down so `.Foo` resolves at all
+		//               (C++ :11439 passes exactly this to check_expr_with_type_hint)
+		//   elem_type — the DECLARED BitSet.elem, which is what the element must be
+		//               assignable TO (C++ :11460 check_assignment against BitSet.elem)
 		elem_type := bs.elem
+		elem_hint := base_type(bs.elem)
 
 		// Process each element in the bit_set literal
 		for elem in cl.elems {
@@ -1038,8 +1047,9 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				if be, is_binary := elem_expr.derived.(^ast.Binary_Expr); is_binary {
 					// Check both endpoints
 					lhs_op, rhs_op: Operand
-					check_expr(ctx, &lhs_op, be.left)
-					check_expr(ctx, &rhs_op, be.right)
+					// Range endpoints need the same hint: `.A ..= .C`.
+					check_expr_with_type_hint(ctx, &lhs_op, be.left, elem_hint)
+					check_expr_with_type_hint(ctx, &rhs_op, be.right, elem_hint)
 
 					// Both must be assignable to elem_type
 					if lhs_op.mode != .Invalid && !check_is_assignable_to(ctx, &lhs_op, elem_type) {
@@ -1058,23 +1068,43 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				// Single value element
 				// Reference: C++ lines 10607-10630
 				elem_operand := Operand{}
-				check_expr(ctx, &elem_operand, elem)
+				// C++ Reference: check_expr.cpp:11439 - check_expr_with_type_hint(c, o, elem, et).
+				// Without the hint every implicit-selector element (`Permission{.Read}`) reaches
+				// check_implicit_selector_expr with a nil hint and fails.
+				check_expr_with_type_hint(ctx, &elem_operand, elem, elem_hint)
 
 				if elem_operand.mode == .Invalid {
 					continue
 				}
 
-				// Must be assignable to elem_type
-				if !check_is_assignable_to(ctx, &elem_operand, elem_type) {
-					elem_type_str := type_to_string(elem_type)
-					val_type_str := type_to_string(elem_operand.type)
-					error(elem, "Cannot use '%s' as an element in bit_set[%s]", val_type_str, elem_type_str)
+				// Check constant-ness (C++ :11441-11443, before the assignment check)
+				if elem_operand.mode != .Constant {
+					is_constant = false
+				}
+
+				// C++ Reference: check_expr.cpp:11460 — check_assignment against the
+				// DECLARED element type, not a bespoke check_is_assignable_to. The custom
+				// version this replaces compared the operand against elem_type after
+				// hinting with elem_type, which rejected perfectly legal elements whenever
+				// BitSet.elem and the resolved selector type differed only by naming.
+				check_assignment(ctx, &elem_operand, elem_type, "bit_set literal")
+				if elem_operand.mode == .Invalid {
 					continue
 				}
 
-				// Check constant-ness
-				if elem_operand.mode != .Constant {
-					is_constant = false
+				// C++ Reference: check_expr.cpp:11461-11472 — range bounds check.
+				if elem_operand.mode == .Constant {
+					v := exact_value_to_i64(elem_operand.value)
+					if v < bs.lower || v > bs.upper {
+						s := expr_to_string(elem_operand.expr)
+						defer delete(s)
+						error(
+							elem,
+							"Bit field value out of bounds, %s (%d) not in the range %d .. %d",
+							s, v, bs.lower, bs.upper,
+						)
+						continue
+					}
 				}
 			}
 		}

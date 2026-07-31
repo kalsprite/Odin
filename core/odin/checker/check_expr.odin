@@ -575,14 +575,16 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 			o.type = t_invalid
 		}
 
-		// Handle type aliases - unwrap to base type
-		type_name := entity.variant.(Entity_Type_Name)
-		if type_name.is_type_alias {
-			bt := base_type(o.type)
-			if bt != nil {
-				o.type = bt
-			}
-		}
+		// NO ALIAS UNWRAPPING HERE. C++ Reference: check_expr.cpp:1963-1968 — the
+		// Entity_TypeName arm only runs the cycle check; o->type stays e->type.
+		//
+		// This previously did `if type_name.is_type_alias { o.type = base_type(o.type) }`,
+		// which is wrong at the root: for `N :: E`, check_type_decl already sets N's entity
+		// type to E itself (the non-distinct branch, mirroring check_decl.cpp:499-504). An
+		// alias IS the aliased type; stripping to base_type threw away E's identity and
+		// yielded the underlying unnamed enum, so `x: N = .A`, `y: E = x` and
+		// `bit_set[N]{.A}` all failed while the identical `E` forms worked. base/runtime
+		// reaches this through `Odin_Arch_Type :: type_of(ODIN_ARCH)`.
 
 	case .Import_Name:
 		if !allow_import_name {
@@ -1901,6 +1903,29 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 		return
 	}
 
+	// Shifts are dispatched BEFORE EITHER operand-unification block below, and ALWAYS
+	// return. C++ Reference: check_expr.cpp:4574-4577
+	//     if (token_is_shift(op.kind)) { check_shift(c, x, y, node, type_hint); return; }
+	//
+	// A shift's operands are independent: the amount is NOT unified with the shifted
+	// value. C++ never unifies them; check_shift converts an untyped amount to
+	// untyped_integer itself. Unifying first turns `rune(x) << 31` into a rune shift
+	// amount, which is then rejected as "Shift amount 'rune' must be an unsigned integer".
+	//
+	// NOTE there are TWO unification blocks in this function — `convert_to_typed(x, y.type)`
+	// / `convert_to_typed(&y, x.type)` immediately below, and a second `default_type(...)`
+	// pair further down. An earlier attempt placed this dispatch between them and still
+	// saw the amount arrive as rune. It must precede BOTH.
+	//
+	// The dispatch also must not be conditional on check_shift's return value: that is
+	// false both for "not a shift" and for "shift failed", so a failed shift used to fall
+	// through to the generic binary path and emit a bogus "Unknown operator '<<'".
+	#partial switch op.kind {
+	case .Shl, .Shr:
+		check_shift(ctx, node, x, &y, op, type_hint)
+		return
+	}
+
 	// Convert untyped constants to typed
 	convert_to_typed(ctx, x, y.type)
 	if x.mode == .Invalid {
@@ -1946,11 +1971,6 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 		// If check_binary_array_expr returns false, fall through to report error
 	}
 
-	// Check for shift operations (before types must match check)
-	// Shift operators allow different types: integer << unsigned_integer
-	if check_shift(ctx, node, x, &y, op, type_hint) {
-		return
-	}
 
 	// Types must match
 	// C++ Reference: check_expr.cpp:4284-4290
@@ -2461,30 +2481,21 @@ add_type_and_value :: proc(ctx: ^Checker_Context, expr: ^ast.Node, mode: Address
 		return
 	}
 
-	// Acquire mutex for thread safety during map operations
-	// C++ Reference: checker.cpp:1784-1791
+	// C++ Reference: checker.cpp:1784-1815. C++ stores this ON THE NODE (`expr->tav`), and
+	// so do we now. There is no map and therefore no mutex: a plain field write cannot race
+	// a rehash, and a reader can never find the entry "missing".
 	//
-	// NOTE: see check_get_expr_info - the unlock must be deferred from this scope, not from inside
-	// the `if`. This one mattered: the unprotected write to type_and_value_map below was corrupting
-	// the map under the threaded checker ("double free or corruption" in map_grow_dynamic).
-	locked := !in_single_threaded_checker_stage()
-	if locked {
-		sync.lock(&ctx.info.type_and_value_mutex)
-	}
-	defer if locked {
-		sync.unlock(&ctx.info.type_and_value_mutex)
-	}
-
-	// Store in map using rawptr key (pointer identity)
-	key := rawptr(expr)
+	// The previous implementation kept a `map[rawptr]Type_And_Value` on the shared
+	// Checker_Info, which forced every read and write through an RW mutex and still left a
+	// failure mode C++ does not have - see tav_lookup below.
 
 	// Handle special case: when type is 'any' and we already have an untyped type stored,
 	// preserve the untyped type (C++ lines 1796-1799)
 	final_type := type
-	if tv, found := ctx.info.type_and_value_map[key]; found {
-		if type != nil && tv.type != nil && is_type_any(type) && is_type_untyped(tv.type) {
+	if prev := expr.tav; prev.mode != .Invalid {
+		if type != nil && prev.type != nil && is_type_any(type) && is_type_untyped(prev.type) {
 			// Keep the existing untyped type, don't overwrite with 'any'
-			final_type = tv.type
+			final_type = prev.type
 		}
 	}
 
@@ -2503,7 +2514,7 @@ add_type_and_value :: proc(ctx: ^Checker_Context, expr: ^ast.Node, mode: Address
 		}
 	}
 
-	ctx.info.type_and_value_map[key] = Type_And_Value {
+	expr.tav = Type_And_Value {
 		type         = final_type,
 		mode         = mode,
 		is_lhs       = false, // Will be set appropriately by callers
@@ -2539,17 +2550,16 @@ add_type_and_value :: proc(ctx: ^Checker_Context, expr: ^ast.Node, mode: Address
 
 		// Store type/value for this intermediate level
 		// C++ Reference: checker.cpp:1795-1809
-		current_key := rawptr(current)
 
 		// Apply same type resolution as for the outermost expression
 		current_final_type := type
-		if tv, found := ctx.info.type_and_value_map[current_key]; found {
-			if type != nil && tv.type != nil && is_type_any(type) && is_type_untyped(tv.type) {
-				current_final_type = tv.type
+		if prev := current.tav; prev.mode != .Invalid {
+			if type != nil && prev.type != nil && is_type_any(type) && is_type_untyped(prev.type) {
+				current_final_type = prev.type
 			}
 		}
 
-		ctx.info.type_and_value_map[current_key] = Type_And_Value {
+		current.tav = Type_And_Value {
 			type         = current_final_type,
 			mode         = mode,
 			is_lhs       = false, // Will be set appropriately by callers
@@ -2567,63 +2577,35 @@ type_and_value_of_expr :: proc(ctx: ^Checker_Context, expr: ^ast.Node) -> (type:
 		return nil, {}, .Invalid
 	}
 
-	// Acquire shared lock for thread-safe map read
-	// C++ Reference: checker.cpp uses mutex for thread safety
-	//
-	// NOTE: see check_get_expr_info - the unlock must be deferred from this scope, not from inside
-	// the `if`, or the critical section is empty.
-	locked := !in_single_threaded_checker_stage()
-	if locked {
-		sync.shared_lock(&ctx.info.type_and_value_mutex)
-	}
-	defer if locked {
-		sync.shared_unlock(&ctx.info.type_and_value_mutex)
-	}
-
-	// Look up in map
-	key := rawptr(expr)
-	if tv, found := ctx.info.type_and_value_map[key]; found {
+	// C++ Reference: checker.cpp:1600-1606 - this is `expr->tav`, a plain field read.
+	tv := expr.tav
+	if tv.mode != .Invalid {
 		return tv.type, tv.value, tv.mode
 	}
-
-	// Not found - return invalid
 	return nil, {}, .Invalid
 }
 
-// tav_lookup returns the Type_And_Value recorded for `node`, under the shared side of
-// Checker_Info.type_and_value_mutex.
+// tav_lookup returns the Type_And_Value recorded for `node`.
 //
-// EVERY read of Checker_Info.type_and_value_map must go through here. C++ has no such map: it
-// stores the Type_And_Value on the AST node itself (`expr->tav`), so a reader can never be
-// racing a rehash. The port keeps the data in a `map[rawptr]Type_And_Value` on the shared
-// Checker_Info instead, which turns what is a plain field read in C++ into a lookup in a
-// container that add_type_and_value is concurrently growing from every worker thread. An
-// unsynchronised lookup that lands during map_grow_dynamic reads through the old, freed bucket
-// array and segfaults - which is exactly what checking any core package used to do, roughly two
-// runs in three, once the error cap stopped truncating the run before check_procedure_bodies
-// got properly parallel.
+// C++ has no side table: it stores the Type_And_Value on the AST node itself (`expr->tav`) and
+// tests `tav.mode != Addressing_Invalid` to decide whether the node has been checked
+// (e.g. check_stmt.cpp:534). This now does the same, so `found` means exactly that.
+//
+// It previously read a `map[rawptr]Type_And_Value` on the shared Checker_Info under an RW mutex.
+// That had two costs C++ does not pay. The mutex was mandatory - an unsynchronised lookup landing
+// during map_grow_dynamic reads through the freed bucket array and segfaults, which is what
+// checking any core package used to do roughly two runs in three. And "entry absent" was
+// representable at all, so callers asserting presence (check_stmt.odin's .Map_Index path) could
+// abort on a state C++ cannot reach; that assertion is what blocked the conversion type-hint fix.
 //
 // It takes ^Checker_Info rather than ^Checker_Context because some callers (type_of_expr) only
-// have the info.
-//
-// The returned Type_And_Value is a copy, deliberately: handing back a pointer into the map
-// would let the caller hold a reference into storage the next insertion can free.
+// have the info. The parameter is now unused but kept so the 14 call sites need not change.
 tav_lookup :: proc(info: ^Checker_Info, node: ^ast.Node) -> (tv: Type_And_Value, found: bool) {
 	if node == nil {
 		return {}, false
 	}
-
-	// NOTE: see check_get_expr_info - the unlock must be deferred from this scope, not from
-	// inside the `if`, or the critical section is empty.
-	locked := !in_single_threaded_checker_stage()
-	if locked {
-		sync.shared_lock(&info.type_and_value_mutex)
-	}
-	defer if locked {
-		sync.shared_unlock(&info.type_and_value_mutex)
-	}
-
-	tv, found = info.type_and_value_map[rawptr(node)]
+	tv = node.tav
+	found = tv.mode != .Invalid
 	return
 }
 
@@ -6613,7 +6595,27 @@ check_or_branch_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 // - Basic literals (via check_literal)
 // - Binary expressions (via check_binary_expr)
 // - Unary expressions (via check_unary_expr)
+// check_expr_base checks an expression and RECORDS its type-and-value on the node.
+//
+// C++ Reference: check_expr.cpp:12670-12690. C++ splits this in two: check_expr_base_internal
+// does the dispatch, and check_expr_base wraps it and calls add_type_and_value(c, node, ...)
+// UNCONDITIONALLY for every expression it checks. That single call is what guarantees any
+// checked node has a type-and-value.
+//
+// The port had no such wrapper — the dispatch WAS check_expr_base, and type-and-value was only
+// recorded at ~24 scattered special-case sites. So most expressions never got one, and any
+// consumer that expects a checked node to have a type-and-value would find nothing. The visible
+// symptom was that `m[k] = v` — ANY map assignment — aborted on check_stmt.odin's `has_tav`
+// assertion for the map expression, because a plain identifier was never recorded.
 check_expr_base :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, type_hint: ^Type) -> Expr_Kind {
+	kind := check_expr_base_internal(ctx, o, node, type_hint)
+	// C++ line 12688 — every expression, no exceptions. add_type_and_value itself skips
+	// .Invalid modes and nil nodes, matching C++'s own guards.
+	add_type_and_value(ctx, node, o.mode, o.type, o.value)
+	return kind
+}
+
+check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, type_hint: ^Type) -> Expr_Kind {
 	// Initialize operand to invalid state
 	o.mode = .Invalid
 	o.type = t_invalid
@@ -8362,7 +8364,16 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		// C++ Reference: check_expr.cpp:8110-8151
 		arg := call.args[0]
 		arg_op: Operand
-		check_expr(ctx, &arg_op, arg)
+		// C++ Reference: check_expr.cpp:8634 - check_expr_with_type_hint(c, operand, arg, t).
+		// The target type must be pushed down, otherwise an implicit-selector argument
+		// (`Futex_Trylock_Pi_Type(.TRYLOCK_PI)`) reaches check_implicit_selector_expr with a
+		// nil hint and fails.
+		//
+		// This was reverted twice while check_expr_base failed to record a type-and-value for
+		// every expression: the hint made `m[k] = v` code reachable, and that construct aborted
+		// on check_stmt.odin's `has_tav` assertion. The crash was never caused by this line —
+		// any map assignment crashed the checker on its own. Fixed at check_expr_base.
+		check_expr_with_type_hint(ctx, &arg_op, arg, target_type)
 
 		if arg_op.mode == .Invalid {
 			o.mode = .Invalid
@@ -8430,8 +8441,23 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			return .Stmt
 		}
 
-		// Set result type from the resolved procedure
+		// Set result type from the resolved procedure.
+		//
+		// A SINGLE result must be unwrapped from its tuple. C++ maintains this as an
+		// invariant and asserts it: check_not_tuple (check_expr.cpp:12739-12749) ends with
+		// GB_ASSERT(count != 1), i.e. a 1-tuple must never reach a single-value context.
+		// The other result path in this file (the `case 1:` arm below, ~line 9112) already
+		// unwraps; this proc-group path did not, so every call to an overloaded procedure
+		// with one result — `copy`, `append`, and the rest of base:runtime's proc groups —
+		// produced a 1-tuple and any single-value use of it reported the self-contradictory
+		// "1-valued expression found where single value expected". That was 4,201 of the
+		// sweep's diagnostics, every one of them a 1.
 		o.type = arg_data.result_type
+		if o.type != nil && o.type.kind == .Tuple {
+			if tup, tup_ok := o.type.variant.(Type_Tuple); tup_ok && len(tup.variables) == 1 {
+				o.type = entity_type(tup.variables[0])
+			}
+		}
 		o.mode = .Value
 		o.expr = node
 

@@ -2162,6 +2162,16 @@ check_enum_type_expr :: proc(ctx: ^Checker_Context, et: ^ast.Enum_Type, type: ^^
 	//   3. check_decl_helpers.odin:1368 takes `original_enum.scope.parent` to
 	//      recover the enclosing scope (mirroring check_decl.cpp:419), which lands
 	//      on the grandparent when `scope` is already the enclosing one.
+	// C++ Reference: check_type.cpp:3887 and :3896 set and clear this around the enum
+	// check. The port declared Checker_Context.in_enum_type and read it in
+	// convert_to_typed (check_expr.odin:3567, mirroring check_expr.cpp:5044) but NEVER
+	// set it, so that read was permanently false and the enum arm was dead code.
+	// With it false, convert_to_typed takes base_type(target) instead of
+	// core_type(target), so an untyped integer constant cannot reach an enum's backing
+	// integer type and every `A = 0` member fails to convert.
+	prev_in_enum_type := ctx.in_enum_type
+	ctx.in_enum_type = true
+
 	check_open_scope(ctx, et)
 	enum_type.variant = Type_Enum {
 		base_type = t_int,
@@ -2170,6 +2180,8 @@ check_enum_type_expr :: proc(ctx: ^Checker_Context, et: ^ast.Enum_Type, type: ^^
 	}
 	check_enum_type(ctx, enum_type, named_type, et)
 	check_close_scope(ctx)
+
+	ctx.in_enum_type = prev_in_enum_type
 
 	return true
 }
@@ -2426,22 +2438,15 @@ check_enum_type :: proc(ctx: ^Checker_Context, enum_type: ^Type, named_type: ^Ty
 			}
 
 			if o.mode != .Invalid {
-				// DELIBERATE DEVIATION, measured. C++ (check_type.cpp:958) passes
-				// `constant_type` here — the named enum type, not the backing integer.
-				// Matching C++ exactly costs +12,008 diagnostics (97,160 -> 109,168,
-				// measured with sweep_det.sh), because this port's check_assignment cannot
-				// convert an untyped integer constant to an enum type: every ordinary
-				// `A = 0` member becomes "Cannot convert '0' to 'X' from 'untyped integer'".
+				// C++ Reference: check_type.cpp:958 — `constant_type` is the named enum
+				// type (or the enum type itself), NOT the backing integer.
 				//
-				// So base_type is a COMPENSATION for that missing conversion, not a
-				// considered choice. It has a real cost of its own: it breaks the legal
-				// cross-reference form `B = A` between members of one enum (e.g. core/io's
-				// `Empty = Unsupported`), which reports the member's own enum type as
-				// unassignable to i32.
-				//
-				// Fix the untyped-integer-to-enum conversion first; then switch this line
-				// to constant_type and re-measure. Do not switch it before.
-				check_assignment(ctx, &o, base_type, "enumeration")
+				// This previously had to pass base_type as a compensation: with
+				// ctx.in_enum_type never being set, convert_to_typed could not take an
+				// untyped integer constant to an enum's backing type, so matching C++ here
+				// cost +12,008. Setting in_enum_type in check_enum_type_expr (above) is
+				// what makes this line safe.
+				check_assignment(ctx, &o, constant_type, "enumeration")
 			}
 
 			if o.mode != .Invalid {
@@ -3314,16 +3319,31 @@ check_proc_type_expr :: proc(ctx: ^Checker_Context, pt: ^ast.Proc_Type, type: ^^
 	// Create procedure type
 	proc_type := new(Type, ctx.checker.allocator)
 	proc_type.kind = .Proc
-	proc_type.variant = Type_Proc {
-		node  = pt,
-		scope = ctx.scope,
-	}
 
 	type^ = proc_type
 	set_base_type(named_type, proc_type)
 
-	// Delegate to full procedure type checking
-	return check_procedure_type(ctx, proc_type, pt, nil)
+	// C++ Reference: check_type.cpp:3929-3931 wraps check_procedure_type in
+	// check_open_scope / check_close_scope, so a procedure type's PARAMETERS live in a
+	// scope of their own.
+	//
+	// The port stored ctx.scope — the ENCLOSING scope — and never opened one, so every
+	// proc type inserted its parameter names into the surrounding scope. Two unrelated
+	// procedure types in the same file each declaring a parameter called `data` then
+	// collided, and check_get_params reported "Duplicate parameter 'data'" for the second.
+	// base/runtime/core.odin hits this immediately (Hasher_Proc's `data` against an
+	// earlier one), and it was worth 2,243 diagnostics.
+	//
+	// This is the same defect as the enum-scope bug (task 71): C++ opens a scope around
+	// the type check and the port stored the enclosing one instead.
+	check_open_scope(ctx, pt)
+	proc_type.variant = Type_Proc {
+		node  = pt,
+		scope = ctx.scope, // the freshly opened parameter scope
+	}
+	ok := check_procedure_type(ctx, proc_type, pt, nil)
+	check_close_scope(ctx)
+	return ok
 }
 
 // check_procedure_type performs full procedure type validation
@@ -3634,7 +3654,15 @@ determine_type_from_polymorphic :: proc(ctx: ^Checker_Context, poly_type: ^Type,
 	// C++ line 1576-1585: Validate operand is a value
 	if !is_operand_value(operand) {
 		if show_error {
-			error(operand.expr, "Cannot determine polymorphic type from parameter: '%v' to '%v'", operand.type, poly_type)
+			// C++ Reference: check_type.cpp:1645 / :1664 — both build the strings with
+			// type_to_string(..., true) first. Passing a ^Type straight to %v printed the whole
+			// Type struct, addresses and all, instead of a type name.
+			// NOTE: do NOT free these. type_to_string returns string literals or
+			// temp-allocator storage; only expr_to_string is caller-owned. Freeing a
+			// literal here segfaulted every package that reached this diagnostic.
+			ots := type_to_string(operand.type)
+			pts := type_to_string(poly_type)
+			error(operand.expr, "Cannot determine polymorphic type from parameter: '%s' to '%s'", ots, pts)
 		}
 		return t_invalid
 	}
@@ -3647,7 +3675,13 @@ determine_type_from_polymorphic :: proc(ctx: ^Checker_Context, poly_type: ^Type,
 
 	// C++ line 1590-1615: Show detailed error if binding failed
 	if show_error {
-		error(operand.expr, "Cannot determine polymorphic type from parameter: '%v' to '%v'", operand.type, poly_type)
+		// C++ Reference: check_type.cpp:1645 / :1664 — both build the strings with
+		// type_to_string(..., true) first. Passing a ^Type straight to %v printed the whole
+		// Type struct, addresses and all, instead of a type name.
+		// NOTE: do NOT free these — see the note at the other call site.
+		ots := type_to_string(operand.type)
+		pts := type_to_string(poly_type)
+		error(operand.expr, "Cannot determine polymorphic type from parameter: '%s' to '%s'", ots, pts)
 
 		// C++ line 1598-1614: Special error hint for slice/array mismatches
 		pt := poly_type
@@ -5664,18 +5698,163 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 
 // check_array_count checks and returns the array count from an expression
 // Returns 0 on error
+// check_array_count evaluates an array-length expression.
+// C++ Reference: check_type.cpp:2776-2872.
+//
+// The sentinel return values are load-bearing and callers depend on them:
+//   -1  the length is to be determined later — either `[?]T` (only legal attached to a
+//       compound literal, diagnosed by the caller at check_type.odin:565) or an enum
+//       used as an enumerated-array index.
+//    0  invalid, already diagnosed.
+//
+// This was previously a simplified stub that called check_expr, accepted only
+// .Constant/.Type, and returned exact_value_to_i64. It never produced -1, so `[?]T`
+// silently became [0]T and the "? can only be used in conjunction with compound
+// literals" diagnostic below could never fire.
 check_array_count :: proc(ctx: ^Checker_Context, operand: ^Operand, expr: ^ast.Expr) -> i64 {
-	check_expr(ctx, operand, expr)
-	if operand.mode == .Invalid {
+	// C++ line 2777-2779
+	if expr == nil {
 		return 0
 	}
-	if operand.mode != .Constant && operand.mode != .Type {
-		error_node(expr, "Array count must be a constant")
+
+	// C++ line 2780-2790: `?` is recognised syntactically, before any checking.
+	if unary, is_unary := expr.derived.(^ast.Unary_Expr); is_unary {
+		if unary.op.kind == .Question {
+			return -1
+		}
+		if unary.expr == nil {
+			error(expr, "Invalid array count '[%s]'", unary.op.text)
+			return 0
+		}
+	}
+
+	// C++ line 2792: check_expr_or_type, not check_expr — an enum type is a legal
+	// array count (enumerated arrays) and must not be rejected as a non-value.
+	check_expr_or_type(ctx, operand, expr)
+
+	if operand.mode == .Type {
+		ot := base_type(operand.type)
+
+		// C++ line 2796-2804
+		if ot != nil && ot.kind == .Generic {
+			if ctx.allow_polymorphic_types {
+				if gen, gen_ok := &ot.variant.(Type_Generic); gen_ok && gen.specialized != nil {
+					gen.specialized = nil
+					error(operand.expr, "Polymorphic array length cannot have a specialization")
+				}
+				return 0
+			}
+		}
+		// C++ line 2805-2807: an enum index yields a to-be-determined count.
+		if is_type_enum(ot) {
+			return -1
+		}
+	}
+
+	if operand.mode != .Constant {
+		// C++ line 2809-2840
+		if operand.mode != .Invalid {
+			entity := entity_of_node(ctx.info, operand.expr)
+			is_poly_type := false
+			is_poly_const_value := false
+			if entity != nil {
+				is_poly_type =
+					entity.kind == .Type_Name &&
+					entity.type == t_typeid &&
+					.Poly_Const in entity.flags
+				// COMPENSATION, not C++ parity. In C++ a polymorphic value parameter
+				// (`$N: int`) is a CONSTANT operand inside its own signature, so
+				// `[N]int` and `#simd[W]u64` never reach this branch at all. In this
+				// port such an entity is not bound as a constant in the signature /
+				// type-expression path — task 57 fixed that for procedure BODIES only —
+				// so it lands here and would be reported as a non-constant count.
+				//
+				// Verified against the real compiler: `f :: proc($W: uint) -> #simd[W]u64`
+				// and `g :: proc($N: int) -> [N]int` both check with zero errors, and
+				// core/hash/xxhash depends on exactly this.
+				//
+				// Remove this arm once polymorphic constants are bound as constants in
+				// signatures; the C++ is_poly_type escape above is then sufficient.
+				is_poly_const_value = entity.kind == .Constant && .Poly_Const in entity.flags
+			}
+
+			// C++ line 2821-2824
+			if ctx.allow_polymorphic_types && (is_poly_type || is_poly_const_value) {
+				return 0
+			}
+
+			begin_error_block()
+			s := expr_to_string(operand.expr)
+			defer delete(s)
+			error(expr, "Array count must be a constant integer, got %s", s)
+
+			if is_poly_type {
+				error_line("\tSuggestion: 'where' clause may be required to restrict the enumerated array index type to an enum\n")
+				error_line("\t            'where intrinsics.type_is_enum(%s)'\n", entity.token.text)
+			}
+			end_error_block()
+
+			operand.mode = .Invalid
+			operand.type = t_invalid
+		}
 		return 0
 	}
-	if operand.mode == .Constant {
-		return exact_value_to_i64(operand.value)
+
+	// C++ line 2842-2869
+	type := core_type(operand.type)
+
+	// COMPENSATION, not C++ parity. A polymorphic value parameter (`$N: int`) is
+	// .Constant here but carries NO value yet, so none of the arms below match and it
+	// would fall through to the final "must be a constant integer" error. In C++ such a
+	// count is resolved by the time it reaches this point, so the case cannot arise.
+	//
+	// The previous stub returned exact_value_to_i64(...) == 0 for this, which silently
+	// produced [0]T — wrong, but quiet. Returning the to-be-determined sentinel keeps it
+	// quiet without inventing a zero length.
+	//
+	// Verified against the real compiler: `proc($W: uint) -> #simd[W]u64` and
+	// `proc($N: int) -> [N]int` both check with zero errors; core/hash/xxhash relies on it.
+	// Remove once polymorphic constants carry values in the signature path.
+	if operand.value == nil && ctx.allow_polymorphic_types {
+		return 0
 	}
+
+	if is_type_untyped(type) || is_type_integer(type) {
+		#partial switch v in operand.value {
+		case big.Int:
+			count := v
+			if is_neg, _ := big.int_is_negative(&count); is_neg {
+				str, err := big.int_to_string(&count)
+				if err == nil {
+					defer delete(str)
+					error(expr, "Invalid negative array count, %s", str)
+				} else {
+					error(expr, "Invalid negative array count")
+				}
+				return 0
+			}
+			result, get_err := big.int_get_i64(&count)
+			if get_err != nil {
+				str, err := big.int_to_string(&count)
+				if err == nil {
+					defer delete(str)
+					error(expr, "Array count too large, %s", str)
+				} else {
+					error(expr, "Array count too large")
+				}
+				return 0
+			}
+			return result
+		case f64:
+			// C++ line 2862-2868: accept a float only if it round-trips exactly.
+			u := u64(v)
+			if f64(u) == v {
+				return i64(u)
+			}
+		}
+	}
+
+	error(expr, "Array count must be a constant integer")
 	return 0
 }
 

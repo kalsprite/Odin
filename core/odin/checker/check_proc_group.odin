@@ -1184,8 +1184,15 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 		candidate_data := Call_Argument_Data{}
 
 		// Create a sub-context for testing (to suppress errors)
+		// C++ Reference: check_expr.cpp:7559-7562 sets all THREE of these before probing
+		// a candidate. The port set only no_polymorphic_errors, which left
+		// hide_polymorphic_errors permanently false everywhere (its sole reader,
+		// check_type.odin:3637, mirrors check_type.cpp:1636) and left
+		// allow_polymorphic_types at whatever the enclosing context happened to hold.
 		test_ctx := ctx^
 		test_ctx.no_polymorphic_errors = true
+		test_ctx.allow_polymorphic_types = is_type_polymorphic(proc_type)
+		test_ctx.hide_polymorphic_errors = true
 
 		ok := check_call_arguments_single(&test_ctx, call_node, operand, entity_proc, proc_type, positional_operands, named_operands[:], args_split, .No_Errors, &candidate_data, true)
 

@@ -668,12 +668,14 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:825-831
-	if c != nil {
+	// C++ Reference: check_expr.cpp:832-838. The in_enum_type gate is part of the
+	// condition, not optional: C++ only treats an enum and its own base type as
+	// distance-3 assignable while checking an enum's own body. Dropping the gate makes
+	// the port accept base-type values as that enum everywhere.
+	if c != nil && c.in_enum_type {
 		if is_type_enum(dst) {
 			dst_enum := dst.variant.(Type_Enum)
 			if are_types_identical(dst_enum.base_type, operand.type) {
-				// Would check c.in_enum_type here
 				return 3
 			}
 		}

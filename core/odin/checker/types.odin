@@ -1571,7 +1571,13 @@ type_size_of :: proc(t: ^Type) -> int {
 			align := type_align_of(bt)
 			max_size := 0
 			for i in 0 ..< count {
-				field_size := type_size_of(struc.fields[i].type)
+				// Read the field type via entity_type(), NOT Entity.type.
+				// For struct field entities in this port only the VARIANT carries the type;
+				// Entity.type is nil (verified by instrumentation: f0.type=<nil> while
+				// f0.variant.(Entity_Variable).type=int). type_offset_of already goes through
+				// the variant, which is why it returned the correct offset 8 while this
+				// returned size 0 — `struct { a: int, b: int }` measured 8 instead of 16.
+				field_size := type_size_of(entity_type(struc.fields[i]))
 				if max_size < field_size {
 					max_size = field_size
 				}
@@ -1593,7 +1599,9 @@ type_size_of :: proc(t: ^Type) -> int {
 		// Calculate offset of last field + its size
 		// C++ Reference: types.cpp:4471
 		last_field_offset := type_offset_of(bt, i64(count - 1))
-		last_field_size := type_size_of(struc.fields[count - 1].type)
+		// See the note in the raw_union arm above: struct field types live on the variant,
+		// so read them through entity_type().
+		last_field_size := type_size_of(entity_type(struc.fields[count - 1]))
 		size := int(last_field_offset) + last_field_size
 
 		// Align final struct size to struct alignment
@@ -1611,7 +1619,99 @@ type_size_of :: proc(t: ^Type) -> int {
 			return stride_in_bytes * int(mat.column_count)
 		}
 
+	// C++ Reference: types.cpp type_size_of_internal, case Type_Enum.
+	case .Enum:
+		en := bt.variant.(Type_Enum)
+		return type_size_of(en.base_type)
+
+	// C++ Reference: types.cpp type_size_of_internal, case Type_BitSet.
+	case .Bit_Set:
+		bs := bt.variant.(Type_Bit_Set)
+		if bs.underlying != nil {
+			return type_size_of(bs.underlying)
+		}
+		bits := bs.upper - bs.lower + 1
+		switch {
+		case bits <= 8:   return 1
+		case bits <= 16:  return 2
+		case bits <= 32:  return 4
+		case bits <= 64:  return 8
+		case bits <= 128: return 16
+		}
+		// C++: "Could be an invalid range so limit it for now"
+		return 8
+
+	// C++ Reference: types.cpp type_size_of_internal, case Type_SimdVector.
+	case .Simd_Vector:
+		sv := bt.variant.(Type_Simd_Vector)
+		return int(sv.count) * type_size_of(sv.elem)
+
+	// C++ Reference: types.cpp type_size_of_internal, case Type_Union.
+	case .Union:
+		un := bt.variant.(Type_Union)
+		if len(un.variants) == 0 {
+			return 0
+		}
+		align := type_align_of(bt)
+
+		max_variant := 0
+		for variant_type in un.variants {
+			vs := type_size_of(variant_type)
+			if max_variant < vs {
+				max_variant = vs
+			}
+		}
+
+		size := 0
+		if is_type_union_maybe_pointer(bt) {
+			// A #maybe-pointer union needs no tag: the pointer's nil state IS the tag.
+			size = max_variant
+		} else {
+			tag_size := union_tag_size(bt)
+			// Align the variant block to the tag, then append the tag.
+			if tag_size > 0 {
+				size = (max_variant + tag_size - 1) - ((max_variant + tag_size - 1) % tag_size)
+			} else {
+				size = max_variant
+			}
+			size += tag_size
+		}
+		if align > 0 {
+			size = (size + align - 1) - ((size + align - 1) % align)
+		}
+		return size
+
+	// C++ Reference: types.cpp type_size_of_internal, case Type_BitField.
+	case .Bit_Field:
+		bf := bt.variant.(Type_Bit_Field)
+		return type_size_of(bf.backing_type)
+
+	// C++ Reference: types.cpp type_size_of_internal, case Type_Proc — a procedure VALUE
+	// is a pointer.
+	case .Proc:
+		return int(build_context.ptr_size)
+
+	// C++ Reference: types.cpp type_size_of_internal, case Type_Tuple.
+	case .Tuple:
+		tup := bt.variant.(Type_Tuple)
+		count := len(tup.variables)
+		if count == 0 {
+			return 0
+		}
+		align := type_align_of(bt)
+		last_offset := type_offset_of(bt, i64(count - 1))
+		size := int(last_offset) + type_size_of(entity_type(tup.variables[count - 1]))
+		if align > 0 {
+			size = (size + align - 1) - ((size + align - 1) % align)
+		}
+		return size
+
 	case:
+		// NOTE: reaching here means the kind has no size rule and silently measures 0,
+		// which then surfaces as "Cannot transmute to 'X', N vs 0 bytes" and as
+		// size-0 comparisons far from the real cause. Every kind C++ gives a size rule in
+		// types.cpp type_size_of_internal is now handled above; anything reaching here is a
+		// kind neither compiler sizes, or a genuinely new one.
 		return 0
 	}
 }
@@ -2876,6 +2976,39 @@ lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: b
 
 	} else {
 		// Handle value-level access (value.field syntax)
+
+		// C++ Reference: types.cpp:4123-4144. Dynamic arrays and maps expose a built-in
+		// `allocator` field — index 3 in Raw_Dynamic_Array, index 2 in Raw_Map. The port
+		// had neither, so `d.allocator` on a [dynamic]T reported "has no field 'allocator'"
+		// (662 instances across the sweep) and took the surrounding code with it:
+		// core/bytes/buffer.odin fails here at line 46 and every later multi-value call in
+		// the file then reports "Assignment count mismatch '2' = '1'".
+		if field_name == "allocator" {
+			#partial switch type.kind {
+			case .Dynamic_Array:
+				sel_out := sel
+				selection_add_index(&sel_out, 3)
+				sel_out.entity = alloc_entity_field(
+					nil,
+					make_token_ident("allocator"),
+					t_allocator,
+					false,
+					3,
+				)
+				return sel_out
+			case .Map:
+				sel_out := sel
+				selection_add_index(&sel_out, 2)
+				sel_out.entity = alloc_entity_field(
+					nil,
+					make_token_ident("allocator"),
+					t_allocator,
+					false,
+					2,
+				)
+				return sel_out
+			}
+		}
 
 		if type.kind == .Struct {
 			// ObjC class instance value handling
