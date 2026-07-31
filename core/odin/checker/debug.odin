@@ -54,10 +54,16 @@ debug_println :: proc(args: ..any) {
 // debug_entity_type prints entity name and type for debugging
 debug_entity_type :: proc(prefix: string, e: ^Entity) {
 	if build_context.show_debug_messages {
+		// Formatted outside the lock on purpose. type_to_string walks arbitrary checker
+		// types and asserts on malformed ones; an assertion ends the thread through
+		// runtime.trap() without unwinding, so doing this while holding debugf_mutex
+		// would leave the mutex locked and hang every other thread that logs afterwards.
+		// The lock only needs to cover the write.
+		type_str := e.type != nil ? type_to_string(e.type) : "<nil type>"
+
 		sync.lock(&debugf_mutex)
 		defer sync.unlock(&debugf_mutex)
 
-		type_str := e.type != nil ? type_to_string(e.type) : "<nil type>"
 		fmt.eprintf("[DEBUG] %s %s :: %s\n", prefix, e.token.text, type_str)
 	}
 }

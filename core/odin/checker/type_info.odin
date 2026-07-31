@@ -162,9 +162,15 @@ add_type_info_dependency :: proc(info: ^Checker_Info, decl: ^Decl_Info, t: ^Type
 	// Thread-safe insertion into type_info_deps (C++ line 881-883)
 	// During single-threaded initialization phase, skip locking to avoid issues
 	// with recursive calls from add_type_info_type_internal
-	if !in_single_threaded_checker_stage() {
+	// NOTE: the unlock must be deferred from THIS scope, not from inside the `if`. Odin's `defer`
+	// is scope-scoped, so a `defer` written inside the `if` fires at that block's closing brace -
+	// releasing the lock before the map write below and leaving the critical section empty.
+	locked := !in_single_threaded_checker_stage()
+	if locked {
 		sync.rw_mutex_lock(&decl.type_info_deps_mutex)
-		defer sync.rw_mutex_unlock(&decl.type_info_deps_mutex)
+	}
+	defer if locked {
+		sync.rw_mutex_unlock(&decl.type_info_deps_mutex)
 	}
 
 	decl.type_info_deps[actual_type] = {}
@@ -570,8 +576,14 @@ get_package_scope :: proc(info: ^Checker_Info, pkg: ^ast.Package) -> ^Scope {
 
 // set_package_scope associates a scope with a package
 // C++ Reference: parser.hpp:212 - pkg->scope = scope
-// NOTE: Cannot use pkg.scope directly because ast.Package.scope has type ^ast.Scope,
-// while checker uses ^Scope. External map required until type unification.
+//
+// NOTE: the claim this comment used to make - that pkg.scope could not be written because
+// ast.Package.scope is ^ast.Scope while the checker uses its own ^Scope - is no longer true.
+// The types are unified: checker.odin:321 declares `Scope :: ast.Scope`. The field is still
+// left unwritten, but for an entirely different reason; see the PARITY GAP note in
+// create_scope_from_package (scope.odin), which is where C++ writes it and where restoring it
+// belongs. Consumers that read pkg.scope rather than this map - check_export_entities is the
+// important one - are broken until that happens.
 set_package_scope :: proc(info: ^Checker_Info, pkg: ^ast.Package, scope: ^Scope) {
 	if pkg == nil {
 		return
@@ -592,9 +604,15 @@ find_core_entity :: proc(c: ^Checker, name: string) -> ^Entity {
 
 	// Look up entity in runtime package scope (C++ line 3162)
 	// NOTE: ast.Package doesn't have scope field, must get from Checker_Info.package_scopes
+	// A runtime package with no scope means create_package_scopes has not run over it yet -
+	// i.e. this is a check_files call that never went through Phase 1 with runtime in its file
+	// list. That is the same "runtime is not usable here" condition as runtime_pkg being nil,
+	// so it gets the same answer rather than taking the host process down with it. C++ can
+	// dereference pkg->scope unguarded (checker.cpp:3162) because its runtime package is always
+	// both present and scoped by the time init_preload runs.
 	runtime_scope := get_package_scope(&c.info, runtime_pkg)
 	if runtime_scope == nil {
-		panic(fmt.aprintf("Runtime package has no scope"))
+		return nil
 	}
 
 	e := scope_lookup_current(runtime_scope, name)
@@ -682,6 +700,21 @@ init_objc_types :: proc(c: ^Checker) {
 	}
 }
 
+// init_c_va_list_types initializes the cached C variadic types from base:intrinsics
+//
+// C++ builds `c_va_list` as a synthetic, platform-specific struct in init_universal
+// (checker.cpp:1528-1591) and registers it into base:intrinsics itself. The port sources
+// it from the package's own `c_va_list :: struct{...}` declaration instead, the same way
+// init_objc_types sources objc_object; only its identity matters to the checker, since no
+// field of it is ever named by user code.
+init_c_va_list_types :: proc(c: ^Checker) {
+	c_va_list := find_intrinsics_type(c, "c_va_list")
+	if c_va_list != nil {
+		t_c_va_list = c_va_list
+		t_c_va_list_ptr = alloc_type_pointer(c_va_list)
+	}
+}
+
 // check_single_global_entity ensures a global entity is fully checked
 // C++ Reference: /mnt/c/odin/src/checker.cpp:4938-4969
 //
@@ -704,6 +737,7 @@ check_single_global_entity :: proc(c: ^Checker, e: ^Entity, d: ^Decl_Info) {
 
 	// Create checker context (C++ line 4949)
 	ctx := make_checker_context(c)
+	defer destroy_checker_context(&ctx)
 
 	// Set up file and package context (C++ lines 4951-4954)
 	assert(d.scope.flags & {.File} != {}, "Scope must be file-level")

@@ -48,11 +48,6 @@ global_after_checking_procedure_bodies: bool = false
 // C++ Reference: checker.cpp:6374 (gb_global std::atomic<isize> total_bodies_checked)
 total_bodies_checked: int = 0
 
-// Mutex for protecting procedure check state transitions
-// C++ Reference: checker.cpp:6174-6180 (check_proc_info uses mutex)
-// This prevents multiple threads from checking the same procedure simultaneously
-check_proc_info_mutex: sync.Mutex
-
 // ======================================================================================
 // WORKER DATA STRUCTURES
 // C++ Reference: /mnt/c/odin/src/checker.cpp:6405-6410
@@ -177,7 +172,7 @@ check_procedure_later_from_entity :: proc(c: ^Checker, e: ^Entity, from_msg: str
 
 	// Skip already-checked procedures
 	// C++ Reference: checker.cpp:6120-6122
-	if .Proc_Body_Checked in e.flags {
+	if sync.atomic_load(&e.proc_body_checked) {
 		return
 	}
 
@@ -189,8 +184,8 @@ check_procedure_later_from_entity :: proc(c: ^Checker, e: ^Entity, from_msg: str
 		assert(e.aliased_of.kind == .Procedure)
 
 		// If aliased procedure is already checked, mark this as checked too
-		if .Proc_Body_Checked in e.aliased_of.flags {
-			e.flags += {.Proc_Body_Checked}
+		if sync.atomic_load(&e.aliased_of.proc_body_checked) {
+			sync.atomic_store(&e.proc_body_checked, true)
 			return
 		}
 
@@ -285,7 +280,7 @@ consume_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^
 
 	// Check current procedure checking state
 	// C++ Reference: checker.cpp:6378-6383
-	#partial switch pi.decl.proc_checked_state {
+	#partial switch sync.atomic_load(&pi.decl.proc_checked_state) {
 	case .In_Progress:
 		// Already being checked, don't re-enter
 		// C++ Reference: checker.cpp:6379-6380
@@ -306,7 +301,7 @@ consume_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^
 		// In single-threaded mode, this should never trigger
 		// C++ Reference: checker.cpp:6387-6393
 		if parent.kind == .Procedure {
-			parent_checked := .Proc_Body_Checked in parent.flags
+			parent_checked := sync.atomic_load(&parent.proc_body_checked)
 			if !parent_checked {
 				// Defer this procedure until parent is ready
 				// C++ Reference: checker.cpp:6391-6392
@@ -354,6 +349,15 @@ consume_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^
 // - 0 on success (procedure checked)
 // - 1 on failure or re-queue
 check_proc_info_worker_proc :: proc(data: rawptr) -> int {
+	// Cooperative cancellation: the error cap was hit on some thread. Instead of the C++
+	// exit(1) (see CPP_DEVIATIONS.md [EMBED-1]) every worker drops its remaining task so the
+	// pool drains and thread_pool_wait() returns promptly. Bailing here - before the
+	// parent-not-ready re-queue below - is what guarantees the queue actually empties rather
+	// than re-feeding itself.
+	if error_limit_reached() {
+		return 1
+	}
+
 	// In C++, this retrieves per-worker data via current_thread_index()
 	// C++ Reference: checker.cpp:6413-6415
 	thread_idx := current_thread_index()
@@ -376,7 +380,7 @@ check_proc_info_worker_proc :: proc(data: rawptr) -> int {
 		// This prevents race conditions in multithreaded evaluation
 		// C++ Reference: checker.cpp:6422-6423
 		if parent.kind == .Procedure {
-			parent_checked := .Proc_Body_Checked in sync.atomic_load(&parent.flags)
+			parent_checked := sync.atomic_load(&parent.proc_body_checked)
 			if !parent_checked {
 				// Re-queue this task for later (parent not ready)
 				// C++ Reference: checker.cpp:6426-6427
@@ -471,6 +475,12 @@ check_procedure_bodies :: proc(c: ^Checker) {
 		// Process all procedures in procs_to_check array
 		// C++ Reference: checker.cpp:6459-6461
 		for i in 0 ..< len(c.procs_to_check) {
+			// Cooperative cancellation, mirroring the worker path below: once the error cap
+			// is hit every further diagnostic is dropped, so there is nothing to gain from
+			// checking the remaining bodies. See CPP_DEVIATIONS.md [EMBED-1].
+			if error_limit_reached() {
+				break
+			}
 			consume_proc_info(c, c.procs_to_check[i], untyped)
 		}
 
@@ -554,45 +564,57 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 		return false
 	}
 
-	// Mutex protection for state machine (critical for thread safety)
-	// C++ Reference: checker.cpp:6175-6178
-	// Note: Using global mutex for simplicity. C++ uses per-procedure mutex.
-	sync.lock(&check_proc_info_mutex)
-	defer sync.unlock(&check_proc_info_mutex)
+	// State machine transition, guarded by this declaration's own mutex.
+	// C++ Reference: checker.cpp:6175-6196 - the C++ MUTEX_GUARD is scoped to exactly this
+	// block and locks DeclInfo::proc_checked_mutex, not a global.
+	//
+	// The guard MUST NOT extend over check_proc_body below. It is only here to make
+	// "read the state, and claim it if it is Unchecked" indivisible, so that two threads
+	// racing on the same declaration cannot both start checking it. Holding it any longer
+	// would serialise every procedure body in the program onto one thread - and, because
+	// the checker's internal invariants are enforced with panic/assert (which end the
+	// thread via runtime.trap() without unwinding), any such failure inside the body would
+	// leave the lock held forever and wedge every other thread that reaches this point.
+	// A global mutex here used to do both.
+	{
+		sync.lock(&decl.proc_checked_mutex)
+		defer sync.unlock(&decl.proc_checked_mutex)
 
-	// State machine check
-	// C++ Reference: checker.cpp:6181-6195
-	state := sync.atomic_load(&decl.proc_checked_state)
-	#partial switch state {
-	case .In_Progress:
-		// Currently being checked (by another thread in parallel mode)
-		// C++ Reference: checker.cpp:6182-6186
-		return false
+		// State machine check
+		// C++ Reference: checker.cpp:6181-6195
+		state := sync.atomic_load(&decl.proc_checked_state)
+		#partial switch state {
+		case .In_Progress:
+			// Currently being checked (by another thread in parallel mode)
+			// C++ Reference: checker.cpp:6182-6186
+			return false
 
-	case .Checked:
-		// Already checked successfully
-		// C++ Reference: checker.cpp:6187-6191
-		if decl.entity != nil {
-			assert(.Proc_Body_Checked in sync.atomic_load(&decl.entity.flags))
+		case .Checked:
+			// Already checked successfully
+			// C++ Reference: checker.cpp:6187-6191
+			if decl.entity != nil {
+				assert(sync.atomic_load(&decl.entity.proc_body_checked))
+			}
+			return true
+
+		case .Unchecked:
+			// Proceed with checking
+			// C++ Reference: checker.cpp:6192-6194
+			break
 		}
-		return true
 
-	case .Unchecked:
-		// Proceed with checking
-		// C++ Reference: checker.cpp:6192-6194
-		break
+		// Claim the procedure. From here on this thread owns the body check, and every
+		// exit path below must move the state off In_Progress.
+		// C++ Reference: checker.cpp:6196
+		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.In_Progress)
 	}
-
-	// Mark procedure as in progress (atomic store for thread safety)
-	// C++ Reference: checker.cpp:6196
-	sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.In_Progress)
 
 	// Validate procedure type
 	// C++ Reference: checker.cpp:6198-6200
 	assert(pi.type.kind == .Proc)
 	pt, pt_ok := &pi.type.variant.(Type_Proc)
 	if !pt_ok {
-		decl.proc_checked_state = .Unchecked
+		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Unchecked)
 		return false
 	}
 
@@ -612,7 +634,7 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 		// C++ Reference: checker.cpp:6207
 		error(token, "Unspecialized polymorphic procedure '%s'", name)
 
-		decl.proc_checked_state = .Unchecked
+		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Unchecked)
 		return false
 	}
 
@@ -625,7 +647,7 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 			// Never used, don't check
 			// C++ Reference: checker.cpp:6216-6218
 			// NOTE: This may need to be checked later if used elsewhere
-			decl.proc_checked_state = .Unchecked
+			sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Unchecked)
 			return false
 		}
 	}
@@ -678,14 +700,30 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	if body_was_checked {
 		// Success: Mark as checked (atomic store for thread safety)
 		// C++ Reference: checker.cpp:6253-6259
-		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Checked)
+		//
+		// DEVIATION (ordering): C++ stores ProcCheckedState_Checked first and sets
+		// EntityFlag_ProcBodyChecked second. It can afford to, because its
+		// proc_checked_mutex is held for the whole of check_proc_body_for_proc_info - so
+		// no other thread can be inside the `case ProcCheckedState_Checked` arm that
+		// asserts on the flag (checker.cpp:6532-6536) while this window is open.
+		//
+		// This port deliberately narrows that guard to the state transition alone (see the
+		// long comment above the claim, and CPP_DEVIATIONS): the C++ shape would serialise
+		// every body onto one thread and, worse, would leave the lock held forever if an
+		// internal assert tripped inside a body. The cost is that the window IS observable
+		// here, so the two writes are swapped: the flag is published before the state, and
+		// a reader that sees .Checked is therefore guaranteed to see the flag. Both writes
+		// are sequentially consistent, so the order is not reordered by the compiler or the
+		// CPU. A reader that sees the flag while the state is still .In_Progress is
+		// harmless - nothing keys off the flag alone.
 		if pi.body != nil {
 			e := pi.decl.entity
 			if e != nil {
 				// Atomic flag set for thread safety
-				sync.atomic_or(&e.flags, Entity_Flags{.Proc_Body_Checked})
+				sync.atomic_store(&e.proc_body_checked, true)
 			}
 		}
+		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Checked)
 	} else {
 		// Failure: Mark as unchecked (atomic store for thread safety)
 		// C++ Reference: checker.cpp:6260-6267
@@ -694,7 +732,7 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 			e := pi.decl.entity
 			if e != nil {
 				// Atomic flag clear for thread safety
-				sync.atomic_and(&e.flags, ~Entity_Flags{.Proc_Body_Checked})
+				sync.atomic_store(&e.proc_body_checked, false)
 			}
 		}
 	}
@@ -711,7 +749,7 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 
 	for dep in ctx.decl.deps {
 		if dep != nil && dep.kind == .Procedure {
-			if .Proc_Body_Checked not_in dep.flags {
+			if !sync.atomic_load(&dep.proc_body_checked) {
 				check_procedure_later_from_entity(c, dep, "")
 			}
 		}
@@ -728,13 +766,25 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 // make_checker_context is defined in check_collect.odin
 
 // destroy_checker_context cleans up a checker context
-// C++ Reference: Context destructor (implicit cleanup in C++)
+// C++ Reference: checker.cpp:1695-1697 (destroy_checker_context)
 //
 // Cleans up resources owned by the Checker_Context:
+// - type_path: OWNED by the root context returned from make_checker_context, freed here
 // - type_and_value_map: DELETED - now stored in Checker_Info, not owned by context
 // - untyped: Pointer to external map, NOT freed (managed elsewhere)
 // - Other fields: Primitives or pointers to external resources (not owned)
+//
+// Only call this on a context produced by make_checker_context, never on a `c := ctx^`
+// copy: copies deliberately share the root's type path, exactly as in C++.
 destroy_checker_context :: proc(ctx: ^Checker_Context) {
+	// C++ line 1696: destroy_checker_type_path(ctx->type_path)
+	// The path was allocated from the checker's allocator by make_checker_context.
+	if ctx.type_path != nil {
+		allocator := ctx.checker != nil ? ctx.checker.allocator : context.allocator
+		destroy_checker_type_path(ctx.type_path, allocator)
+		ctx.type_path = nil
+	}
+
 	// Note: ctx.untyped is a pointer to an external map (^map[^ast.Expr]^Expr_Info)
 	// It's not owned by this context, so we don't delete it.
 	// It either points to:
@@ -746,8 +796,6 @@ destroy_checker_context :: proc(ctx: ^Checker_Context) {
 	// - Primitives (ints, bools, enums, etc.) - no cleanup needed
 	// - Pointers to external resources (checker, info, file, pkg, scope, etc.) - not owned
 	// - Flags and state (bit_set types) - no cleanup needed
-
-	// Currently no cleanup needed
 }
 
 // reset_checker_context is defined in check_import_export.odin
@@ -866,7 +914,6 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 							// but then doesn't actually use that check (line 6752 is commented out)
 							// We'll print without the header for consistency with C++
 							type_str := type_to_string(e.type)
-							defer delete(type_str)
 							error_line("\t\t%s :: %s;\n", e.token.text, type_str)
 							print_count += 1
 
@@ -889,7 +936,6 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 								// Typed constant: name : type : value;
 								// C++ Reference: check_expr.cpp:6766-6770
 								type_str := type_to_string(e.type)
-								defer delete(type_str)
 								error_line("\t\t%s : %s : %s;\n", e.token.text, type_str, value_str)
 							}
 							print_count += 1
@@ -1412,7 +1458,6 @@ check_scope_usage_internal :: proc(c: ^Checker, scope: ^Scope, vet_flags_param: 
 					}
 					if !is_ref {
 						type_str := type_to_string(e.type)
-						defer delete(type_str)
 						warning(e.token, "Declaration of '%s' may cause a stack overflow due to its type '%s' having a size of %d bytes", e.token.text, type_str, sz)
 					}
 				}
@@ -1559,7 +1604,6 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 			is_poly := is_type_polymorphic(e.type)
 			if is_poly && is_type_polymorphic_record_unspecialized(e.type) {
 				type_str := type_to_string(e.type)
-				defer delete(type_str)
 
 				msg := "Unspecialized polymorphic types are not allowed in procedure parameters, got %s"
 				if e_var, ok := &e.variant.(Entity_Variable); ok && e_var.type_expr != nil {
@@ -2228,7 +2272,7 @@ check_safety_all_procedures_for_unchecked :: proc(c: ^Checker) {
 
 		// Check if procedure needs checking
 		// C++ Reference: checker.cpp:6349-6356
-		if e != nil && .Proc_Body_Checked not_in e.flags {
+		if e != nil && !sync.atomic_load(&e.proc_body_checked) {
 			if .Used in e.flags {
 				// Debug output (commented in C++)
 				// C++ Reference: checker.cpp:6351-6353

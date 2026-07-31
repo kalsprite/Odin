@@ -34,9 +34,37 @@ import "core:odin/tokenizer"
 // C++ Reference: checker.cpp:7282-7542 (check_parsed_files)
 //
 // Returns true if checking completed without errors, false otherwise.
+//
+// ERROR LIMIT: if the error cap is hit mid-run, error_va latches
+// global_error_collector.limit_reached instead of terminating the process (see
+// CPP_DEVIATIONS.md [EMBED-1]). This procedure then unwinds at the next phase boundary and
+// returns false. The distinction between "finished and found errors" and "gave up early,
+// results are a truncated prefix" is NOT carried in this bool - callers must consult
+// error_limit_reached(), exactly as they already consult error_count() for the error total.
+// check_package_from_path surfaces both on Package_Check_Result.
 check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	if len(files) == 0 {
 		return true
+	}
+
+	// The MPSC queues are producer-side handoff points: an entity is owned by a Checker_Info
+	// array only once it has been merged across, and destroy_checker_info requires every queue
+	// to be empty. The unwind points below return at phase boundaries when the error cap is
+	// hit, skipping the later phases - including the check_merge_queues_into_arrays calls that
+	// would have taken ownership of what Phase 4 produced. Merging on the way out makes
+	// "queues are drained by the time check_files returns" hold on every exit path rather than
+	// only the one that runs to the bottom, so a future unwind point cannot silently strand
+	// entities. On the normal path the queues are already empty here and this is a no-op.
+	defer {
+		check_merge_queues_into_arrays(c)
+
+		// The queues that no array owns belong to phases an unwind skipped outright, so
+		// there is nothing to merge them into - see discard_abandoned_queue_work. This is
+		// deliberately conditional: on a run that completes, those phases are responsible
+		// for their own queues, and mpsc_destroy's assertion is what proves they ran.
+		if error_limit_reached() {
+			discard_abandoned_queue_work(c)
+		}
 	}
 
 	// =========================================================================
@@ -78,6 +106,12 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// C++ line 7323: check_merge_queues_into_arrays(c)
 	check_merge_queues_into_arrays(c)
 
+	// Unwind point: collection produced more diagnostics than the cap allows. Everything
+	// after this would append to a list that is already being discarded.
+	if error_limit_reached() {
+		return false
+	}
+
 	// =========================================================================
 	// Phase 4: Global Entity Type Checking
 	// C++ Reference: checker.cpp:7327-7337
@@ -86,6 +120,7 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// Create base context for global checking
 	// C++ line 7328-7329: Context ctx = make_context(c.info)
 	ctx := make_checker_context(c)
+	defer destroy_checker_context(&ctx)
 
 	// Type check all global entities in dependency order
 	// C++ line 7331: check_all_global_entities(c)
@@ -94,6 +129,12 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// Initialize preloaded types (runtime dependencies)
 	// C++ line 7333: init_preload(c)
 	init_preload(c)
+
+	// Unwind point: skip procedure body checking, which is by far the most expensive phase
+	// and the one most likely to keep generating dropped diagnostics.
+	if error_limit_reached() {
+		return false
+	}
 
 	// =========================================================================
 	// Phase 5: Procedure Body Checking
@@ -118,9 +159,23 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// C++ line 7343: check_procedure_bodies(c)
 	check_procedure_bodies(c)
 
+	// Resolve `foreign import` library paths and finish WASM foreign declarations.
+	// C++ Reference: checker.cpp:7710-7711 - "check foreign import fullpaths", between
+	// check_procedure_bodies and the merge below. This is the sole consumer of
+	// foreign_imports_to_check_fullpaths and foreign_decls_to_check; both are producer-side
+	// queues filled during collection, so if this never runs their contents are stranded and
+	// Entity_Library_Name.paths is never populated.
+	check_foreign_import_fullpaths(&ctx)
+
 	// Drain queues again after procedure checking
 	// C++ line 7345: check_merge_queues_into_arrays(c)
 	check_merge_queues_into_arrays(c)
+
+	// Unwind point: the post-processing and validation phases below assume the procedure
+	// bodies were all checked. After a truncated Phase 5 their findings would be noise.
+	if error_limit_reached() {
+		return false
+	}
 
 	// =========================================================================
 	// Phase 6: Post-Processing and Validation
@@ -134,6 +189,10 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// Sort init/fini procedures by priority
 	// C++ line 7377: check_sort_init_and_fini_procedures(c)
 	check_sort_init_and_fini_procedures(c)
+
+	// Report intrinsics.__entry_point calls made in a program that has no entry point.
+	// C++ Reference: checker.cpp:7900-7909
+	check_intrinsics_entry_point_usage(c)
 
 	// Check test procedures
 	// C++ line 7400: check_test_procedures(c)
@@ -217,6 +276,7 @@ register_packages_from_files :: proc(c: ^Checker, files: []^ast.File) {
 // In C++, this happens as part of package creation. Here we do it as a separate step.
 create_package_scopes :: proc(c: ^Checker) {
 	ctx := make_checker_context(c)
+	defer destroy_checker_context(&ctx)
 	for _, pkg in c.info.packages {
 		// Skip if already has a scope
 		if get_package_scope(&c.info, pkg) != nil {

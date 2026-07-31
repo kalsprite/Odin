@@ -77,7 +77,6 @@ check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 		} else {
 			// ERROR_BLOCK()
 			t_str := type_to_string(operand.type)
-			defer delete(t_str)
 
 			if is_type_polymorphic(operand.type) {
 				error(operand.expr, "Cannot assign a non-specialized polymorphic type '%s' to variable '%s'", t_str, e.token.text)
@@ -129,14 +128,12 @@ check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 				return nil
 			}
 			str := type_to_string(t)
-			defer delete(str)
 			error(operand.expr, "Invalid use of a non-specialized polymorphic type '%s' in %s", str, context_name)
 			set_entity_type(e, t_invalid)
 			return nil
 		} else if is_type_empty_union(t) {
 			// C++ Reference: check_decl.cpp:105-110
 			str := type_to_string(t)
-			defer delete(str)
 			error(e.token, "An empty union '%s' cannot be instantiated in %s", str, context_name)
 			set_entity_type(e, t_invalid)
 			return nil
@@ -265,12 +262,10 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 	if entity_type(e) != nil {
 		if is_type_polymorphic(base_type(entity_type(e))) {
 			str := type_to_string(entity_type(e))
-			defer delete(str)
 			error(e.token, "Invalid use of a polymorphic type '%s' in %s", str, context_name)
 			set_entity_type(e, t_invalid)
 		} else if is_type_empty_union(entity_type(e)) {
 			str := type_to_string(entity_type(e))
-			defer delete(str)
 			error(e.token, "An empty union '%s' cannot be instantiated in %s", str, context_name)
 			set_entity_type(e, t_invalid)
 		}
@@ -305,7 +300,6 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		if found != nil {
 			f := found
 			pos := token_pos_to_string(f.token.pos)
-			defer delete(pos)
 
 			this_type := base_type(entity_type(e))
 			other_type := base_type(entity_type(f))
@@ -360,10 +354,8 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 							// Get token and type for error message
 							tok := ast_token(elem)
 							pos := token_pos_to_string(tok.pos)
-							defer delete(pos)
 							elem_type := type_of_expr(elem, ctx.info)
 							s := type_to_string(elem_type)
-							defer delete(s)
 							error_line("%s Element is not constant, which is required for @(rodata), of type %s\n", pos, s)
 						}
 					}
@@ -623,6 +615,21 @@ check_entity_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, name
 		}
 		e.state = .In_Progress
 
+		// C++ Reference: check_decl.cpp:2032-2046
+		// Entities whose type can name other entities take part in cycle detection: push
+		// them onto the shared type path for the duration of their declaration check.
+		track_cycle_path := false
+		#partial switch e.kind {
+		case .Variable, .Constant, .Type_Name:
+			track_cycle_path = true
+		}
+		if track_cycle_path {
+			check_type_path_push(&c, e)
+		}
+		defer if track_cycle_path {
+			check_type_path_pop(&c)
+		}
+
 		#partial switch e.kind {
 		case .Variable:
 			check_global_variable_decl(&c, e, d.type_expr, d.init_expr)
@@ -656,8 +663,7 @@ get_type_and_value :: proc(ctx: ^Checker_Context, expr: ^ast.Node) -> Type_And_V
 	if expr == nil {
 		return {}
 	}
-	key := rawptr(expr)
-	if tv, found := ctx.info.type_and_value_map[key]; found {
+	if tv, found := tav_lookup(ctx.info, expr); found {
 		return tv
 	}
 	return {}
@@ -684,6 +690,7 @@ check_init_constant :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 	// C++ Reference: check_decl.cpp:325-333
 	if operand.mode != .Constant {
 		str := expr_to_string(operand.expr)
+		defer delete(str)
 		error(operand.expr, "'%s' is not a compile-time known constant", str)
 		if entity_type(e) == nil {
 			set_entity_type(e, t_invalid)
@@ -840,6 +847,7 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 				}
 				if !check_is_assignable_to(ctx, &x, entity_type(e)) {
 					expr_str := expr_to_string(init)
+					defer delete(expr_str)
 					op_type_str := type_to_string(entity_type(entity))
 					type_str := type_to_string(entity_type(e))
 					error(e.token, "Cannot assign '%s' of type '%s' to '%s'", expr_str, op_type_str, type_str)
@@ -869,6 +877,7 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 	// C++ Reference: check_decl.cpp:756-761
 	if operand.mode == .Invalid || base_type(operand.type) == t_invalid {
 		str := expr_to_string(init)
+		defer delete(str)
 		error(init, "Invalid declaration value '%s'", str)
 	}
 
@@ -1053,7 +1062,6 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		decl_type = check_type_expr(ctx, d.type_expr, nil)
 		if !is_type_proc(decl_type) {
 			str := type_to_string(decl_type)
-			defer delete(str)
 			error(d.type_expr, "Expected a procedure type, got '%s'", str)
 		}
 	}
@@ -1077,8 +1085,6 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 			op_type_str := type_to_string(e.type)
 			type_str := type_to_string(decl_type)
 			defer delete(expr_str)
-			defer delete(op_type_str)
-			defer delete(type_str)
 			error(e.token, "Cannot assign '%s' of type '%s' to '%s'", expr_str, op_type_str, type_str)
 		}
 	}
@@ -1103,7 +1109,6 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		// C++ Reference: checker.cpp validation for init procedures
 		if pt.param_count != 0 || pt.result_count != 0 {
 			type_str := type_to_string(proc_type)
-			defer delete(type_str)
 			error(e.token, "@(init) procedures must have a signature type with no parameters nor results, got %s", type_str)
 		}
 		e.flags += {.Init}
@@ -1112,7 +1117,6 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		// C++ Reference: checker.cpp validation for fini procedures
 		if pt.param_count != 0 || pt.result_count != 0 {
 			type_str := type_to_string(proc_type)
-			defer delete(type_str)
 			error(e.token, "@(fini) procedures must have a signature type with no parameters nor results, got %s", type_str)
 		}
 		e.flags += {.Fini}
@@ -1238,7 +1242,6 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		init_core_source_code_location(ctx.checker)
 		if !is_valid_instrumentation_call(e.type) {
 			s := type_to_string(e.type)
-			defer delete(s)
 			error(e.token, "@(instrumentation_enter) procedures must have the type '%s', got %s", instrumentation_proc_type_str, s)
 		}
 		if (ctx.scope.flags & {.File, .Pkg}) == {} {
@@ -1258,7 +1261,6 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		init_core_source_code_location(ctx.checker)
 		if !is_valid_instrumentation_call(e.type) {
 			s := type_to_string(e.type)
-			defer delete(s)
 			error(e.token, "@(instrumentation_exit) procedures must have the type '%s', got %s", instrumentation_proc_type_str, s)
 		}
 		if (ctx.scope.flags & {.File, .Pkg}) == {} {
@@ -1333,7 +1335,6 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 			if e.pkg.kind != .Runtime {
 				if pt.param_count != 0 || pt.result_count != 0 {
 					str := type_to_string(proc_type)
-					defer delete(str)
 					error(e.token, "Procedure type of 'main' was expected to be 'proc()', got %s", str)
 				}
 				if pt.calling_convention != default_calling_convention() {
@@ -1465,7 +1466,6 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 			fp := &ctx.info.foreigns
 			if found := fp[name]; found != nil {
 				pos := token_pos_to_string(found.token.pos)
-				defer delete(pos)
 				error(d.proc_lit, "Non unique linking name for procedure '%s'\n\tother at %s", name, pos)
 			} else if name == "main" {
 				if e.pkg != nil && e.pkg.kind != .Runtime {
@@ -1545,7 +1545,6 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 			if e.kind == .Variable {
 				if !is_type_proc(entity_type(e)) {
 					s := type_to_string(entity_type(e))
-					defer delete(s)
 					error(arg, "Expected a procedure, got %s", s)
 					continue
 				}
@@ -1638,7 +1637,6 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 				// C++ Reference: check_decl.cpp:1883-1886
 				if is_invalid {
 					pos_str := token_pos_to_string(pos)
-					defer delete(pos_str)
 					error_line("\tprevious procedure at %s\n", pos_str)
 					set_entity_type(q, t_invalid)
 				}
@@ -1869,17 +1867,32 @@ check_foreign_import_fullpaths :: proc(ctx: ^Checker_Context) {
 			continue
 		}
 
-		// Get file context for path resolution (C++ line 5394-5399)
-		// C++ Reference: decl->file()->fullpath at checker.cpp:5413
-		// Get base directory from source file for resolving relative library paths
+		// Get file context for path resolution
+		// C++ Reference: checker.cpp:5728-5734 - `AstFile *f = decl->file();
+		// reset_checker_context(&ctx, f, &untyped);` followed by
+		// `String base_dir = dir_from_path(decl->file()->fullpath);`
+		//
+		// The context must be re-pointed at the file that owns *this* declaration: the queue
+		// is filled from every file in the program, so the caller's file/scope says nothing
+		// about the entry being processed. The path expressions below are checked in this
+		// file's scope, and relative library paths resolve against this file's directory.
+		decl_file := get_file_from_node(ctx.info, lib.decl)
+		if decl_file != nil {
+			reset_checker_context(ctx, decl_file)
+		}
+		// C++ line 5734: GB_ASSERT(ctx.scope == e->scope);
 		base_dir := ""
-		if ctx.file != nil {
-			base_dir = filepath.dir(ctx.file.fullpath, context.temp_allocator)
+		if decl_file != nil {
+			// NOTE: filepath.dir does not allocate - the result is a substring of the file's
+			// fullpath, which outlives this scope.
+			base_dir = filepath.dir(decl_file.fullpath)
 		}
 
 		// Evaluate path expressions to strings (C++ line 5401-5435)
-		fullpaths := make([dynamic]string, 0, len(decl.fullpaths), context.temp_allocator)
-		defer delete(fullpaths)
+		// NOTE: this array outlives the loop iteration - `lib.paths` below aliases its backing
+		// storage and is read for the rest of the checker's life (and by the linker driver).
+		// C++ allocates it from permanent_allocator() for the same reason (checker.cpp:5738).
+		fullpaths := make([dynamic]string, 0, len(decl.fullpaths), ctx.checker.allocator)
 
 		for fp_expr in decl.fullpaths {
 			// Evaluate expression to constant string (C++ line 5407-5420)
@@ -1903,7 +1916,6 @@ check_foreign_import_fullpaths :: proc(ctx: ^Checker_Context) {
 
 			if !is_type_string(o.type) {
 				str := type_to_string(o.type)
-				defer delete(str)
 				error_node(fp_expr, "Expected a constant string value, got value of type '%s'", str)
 				continue
 			}
@@ -1928,24 +1940,48 @@ check_foreign_import_fullpaths :: proc(ctx: ^Checker_Context) {
 			// Resolve path (C++ line 5425-5431)
 			fullpath := file_str
 
+			// A `system:` library is named, not located - see below. Tracked separately so
+			// the path normalisation at the end of the loop leaves it alone.
+			is_system_library := false
+
 			// Check for special collections (e.g., "system:library")
 			// C++ Reference: determine_path_from_string in build_settings.cpp
 			colon_idx := strings.index_byte(file_str, ':')
 			if colon_idx > 0 {
+				collection_name := file_str[:colon_idx]
+
 				// Has a colon - could be collection path or Windows drive letter
 				// Windows drive letters are single character (e.g., "C:\path")
 				if colon_idx == 1 && len(file_str) > 2 && file_str[2] == '\\' {
 					// Windows absolute path with drive letter - not a collection
 					fullpath = file_str
+				} else if collection_name == "system" {
+					// The 'system' collection is reserved for 'foreign import' and is
+					// deliberately NOT resolved against a directory: what follows the colon
+					// is a system library name handed to the linker as-is ("system:c" ->
+					// -lc), so there is nothing on disk to look up and no base_dir to join
+					// against. Resolving it would both fabricate a bogus path and, since
+					// library_collections is currently never populated, report every
+					// `foreign import "system:..."` in core and vendor (321 of them) as an
+					// unknown collection.
+					// C++ Reference: parser.cpp determine_path_from_string - `if
+					// (collection_name == "system") { *path = file_str; return true; }`,
+					// guarded so that only Ast_ForeignImportDecl may use it.
+					is_system_library = true
+					fullpath = file_str[colon_idx + 1:]
 				} else {
 					// Collection path format: "collection:path/to/lib"
-					collection_name := file_str[:colon_idx]
 					lib_path := file_str[colon_idx + 1:]
 
 					// Look up collection path
 					if collection_path, found := find_library_collection_path(collection_name); found {
 						// Join collection path with library path
-						fullpath = filepath.join({collection_path, lib_path}, context.temp_allocator)
+						joined, join_err := filepath.join({collection_path, lib_path}, context.temp_allocator)
+						if join_err != nil {
+							error_node(fp_expr, "Failed to resolve foreign library path '%s'", file_str)
+							continue
+						}
+						fullpath = joined
 					} else {
 						// Unknown collection - report error but continue with original path
 						error_node(fp_expr, "Unknown library collection '%s'", collection_name)
@@ -1954,13 +1990,23 @@ check_foreign_import_fullpaths :: proc(ctx: ^Checker_Context) {
 				}
 			} else if len(base_dir) > 0 && !filepath.is_abs(file_str) {
 				// Relative path - resolve relative to source file
-				fullpath = filepath.join({base_dir, file_str}, context.temp_allocator)
+				joined, join_err := filepath.join({base_dir, file_str}, context.temp_allocator)
+				if join_err != nil {
+					error_node(fp_expr, "Failed to resolve foreign library path '%s'", file_str)
+					continue
+				}
+				fullpath = joined
 			}
 
 			// Normalize path (convert to absolute if possible)
 			// C++ uses determine_path_from_string (line 5427-5430)
-			if !strings.contains(fullpath, ":") && !filepath.is_abs(fullpath) && len(base_dir) > 0 {
-				fullpath = filepath.join({base_dir, fullpath}, context.temp_allocator)
+			if !is_system_library && !strings.contains(fullpath, ":") && !filepath.is_abs(fullpath) && len(base_dir) > 0 {
+				joined, join_err := filepath.join({base_dir, fullpath}, context.temp_allocator)
+				if join_err != nil {
+					error_node(fp_expr, "Failed to resolve foreign library path '%s'", file_str)
+					continue
+				}
+				fullpath = joined
 			}
 
 			append(&fullpaths, strings.clone(fullpath, ctx.checker.allocator))
@@ -2242,7 +2288,6 @@ check_rtti_type_disallowed :: proc(ctx: ^Checker_Context, pos: tokenizer.Token, 
 	if ctx.info.build_context != nil && ctx.info.build_context.no_rtti && type != nil {
 		if is_type_any(type) {
 			t := type_to_string(type)
-			defer delete(t)
 			error(pos, format_message, t)
 			return true
 		}

@@ -73,7 +73,9 @@ basic_flags_table := [Basic_Kind]Basic_Flags {
 	// C++ lines 505-508
 	.Int                = {.Integer},
 	.Uint               = {.Integer, .Unsigned},
-	.Uintptr            = {.Integer, .Unsigned, .Pointer},
+	// NOTE: `uintptr` is NOT flagged as a pointer; C++ types.cpp:522 gives it only
+	// `BasicFlag_Integer | BasicFlag_Unsigned`. Only `rawptr` carries BasicFlag_Pointer.
+	.Uintptr            = {.Integer, .Unsigned},
 	.Rawptr             = {.Pointer},
 
 	// String types

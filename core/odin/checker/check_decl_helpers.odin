@@ -172,19 +172,22 @@ check_unpack_arguments :: proc(ctx: ^Checker_Context, lhs: []^Entity, operands: 
 		type_hint: ^Type = nil
 
 		if len(lhs) > 0 {
-			if tuple_index < var_index {
+			if tuple_index < var_index && tuple_index < len(lhs) {
 				// C++ lines 6105-6110: Non-variadic parameter
 				e := lhs[tuple_index]
 				if e != nil {
 					type_hint = e.type
 				}
-			} else if is_variadic {
+			} else if is_variadic && var_index >= 0 && var_index < len(lhs) {
 				// C++ lines 6111-6118: Variadic parameter
+				// C++ GB_ASSERTs that the entity is an ellipsis slice; the port
+				// degrades to "no type hint" instead so a malformed signature
+				// cannot take the process down.
 				e := lhs[var_index]
-				if e != nil {
-					assert(.Ellipsis in e.flags)
-					assert(is_type_slice(e.type))
-					type_hint = e.type.variant.(Type_Slice).elem
+				if e != nil && e.type != nil && .Ellipsis in e.flags {
+					if slice, is_slice := e.type.variant.(Type_Slice); is_slice {
+						type_hint = slice.elem
+					}
 				}
 			}
 		}
@@ -1452,7 +1455,6 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 			// C++ lines 485-490: SIMD vector and SOA pointer validation
 			type_str := type_to_string(entity_type(e))
 			error(init_expr, "'distinct' cannot be applied to '%s'", type_str)
-			delete(type_str)
 			is_distinct = false
 		}
 	} else {
@@ -1525,7 +1527,6 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 				if !has_type_got_objc_class_attribute(superclass_type) {
 					superclass_str := type_to_string(superclass_type)
 					error(init_expr, "@(objc_superclass) Superclass '%s' must have a valid @(objc_class) attribute", superclass_str)
-					delete(superclass_str)
 				}
 				type_name.objc_superclass = superclass_type
 			}
@@ -1682,8 +1683,6 @@ check_init_variable_internal :: proc(ctx: ^Checker_Context, entity: ^Entity, ope
 		t1_str := type_to_string(operand.type)
 		t2_str := type_to_string(entity.type)
 		error(init, "Cannot assign value of type '%s' to variable of type '%s'", t1_str, t2_str)
-		delete(t1_str)
-		delete(t2_str)
 		return false
 	}
 
@@ -2078,7 +2077,6 @@ check_foreign_procedure :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info
 				error(d.proc_lit,
 					"Redeclaration of foreign procedure '%s' with different type signatures\n\tat %s",
 					name, pos_str)
-				delete(pos_str)
 			}
 		} else if !signature_parameter_similar_enough(this_type, other_type) {
 			// C++ lines 1239-1243: Non-procedure foreign entity type mismatch
@@ -2086,7 +2084,6 @@ check_foreign_procedure :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info
 			error(d.proc_lit,
 				"Foreign entity '%s' previously declared elsewhere with a different type\n\tat %s",
 				name, pos_str)
-			delete(pos_str)
 		}
 	} else if name == "main" {
 		// C++ lines 1245-1246: Reserved link name check
@@ -2100,18 +2097,24 @@ check_foreign_procedure :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info
 // init_core_source_code_location ensures core:runtime.Source_Code_Location is loaded
 // C++ Reference: /mnt/c/odin/src/checker.cpp:3362-3368
 init_core_source_code_location :: proc(c: ^Checker) {
-	// C++ Reference: checker.cpp:3363-3365 - Early return if already loaded
-	if c.info.cached_source_code_location != nil {
+	// C++ Reference: checker.cpp:3587-3589 - Early return if already loaded.
+	// NOTE: guard on the GLOBAL, matching C++. See init_mem_allocator.
+	if t_source_code_location != nil {
 		return
 	}
 
-	// C++ Reference: checker.cpp:3366 - Load Source_Code_Location from core:runtime
-	c.info.cached_source_code_location = find_core_type(c, "Source_Code_Location")
-	if c.info.cached_source_code_location == nil {
+	// C++ Reference: checker.cpp:3590 - Load Source_Code_Location from core:runtime
+	scl := find_core_type(c, "Source_Code_Location")
+	if scl == nil {
 		// Runtime package not loaded - skip
 		return
 	}
 
-	// C++ Reference: checker.cpp:3367 - Create pointer type
-	c.info.cached_source_code_location_ptr = alloc_type_pointer(c.info.cached_source_code_location)
+	// C++ Reference: checker.cpp:3591 - Create pointer type.
+	// The checker reads the globals; the cached_ fields are not read anywhere.
+	t_source_code_location = scl
+	t_source_code_location_ptr = alloc_type_pointer(scl)
+
+	c.info.cached_source_code_location = scl
+	c.info.cached_source_code_location_ptr = t_source_code_location_ptr
 }

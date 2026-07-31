@@ -125,13 +125,22 @@ check_load_directive :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^as
 	if ctx.file != nil && ctx.file.fullpath != "" && !filepath.is_abs(path_str) {
 		// Get directory of source file and join with relative path
 		src_dir := filepath.dir(ctx.file.fullpath)
-		full_path = filepath.join({src_dir, path_str})
+		joined, join_err := filepath.join({src_dir, path_str})
+		if join_err != nil {
+			if err_on_not_found {
+				error_node(arg, "'#%s' could not resolve path for '%s'", name, path_str)
+			}
+			return .Not_Found
+		}
+		full_path = joined
 	}
 
 	// Try to read the file
 	// C++ Reference: check_builtin.cpp:1862-1875
-	data, read_ok := os.read_entire_file(full_path)
-	if !read_ok {
+	// NOTE: the contents become a constant value on the operand, so they must be allocated
+	// persistently rather than in the temporary allocator.
+	data, read_err := os.read_entire_file(full_path, context.allocator)
+	if read_err != nil {
 		if err_on_not_found {
 			error_node(arg, "'#%s' cannot load file '%s'", name, path_str)
 		}
@@ -226,6 +235,7 @@ check_array_range :: proc(ctx: ^Checker_Context, node: ^ast.Expr, is_for_loop: b
 			xt := type_to_string(x.type)
 			yt := type_to_string(y.type)
 			expr_str := expr_to_string(x.expr)
+			defer delete(expr_str)
 			error(binary.op, "Mismatched types in interval expression '%s' : '%s' vs '%s'", expr_str, xt, yt)
 		}
 		return false
@@ -455,6 +465,18 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 	if entity.state == .Unresolved {
 		// Trigger lazy resolution
 		check_entity_decl(ctx, entity, nil, named_type)
+	}
+
+	// C++ Reference: check_expr.cpp:1957-1968
+	// Report an illegal declaration cycle before the `type == nil` bail-out below: an
+	// entity caught mid-cycle has no type yet, so leaving this until the .Type_Name case
+	// further down means the cycle is never reported and resolution keeps recursing.
+	#partial switch entity.kind {
+	case .Constant, .Variable, .Type_Name:
+		if check_cycle(ctx, entity, true) {
+			o.type = t_invalid
+			return entity
+		}
 	}
 
 	// Extract type from entity - different variants store it differently
@@ -1673,9 +1695,36 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 	// Special cases like == and != allow type checking
 	#partial switch op.kind {
 	case .Cmp_Eq, .Not_Eq:
-		// Allow type or expression on either side
-		check_expr(ctx, x, be.left)
-		check_expr(ctx, &y, be.right)
+		// NOTE(bill) in C++: allow comparisons between types.
+		// C++ Reference: check_expr.cpp:4382-4410
+		//
+		// Each side is checked with the *other* side's type as its hint, which is the only
+		// thing that gives an implicit selector something to resolve against:
+		// `ODIN_ENDIAN == .Little` has to learn `.Little`'s type from ODIN_ENDIAN. When the
+		// implicit selector is on the left instead, the order is reversed.
+		if is_ise_expr(be.left) {
+			// Evaluate the right before the left for an '.X' expression
+			check_expr_or_type(ctx, &y, be.right, nil)
+			check_expr_or_type(ctx, x, be.left, y.type)
+		} else {
+			check_expr_or_type(ctx, x, be.left, nil)
+			check_expr_or_type(ctx, &y, be.right, x.type)
+		}
+
+		// If exactly one side is a type, that is an error unless the other is a typeid.
+		// C++ Reference: check_expr.cpp:4394-4409
+		{
+			x_is_type := x.mode == .Type
+			y_is_type := y.mode == .Type
+			if x_is_type != y_is_type {
+				if x_is_type && !is_type_typeid(y.type) {
+					error_operand_not_expression(x)
+				}
+				if y_is_type && !is_type_typeid(x.type) {
+					error_operand_not_expression(&y)
+				}
+			}
+		}
 
 	case .In, .Not_In:
 		// C++ Reference: check_expr.cpp:4065-4156
@@ -1979,6 +2028,29 @@ check_unary_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node) {
 		return
 	}
 
+	// '**x' is the expand_values operator: **x == expand_values(x)
+	// C++ Reference: check_expr.cpp:2995-3035 (case Token_MulMul), handled before check_unary_op.
+	if op.kind == .Mul_Mul {
+		if o.type == nil {
+			return
+		}
+		if o.mode == .Type {
+			type_str := type_to_string(o.type)
+			error(node, "Cannot apply '**' to a type '%s', the operand must be a value of struct or array type", type_str)
+		}
+		result, ok2 := expand_values_tuple_type(ctx, o.type)
+		if !ok2 {
+			type_str := type_to_string(o.type)
+			error(node, "Expected a struct or array type to 'expand_values', got '%s'", type_str)
+			o.mode = .Invalid
+			o.type = t_invalid
+			return
+		}
+		o.type = result
+		o.mode = .Value
+		return
+	}
+
 	// Handle address-of operator specially
 	if op.kind == .And {
 		// Address-of operator: check addressability
@@ -2137,7 +2209,9 @@ check_unary_op :: proc(ctx: ^Checker_Context, o: ^Operand, op: tokenizer.Token) 
 
 	case .Pointer:
 		// Dereference operator - check for pointer type
-		if !is_type_pointer(type) {
+		// C++ Reference: check_expr.cpp:12569 - the deref path tests `t->kind == Type_Pointer`
+		// directly rather than is_type_pointer, because `rawptr` cannot be dereferenced.
+		if type.kind != .Pointer {
 			error(op.pos, "Cannot dereference non-pointer type '%s'", type_to_string(o.type))
 			return false
 		}
@@ -2253,9 +2327,16 @@ check_get_expr_info :: proc(ctx: ^Checker_Context, expr: ^ast.Expr) -> ^Expr_Inf
 
 	// Fall back to global untyped map with mutex protection
 	// C++ Reference: checker.cpp uses mutex for thread safety
-	if !in_single_threaded_checker_stage() {
+	//
+	// NOTE: the unlock must be deferred from THIS scope, not from inside the `if`. Odin's `defer`
+	// is scope-scoped, so a `defer` written inside the `if` fires at that block's closing brace -
+	// releasing the lock before the map access below and leaving the critical section empty.
+	locked := !in_single_threaded_checker_stage()
+	if locked {
 		sync.shared_lock(&ctx.info.global_untyped_mutex)
-		defer sync.shared_unlock(&ctx.info.global_untyped_mutex)
+	}
+	defer if locked {
+		sync.shared_unlock(&ctx.info.global_untyped_mutex)
 	}
 	if info, found := ctx.info.global_untyped[expr]; found {
 		return info
@@ -2285,9 +2366,14 @@ check_set_expr_info :: proc(ctx: ^Checker_Context, expr: ^ast.Expr, mode: Addres
 	} else {
 		// Use mutex protection for global untyped map
 		// C++ Reference: checker.cpp uses mutex for thread safety
-		if !in_single_threaded_checker_stage() {
+		// NOTE: see check_get_expr_info - the unlock must be deferred from this scope, not from
+		// inside the `if`, or the critical section is empty.
+		locked := !in_single_threaded_checker_stage()
+		if locked {
 			sync.lock(&ctx.info.global_untyped_mutex)
-			defer sync.unlock(&ctx.info.global_untyped_mutex)
+		}
+		defer if locked {
+			sync.unlock(&ctx.info.global_untyped_mutex)
 		}
 		ctx.info.global_untyped[expr] = info
 	}
@@ -2307,9 +2393,14 @@ check_remove_expr_info :: proc(ctx: ^Checker_Context, expr: ^ast.Expr) {
 	} else {
 		// Use mutex protection for global untyped map
 		// C++ Reference: checker.cpp uses mutex for thread safety
-		if !in_single_threaded_checker_stage() {
+		// NOTE: see check_get_expr_info - the unlock must be deferred from this scope, not from
+		// inside the `if`, or the critical section is empty.
+		locked := !in_single_threaded_checker_stage()
+		if locked {
 			sync.lock(&ctx.info.global_untyped_mutex)
-			defer sync.unlock(&ctx.info.global_untyped_mutex)
+		}
+		defer if locked {
+			sync.unlock(&ctx.info.global_untyped_mutex)
 		}
 		delete_key(&ctx.info.global_untyped, expr)
 	}
@@ -2337,9 +2428,16 @@ add_type_and_value :: proc(ctx: ^Checker_Context, expr: ^ast.Node, mode: Address
 
 	// Acquire mutex for thread safety during map operations
 	// C++ Reference: checker.cpp:1784-1791
-	if !in_single_threaded_checker_stage() {
+	//
+	// NOTE: see check_get_expr_info - the unlock must be deferred from this scope, not from inside
+	// the `if`. This one mattered: the unprotected write to type_and_value_map below was corrupting
+	// the map under the threaded checker ("double free or corruption" in map_grow_dynamic).
+	locked := !in_single_threaded_checker_stage()
+	if locked {
 		sync.lock(&ctx.info.type_and_value_mutex)
-		defer sync.unlock(&ctx.info.type_and_value_mutex)
+	}
+	defer if locked {
+		sync.unlock(&ctx.info.type_and_value_mutex)
 	}
 
 	// Store in map using rawptr key (pointer identity)
@@ -2436,9 +2534,15 @@ type_and_value_of_expr :: proc(ctx: ^Checker_Context, expr: ^ast.Node) -> (type:
 
 	// Acquire shared lock for thread-safe map read
 	// C++ Reference: checker.cpp uses mutex for thread safety
-	if !in_single_threaded_checker_stage() {
+	//
+	// NOTE: see check_get_expr_info - the unlock must be deferred from this scope, not from inside
+	// the `if`, or the critical section is empty.
+	locked := !in_single_threaded_checker_stage()
+	if locked {
 		sync.shared_lock(&ctx.info.type_and_value_mutex)
-		defer sync.shared_unlock(&ctx.info.type_and_value_mutex)
+	}
+	defer if locked {
+		sync.shared_unlock(&ctx.info.type_and_value_mutex)
 	}
 
 	// Look up in map
@@ -2449,6 +2553,43 @@ type_and_value_of_expr :: proc(ctx: ^Checker_Context, expr: ^ast.Node) -> (type:
 
 	// Not found - return invalid
 	return nil, {}, .Invalid
+}
+
+// tav_lookup returns the Type_And_Value recorded for `node`, under the shared side of
+// Checker_Info.type_and_value_mutex.
+//
+// EVERY read of Checker_Info.type_and_value_map must go through here. C++ has no such map: it
+// stores the Type_And_Value on the AST node itself (`expr->tav`), so a reader can never be
+// racing a rehash. The port keeps the data in a `map[rawptr]Type_And_Value` on the shared
+// Checker_Info instead, which turns what is a plain field read in C++ into a lookup in a
+// container that add_type_and_value is concurrently growing from every worker thread. An
+// unsynchronised lookup that lands during map_grow_dynamic reads through the old, freed bucket
+// array and segfaults - which is exactly what checking any core package used to do, roughly two
+// runs in three, once the error cap stopped truncating the run before check_procedure_bodies
+// got properly parallel.
+//
+// It takes ^Checker_Info rather than ^Checker_Context because some callers (type_of_expr) only
+// have the info.
+//
+// The returned Type_And_Value is a copy, deliberately: handing back a pointer into the map
+// would let the caller hold a reference into storage the next insertion can free.
+tav_lookup :: proc(info: ^Checker_Info, node: ^ast.Node) -> (tv: Type_And_Value, found: bool) {
+	if node == nil {
+		return {}, false
+	}
+
+	// NOTE: see check_get_expr_info - the unlock must be deferred from this scope, not from
+	// inside the `if`, or the critical section is empty.
+	locked := !in_single_threaded_checker_stage()
+	if locked {
+		sync.shared_lock(&info.type_and_value_mutex)
+	}
+	defer if locked {
+		sync.shared_unlock(&info.type_and_value_mutex)
+	}
+
+	tv, found = info.type_and_value_map[rawptr(node)]
+	return
 }
 
 // update_untyped_expr_type updates the type for an untyped expression
@@ -2472,8 +2613,7 @@ update_untyped_expr_type :: proc(ctx: ^Checker_Context, expr: ^ast.Node, type: ^
 		// No expr info found - try updating tav directly as fallback
 		// C++ Reference: check_expr.cpp:4483-4492
 		if type != nil && type != t_invalid {
-			key := rawptr(expr)
-			if tv, found := &ctx.info.type_and_value_map[key]; found {
+			if tv, found := tav_lookup(ctx.info, expr); found {
 				if tv.type == nil || tv.type == t_invalid {
 					// Update permanent storage
 					add_type_and_value(ctx, expr, tv.mode, type, tv.value)
@@ -2671,18 +2811,28 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		return true
 	}
 
-	if type == t_invalid {
+	// C++ Reference: check_expr.cpp:2295 - `type = core_type(type);`
+	// Unwraps Named, Enum (to its backing integer) and Bit_Field (to its backing type)
+	// so the rules below dispatch on the underlying basic kind.
+	ct := core_type(type)
+
+	if ct == nil || ct == t_invalid {
 		return false
 	}
 
 	// Check based on the type category
-	if is_type_boolean(type) {
+	if is_type_boolean(ct) {
 		// Boolean values can only be represented as booleans
 		_, ok := in_value.(bool)
 		return ok
 
-	} else if is_type_string(type) {
+	} else if is_type_string(ct) {
 		// String values
+		// C++ Reference: check_expr.cpp:2301-2306
+		// A UTF-16 string value is only representable in the UTF-16 string types.
+		if _, is_string16 := in_value.(Exact_Value_String16); is_string16 {
+			return is_type_string16(ct) || is_type_cstring16(ct)
+		}
 		s, ok := in_value.(string)
 		if !ok {
 			return false
@@ -2692,7 +2842,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		}
 		return true
 
-	} else if is_type_integer(type) {
+	} else if is_type_integer(ct) {
 		// Convert value to integer
 		// For i128/u128 we work with BigInt directly
 		value_i64: i64
@@ -2756,7 +2906,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		}
 
 		// Check if untyped - untyped integers accept any value
-		if is_type_untyped(type) {
+		if is_type_untyped(ct) {
 			if out_value != nil {
 				result: big.Int
 				if is_signed {
@@ -2770,7 +2920,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		}
 
 		// Get type size for range checking
-		bt := base_type(type)
+		bt := base_type(ct)
 		if bt == nil || bt.kind != .Basic {
 			return false
 		}
@@ -2839,16 +2989,21 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				}
 				return true
 			}
-			return false
+			// C++ Reference: check_expr.cpp:2445 - GB_PANIC("Compiler error: Unknown integer type!")
+			// No integer basic kind is wider than 8 bytes except the i128/u128 families above.
+			panic(fmt.tprintf("check_representable_as_constant: Compiler error: Unknown integer type: %v", basic.kind))
 		}
 
 		// Check range based on signedness
+		// C++ Reference: check_expr.cpp:2375-2446
 		#partial switch basic.kind {
-		case .I8, .I16, .I32, .I64, .Int, .Rune:
+		case .I8, .I16, .I32, .I64, .Int, .Rune,
+		     .I16le, .I32le, .I64le,
+		     .I16be, .I32be, .I64be:
 			// Signed integer types
 			// Note: Rune is treated as i32 for representability
 			// Note: Untyped_Rune handled by is_type_untyped check above
-			// C++ Reference: check_expr.cpp:2192 (Basic_rune)
+			// C++ Reference: check_expr.cpp:2376-2388 (Basic_rune, Basic_i*, Basic_i*le, Basic_i*be)
 			if byte_size < 9 && byte_size > 0 {
 				min_val := SIGNED_INTEGER_MINS[byte_size]
 				max_val := SIGNED_INTEGER_MAXS[byte_size]
@@ -2875,9 +3030,13 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				}
 				return true
 			}
+			return false
 
-		case .U8, .U16, .U32, .U64, .Uint, .Uintptr:
+		case .U8, .U16, .U32, .U64, .Uint, .Uintptr,
+		     .U16le, .U32le, .U64le,
+		     .U16be, .U32be, .U64be:
 			// Unsigned integer types
+			// C++ Reference: check_expr.cpp:2408-2421 (Basic_u*, Basic_uint, Basic_uintptr, Basic_u*le, Basic_u*be)
 			if byte_size < 9 && byte_size > 0 {
 				max_val := UNSIGNED_INTEGER_MAXS[byte_size]
 
@@ -2903,9 +3062,11 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				}
 				return true
 			}
+			return false
 
 		case .Untyped_Integer:
 			// Untyped integers accept any integer value
+			// C++ Reference: check_expr.cpp:2443-2444
 			if out_value != nil {
 				// Convert to big.Int since Exact_Value uses big.Int for integers
 				result: big.Int
@@ -2917,9 +3078,15 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				out_value^ = result
 			}
 			return true
+
+		case:
+			// C++ Reference: check_expr.cpp:2446 - GB_PANIC("Compiler error: Unknown integer type!")
+			// Every Basic_Kind carrying Basic_Flag.Integer is covered above; the untyped
+			// integer kinds (Untyped_Integer, Untyped_Rune) return early via is_type_untyped.
+			panic(fmt.tprintf("check_representable_as_constant: Compiler error: Unknown integer type: %v", basic.kind))
 		}
 
-	} else if is_type_float(type) {
+	} else if is_type_float(ct) {
 		// Convert value to float
 		value_f64: f64
 		local_value := in_value
@@ -2961,7 +3128,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		}
 
 		// Check if untyped
-		if is_type_untyped(type) {
+		if is_type_untyped(ct) {
 			if out_value != nil {
 				out_value^ = value_f64
 			}
@@ -2970,7 +3137,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 
 		// C++ Reference: check_expr.cpp:2240-2255
 		// Check for float overflow on conversion to smaller types
-		bt := base_type(type)
+		bt := base_type(ct)
 		if bt == nil || bt.kind != .Basic {
 			return false
 		}
@@ -3014,9 +3181,14 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				out_value^ = value_f64
 			}
 			return true
+
+		case:
+			// C++ Reference: check_expr.cpp:2472 - GB_PANIC("Compiler error: Unknown float type!")
+			// Every Basic_Kind carrying Basic_Flag.Float is covered above.
+			panic(fmt.tprintf("check_representable_as_constant: Compiler error: Unknown float type: %v", basic.kind))
 		}
 
-	} else if is_type_complex(type) {
+	} else if is_type_complex(ct) {
 		// Convert value to complex
 		value_complex: complex128
 		local_value := in_value
@@ -3057,7 +3229,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		}
 
 		// Check if untyped
-		if is_type_untyped(type) {
+		if is_type_untyped(ct) {
 			if out_value != nil {
 				out_value^ = value_complex
 			}
@@ -3066,7 +3238,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 
 		// Range checking for complex types
 		// Reference: check_expr.cpp:2266-2278
-		bt := base_type(type)
+		bt := base_type(ct)
 		if bt == nil || bt.kind != .Basic {
 			return false
 		}
@@ -3085,14 +3257,22 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				}
 				return true
 			}
+			// C++ Reference: check_expr.cpp:2489 - `break` out of the switch, then `return false`
+			return false
+
 		case .Untyped_Complex:
 			if out_value != nil {
 				out_value^ = value_complex
 			}
 			return true
+
+		case:
+			// C++ Reference: check_expr.cpp:2495 - GB_PANIC("Compiler error: Unknown complex type!")
+			// Every Basic_Kind carrying Basic_Flag.Complex is covered above.
+			panic(fmt.tprintf("check_representable_as_constant: Compiler error: Unknown complex type: %v", basic.kind))
 		}
 
-	} else if is_type_quaternion(type) {
+	} else if is_type_quaternion(ct) {
 		// Quaternion constant checking
 		// Reference: check_expr.cpp:2286-2314
 		value_quat := exact_value_to_quaternion(in_value)
@@ -3101,14 +3281,14 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		}
 
 		// Check if untyped
-		if is_type_untyped(type) {
+		if is_type_untyped(ct) {
 			if out_value != nil {
 				out_value^ = value_quat
 			}
 			return true
 		}
 
-		bt := base_type(type)
+		bt := base_type(ct)
 		if bt == nil || bt.kind != .Basic {
 			return false
 		}
@@ -3131,36 +3311,50 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				}
 				return true
 			}
+			// C++ Reference: check_expr.cpp:2523 - `break` out of the switch, then `return false`
+			return false
+
 		case .Untyped_Quaternion:
 			if out_value != nil {
 				out_value^ = value_quat
 			}
 			return true
+
+		case:
+			// C++ Reference: check_expr.cpp:2531 - GB_PANIC (quaternion switch default)
+			// Every Basic_Kind carrying Basic_Flag.Quaternion is covered above.
+			panic(fmt.tprintf("check_representable_as_constant: Compiler error: Unknown quaternion type: %v", basic.kind))
 		}
 
-	} else if is_type_pointer(type) {
-		// Pointer constants (nil, pointer literals)
-		// C++ Reference: check_expr.cpp:2325-2339
+	} else if is_type_pointer(ct) {
+		// Pointer constants (nil, pointer literals). Covers both Type_Pointer and
+		// the `rawptr` basic type, which carries Basic_Flag.Pointer.
+		// C++ Reference: check_expr.cpp:2535-2549
 		#partial switch v in in_value {
+		case Exact_Value_Pointer:
+			// C++ Reference: check_expr.cpp:2536-2538
+			return true
 		case big.Int:
 			// Integer to pointer rejected at constant level
 			// (May be allowed at runtime via cast/transmute)
-			// C++ Reference: check_expr.cpp:2329-2331
+			// C++ Reference: check_expr.cpp:2539-2542
 			return false
 		case string:
 			// String to pointer rejected
-			// C++ Reference: check_expr.cpp:2333-2338
+			// C++ Reference: check_expr.cpp:2543-2545
+			return false
+		case Exact_Value_String16:
+			// C++ Reference: check_expr.cpp:2546-2548
 			return false
 		case:
-			// Accept pointer exact values (nil, etc.)
-			// C++ Reference: check_expr.cpp:2326-2327, 2339
+			// C++ Reference: check_expr.cpp:2549 - writes the value through but does NOT
+			// return true; control falls out to the trailing `return false`.
 			if out_value != nil {
 				out_value^ = in_value
 			}
-			return true
 		}
 
-	} else if is_type_bit_set(type) {
+	} else if is_type_bit_set(ct) {
 		// Bit set constants can be initialized from integers
 		// C++ Reference: check_expr.cpp:2340-2343
 		#partial switch v in in_value {
@@ -3174,7 +3368,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 			return false
 		}
 
-	} else if is_type_typeid(type) {
+	} else if is_type_typeid(ct) {
 		// Typeid constants
 		// C++ Reference: check_expr.cpp:2336-2349
 		// Handle typeid{} compound literals
@@ -3195,7 +3389,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 			}
 			return true
 		}
-	} else if is_type_proc(type) {
+	} else if is_type_proc(ct) {
 		// Procedure constants
 		// C++ Reference: check_expr.cpp:2363-2365
 		#partial switch v in in_value {
@@ -3210,7 +3404,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 	// Compound literal constants (struct{}, array{})
 	// C++ Reference: check_expr.cpp:2350-2362
 	if _, is_compound := in_value.(Exact_Value_Compound); is_compound {
-		if is_type_struct(type) || is_type_array(type) || is_type_enumerated_array(type) {
+		if is_type_struct(ct) || is_type_array(ct) || is_type_enumerated_array(ct) {
 			// Compound literals can be assigned to struct/array types
 			// The compound literal itself has already been type-checked
 			if out_value != nil {
@@ -3220,13 +3414,11 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		}
 	}
 
-	// If we reach here with a Basic type, it's an unhandled basic kind - panic
-	// C++ Reference: check_expr.cpp:2240, 2264, 2290 (GB_PANIC for unknown types)
-	if type.kind == .Basic {
-		basic := type.variant.(Type_Basic)
-		panic(fmt.tprintf("check_representable_as_constant: Unhandled Basic type kind: %v", basic.kind))
-	}
-
+	// C++ Reference: check_expr.cpp:2569 - the function simply returns false for anything
+	// that matched none of the categories above. There is NO panic here in C++; the four
+	// GB_PANICs live inside the integer/float/complex/quaternion switches, which is where
+	// they now live here too. Basic kinds that legitimately reach this point and are not
+	// representable as constants: Any, Untyped_Nil, Untyped_Uninit, and Invalid.
 	return false
 }
 
@@ -3246,9 +3438,7 @@ check_is_expressible :: proc(ctx: ^Checker_Context, operand: ^Operand, target_ty
 		// Error reporting for expressibility failures
 		// C++ Reference: check_expr.cpp:2545-2578
 		src_type_str := type_to_string(operand.type)
-		defer delete(src_type_str)
 		dst_type_str := type_to_string(target_type)
-		defer delete(dst_type_str)
 		value_str := exact_value_to_string(operand.value)
 		defer delete(value_str)
 
@@ -3293,9 +3483,7 @@ convert_untyped_error :: proc(ctx: ^Checker_Context, operand: ^Operand, target_t
 	expr_str := expr_to_string(operand.expr)
 	defer delete(expr_str)
 	target_str := type_to_string(target_type)
-	defer delete(target_str)
 	from_str := type_to_string(operand.type)
-	defer delete(from_str)
 	error(operand.expr, "Cannot convert '%s' to '%s' from '%s'", expr_str, target_str, from_str)
 }
 
@@ -3517,7 +3705,6 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 			}
 
 			type_str := type_to_string(target_type)
-			defer delete(type_str)
 
 			if valid_count == 1 {
 				// Exactly one matching variant
@@ -3562,7 +3749,6 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 					strings.write_string(&sb, "'")
 					strings.write_string(&sb, var_str)
 					strings.write_string(&sb, "'")
-					delete(var_str)
 				}
 				error(operand.expr, "%s", strings.to_string(sb))
 				return
@@ -3597,7 +3783,6 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 						strings.write_string(&sb, "'")
 						strings.write_string(&sb, var_str)
 						strings.write_string(&sb, "'")
-						delete(var_str)
 					}
 					error(operand.expr, "%s", strings.to_string(sb))
 				}
@@ -3667,6 +3852,7 @@ check_expr_with_type_hint :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast
 
 	if err_str != "" {
 		expr_str := expr_to_string(node)
+		defer delete(expr_str)
 		error(node, "'%s' %s", expr_str, err_str)
 		o.mode = .Invalid
 	}
@@ -3765,28 +3951,32 @@ check_multi_expr_with_type_hint :: proc(ctx: ^Checker_Context, o: ^Operand, node
 
 // get_constant_field_value extracts a field value from a constant compound literal
 // C++ Reference: check_expr.cpp:5810-5830
-// Returns pointer to the value if found and constant, nil otherwise
-get_constant_field_value :: proc(ctx: ^Checker_Context, comp_lit: ^ast.Comp_Lit, field_idx: int, struct_type: ^Type) -> ^Exact_Value {
+// Returns the value and true if one was found and is constant.
+//
+// NOTE: this used to return ^Exact_Value, taken as `&tv.value` from a Type_And_Value that a map
+// lookup had already copied onto this frame - i.e. a pointer to a dead stack slot, dereferenced
+// by every caller. It returns by value now; there is nothing in the map worth aliasing.
+get_constant_field_value :: proc(ctx: ^Checker_Context, comp_lit: ^ast.Comp_Lit, field_idx: int, struct_type: ^Type) -> (value: Exact_Value, ok: bool) {
 	if comp_lit == nil || field_idx < 0 {
-		return nil
+		return {}, false
 	}
 
 	elems := comp_lit.elems
 	if len(elems) == 0 {
-		return nil
+		return {}, false
 	}
 
 	// Get struct field info to understand the layout
 	bt := base_type(struct_type)
 	if bt == nil || bt.kind != .Struct {
-		return nil
+		return {}, false
 	}
 	struct_info := bt.variant.(Type_Struct)
 
 	// Check if elements are named (Field_Value) or positional
 	first_elem := elems[0]
 	if first_elem == nil {
-		return nil
+		return {}, false
 	}
 
 	target_elem: ^ast.Expr = nil
@@ -3798,8 +3988,8 @@ get_constant_field_value :: proc(ctx: ^Checker_Context, comp_lit: ^ast.Comp_Lit,
 			field_name := field_entity.token.text
 
 			for elem in elems {
-				if fv, ok := elem.derived.(^ast.Field_Value); ok {
-					if ident, ok2 := fv.field.derived.(^ast.Ident); ok2 {
+				if fv, is_fv := elem.derived.(^ast.Field_Value); is_fv {
+					if ident, is_ident := fv.field.derived.(^ast.Ident); is_ident {
 						if ident.name == field_name {
 							target_elem = fv.value
 							break
@@ -3816,48 +4006,47 @@ get_constant_field_value :: proc(ctx: ^Checker_Context, comp_lit: ^ast.Comp_Lit,
 	}
 
 	if target_elem == nil {
-		return nil
+		return {}, false
 	}
 
 	// Get the type_and_value of the target element
-	key := rawptr(target_elem)
-	if tv, found := ctx.info.type_and_value_map[key]; found {
+	if tv, found := tav_lookup(ctx.info, target_elem); found {
 		if tv.mode == .Constant {
-			return &tv.value
+			return tv.value, true
 		}
 	}
 
-	return nil
+	return {}, false
 }
 
 // get_constant_array_element_value extracts an element value from a constant array compound literal
 // C++ Reference: check_expr.cpp:11110-11128
-// Returns pointer to the value if found and constant, nil otherwise
-get_constant_array_element_value :: proc(ctx: ^Checker_Context, comp_lit: ^ast.Comp_Lit, elem_idx: i64) -> ^Exact_Value {
+// Returns the value and true if one was found and is constant. See get_constant_field_value for
+// why this returns by value rather than by pointer.
+get_constant_array_element_value :: proc(ctx: ^Checker_Context, comp_lit: ^ast.Comp_Lit, elem_idx: i64) -> (value: Exact_Value, ok: bool) {
 	if comp_lit == nil || elem_idx < 0 {
-		return nil
+		return {}, false
 	}
 
 	elems := comp_lit.elems
 	if len(elems) == 0 || elem_idx >= i64(len(elems)) {
-		return nil
+		return {}, false
 	}
 
 	// Array elements are always positional (unlike struct fields which can be named)
 	target_elem := elems[elem_idx]
 	if target_elem == nil {
-		return nil
+		return {}, false
 	}
 
 	// Get the type_and_value of the target element
-	key := rawptr(target_elem)
-	if tv, found := ctx.info.type_and_value_map[key]; found {
+	if tv, found := tav_lookup(ctx.info, target_elem); found {
 		if tv.mode == .Constant {
-			return &tv.value
+			return tv.value, true
 		}
 	}
 
-	return nil
+	return {}, false
 }
 
 // get_constant_field_single extracts a single element from a constant value by index
@@ -3900,8 +4089,8 @@ get_constant_field_single :: proc(ctx: ^Checker_Context, value: Exact_Value, typ
 		if compound, is_compound := value.(Exact_Value_Compound); is_compound {
 			if compound.expr != nil {
 				if comp_lit, ok := compound.expr.derived.(^ast.Comp_Lit); ok {
-					if ptr := get_constant_array_element_value(ctx, comp_lit, index); ptr != nil {
-						return ptr^
+					if elem, has_elem := get_constant_array_element_value(ctx, comp_lit, index); has_elem {
+						return elem
 					}
 				}
 			}
@@ -4253,8 +4442,7 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 	// Entity not found - report error
 	if entity == nil {
 		op_str := expr_to_string(op_expr)
-		// NOTE: defer delete removed - type_to_string uses temp_allocator internally
-		// defer delete(op_str)
+		defer delete(op_str)
 		type_str := type_to_string_shorthand(operand.type)
 		// NOTE: defer delete removed - type_to_string uses temp_allocator internally
 		// defer delete(type_str)
@@ -4296,9 +4484,9 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 			if compound.expr != nil {
 				if comp_lit, is_comp := compound.expr.derived.(^ast.Comp_Lit); is_comp {
 					field_idx := sel.index[0]
-					field_value := get_constant_field_value(ctx, comp_lit, int(field_idx), operand.type)
-					if field_value != nil {
-						operand.value = field_value^
+					field_value, has_field_value := get_constant_field_value(ctx, comp_lit, int(field_idx), operand.type)
+					if has_field_value {
+						operand.value = field_value
 						// Mode stays Constant, type will be set below from entity
 					}
 				}
@@ -4600,9 +4788,7 @@ check_index_value :: proc(ctx: ^Checker_Context, main_type: ^Type, open_range: b
 			expr_str := expr_to_string(operand.expr)
 			defer delete(expr_str)
 			got_type_str := type_to_string(operand.type)
-			defer delete(got_type_str)
 			want_type_str := type_to_string(type_hint)
-			defer delete(want_type_str)
 			error(operand.expr, "Expected index of type '%s' for '%s', got '%s'", want_type_str, expr_str, got_type_str)
 			if value != nil {
 				value^ = 0
@@ -4614,7 +4800,6 @@ check_index_value :: proc(ctx: ^Checker_Context, main_type: ^Type, open_range: b
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
 		type_str := type_to_string(operand.type)
-		defer delete(type_str)
 		error(operand.expr, "Index '%s' must be an integer, got '%s'", expr_str, type_str)
 		if value != nil {
 			value^ = 0
@@ -4695,7 +4880,6 @@ check_index_value :: proc(ctx: ^Checker_Context, main_type: ^Type, open_range: b
 						error(operand.expr, "Index '%s' is out of bounds range %s ..= %s", expr_str, lo_str, hi_str)
 					} else {
 						type_str := type_to_string(operand.type)
-						defer delete(type_str)
 						error(operand.expr, "Index '%s' is out of bounds range of enum type %s", expr_str, type_str)
 					}
 					return false
@@ -4820,7 +5004,6 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
 		type_str := type_to_string(operand.type)
-		defer delete(type_str)
 		if is_const {
 			error(operand.expr, "Cannot index constant '%s' of type '%s'", expr_str, type_str)
 		} else {
@@ -4892,9 +5075,9 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 				if compound, is_compound := operand.value.(Exact_Value_Compound); is_compound {
 					if compound.expr != nil {
 						if comp_lit, is_comp := compound.expr.derived.(^ast.Comp_Lit); is_comp {
-							elem_value := get_constant_array_element_value(ctx, comp_lit, index)
-							if elem_value != nil {
-								operand.value = elem_value^
+							elem_value, has_elem := get_constant_array_element_value(ctx, comp_lit, index)
+							if has_elem {
+								operand.value = elem_value
 								operand.mode = .Constant
 							}
 						}
@@ -5153,7 +5336,6 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
 		type_str := type_to_string(operand.type)
-		defer delete(type_str)
 		error(node, "Cannot slice enumerated array '%s' of type '%s'", expr_str, type_str)
 		operand.mode = .Invalid
 		operand.expr = node
@@ -5166,7 +5348,6 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
 		type_str := type_to_string(operand.type)
-		defer delete(type_str)
 		error(operand.expr, "Cannot slice '%s' of type '%s'", expr_str, type_str)
 		operand.mode = .Invalid
 		operand.expr = node
@@ -5353,6 +5534,7 @@ check_ternary_if_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Nod
 	if x.mode == .Type || y.mode == .Type {
 		type_expr := x.mode == .Type ? x.expr : y.expr
 		type_str := expr_to_string(type_expr)
+		defer delete(type_str)
 		error(node, "Type %s is invalid operand for ternary if expression", type_str)
 		return kind
 	}
@@ -5898,8 +6080,27 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 		o.mode = .Constant
 		o.type = t_untyped_string
 		if len(bd.tok.pos.file) > 0 {
-			// Extract directory from file path
-			dir := filepath.dir(bd.tok.pos.file, context.temp_allocator)
+			// C++ Reference: dir_from_path (parser.cpp). It walks back from the end shrinking the
+			// length and BREAKS on the separator without consuming it, so the result KEEPS its
+			// trailing separator: "/a/b/c.odin" -> "/a/b/".
+			//
+			// filepath.dir would return "/a/b" instead - a one-character divergence that is
+			// user-visible for anything concatenating #directory with a filename. Sliced directly
+			// so the value stays a substring of the token's file path and therefore outlives this
+			// constant (it must not come from the temp allocator, which can be reset while the
+			// constant is still referenced).
+			file := bd.tok.pos.file
+			dir := file
+			for i := len(file) - 1; i >= 0; i -= 1 {
+				if file[i] == '/' || file[i] == '\\' {
+					dir = file[:i + 1]
+					break
+				}
+				if i == 0 {
+					// No separator at all - C++ shrinks to length 0.
+					dir = file[:0]
+				}
+			}
 			o.value = dir
 		} else {
 			o.value = "."
@@ -6228,9 +6429,7 @@ check_or_return_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 					} else if !check_is_assignable_to(ctx, &rhs, end_type) {
 						// C++ Reference: check_builtin.cpp:139-145
 						rhs_str := type_to_string(right_type)
-						defer delete(rhs_str)
 						end_str := type_to_string(end_type)
-						defer delete(end_str)
 						error(node, "Cannot assign end value '%s' of or_return to return type '%s'", rhs_str, end_str)
 					}
 				}
@@ -6593,7 +6792,16 @@ check_expr_base :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 				error(node, "'context' has not been defined within this scope")
 			}
 
-			// Note: Core context initialization is handled during global entity checking
+			// C++ Reference: check_expr.cpp:12285 - init_core_context(c->checker) is called HERE,
+			// immediately before assigning t_context, not only from init_preload.
+			//
+			// The previous comment here claimed "core context initialization is handled during
+			// global entity checking". That is exactly backwards: init_preload runs AFTER
+			// check_all_global_entities (check_files.odin, matching checker.cpp:7695-7698), and
+			// procedure signatures with `allocator := context.allocator` are checked inside that
+			// earlier window - so t_context was still nil for them and every such default
+			// parameter reported "Cannot use a selector expression on nil-value expression".
+			init_core_context(ctx.checker)
 			o.mode = .Context
 			o.type = t_context
 			return .Expr
@@ -6946,7 +7154,6 @@ check_assignment :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 	// Special error for type expressions
 	if operand.mode == .Type {
 		type_str := type_to_string(operand.type)
-		defer delete(type_str)
 
 		if is_type_polymorphic(operand.type) {
 			// C++ Reference: check_expr.cpp:9320-9325
@@ -7719,9 +7926,7 @@ check_cast :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^Type, forb
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
 		from_str := type_to_string(operand.type)
-		defer delete(from_str)
 		to_str := type_to_string(target)
-		defer delete(to_str)
 		error(operand.expr, "Cannot cast '%s' as '%s' from '%s'", expr_str, to_str, from_str)
 
 		// Cast error suggestions
@@ -7989,7 +8194,6 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		if len(call.args) == 0 {
 			// No arguments - error
 			type_str := type_to_string(target_type)
-			defer delete(type_str)
 			error(node, "Missing argument in type conversion to '%s'", type_str)
 			o.mode = .Invalid
 			o.expr = node
@@ -8001,7 +8205,6 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		if call.args[0] != nil {
 			if _, is_fv := call.args[0].derived.(^ast.Field_Value); is_fv {
 				type_str := type_to_string(target_type)
-				defer delete(type_str)
 				error(call.args[0], "Field values are not allowed in type conversion '%s'", type_str)
 				error_line("\tSuggestion: use '%s{{...}}' for compound literals", type_str)
 				o.mode = .Invalid
@@ -8017,10 +8220,29 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		// C++ Reference: check_expr.cpp handles this differently - see check_type.cpp:3412
 		if is_type_polymorphic_record_unspecialized(target_type) {
 			// Check all arguments - they can be types or constant values
-			operands := make([]Operand, len(call.args), context.temp_allocator)
-			for arg, i in call.args {
-				check_expr_or_type(ctx, &operands[i], arg, nil)
+			named_fields := len(call.args) > 0 && is_call_expr_field_value(call.args[0])
+
+			operand_list := make([dynamic]Operand, 0, 2 * len(call.args), context.temp_allocator)
+			if named_fields {
+				// `Foo(T = int)`: each field value is checked on its own; there
+				// is nothing positional to unpack.
+				resize(&operand_list, len(call.args))
+				for arg, i in call.args {
+					check_expr_or_type(ctx, &operand_list[i], arg, nil)
+				}
+			} else {
+				// Positional parameters, so a multi-valued expression spreads
+				// across them, hinted by the record's polymorphic parameters.
+				//
+				// C++ Reference: /mnt/c/odin/src/check_expr.cpp check_polymorphic_record_type,
+				// the `check_unpack_arguments(c, lhs, lhs_count, &operands, ce->args, UnpackFlag_None)` call.
+				lhs: []^Entity = nil
+				if params := get_record_polymorphic_params(target_type); params != nil {
+					lhs = params.variables[:]
+				}
+				check_unpack_arguments(ctx, lhs, &operand_list, call.args, {})
 			}
+			operands := operand_list[:]
 
 			// Try polymorphic type instantiation
 			specialized_type := check_polymorphic_record_type(ctx, target_type, operands[:], node)
@@ -8033,7 +8255,6 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			} else {
 				// Failed to instantiate
 				type_str := type_to_string(target_type)
-				defer delete(type_str)
 				error(node, "Failed to instantiate polymorphic type '%s'", type_str)
 				o.mode = .Invalid
 				o.expr = node
@@ -8093,7 +8314,6 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 
 			// Multiple arguments but not complex/quaternion - error
 			type_str := type_to_string(target_type)
-			defer delete(type_str)
 			error(node, "Type conversion to '%s' expects 1 argument, got %d", type_str, len(call.args))
 			o.mode = .Invalid
 			o.expr = node
@@ -8129,8 +8349,6 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			// Conversion not possible
 			arg_type_str := type_to_string(arg_op.type)
 			target_type_str := type_to_string(target_type)
-			defer delete(arg_type_str)
-			defer delete(target_type_str)
 			error(node, "Cannot convert '%s' to '%s'", arg_type_str, target_type_str)
 			o.mode = .Invalid
 			o.expr = node
@@ -8475,6 +8693,29 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 		}
 	}
 
+	// Unpack multi-valued positional arguments (`f(returns_two())`) into a flat
+	// operand list, giving each one the matching parameter's type as a hint.
+	// This is the only place the positional arguments get checked; everything
+	// below consumes `positional_operands` rather than the raw argument nodes.
+	//
+	// C++ Reference: /mnt/c/odin/src/check_expr.cpp check_call_arguments, the
+	// `check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index)` call.
+	//
+	// No flags: `---` is not a legal call argument (that is `.Allow_Undef`, for
+	// variable declarations) and optional-ok does not spread across two
+	// parameters at a call site (that is `.Allow_Ok`, for declarations and
+	// returns). Only genuine tuples expand here. The variadic index is passed so
+	// arguments landing in the variadic slot are hinted with its element type.
+	positional_operands := make([dynamic]Operand, 0, 2 * len(positional_args), context.temp_allocator)
+	if len(positional_args) > 0 {
+		lhs := populate_proc_parameter_list(ctx, proc_type)
+		unpack_variadic_index := -1
+		if pt.variadic {
+			unpack_variadic_index = variadic_index
+		}
+		check_unpack_arguments(ctx, lhs, &positional_operands, positional_args[:], {}, unpack_variadic_index)
+	}
+
 	// Handle variadic expansion (args..)
 	// Reference: /mnt/c/odin/src/check_expr.cpp:6274-6288
 	vari_expand := call.ellipsis.kind != .Invalid
@@ -8487,7 +8728,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 		}
 		// With variadic expansion, positional_args should have exactly variadic_index + 1 args
 		// The last one is the slice being expanded
-		if len(positional_args) != variadic_index + 1 {
+		if len(positional_operands) != variadic_index + 1 {
 			error_node(call, "Variadic expansion '..' requires exactly %d positional arguments before the expanded slice", variadic_index)
 			data.error = true
 			data.result_type = pt.results
@@ -8544,7 +8785,8 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 
 	// Check positional argument count (before processing)
 	// Reference: /mnt/c/odin/src/check_expr.cpp:6304-6312
-	positional_count := len(positional_args)
+	// NOTE: counted after unpacking, so `f(returns_two())` counts as two.
+	positional_count := len(positional_operands)
 
 	// For variadic procedures, we need at least variadic_index non-variadic args
 	// For non-variadic procedures, we can't exceed param_count
@@ -8565,16 +8807,22 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 
 	// Process positional arguments
 	// Reference: /mnt/c/odin/src/check_expr.cpp:6369-6413
-	for arg, i in positional_args {
+	for i in 0 ..< len(positional_operands) {
+		// `arg` is the expression this operand came from. For an unpacked tuple
+		// every element reports against the multi-valued expression itself,
+		// which is what C++ does too.
+		arg := positional_operands[i].expr
+		if arg == nil {
+			arg = call.expr
+		}
 		// For variadic procedures, arguments at or after variadic_index go to variadic
 		if pt.variadic && i >= variadic_index {
 			// Handle variadic arguments
 			if vari_expand && i == variadic_index {
 				// Variadic expansion: the argument should be a slice
 				// Reference: /mnt/c/odin/src/check_expr.cpp:6274-6288
-				arg_op: Operand
 				expected_slice_type := param_types[variadic_index]
-				check_expr_or_type(ctx, &arg_op, arg, expected_slice_type)
+				arg_op := positional_operands[i]
 
 				if arg_op.mode != .Invalid {
 					// Verify it's assignable to the variadic slice type
@@ -8590,8 +8838,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 				ordered_operands[variadic_index] = arg_op
 			} else {
 				// Regular variadic argument: check against element type
-				arg_op: Operand
-				check_expr_or_type(ctx, &arg_op, arg, variadic_elem_type)
+				arg_op := positional_operands[i]
 
 				if arg_op.mode != .Invalid {
 					// For ..any, any type is allowed (will be converted to any)
@@ -8630,10 +8877,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			}
 			visited[i] = true
 
-			param_type := param_types[i]
-			arg_op: Operand
-			check_expr_or_type(ctx, &arg_op, arg, param_type)
-			ordered_operands[i] = arg_op
+			ordered_operands[i] = positional_operands[i]
 		}
 	}
 

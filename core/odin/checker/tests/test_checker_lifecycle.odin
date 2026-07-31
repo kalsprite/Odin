@@ -9,7 +9,6 @@ These are foundational tests that must pass before more complex tests.
 Run with: odin test core/odin/checker/tests
 */
 
-import "core:sync"
 import "core:testing"
 import checker ".."
 
@@ -31,8 +30,8 @@ test_init_destroy_checker :: proc(t: ^testing.T) {
 @(test)
 test_init_destroy_error_collector :: proc(t: ^testing.T) {
 	// Serialize access to global error collector to avoid race conditions
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	// Test error collector lifecycle
 	checker.init_error_collector(20)
@@ -51,6 +50,7 @@ test_checker_context_creation :: proc(t: ^testing.T) {
 
 	// Create a context
 	ctx := checker.make_checker_context(c)
+	defer checker.destroy_checker_context(&ctx)
 
 	testing.expect(t, ctx.checker == c, "Context should reference checker")
 	testing.expect(t, ctx.info == &c.info, "Context should reference checker info")

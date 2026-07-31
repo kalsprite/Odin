@@ -228,9 +228,24 @@ check_type_expr :: proc(ctx: ^Checker_Context, e: ^ast.Node, named_type: ^Type) 
 	return type
 }
 
-// check_type is a convenience wrapper for check_type_expr
+// check_type checks a type expression on a *fresh* cycle-detection path.
+// C++ Reference: check_type.cpp:4002-4008
+//
+// This is what distinguishes check_type from check_type_expr: indirections that legally
+// break a declaration cycle (`^T`, `[^]T`, `[dynamic]T`, `map[K]V`, ...) go through
+// check_type, so a self-referential type reached behind a pointer is not reported as an
+// illegal cycle. Callers that must keep the cycle chain intact (struct/union fields, for
+// instance) call check_type_expr directly.
 check_type :: proc(ctx: ^Checker_Context, e: ^ast.Node) -> ^Type {
-	return check_type_expr(ctx, e, nil)
+	// C++ lines 4003-4006: CheckerContext c = *ctx; c.type_path = new_checker_type_path();
+	// The path lives on the stack here; it stays empty (and so allocation-free) unless
+	// something below actually pushes onto it.
+	c := ctx^
+	type_path: Checker_Type_Path
+	defer delete(type_path)
+	c.type_path = &type_path
+
+	return check_type_expr(&c, e, nil)
 }
 
 // make_soa_struct_internal creates a Structure-of-Arrays struct type
@@ -945,7 +960,6 @@ check_struct_fields :: proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, st: ^
 					field_name := ident.name
 					// C++ Reference: check_type.cpp:204
 					type_str := type_to_string(t)
-					defer delete(type_str)
 					error(ident, "'using' cannot be applied to the field '%s' of type '%s'", field_name, type_str)
 					continue
 				}
@@ -964,7 +978,6 @@ check_struct_fields :: proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, st: ^
 					field_name := ident.name
 					// C++ Reference: check_type.cpp:221
 					type_str := type_to_string(t)
-					defer delete(type_str)
 					error(ident, "'subtype' cannot be applied to the field '%s' of type '%s'", field_name, type_str)
 				}
 			}
@@ -1053,12 +1066,26 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 		return nil
 	}
 
-	// C++ lines 353-359: Check if we can specialize
-	can_check_fields := check_record_poly_operand_specialization(ctx, nil, poly_operands, is_polymorphic)
-
-	// Only process fields if we have operands to specialize with
+	// C++ Reference: check_type.cpp:398 - `bool can_check_fields = true;`
+	//
+	// C++ writes `can_check_fields` in two places and NEVER READS IT - the only signal that
+	// leaves this procedure is `is_polymorphic^` (and the returned tuple). This port had turned
+	// the dead variable into a live gate on the whole parameter loop, seeded from
+	// check_record_poly_operand_specialization - which is not C++'s call to make here (that
+	// predicate belongs to check_struct_type / check_union_type, which call it themselves) and
+	// which had a nasty consequence:
+	//
+	// instantiating a record with an operand that is ITSELF still generic - `Cache($T)` inside
+	// `init :: proc(c: ^$C/Cache($T))` - made the predicate false, so the loop was skipped, so
+	// none of the per-operand `is_polymorphic^ = true` assignments below could run, so
+	// check_struct_type saw is_polymorphic == false and went on to check the fields of a record
+	// it had not actually specialized. A self-referential field (`head: ^Cache(T)`) then
+	// re-entered check_polymorphic_record_type with the same still-generic operand, forever:
+	// ~7800 stack frames and a SIGSEGV on core/container/{avl,lru,rbtree}, core/odin/{parser,ast}.
+	//
+	// The loop now always runs, as in C++.
 	// C++ lines 361-538
-	if can_check_fields {
+	{
 		scope := ctx.scope
 
 		// C++ lines 365-373: Count total parameters
@@ -1103,7 +1130,6 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 			// C++ lines 418-420: Check if type itself is polymorphic
 			if is_type_polymorphic(type, true) {
 				is_polymorphic^ = true
-				can_check_fields = false
 			}
 
 			// C++ lines 424-435: Handle default parameter value
@@ -1183,6 +1209,23 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 							error(operand.expr, "Expected a type for this polymorphic parameter")
 							continue
 						}
+
+						// C++ Reference: check_type.cpp:513-516
+						//   if (is_type_polymorphic(base_type(operand.type))) {
+						//       *is_polymorphic_ = true;
+						//       can_check_fields = false;
+						//   }
+						//
+						// The operand supplied for this type parameter can itself still be
+						// generic - `Cache($T)` written inside a `$C/Cache($T)` constraint binds
+						// T to a Type_Generic, not to a concrete type. The record is therefore
+						// NOT specialized, and saying so here is what stops check_struct_type
+						// from descending into fields that refer back to the record. Without
+						// this the instantiation recurses until the stack runs out.
+						if is_type_polymorphic(base_type(operand.type)) {
+							is_polymorphic^ = true
+						}
+
 						// When mode is .Type, operand.type is the actual type (e.g., int)
 						// We create a type name entity bound to this type
 						t = operand.type
@@ -1201,7 +1244,6 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 						}
 						if is_type_polymorphic(base_type(t)) {
 							is_polymorphic^ = true
-							can_check_fields = false
 						}
 						if e == nil {
 							e = alloc_entity_const_param(scope, token, t, operand.value, is_type_polymorphic(t))
@@ -2124,7 +2166,6 @@ check_union_type :: proc(ctx: ^Checker_Context, union_type: ^Type, node: ^ast.Un
 				ok = false
 				// C++ Reference: check_type.cpp:769
 				type_str := type_to_string(t)
-				defer delete(type_str)
 				error(variant_node, "Invalid variant type in union '%s'", type_str)
 			} else {
 				// Check for duplicate variant types
@@ -2133,11 +2174,9 @@ check_union_type :: proc(ctx: ^Checker_Context, union_type: ^Type, node: ^ast.Un
 						ok = false
 						// C++ Reference: check_type.cpp:775
 						type_str := type_to_string(t)
-						defer delete(type_str)
 						error(variant_node, "Duplicate variant type '%s'", type_str)
 						if j < len(node.variants) {
 							pos_str := token_pos_to_string(node.variants[j].pos)
-							defer delete(pos_str)
 							error_line("\tPrevious found at %s\n", pos_str)
 						}
 						break
@@ -2153,7 +2192,6 @@ check_union_type :: proc(ctx: ^Checker_Context, union_type: ^Type, node: ^ast.Un
 					if !type_has_nil(t) {
 						// C++ Reference: check_type.cpp:783
 						type_str := type_to_string(t)
-						defer delete(type_str)
 						error(variant_node, "Each variant of a union with #shared_nil must have a 'nil' value, got %s", type_str)
 					}
 				}
@@ -2475,6 +2513,7 @@ check_bit_set_type_expr :: proc(ctx: ^Checker_Context, bst: ^ast.Bit_Set_Type, t
 				lhs_str := type_to_string(lhs.type)
 				rhs_str := type_to_string(rhs.type)
 				expr_str := expr_to_string(bst.elem)
+				defer delete(expr_str)
 				error(bst.elem, "Mismatched types in range '%s' : '%s' vs '%s'", expr_str, lhs_str, rhs_str)
 			}
 			return false
@@ -2887,14 +2926,32 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 // check_matrix_type_expr creates and validates a matrix type
 // C++ Reference: check_type.cpp:2870-2922 (~52 lines)
 check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type: ^^Type, named_type: ^Type) -> bool {
+	// C++ Reference: types.cpp:402-403 - MIN = 1, MAX = 64.
+	// NOTE: MAX applies to the TOTAL element count (row*column), not to each dimension.
+	// C++ check_type.cpp:3108-3131 checks only a MINIMUM per dimension and then bounds
+	// row_count*column_count by MAX. The port previously capped each dimension at 16 and
+	// the total at 16, rejecting valid types such as matrix[8, 8]T.
 	MATRIX_ELEMENT_COUNT_MIN :: 1
-	MATRIX_ELEMENT_COUNT_MAX :: 16
+	MATRIX_ELEMENT_COUNT_MAX :: 64
 
 	// Create the matrix type
 	matrix_type := alloc_type(Type_Matrix)
 	mat := &matrix_type.variant.(Type_Matrix)
 	mat.node = mt
 
+	// NOTE: this publishes a still-ZEROED matrix type (elem=nil, row_count=0, column_count=0) to the
+	// caller before any validation has run, so every error path below MUST overwrite it with
+	// t_invalid. C++ avoids the problem structurally: check_type.cpp:3090-3156 validates everything
+	// first and assigns exactly once at `type_assign:` via alloc_type_matrix with all fields known.
+	//
+	// Leaving a zeroed matrix in circulation caused a SIGSEGV in core/math/linalg: downstream,
+	// is_type_matrix answers true, the `mat.row_count == mat.column_count` guard in
+	// check_distance_between_types (check_equivalence.odin:813) passes because 0 == 0,
+	// base_array_type then returns the nil elem, and that nil reaches is_type_enum, which does
+	// `base_type(t).kind` with no nil guard (as does C++'s - C++ simply never passes nil).
+	//
+	// The early publish is retained because a named matrix type needs its base set before the
+	// element type is checked, to support self-referential declarations.
 	type^ = matrix_type
 	set_base_type(named_type, matrix_type)
 
@@ -2903,6 +2960,9 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	elem := check_type(ctx, mt.elem)
 	if elem == nil || elem == t_invalid {
 		error_node(mt.elem, "Invalid element type for matrix")
+		// Do not leave the half-built matrix type published to the caller.
+		type^ = t_invalid
+		set_base_type(named_type, t_invalid)
 		return false
 	}
 
@@ -2911,6 +2971,9 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	if !is_type_integer(elem) && !is_type_float(elem) && !is_type_complex(elem) && !is_type_quaternion(elem) {
 		type_str := type_to_string(elem)
 		error_node(mt.elem, "matrix element type must be numeric, got '%s'", type_str)
+		// Do not leave the half-built matrix type published to the caller.
+		type^ = t_invalid
+		set_base_type(named_type, t_invalid)
 		return false
 	}
 
@@ -2927,6 +2990,9 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 		if row_op.mode == .Constant {
 			if !is_type_integer(row_op.type) {
 				error_node(mt.row_count, "matrix row count must be an integer")
+				// Do not leave the half-built matrix type published to the caller.
+				type^ = t_invalid
+				set_base_type(named_type, t_invalid)
 				return false
 			}
 			row_count = exact_value_to_i64(row_op.value)
@@ -2935,6 +3001,9 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 			generic_row = row_op.type
 		} else {
 			error_node(mt.row_count, "matrix row count must be a constant integer or polymorphic type parameter")
+			// Do not leave the half-built matrix type published to the caller.
+			type^ = t_invalid
+			set_base_type(named_type, t_invalid)
 			return false
 		}
 	}
@@ -2942,8 +3011,12 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	// Validate row count range
 	// C++ lines 2902-2908
 	if generic_row == nil {
-		if row_count < MATRIX_ELEMENT_COUNT_MIN || row_count > MATRIX_ELEMENT_COUNT_MAX {
-			error_node(mt.row_count, "matrix row count must be between %d and %d, got %d", MATRIX_ELEMENT_COUNT_MIN, MATRIX_ELEMENT_COUNT_MAX, row_count)
+		// C++ check_type.cpp:3108-3116 - minimum only; the maximum is enforced on the total below.
+		if row_count < MATRIX_ELEMENT_COUNT_MIN {
+			error_node(mt.row_count, "Invalid matrix row count, expected %d+ rows, got %d", MATRIX_ELEMENT_COUNT_MIN, row_count)
+			// Do not leave the half-built matrix type published to the caller.
+			type^ = t_invalid
+			set_base_type(named_type, t_invalid)
 			return false
 		}
 	}
@@ -2962,6 +3035,9 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 		if col_op.mode == .Constant {
 			if !is_type_integer(col_op.type) {
 				error_node(mt.column_count, "matrix column count must be an integer")
+				// Do not leave the half-built matrix type published to the caller.
+				type^ = t_invalid
+				set_base_type(named_type, t_invalid)
 				return false
 			}
 			column_count = exact_value_to_i64(col_op.value)
@@ -2970,6 +3046,9 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 			generic_column = col_op.type
 		} else {
 			error_node(mt.column_count, "matrix column count must be a constant integer or polymorphic type parameter")
+			// Do not leave the half-built matrix type published to the caller.
+			type^ = t_invalid
+			set_base_type(named_type, t_invalid)
 			return false
 		}
 	}
@@ -2977,8 +3056,12 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	// Validate column count range
 	// C++ lines 2920-2922
 	if generic_column == nil {
-		if column_count < MATRIX_ELEMENT_COUNT_MIN || column_count > MATRIX_ELEMENT_COUNT_MAX {
-			error_node(mt.column_count, "matrix column count must be between %d and %d, got %d", MATRIX_ELEMENT_COUNT_MIN, MATRIX_ELEMENT_COUNT_MAX, column_count)
+		// C++ check_type.cpp:3118-3126 - minimum only; the maximum is enforced on the total below.
+		if column_count < MATRIX_ELEMENT_COUNT_MIN {
+			error_node(mt.column_count, "Invalid matrix column count, expected %d+ columns, got %d", MATRIX_ELEMENT_COUNT_MIN, column_count)
+			// Do not leave the half-built matrix type published to the caller.
+			type^ = t_invalid
+			set_base_type(named_type, t_invalid)
 			return false
 		}
 	}
@@ -2988,11 +3071,14 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 
 	// C++ Reference: check_type.cpp:2887-2930
 	// Validate total element count (row * column)
-	MATRIX_TOTAL_ELEMENT_MAX :: 16
+	// C++ check_type.cpp:3128-3131 - the single maximum, applied to row*column.
 	if generic_row == nil && generic_column == nil {
 		total_elements := row_count * column_count
-		if total_elements > MATRIX_TOTAL_ELEMENT_MAX {
-			error_node(mt, "matrix total element count must not exceed %d, got %d (%d x %d)", MATRIX_TOTAL_ELEMENT_MAX, total_elements, row_count, column_count)
+		if total_elements > MATRIX_ELEMENT_COUNT_MAX {
+			error_node(mt, "Matrix types are limited to a maximum of %d elements, got %d", MATRIX_ELEMENT_COUNT_MAX, total_elements)
+			// Do not leave the half-built matrix type published to the caller.
+			type^ = t_invalid
+			set_base_type(named_type, t_invalid)
 			return false
 		}
 	}
@@ -3080,24 +3166,13 @@ check_procedure_type :: proc(ctx: ^Checker_Context, proc_type: ^Type, proc_type_
 		if len(cc_str) >= 2 && (cc_str[0] == '"' || cc_str[0] == '`') {
 			cc_str = cc_str[1:len(cc_str)-1]
 		}
-		switch cc_str {
-		case "odin":
-			cc = .Odin
-		case "contextless":
-			cc = .Contextless
-		case "c", "cdecl":
-			cc = .C
-		case "std", "stdcall":
-			cc = .Std
-		case "fast", "fastcall":
-			cc = .Fast
-		case "none":
-			cc = .None
-		case "win64":
-			cc = .Win64
-		case "sysv", "system":
-			cc = .SysV
-		case:
+		// Route through the single shared mapping rather than duplicating it. The previous
+		// inline copy diverged from C++ in three ways: it lacked "naked" and the three
+		// preserve/* conventions, and it mapped "system" to .SysV - but C++
+		// (parser.cpp:4055-4059) maps "system" to stdcall on Windows and cdecl everywhere
+		// else, so on any non-Windows target that was simply the wrong convention.
+		cc = string_to_calling_convention(cc_str)
+		if cc == .Invalid {
 			error_node(proc_type_node, "Unknown calling convention: %s", cc_str)
 			cc = .Odin
 		}
@@ -3128,6 +3203,8 @@ check_procedure_type :: proc(ctx: ^Checker_Context, proc_type: ^Type, proc_type_
 	}
 
 	switch cc {
+	case .Preserve_None, .Preserve_Most, .Preserve_All, .Invalid:
+		// No target-architecture restriction in C++ for these.
 	case .Std, .Fast:
 		// StdCall and FastCall only work on i386 and amd64
 		// C++ Reference: check_type.cpp:2447-2451
@@ -3211,7 +3288,6 @@ check_procedure_type :: proc(ctx: ^Checker_Context, proc_type: ^Type, proc_type_
 				second_type := entity_type(second)
 				if !is_type_polymorphic(second_type) && !is_type_boolean(second_type) {
 					type_str := type_to_string(second_type)
-					defer delete(type_str)
 					error_node(proc_type_node, "Second return value of an #optional_ok procedure must be a boolean, got %s", type_str)
 				}
 			}
@@ -3238,7 +3314,6 @@ check_procedure_type :: proc(ctx: ^Checker_Context, proc_type: ^Type, proc_type_
 				second_type := entity_type(second)
 				if !are_types_identical(second_type, t_allocator_error) {
 					type_str := type_to_string(second_type)
-					defer delete(type_str)
 					error_node(proc_type_node, "A procedure type with the #optional_allocator_error expects a `runtime.Allocator_Error`, got '%s'", type_str)
 				}
 			}
@@ -3708,10 +3783,23 @@ check_get_params :: proc(
 				param_type = out_type
 			}
 
-			// Validate that default value is constant, nil, location, or expression
-			// Reference: /mnt/c/odin/src/check_type.cpp:431-434
+			// Validate the default value kind.
+			//
+			// `.Value` MUST be accepted here. C++ produces ParameterValue_Value for a non-constant
+			// default that resolves to an entity - `allocator := context.allocator` (the
+			// `allocator` field of Context), and equally a global variable used as a default - and
+			// it applies NO post-validation in this path at all: handle_parameter_value is called
+			// with allow_caller_location=true at check_type.cpp:1919 and :1975 and its result is
+			// used as-is. The only C++ site that restricts the kind is check_type.cpp:459, which is
+			// the POLYMORPHIC parameter path (allow_caller_location=false) and permits just
+			// Constant/Nil.
+			//
+			// This switch was a port invention in the procedure-parameter path, and rejecting
+			// `.Value` is what produced "Invalid parameter value" on every `context.allocator`
+			// default in core. The stale reference it carried (check_type.cpp:431-434) points at
+			// unrelated code.
 			#partial switch param_value.kind {
-			case .Constant, .Nil, .Location, .Expression:
+			case .Constant, .Nil, .Location, .Expression, .Value:
 				// Valid parameter value kinds
 			case:
 				error(field.default_value, "Invalid parameter value")
@@ -3910,9 +3998,7 @@ check_get_params :: proc(
 					if specialization != nil && !check_type_specialization_to(ctx, specialization, param_type, false, modify_type) {
 						if !ctx.no_polymorphic_errors {
 							type_str := type_to_string(param_type)
-							defer delete(type_str)
 							spec_str := type_to_string(specialization)
-							defer delete(spec_str)
 							error(operand.expr, "Cannot convert type '%s' to the specialization '%s'", type_str, spec_str)
 						}
 						local_success = false
@@ -4979,17 +5065,21 @@ is_polymorphic_type_assignable :: proc(
 		return true
 	}
 
-	// === Type_Struct === (C++ lines 1540-1576)
-	if poly_base.kind == .Struct && source_base.kind == .Struct {
-		// For structs, delegate to check_type_specialization_to
-		return check_type_specialization_to(ctx, poly, source, compound, modify_type)
-	}
-
-	// === Type_Union === (C++ lines 1523-1538)
-	if poly_base.kind == .Union && source_base.kind == .Union {
-		// For unions, delegate to check_type_specialization_to
-		return check_type_specialization_to(ctx, poly, source, compound, modify_type)
-	}
+	// NO Type_Struct / Type_Union ARM - deliberately.
+	//
+	// C++ Reference: check_expr.cpp:1421-1620 (is_polymorphic_type_assignable). Its switch on
+	// `poly->kind` has no Struct and no Union case; a record poly falls through to the final
+	// `return false`. Records are check_type_specialization_to's job, and that procedure calls
+	// THIS one as its fall-back tail (check_type.cpp:1626), passing base types so the callee can
+	// never re-enter it through the Named arm.
+	//
+	// This port used to have Struct and Union arms here that "delegate to
+	// check_type_specialization_to". Combined with check_type_specialization_to's own
+	// `polymorphic_parent == nil -> is_polymorphic_type_assignable(specialization, type)`
+	// fall-back, that is a closed cycle with the arguments never changing: the two procedures
+	// call each other until the stack is gone. It is reachable from ordinary code - a
+	// `$T/Some_Struct` constraint resolved against a non-polymorphic struct - and took out
+	// core/crypto/legacy/md5 and the multi-threaded test runner.
 
 	// === Type_Proc === (C++ lines 1587-1622)
 	if poly_base.kind == .Proc && source_base.kind == .Proc {

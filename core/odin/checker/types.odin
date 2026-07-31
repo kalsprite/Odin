@@ -124,6 +124,16 @@ t_quaternion256: ^Type
 t_string16: ^Type
 t_cstring16: ^Type
 
+// Explicitly-endian integer and float types.
+// These are entries of the C++ `basic_types` table (src/types.cpp:538-562) and, like every
+// other entry of that table, are registered into the universe scope by init_universal
+// (src/checker.cpp:1122-1131). The port had the Basic_Kind values and the basic_flags_table
+// rows but no singletons, so `x: i32be` could never resolve.
+t_i16le, t_u16le, t_i32le, t_u32le, t_i64le, t_u64le, t_i128le, t_u128le: ^Type
+t_i16be, t_u16be, t_i32be, t_u32be, t_i64be, t_u64be, t_i128be, t_u128be: ^Type
+t_f16le, t_f32le, t_f64le: ^Type
+t_f16be, t_f32be, t_f64be: ^Type
+
 // Untyped type singletons
 t_untyped_bool: ^Type
 t_untyped_integer: ^Type
@@ -146,6 +156,15 @@ t_objc_class: ^Type // intrinsics.objc_class (struct)
 t_objc_id: ^Type // ^objc_object
 t_objc_SEL: ^Type // ^objc_selector
 t_objc_Class: ^Type // ^objc_class
+
+// C variadic types
+// C++ Reference: /mnt/c/odin/src/checker.cpp:1589-1590
+t_c_va_list: ^Type // intrinsics.c_va_list (struct)
+t_c_va_list_ptr: ^Type // ^c_va_list
+
+// intrinsics.Odin_Calling_Convention, the result type of type_proc_calling_convention
+// C++ Reference: /mnt/c/odin/src/checker.cpp:1338
+t_odin_calling_convention: ^Type
 
 // RTTI (Runtime Type Information) types
 // C++ Reference: /mnt/c/odin/src/checker.cpp:3253-3319
@@ -255,6 +274,24 @@ runtime_type_globals_mutex: sync.Mutex
 reset_runtime_type_globals :: proc() {
 	sync.mutex_lock(&runtime_type_globals_mutex)
 	defer sync.mutex_unlock(&runtime_type_globals_mutex)
+
+	// Reset Objective-C runtime types
+	// These are resolved out of the owning Checker's base:intrinsics scope
+	// (init_objc_types), so they are owned by that checker's allocator and must not
+	// survive it -- see t_objc_* usage in check_builtin.odin.
+	t_objc_object = nil
+	t_objc_selector = nil
+	t_objc_class = nil
+	t_objc_id = nil
+	t_objc_SEL = nil
+	t_objc_Class = nil
+
+	// Reset C variadic types (resolved out of the owning checker's base:intrinsics scope)
+	t_c_va_list = nil
+	t_c_va_list_ptr = nil
+
+	// Reset the calling-convention enum (owned by the universe scope's allocator)
+	t_odin_calling_convention = nil
 
 	// Reset RTTI types
 	t_type_info = nil
@@ -378,8 +415,15 @@ init_basic_types :: proc(allocator := context.allocator) {
 	t_u128 = make_basic(.U128, 16, allocator)
 
 	// Helper pointer types
-	t_u8_ptr = alloc_type_pointer(t_u8)
-	t_u8_slice = alloc_type_slice(t_u8)
+	// NOTE: These MUST be allocated from `allocator` (the process-lifetime allocator),
+	// not from the ambient `context.allocator`. They are basic-type singletons with the
+	// same lifetime as t_u8/t_int above: they are never cleared by
+	// reset_runtime_type_globals and are re-used by every subsequent Checker.
+	// Leaving them on context.allocator made them outlive their backing memory whenever
+	// a caller ran init_checker under a temp/arena allocator (as the tests do), and
+	// add_type_info_type_internal then read a freed t_u8_ptr for every string/cstring.
+	t_u8_ptr = alloc_type_pointer(t_u8, allocator)
+	t_u8_slice = alloc_type_slice(t_u8, allocator)
 
 	// Platform-dependent types
 	when size_of(int) == 8 {
@@ -420,6 +464,34 @@ init_basic_types :: proc(allocator := context.allocator) {
 	t_cstring = make_basic(.Cstring, 8, allocator) // ptr only (UTF-8)
 	t_string16 = make_basic(.String16, 16, allocator) // ptr + len (UTF-16)
 	t_cstring16 = make_basic(.Cstring16, 8, allocator) // ptr only (UTF-16)
+
+	// Explicitly-endian types
+	// C++ Reference: /mnt/c/odin/src/types.cpp:537-562 (the "// Endian" block of basic_types)
+	t_i16le = make_basic(.I16le, 2, allocator)
+	t_u16le = make_basic(.U16le, 2, allocator)
+	t_i32le = make_basic(.I32le, 4, allocator)
+	t_u32le = make_basic(.U32le, 4, allocator)
+	t_i64le = make_basic(.I64le, 8, allocator)
+	t_u64le = make_basic(.U64le, 8, allocator)
+	t_i128le = make_basic(.I128le, 16, allocator)
+	t_u128le = make_basic(.U128le, 16, allocator)
+
+	t_i16be = make_basic(.I16be, 2, allocator)
+	t_u16be = make_basic(.U16be, 2, allocator)
+	t_i32be = make_basic(.I32be, 4, allocator)
+	t_u32be = make_basic(.U32be, 4, allocator)
+	t_i64be = make_basic(.I64be, 8, allocator)
+	t_u64be = make_basic(.U64be, 8, allocator)
+	t_i128be = make_basic(.I128be, 16, allocator)
+	t_u128be = make_basic(.U128be, 16, allocator)
+
+	t_f16le = make_basic(.F16le, 2, allocator)
+	t_f32le = make_basic(.F32le, 4, allocator)
+	t_f64le = make_basic(.F64le, 8, allocator)
+
+	t_f16be = make_basic(.F16be, 2, allocator)
+	t_f32be = make_basic(.F32be, 4, allocator)
+	t_f64be = make_basic(.F64be, 8, allocator)
 
 	t_rawptr = make_basic(.Rawptr, 8, allocator)
 	t_typeid = make_basic(.Typeid, 8, allocator)
@@ -549,8 +621,18 @@ is_type_string :: proc(t: ^Type) -> bool {
 }
 
 // is_type_pointer checks if type is a pointer
+// Ported from types.cpp:1513-1520
+// NOTE: this includes `rawptr`, which is a Basic type carrying Basic_Flag.Pointer,
+// not a Type_Pointer. C++ dispatches on the flag for exactly this reason.
 is_type_pointer :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
+	if bt == nil {
+		return false
+	}
+	if bt.kind == .Basic {
+		basic := bt.variant.(Type_Basic)
+		return .Pointer in basic.flags
+	}
 	return bt.kind == .Pointer
 }
 
@@ -2276,8 +2358,8 @@ is_type_constant_type :: proc(t: ^Type) -> bool {
 
 // alloc_type_pointer creates a pointer type
 // Reference: /mnt/c/odin/src/types.cpp
-alloc_type_pointer :: proc(elem: ^Type) -> ^Type {
-	t := new(Type)
+alloc_type_pointer :: proc(elem: ^Type, allocator := context.allocator) -> ^Type {
+	t := new(Type, allocator)
 	t.kind = .Pointer
 	t.variant = Type_Pointer {
 		elem = elem,
@@ -2287,8 +2369,8 @@ alloc_type_pointer :: proc(elem: ^Type) -> ^Type {
 
 // alloc_type_slice creates a slice type
 // Reference: /mnt/c/odin/src/types.cpp:1077-1081
-alloc_type_slice :: proc(elem: ^Type) -> ^Type {
-	t := new(Type)
+alloc_type_slice :: proc(elem: ^Type, allocator := context.allocator) -> ^Type {
+	t := new(Type, allocator)
 	t.kind = .Slice
 	t.variant = Type_Slice {
 		elem = elem,

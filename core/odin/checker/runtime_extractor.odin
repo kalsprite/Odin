@@ -41,7 +41,10 @@ extract_runtime_types :: proc(info: ^Checker_Info, allocator := context.allocato
 		return nil
 	}
 
-	runtime_path := filepath.join({odin_root, "base", "runtime"}, allocator)
+	runtime_path, join_err := filepath.join({odin_root, "base", "runtime"}, allocator)
+	if join_err != nil {
+		return nil
+	}
 
 	// Create runtime package
 	pkg := create_runtime_package(runtime_path, allocator)
@@ -56,8 +59,13 @@ extract_runtime_types :: proc(info: ^Checker_Info, allocator := context.allocato
 	pkg.scope = pkg_scope
 	info.package_scopes[pkg] = pkg_scope
 
-	// Parse runtime files (but don't check them)
-	parsed_pkg, parse_ok := parser.collect_package(runtime_path)
+	// Parse runtime files (but don't check them).
+	//
+	// base/runtime is as platform-split as any other package - entry_windows.odin,
+	// procs_darwin.odin, os_specific_wasi.odin and friends - so it is collected through the
+	// target-aware collector too. Pulling in another platform's files here would define the
+	// same runtime types twice and leave the extractor picking whichever it saw last.
+	parsed_pkg, parse_ok := collect_package_for_target(runtime_path)
 	if !parse_ok || parsed_pkg == nil {
 		return pkg
 	}

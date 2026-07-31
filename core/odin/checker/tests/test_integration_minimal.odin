@@ -7,7 +7,6 @@ import "base:runtime"
 import "core:odin/ast"
 import "core:odin/parser"
 import "core:odin/tokenizer"
-import "core:sync"
 import "core:testing"
 
 import checker ".."
@@ -47,8 +46,8 @@ test_error_collector_only :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Serialize access to global error collector to avoid race conditions
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	checker.init_error_collector(100)
 	defer checker.destroy_error_collector()

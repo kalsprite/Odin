@@ -17,7 +17,7 @@ Usage:
     check_expects_error_containing(t, `package test; x: int = "hello"`, "cannot")
 
     // Get full error details
-    result := check_source_capture_errors(`package test; x: int = "hello"`)
+    result := check_source_capture_errors(t, `package test; x: int = "hello"`)
     for err in result.errors {
         fmt.println(err.line, err.message)
     }
@@ -29,7 +29,6 @@ import "core:odin/ast"
 import "core:odin/parser"
 import "core:odin/tokenizer"
 import "core:strings"
-import "core:sync"
 import "core:testing"
 
 import checker ".."
@@ -74,7 +73,7 @@ check_should_pass :: proc(t: ^testing.T, src: string, msg := "") -> bool {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	result := check_source_internal(src)
+	result := check_source_internal(t, src)
 
 	if !result.parse_ok {
 		testing.expectf(t, false, "%s: Parse failed unexpectedly", msg != "" ? msg : "Positive test")
@@ -117,7 +116,7 @@ check_should_fail :: proc(t: ^testing.T, src: string, msg := "") -> bool {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(src)
+	has_error, _ := check_expects_error(t, src)
 
 	if !has_error {
 		testing.expectf(t, false, "%s: Expected error but got none", msg != "" ? msg : "Negative test")
@@ -141,7 +140,7 @@ check_expects_error_containing :: proc(
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	result := check_source_capture_errors(src)
+	result := check_source_capture_errors(t, src)
 	defer destroy_test_result(&result)
 
 	if result.error_count == 0 {
@@ -187,7 +186,7 @@ check_expects_error_at_line :: proc(t: ^testing.T, src: string, expected_line: i
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	result := check_source_capture_errors(src)
+	result := check_source_capture_errors(t, src)
 	defer destroy_test_result(&result)
 
 	if result.error_count == 0 {
@@ -217,7 +216,7 @@ check_expects_n_errors :: proc(t: ^testing.T, src: string, expected_count: int) 
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	_, count := check_expects_error(src)
+	_, count := check_expects_error(t, src)
 
 	if count != expected_count {
 		testing.expectf(t, false, "Expected %d errors but got %d", expected_count, count)
@@ -228,12 +227,45 @@ check_expects_n_errors :: proc(t: ^testing.T, src: string, expected_count: int) 
 }
 
 // =============================================================================
+// PACKAGE-LEVEL RESULT HELPERS
+// =============================================================================
+
+// expect_not_limit_reached fails the test if checking a package was abandoned because the
+// error cap was hit.
+//
+// This is a THIRD outcome, and it must be reported as its own thing:
+//   - "clean"                -> res.ok
+//   - "checked, found N"     -> res.check_errors == N, res.limit_reached == false
+//   - "gave up after N"      -> res.limit_reached == true
+// In the last case the checker unwound at a phase boundary, so res.check_errors is a
+// truncated prefix and the *absence* of any particular diagnostic means nothing. Treating it
+// as a pass would be wrong (most of the package was never checked); treating it as a plain
+// check failure would be wrong too (it hides that the numbers are not comparable to a
+// completed run). Before this existed the checker called os.exit(1) here and took the whole
+// test binary with it - see CPP_DEVIATIONS.md [EMBED-1].
+expect_not_limit_reached :: proc(t: ^testing.T, path: string, res: checker.Package_Check_Result) -> bool {
+	if res.limit_reached {
+		testing.expectf(
+			t,
+			false,
+			"LIMIT REACHED: %s produced more errors than the cap allows; checking was abandoned "+
+			"after %d recorded errors and the result is incomplete",
+			path,
+			res.check_errors,
+		)
+		return false
+	}
+	return true
+}
+
+// =============================================================================
 // FULL ERROR CAPTURE
 // =============================================================================
 
 // check_source_capture_errors runs the checker and captures all error details
 // Caller must call destroy_test_result when done
 check_source_capture_errors :: proc(
+	t: ^testing.T,
 	src: string,
 	filename := "test.odin",
 	allocator := context.allocator,
@@ -256,8 +288,8 @@ check_source_capture_errors :: proc(
 	}
 
 	// Check with mutex protection
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	c := &checker.Checker{}
 	// Use default_allocator for the checker to ensure types persist
@@ -301,7 +333,7 @@ check_source_capture_errors :: proc(
 // =============================================================================
 
 // check_source_internal runs basic check without error capture
-check_source_internal :: proc(src: string, filename := "test.odin") -> Test_Check_Result {
+check_source_internal :: proc(t: ^testing.T, src: string, filename := "test.odin") -> Test_Check_Result {
 	result: Test_Check_Result
 
 	file := new(ast.File)
@@ -317,8 +349,8 @@ check_source_internal :: proc(src: string, filename := "test.odin") -> Test_Chec
 		return result
 	}
 
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	c := &checker.Checker{}
 	// Use default_allocator for the checker to ensure types persist

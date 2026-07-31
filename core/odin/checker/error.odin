@@ -77,6 +77,19 @@ Error_Collector :: struct {
 	max_error_count:      int,
 	allocator:            runtime.Allocator,
 
+	// limit_reached latches once `count` exceeds `max_error_count`.
+	//
+	// DELIBERATE DIVERGENCE FROM C++ (see CPP_DEVIATIONS.md [EMBED-1]): the C++ compiler
+	// prints everything collected so far and calls exit(1) at this point (error.cpp:535-563,
+	// error.cpp:637-667) because there the checker *is* the process. This package is a
+	// library, so instead of killing the host we latch this flag, drop further diagnostics,
+	// and let the checking entry points unwind. Callers observe it via error_limit_reached()
+	// and Package_Check_Result.limit_reached.
+	//
+	// Accessed from every checking thread; always read/written with sync.atomic_*, like
+	// `count` and `warning_count`. A `bool` is a valid atomic type in Odin.
+	limit_reached:        bool,
+
 	// Checker info for source line extraction
 	info:                 ^Checker_Info,
 
@@ -120,6 +133,7 @@ init_error_collector :: proc(max_errors := 100, warnings_as_errors := false, ign
 	global_error_collector.error_values = make([dynamic]Error_Value, allocator)
 	sync.atomic_store(&global_error_collector.count, 0)
 	sync.atomic_store(&global_error_collector.warning_count, 0)
+	sync.atomic_store(&global_error_collector.limit_reached, false)
 	global_error_collector.max_error_count = max_errors
 	global_error_collector.allocator = allocator
 	global_error_collector.info = nil
@@ -179,6 +193,19 @@ warning_count :: proc() -> int {
 	return sync.atomic_load(&global_error_collector.warning_count)
 }
 
+// error_limit_reached reports whether the error cap (build_context.max_error_count) was hit
+// during the current collector's lifetime.
+//
+// When this is true the diagnostics that were collected are a *truncated prefix* of the real
+// diagnostics: everything reported after the cap was dropped, and the checking entry points
+// stopped early. A result gathered under this condition must never be read as "clean" or as an
+// accurate error count - it is incomplete by construction.
+//
+// C++ has no equivalent because it exits the process instead. See CPP_DEVIATIONS.md [EMBED-1].
+error_limit_reached :: proc() -> bool {
+	return sync.atomic_load(&global_error_collector.limit_reached)
+}
+
 // ============================================================================
 // Error Value Staging
 // ============================================================================
@@ -233,8 +260,57 @@ get_error_value :: proc() -> ^Error_Value {
 // get_error_values returns the current list of accumulated errors
 // Used for test infrastructure to capture and verify error messages
 // Note: Caller should hold test_error_mutex if called from tests
+//
+// The returned slice BORROWS the collector's storage: it is invalidated by any further
+// diagnostic (which may reallocate the backing array) and by destroy_error_collector (which
+// frees every Error_Value.msg). To keep diagnostics past the collector's lifetime, use
+// take_error_values instead.
 get_error_values :: proc() -> []Error_Value {
 	return global_error_collector.error_values[:]
+}
+
+// take_error_values transfers ownership of the accumulated diagnostics out of the global
+// collector, so that they can outlive it.
+//
+// This exists because the collector is a process-global singleton whose lifetime is bounded by
+// init_error_collector / destroy_error_collector, while a *result* handed back to an embedder
+// has to remain readable afterwards. Copying would work but is unnecessary: the diagnostics are
+// already a self-contained [dynamic]Error_Value (each Error_Value.msg is its own allocation),
+// so the array is simply detached - no allocation, no copy.
+//
+// After this call the collector holds no diagnostics, and `count` / `warning_count` /
+// `errors_already_printed` are reset to match: the errors left with the values, so claiming
+// they are still here would make any_errors() true over an empty list. `limit_reached` is
+// deliberately NOT cleared - it records that the cap was tripped during this collector's
+// lifetime and that later diagnostics were dropped, which remains true no matter who owns the
+// values (see CPP_DEVIATIONS.md [EMBED-1]).
+//
+// The caller owns the result and must free it with destroy_error_values.
+take_error_values :: proc() -> (values: [dynamic]Error_Value) {
+	sync.lock(&global_error_collector.mutex)
+	defer sync.unlock(&global_error_collector.mutex)
+
+	values = global_error_collector.error_values
+
+	// A zero-length make performs no allocation; it only records the allocator, so the
+	// collector stays usable and destroy_error_collector stays a no-op over it.
+	global_error_collector.error_values = make([dynamic]Error_Value, 0, 0, global_error_collector.allocator)
+	sync.atomic_store(&global_error_collector.count, 0)
+	sync.atomic_store(&global_error_collector.warning_count, 0)
+	errors_already_printed = false
+	return
+}
+
+// destroy_error_values frees a diagnostic list obtained from take_error_values.
+//
+// Each Error_Value.msg is a separately allocated buffer, so freeing the array alone leaks every
+// message - this mirrors what destroy_error_collector does for the collector-owned list.
+destroy_error_values :: proc(values: ^[dynamic]Error_Value) {
+	for &entry in values {
+		delete(entry.msg)
+	}
+	delete(values^)
+	values^ = nil
 }
 
 // ============================================================================
@@ -719,11 +795,26 @@ show_error_on_line :: proc(pos: tokenizer.Pos, end: tokenizer.Pos) -> int {
 // error_va is the core error reporting function (variadic version)
 // C++ Reference: error.cpp:535-563
 error_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args: ..any) {
+	// DELIBERATE DIVERGENCE FROM C++ (CPP_DEVIATIONS.md [EMBED-1]).
+	// C++ error.cpp:535-563 does `print_all_errors(); exit(1);` here. That is correct for a
+	// compiler that owns the process; it is wrong for a library, where it would kill the host
+	// (e.g. the test binary in core/odin/checker/tests, taking the whole run with it).
+	// Instead: latch the limit, stop recording, and let the caller unwind. Printing is the
+	// host's job, not ours - see print_all_errors / exit_with_errors.
+
+	// Fast path once the limit has been latched: no atomics-with-writes, no allocation, no
+	// growth of error_values. The fact that the limit was hit is preserved in the flag.
+	if error_limit_reached() {
+		return
+	}
+
 	sync.atomic_add(&global_error_collector.count, 1)
 
 	if sync.atomic_load(&global_error_collector.count) > build_context.max_error_count {
-		print_all_errors()
-		os.exit(1)
+		// Latch and drop this diagnostic. C++ also drops it: it prints the *previously*
+		// collected errors and exits before ever calling push_error_value.
+		sync.atomic_store(&global_error_collector.limit_reached, true)
+		return
 	}
 
 	push_error_value(pos, .Error)
@@ -790,20 +881,30 @@ error_line_va :: proc(format: string, args: ..any) {
 	// This prevents crashes if error_line is called standalone
 	if tls_curr_error_value_set {
 		error_out(format, ..args)
-	} else {
+	} else if !error_limit_reached() {
 		// Fallback: print directly if no active error (shouldn't happen in normal use)
 		fmt.eprintf(format, ..args)
 	}
+	// Once the error limit is latched, error_va/syntax_error_va return without pushing an
+	// error value, so the `error(...)` that this line belongs to no longer exists. Emitting
+	// the continuation on its own would spray headerless fragments at stderr, so drop it.
 }
 
 // syntax_error_va reports a syntax error with "Syntax Error:" prefix
 // C++ Reference: error.cpp:637-667
 syntax_error_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args: ..any) {
+	// DELIBERATE DIVERGENCE FROM C++ (CPP_DEVIATIONS.md [EMBED-1]).
+	// C++ error.cpp:637-667 does `print_all_errors(); exit(1);` here. Same reasoning as
+	// error_va: a library must not terminate its host. Latch and unwind instead.
+	if error_limit_reached() {
+		return
+	}
+
 	sync.atomic_add(&global_error_collector.count, 1)
 
 	if sync.atomic_load(&global_error_collector.count) > build_context.max_error_count {
-		print_all_errors()
-		os.exit(1)
+		sync.atomic_store(&global_error_collector.limit_reached, true)
+		return
 	}
 
 	push_error_value(pos, .Warning) // Note: C++ uses Warning kind for syntax errors
@@ -947,6 +1048,16 @@ syntax_warning_pos :: proc(pos: tokenizer.Pos, format: string, args: ..any) {
 
 // compiler_error reports a fatal internal compiler error and exits
 // C++ Reference: error.cpp:803-816
+//
+// HOST-DRIVER ONLY. Unlike error_va/syntax_error_va (see CPP_DEVIATIONS.md [EMBED-1]), this
+// deliberately keeps the C++ exit(1) behaviour:
+//   - It signals a violated internal invariant, not a diagnostic about the checked program.
+//     Continuing past one produces garbage results rather than an incomplete-but-honest one,
+//     so there is nothing meaningful to hand back to an embedder.
+//   - It has no callers inside this package: internal invariants are enforced with `assert`
+//     (which also aborts, but with a message and a trace - see check_deferred.odin:453).
+// It must never be called from a library code path reachable while checking user code. If a
+// recoverable condition ever needs reporting, use error()/syntax_error() instead.
 compiler_error :: proc(format: string, args: ..any) {
 	if any_errors() || any_warnings() {
 		print_all_errors()
@@ -960,6 +1071,11 @@ compiler_error :: proc(format: string, args: ..any) {
 
 // exit_with_errors prints all errors and exits if there are any
 // C++ Reference: error.cpp:819-824
+//
+// HOST-DRIVER ONLY. This keeps the C++ exit(1) because terminating *is* its entire contract:
+// it exists so a command-line front end can end its own process after a failed check. It has
+// no callers inside this package and must never acquire one. Embedders should call
+// print_all_errors() / error_count() / error_limit_reached() and decide for themselves.
 exit_with_errors :: proc() {
 	if any_errors() || any_warnings() {
 		print_all_errors()
@@ -1090,10 +1206,50 @@ print_all_errors :: proc() {
 		return
 	}
 
-	assert(any_errors() || any_warnings())
+	// C++ Reference: error.cpp:897 - GB_ASSERT(any_errors() || any_warnings())
+	//
+	// KEPT, deliberately. This is a precondition, not a formality: every C++ call site guards
+	// with `if (any_errors() || any_warnings())` (error.cpp:804, error.cpp:820) or has just
+	// reported a diagnostic (error.cpp:539, 609, 641, 673). Reaching here with an empty global
+	// collector means the caller believed there were diagnostics to print and was wrong -
+	// almost always because the collector was torn down between reporting and printing. Making
+	// that a silent no-op would hide the lifetime bug rather than expose it.
+	//
+	// Embedders holding their own diagnostics (take_error_values / Package_Check_Result) do NOT
+	// come through here: print_error_values takes the list explicitly and has no global
+	// precondition to violate, so printing an empty list there is a legitimate no-op.
+	assert(
+		any_errors() || any_warnings(),
+		"print_all_errors called with no diagnostics in the global error collector - it was "+
+		"either never populated or already destroyed. If you are printing the result of "+
+		"check_package_from_path, use print_package_diagnostics(&result) instead: that result "+
+		"owns its diagnostics and does not depend on the global collector still being alive.",
+	)
+
+	print_error_values(&global_error_collector.error_values)
+
+	errors_already_printed = true
+}
+
+// print_error_values sorts, merges and prints a diagnostic list that the caller owns.
+//
+// This is the body of print_all_errors, parameterised over the storage. It exists so that
+// diagnostics detached with take_error_values - which outlive the global collector - are
+// printed by exactly the same code, rather than by a second, drifting implementation.
+//
+// Unlike print_all_errors this consults neither `errors_already_printed` nor any_errors(): both
+// are properties of the global collector, and the list here is the caller's. An empty list
+// prints nothing.
+//
+// The list is mutated in place (sorted, and neighbouring diagnostics at the same position are
+// merged, freeing the absorbed entries), matching C++ behaviour.
+print_error_values :: proc(values: ^[dynamic]Error_Value) {
+	if len(values) == 0 {
+		return
+	}
 
 	// Sort errors by position
-	slice.sort_by(global_error_collector.error_values[:], error_value_cmp)
+	slice.sort_by(values[:], error_value_cmp)
 
 	// Merge neighboring errors at the same position
 	// C++ Reference: error.cpp:902-937
@@ -1105,8 +1261,8 @@ print_all_errors :: proc() {
 
 		prev_ev: ^Error_Value = nil
 		i := 0
-		for i < len(global_error_collector.error_values) {
-			ev := &global_error_collector.error_values[i]
+		for i < len(values) {
+			ev := &values[i]
 
 			// Check if this error is at the same position as the previous one
 			if prev_ev != nil && positions_equal(prev_ev.pos, ev.pos) {
@@ -1139,7 +1295,7 @@ print_all_errors :: proc() {
 
 				// Free the current error's message and remove it
 				delete(ev.msg)
-				ordered_remove(&global_error_collector.error_values, i)
+				ordered_remove(values, i)
 				// Don't increment i since we removed an element
 			} else {
 				prev_ev = ev
@@ -1149,21 +1305,19 @@ print_all_errors :: proc() {
 	}
 
 	if json_errors() {
-		print_errors_json()
+		print_errors_json(values[:])
 	} else {
-		print_errors_standard()
+		print_errors_standard(values[:])
 	}
-
-	errors_already_printed = true
 }
 
 // print_errors_standard outputs errors in standard format
 // C++ Reference: error.cpp:1009-1027
-print_errors_standard :: proc() {
+print_errors_standard :: proc(error_values: []Error_Value) {
 	sb := strings.builder_make(context.temp_allocator)
 	defer strings.builder_destroy(&sb)
 
-	for ev in global_error_collector.error_values {
+	for ev in error_values {
 		// Split message into lines and output
 		msg := string(ev.msg[:])
 		lines := strings.split_lines(msg, context.temp_allocator)
@@ -1189,15 +1343,15 @@ print_errors_standard :: proc() {
 
 // print_errors_json outputs errors in JSON format
 // C++ Reference: error.cpp:942-1008
-print_errors_json :: proc() {
+print_errors_json :: proc(error_values: []Error_Value) {
 	sb := strings.builder_make(context.temp_allocator)
 	defer strings.builder_destroy(&sb)
 
 	strings.write_string(&sb, "{\n")
-	fmt.sbprintf(&sb, "\t\"error_count\": %d,\n", len(global_error_collector.error_values))
+	fmt.sbprintf(&sb, "\t\"error_count\": %d,\n", len(error_values))
 	strings.write_string(&sb, "\t\"errors\": [\n")
 
-	for ev, i in global_error_collector.error_values {
+	for ev, i in error_values {
 		strings.write_string(&sb, "\t\t{\n")
 
 		// Type
@@ -1276,6 +1430,7 @@ clear_errors :: proc() {
 	clear(&global_error_collector.error_values)
 	sync.atomic_store(&global_error_collector.count, 0)
 	sync.atomic_store(&global_error_collector.warning_count, 0)
+	sync.atomic_store(&global_error_collector.limit_reached, false)
 	errors_already_printed = false
 }
 

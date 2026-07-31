@@ -89,6 +89,10 @@ proc_calling_convention_strings := [Calling_Convention]string {
 	.Inline_Asm  = "inline_asm",
 	.Win64       = "win64",
 	.SysV        = "sysv",
+	.Preserve_None = "preserve/none",
+	.Preserve_Most = "preserve/most",
+	.Preserve_All  = "preserve/all",
+	.Invalid       = "invalid",
 }
 
 // quote_to_ascii escapes special characters in strings for canonical representation

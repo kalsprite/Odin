@@ -63,7 +63,7 @@ is_diverging_expr :: proc(ctx: ^Checker_Context, expr: ^ast.Expr) -> bool {
 	// Check procedure type for diverging flag
 	// C++ Reference: check_stmt.cpp lines 9-23
 	proc_node := unparen_expr(call_expr.expr)
-	tv, has_tv := ctx.info.type_and_value_map[rawptr(proc_node)]
+	tv, has_tv := tav_lookup(ctx.info, proc_node)
 	if !has_tv {
 		return false
 	}
@@ -912,7 +912,6 @@ check_expr_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 	// Check if it's a type instead of an expression
 	if operand.mode == .Type {
 		type_str := type_to_string(operand.type)
-		defer delete(type_str)
 		error_node(node, "'%s' is not an expression but a type and cannot be used as a statement", type_str)
 		return
 	}
@@ -991,7 +990,7 @@ check_expr_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 			if bin.op.kind == .Cmp_Eq {
 				// Check if left-hand side can be assigned to
 				// C++ checks: Addressing_Context, Addressing_Variable, Addressing_MapIndex, Addressing_SoaVariable
-				lhs_tav, has_tav := ctx.info.type_and_value_map[rawptr(bin.left)]
+				lhs_tav, has_tav := tav_lookup(ctx.info, bin.left)
 				can_assign := false
 
 				if has_tav {
@@ -1185,6 +1184,22 @@ check_assign_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 	}
 }
 
+// all_operands_valid reports whether an arity error is worth emitting.
+// Once any error has been reported, an operand that resolved to `t_invalid`
+// means the real cause was already diagnosed, so the follow-on count mismatch
+// is suppressed.
+// C++ Reference: check_stmt.cpp all_operands_valid
+all_operands_valid :: proc(operands: []Operand) -> bool {
+	if any_errors() {
+		for o in operands {
+			if o.type == t_invalid {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // check_unsafe_return validates that returned values don't reference stack memory
 // C++ Reference: check_stmt.cpp lines 2547-2614
 check_unsafe_return :: proc(ctx: ^Checker_Context, o: ^Operand, type: ^Type, expr: ^ast.Expr) {
@@ -1195,7 +1210,6 @@ check_unsafe_return :: proc(ctx: ^Checker_Context, o: ^Operand, type: ^Type, exp
 
 		if extra_type != nil {
 			type_str := type_to_string(extra_type)
-			defer delete(type_str)
 			error_node(o.expr, "It is unsafe to return %s ('%s') of type ('%s') from a procedure, as it uses the current stack frame's memory", msg, expr_str, type_str)
 		} else {
 			error_node(o.expr, "It is unsafe to return %s ('%s') from a procedure, as it uses the current stack frame's memory", msg, expr_str)
@@ -1323,58 +1337,75 @@ check_return_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) -> Viral_State
 			}
 		}
 
-		return_count := len(stmt.results)
+		// Unpack multi-valued expressions (tuples, optional-ok) into a flat
+		// operand list before any arity checking, exactly as C++ does.
+		// C++ Reference: check_stmt.cpp check_return_stmt, the
+		// `check_unpack_arguments(..., UnpackFlag_AllowOk)` call.
+		//
+		// `.Allow_Ok` (and NOT `.Allow_Undef`): a return statement may spread a
+		// map index / type assertion / optional-ok call across two named results
+		// (`return m[k]`), but `---` is not a legal return value.
+		operands := make([dynamic]Operand, 0, 2 * len(stmt.results), context.temp_allocator)
+		check_unpack_arguments(ctx, result_entities, &operands, stmt.results, {.Allow_Ok})
 
-		if result_count == 0 && return_count > 0 {
-			error_node(node, "No return values expected")
-			return viral_flags
-		}
-
-		if has_named_results && return_count == 0 {
+		if result_count == 0 && len(stmt.results) > 0 {
+			error_node(stmt.results[0], "No return values expected")
+		} else if has_named_results && len(operands) == 0 {
 			// Named returns with no explicit values - okay
-			return viral_flags
+		} else if len(operands) != result_count {
+			// Ignore error message as it has most likely already been reported
+			if all_operands_valid(operands[:]) {
+				if len(operands) == 1 {
+					type_str := type_to_string(operands[0].type)
+					error_node(node, "Expected %d return values, got %d (%s)", result_count, len(operands), type_str)
+					delete(type_str)
+				} else {
+					error_node(node, "Expected %d return values, got %d", result_count, len(operands))
+				}
+			}
+		} else {
+			// Check each return value
+			for i in 0 ..< result_count {
+				if result_entities == nil {
+					continue
+				}
+
+				entity := result_entities[i]
+				if entity == nil {
+					continue
+				}
+				target_type := entity_type(entity)
+				if target_type == nil {
+					continue
+				}
+
+				operand := &operands[i]
+				check_assignment(ctx, operand, target_type, "return statement")
+
+				if is_type_untyped(operand.type) {
+					update_untyped_expr_type(ctx, operand.expr, target_type, true)
+				}
+			}
 		}
 
-		if return_count != result_count {
-			error_node(node, "Expected %d return values, got %d", result_count, return_count)
-			return viral_flags
-		}
-
-		// Check each return value
-		for i in 0 ..< result_count {
-			if result_entities == nil {
+		// C++: check_stmt.cpp:2680-2692
+		// Unwrap type conversions before checking for unsafe returns
+		for &operand in operands {
+			if operand.expr == nil {
 				continue
 			}
-
-			// Get target type from entity
-			entity := result_entities[i]
-			target_type: ^Type = nil
-			#partial switch v in entity.variant {
-			case Entity_Variable:
-				target_type = v.type
-			}
-
-			if target_type == nil {
-				continue
-			}
-
-			operand: Operand
-			operand.mode = .Invalid
-			check_expr(ctx, &operand, stmt.results[i])
-
-			check_assignment(ctx, &operand, target_type, "return statement")
-
-			// C++: check_stmt.cpp:2680-2692
-			// Unwrap type conversions before checking for unsafe returns
 			expr := unparen_expr(operand.expr)
 			unwrap_loop: for {
+				if expr == nil {
+					break unwrap_loop
+				}
 				call, is_call := expr.derived.(^ast.Call_Expr)
 				if !is_call {
 					break unwrap_loop
 				}
 
 				// Check if it's a type conversion
-				if proc_tav, has_tav := ctx.info.type_and_value_map[rawptr(call.expr)]; has_tav {
+				if proc_tav, has_tav := tav_lookup(ctx.info, call.expr); has_tav {
 					if proc_tav.mode != .Type {
 						break unwrap_loop
 					}
@@ -1395,7 +1426,7 @@ check_return_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) -> Viral_State
 				}
 
 				// Check type identity
-				if arg_tav, has_arg_tav := ctx.info.type_and_value_map[rawptr(arg)]; has_arg_tav {
+				if arg_tav, has_arg_tav := tav_lookup(ctx.info, arg); has_arg_tav {
 					if !are_types_identical(arg_tav.type, operand.type) {
 						break unwrap_loop
 					}
@@ -1774,7 +1805,6 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 				// Validate that the switch type is ordered
 				if !is_type_ordered(x.type) {
 					type_str := type_to_string(x.type)
-					defer delete(type_str)
 					error_node(case_expr, "Unordered type '%s' is invalid for an interval expression", type_str)
 					continue
 				}
@@ -2124,7 +2154,6 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 	switch_kind := check_valid_type_switch_type(x.type)
 	if switch_kind == .Invalid {
 		type_str := type_to_string(x.type)
-		defer delete(type_str)
 		error_node(rhs, "Invalid type for this type switch expression, got '%s'", type_str)
 		return viral_flags
 	}
@@ -2192,7 +2221,6 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 				// Check if nil is allowed for this type
 				if !type_has_nil(type_deref(x.type)) {
 					type_str := type_to_string(type_deref(x.type))
-					defer delete(type_str)
 					error_node(type_expr, "'nil' case is not allowed for the type '%s'", type_str)
 					continue
 				}
@@ -2233,7 +2261,6 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 				}
 				if !tag_type_found {
 					type_str := type_to_string(y.type)
-					defer delete(type_str)
 					error_node(type_expr, "Unknown variant type, got '%s'", type_str)
 					continue
 				}
@@ -2252,7 +2279,6 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 				defer end_error_block()
 
 				type_str := type_to_string(y.type)
-				defer delete(type_str)
 				error_node(type_expr, "Duplicate type case '%s'", type_str)
 				error_line("\tprevious type case at %s", token_pos_to_string(prev_expr.pos))
 				continue
@@ -2330,13 +2356,11 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 
 			if len(unhandled) == 1 {
 				type_str := type_to_string(unhandled[0])
-				defer delete(type_str)
 				error_node(node, "Unhandled switch case: %s", type_str)
 			} else {
 				error_node(node, "Unhandled switch cases:")
 				for t in unhandled {
 					type_str := type_to_string(t)
-					defer delete(type_str)
 					error_line("\t%s", type_str)
 				}
 			}
@@ -2826,7 +2850,7 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 						error_token(e.token, "A static variable declaration with a default value must be constant")
 					} else {
 						value := vd.values[i]
-						if tv, ok := ctx.info.type_and_value_map[rawptr(value)]; ok {
+						if tv, ok := tav_lookup(ctx.info, value); ok {
 							if tv.mode != .Constant {
 								error_token(e.token, "A static variable declaration with a default value must be constant")
 							}
@@ -3005,7 +3029,6 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 	// C++: check_stmt.cpp:501-505
 	if rhs.mode == .Type && is_type_polymorphic(rhs.type) {
 		t_str := type_to_string(rhs.type)
-		defer delete(t_str)
 		error_node(rhs.expr, "Invalid use of a non-specialized polymorphic type '%s'", t_str)
 	}
 
@@ -3048,7 +3071,7 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 		ln := unparen_expr(lhs.expr)
 		if idx_expr, ok := ln.derived.(^ast.Index_Expr); ok {
 			x := idx_expr.expr
-			tav, has_tav := ctx.info.type_and_value_map[rawptr(x)]
+			tav, has_tav := tav_lookup(ctx.info, x)
 			assert(has_tav)
 			if tav.mode != .Variable {
 				if !is_type_pointer(tav.type) {
@@ -3210,20 +3233,32 @@ check_foreign_block_decl :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 }
 
 // check_foreign_block_attributes validates foreign block attributes
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3417-3488
+// C++ Reference: checker.cpp:3706 (foreign_block_decl_attribute), dispatched via
+// check_decl_attributes at checker.cpp:4562 (the previously cited line range
+// 3417-3488 was stale and no longer corresponds to this function)
 check_foreign_block_attributes :: proc(ctx: ^Checker_Context, attributes: [dynamic]^ast.Attribute) {
 	for attr in attributes {
 		for elem_node in attr.elems {
-			elem := elem_node.derived.(^ast.Field_Value)
-			name_node := elem.field
-			value_node := elem.value
-
-			// Extract attribute name
+			// An attribute element is either a bare identifier (`@(name)`,
+			// value-less form) or a Field_Value (`@(name=value)`). Extracting
+			// via a comma-ok switch mirrors the pattern used elsewhere in this
+			// package (e.g. check_collect.odin, check_import_export.odin,
+			// check_decl.odin, check_decl_helpers.odin, docs_writer.odin).
 			name: string
-			if ident, ok := name_node.derived.(^ast.Ident); ok {
-				name = ident.name
-			} else {
-				error_node(name_node, "Attribute name must be an identifier")
+			value_node: ^ast.Expr = nil
+
+			#partial switch e in elem_node.derived {
+			case ^ast.Ident:
+				name = e.name
+			case ^ast.Field_Value:
+				if field_ident, ok2 := e.field.derived.(^ast.Ident); ok2 {
+					name = field_ident.name
+					value_node = e.value
+				} else {
+					error_node(e.field, "Attribute name must be an identifier")
+					continue
+				}
+			case:
 				continue
 			}
 
@@ -3248,7 +3283,7 @@ check_foreign_block_attributes :: proc(ctx: ^Checker_Context, attributes: [dynam
 				}
 				if str, ok := operand.value.(string); ok {
 					cc := string_to_calling_convention(str)
-					if cc == .None {
+					if cc == .Invalid {
 						error_node(value_node, "Unknown procedure calling convention: '%s'", str)
 					} else {
 						ctx.foreign_context.default_cc = cc
@@ -3337,18 +3372,34 @@ string_to_calling_convention :: proc(str: string) -> Calling_Convention {
 		return .Contextless
 	case "cdecl", "c":
 		return .C
-	case "stdcall":
+	case "stdcall", "std":
 		return .Std
-	case "fastcall":
+	case "fastcall", "fast":
 		return .Fast
 	case "none":
 		return .None
+	case "naked":
+		return .Naked
 	case "win64":
 		return .Win64
 	case "sysv":
 		return .SysV
+	case "preserve/none":
+		return .Preserve_None
+	case "preserve/most":
+		return .Preserve_Most
+	case "preserve/all":
+		return .Preserve_All
+	case "system":
+		// C++ parser.cpp:4055-4059 - target dependent, NOT sysv.
+		if build_context.metrics.os == .Windows {
+			return .Std
+		}
+		return .C
 	case:
-		return .None
+		// C++ returns ProcCC_Invalid here. Returning .None conflated an unrecognised
+		// convention with the legitimate "none" convention.
+		return .Invalid
 	}
 }
 
@@ -3658,7 +3709,6 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 			// C++ Reference: check_stmt.cpp lines 1748-1767
 			if !is_type_enum(operand.type) {
 				type_str := type_to_string(operand.type)
-				defer delete(type_str)
 				error_node(operand.expr, "Cannot iterate over the type '%s'", type_str)
 				skip_expr_range_stmt = true
 			} else {
@@ -3852,7 +3902,6 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 							cond_type := get_entity_type(tup.variables[count - 1])
 							if !is_type_boolean(cond_type) {
 								type_str := type_to_string(cond_type)
-								defer delete(type_str)
 								error_node(operand.expr, "The final type of %d-valued expression must be a boolean, got %s", count, type_str)
 								skip_expr_range_stmt = true
 							} else {
@@ -3867,7 +3916,6 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 								for i := len(stmt.vals) - 1; i >= 0 && valid; i -= 1 {
 									if stmt.vals[i] != nil && count < i + 2 {
 										type_str := type_to_string(t)
-										defer delete(type_str)
 										error_node(operand.expr, "Expected a %d-valued expression on the rhs, got (%s)", i + 2, type_str)
 										skip_expr_range_stmt = true
 										valid = false
@@ -3907,7 +3955,6 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 			expr_str := expr_to_string(operand.expr)
 			type_str := type_to_string(operand.type)
 			defer delete(expr_str)
-			defer delete(type_str)
 
 			error_node(operand.expr, "Cannot iterate over '%s' of type '%s'", expr_str, type_str)
 
@@ -4189,7 +4236,6 @@ check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flag
 			// Iterating over a type (e.g., enum)
 			if !is_type_enum(operand.type) {
 				type_str := type_to_string(operand.type)
-				defer delete(type_str)
 				error_node(operand.expr, "Cannot iterate over the type '%s'", type_str)
 				skip_expr = true
 			} else {
@@ -4269,7 +4315,6 @@ check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flag
 			expr_str := expr_to_string(operand.expr)
 			type_str := type_to_string(operand.type)
 			defer delete(expr_str)
-			defer delete(type_str)
 			error_node(operand.expr, "Cannot iterate over '%s' of type '%s' in an '#unroll for' statement", expr_str, type_str)
 		} else if operand.mode != .Constant && unroll_count <= 0 {
 			error_node(operand.expr, "An '#unroll for' expression must be known at compile time")

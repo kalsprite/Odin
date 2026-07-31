@@ -549,6 +549,47 @@ create_scope_from_package :: proc(ctx: ^Checker_Context, pkg: ^ast.Package, allo
 	s.flags += {.Pkg}
 	s.pkg = pkg
 
+	// C++ Reference: checker.cpp:266 - `pkg->scope = s;`
+	pkg.scope = s
+
+	// The assignment above was omitted for a long time, and the omission was load-bearing in the
+	// worst way: check_export_entities walks c.info.packages and drains each package's
+	// exported_entity_queue into `pkg.scope`, skipping any package whose scope is nil
+	// (check_import_export.odin:526). With pkg.scope nil for every parsed package that guard fired
+	// every time, the queues were never drained, and NO exported entity ever reached its package
+	// scope - a declaration in one file of a package was invisible to every other file of the same
+	// package, and `pkg.Name` selectors resolved against an empty scope. It was the direct cause
+	// of the "Undeclared name: X" flood over the core packages, base:runtime included (Type_Info,
+	// Allocator_Error and RUNTIME_LINKAGE are all cross-file references).
+	//
+	// Measured effect of restoring it, over the whole dependency closure of each package:
+	//   core/strings  6079 -> 2210 diagnostics total, 1048 -> 414 in its own files
+	//   core/unicode  3404 -> 1096 diagnostics total,  713 ->   0 in its own files
+	//   core/slice    2876 -> 1180 diagnostics total,  184 ->  84 in its own files
+	// and all 258 "'#caller_location' requires base:runtime to be imported" errors disappear.
+	//
+	// It could not be applied until four unrelated defects were fixed, because a populated package
+	// scope is what makes the checker get far enough to reach any of them. For the record:
+	//
+	//   1. Six empty critical sections (lock and its scope-scoped `defer` unlock both inside an
+	//      `if !in_single_threaded_checker_stage()` block, so the unlock fired before the guarded
+	//      work). Fixed previously; that was the "double free or corruption in map_grow_dynamic".
+	//   2. task_deque_take did not restore `bottom` after winning the CAS for the last element,
+	//      leaving the work-stealing deque at size -1 and silently losing the next task pushed to
+	//      it while `tasks_left` still counted it - a hard deadlock of the whole thread pool.
+	//      See queue_drain.odin.
+	//   3. Fourteen unsynchronised readers of Checker_Info.type_and_value_map racing the writer's
+	//      map growth. See tav_lookup in check_expr.odin.
+	//   4. Two unbounded recursions in the polymorphic-record machinery: a missing
+	//      `is_polymorphic^ = true` for a still-generic type-parameter operand, and an invented
+	//      Struct/Union arm in is_polymorphic_type_assignable that formed a closed cycle with
+	//      check_type_specialization_to. See check_type.odin.
+	//
+	// The `ident.name == e.token.text` assertion in add_entity_and_decl_info, which used to fire
+	// as soon as this line was applied, does not fire any more: it was a downstream symptom of
+	// (2)/(3), not an entity-construction defect. It is C++'s GB_ASSERT at checker.cpp:2219 and
+	// stays.
+
 	// Check if this is the init package
 	// C++ lines 267-269: if (pkg->fullpath == c->checker->parser->init_fullpath || pkg->kind == Package_Init)
 	// Dynamically created runtime packages may have .Init kind OR match the init_fullpath

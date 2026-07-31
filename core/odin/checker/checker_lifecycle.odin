@@ -8,6 +8,7 @@ import "core:mem"
 import "core:odin/ast"
 import "core:os"
 import "core:sync"
+import "core:time"
 /*
 Checker Lifecycle Management
 
@@ -179,7 +180,7 @@ init_checker :: proc(c: ^Checker, allocator := context.allocator) {
 		if global_thread_pool == nil && !build_context.no_threaded_checker {
 			// Use hardware thread count (or minimum of 1 worker)
 			// C++ uses same approach: worker_count = max(1, cpu_count - 1)
-			cpu_count := os.processor_core_count()
+			cpu_count := os.get_processor_core_count()
 			worker_count := max(1, cpu_count - 1) // Leave one core for main thread
 			global_thread_pool = thread_pool_init(worker_count, runtime.default_allocator())
 		}
@@ -196,6 +197,14 @@ init_checker :: proc(c: ^Checker, allocator := context.allocator) {
 	// Initialize Checker_Info
 	init_checker_info(&c.info, allocator)
 	c.info.checker = c
+
+	// Initialize the builtin context the same way C++ init_checker_context does, so that
+	// anything reached through it has a valid type path to push onto.
+	// C++ Reference: checker.cpp:1685-1693
+	c.builtin_ctx.checker = c
+	c.builtin_ctx.info = &c.info
+	c.builtin_ctx.type_path = new_checker_type_path(allocator)
+	c.builtin_ctx.type_level = 0
 
 	// Initialize builtin packages (builtin, intrinsics, config)
 	// C++ Reference: checker.cpp:1102-1105
@@ -218,6 +227,11 @@ init_checker :: proc(c: ^Checker, allocator := context.allocator) {
 
 // destroy_checker cleans up a Checker instance
 destroy_checker :: proc(c: ^Checker) {
+	// Clean up the builtin context's type path
+	// C++ Reference: checker.cpp:1695-1697 (destroy_checker_context)
+	destroy_checker_type_path(c.builtin_ctx.type_path, c.allocator)
+	c.builtin_ctx.type_path = nil
+
 	// Clean up Checker_Info
 	destroy_checker_info(&c.info)
 
@@ -281,18 +295,26 @@ init_builtin_packages :: proc(info: ^Checker_Info, allocator := context.allocato
 		info.package_scopes[info.config_package] = info.config_package.scope
 	}
 
-	// Initialize ODIN_ROOT from environment if not set
-	// This is needed for the runtime extractor to find base/runtime
+	// Initialize ODIN_ROOT from environment if not set.
+	// The loader needs it to resolve `base:runtime` and every other collection path.
 	init_odin_root_from_env()
 
-	// Extract runtime types from base/runtime source
-	// This allows code that imports base:runtime to access runtime types
-	info.runtime_package = extract_runtime_types(info, allocator)
-	if info.runtime_package != nil {
-		// Register under both "runtime" and "base:runtime" import paths
-		info.packages["runtime"] = info.runtime_package
-		info.packages["base:runtime"] = info.runtime_package
-	}
+	// NOTE: base:runtime is deliberately NOT created here, and info.runtime_package is left nil.
+	//
+	// It used to be synthesized at this point by extract_runtime_types, which produced a package
+	// of placeholder entities - struct fields typed t_untyped_nil, distinct types with no base -
+	// because nothing here can resolve types before checking has begun. It is now a real,
+	// parsed, checked package, seeded by the loader (see seed comment in
+	// load_package_with_dependencies) exactly as the C++ compiler seeds it in parse_packages
+	// (src/parser.cpp:7062-7071), which is likewise a parser-phase job and not a checker-init
+	// job. info.runtime_package is set when that package is registered, and again by
+	// register_packages_from_files from its .Runtime kind.
+	//
+	// The consequence for a caller that bypasses the loader - handing check_files a file list it
+	// assembled itself - is that there is no runtime package at all, and the preload types
+	// (t_type_info and friends) stay nil. That was already the outcome whenever ODIN_ROOT could
+	// not be found; it is now simply the outcome whenever runtime was not loaded. Every consumer
+	// of info.runtime_package tolerates nil for that reason.
 }
 
 // populate_config_package_scope adds defined_values to config_package scope as constants
@@ -343,9 +365,275 @@ populate_config_package_scope :: proc(info: ^Checker_Info) -> (had_double_declar
 	return had_double_declaration
 }
 
-// populate_builtin_package_scope adds builtin type entities to the builtin package scope.
-// This allows code like `x: int` to resolve `int` through scope lookup.
-// C++ Reference: checker.cpp:1071-1091 (create_type_entity, init_universe)
+// Global_Enum_Value is one member of a synthesized universe-scope enum.
+// C++ Reference: checker.cpp:1044-1047 (struct GlobalEnumValue)
+Global_Enum_Value :: struct {
+	name:  string,
+	value: i64,
+}
+
+// add_global_type_entity registers a type under `name` in `scope`.
+// C++ Reference: checker.cpp:1026-1028 (add_global_type_entity)
+@(private = "file")
+add_global_type_entity :: proc(scope: ^Scope, name: string, type: ^Type, alloc: mem.Allocator) {
+	if type == nil {
+		return
+	}
+	token := make_token_ident(name)
+	entity := alloc_entity_type_name(scope, token, type, .Resolved, alloc)
+	scope_insert(scope, entity)
+}
+
+// set_type_name_entity_type points a type-name entity at `type`.
+//
+// Both fields have to be written: `Entity.type` is what most of the checker reads, but
+// get_entity_type (check_expr.odin:303-305) goes through the Entity_Type_Name variant, which
+// alloc_entity only fills in from the `type` argument - and these entities are necessarily
+// allocated before their named type exists, because the named type points back at them.
+@(private = "file")
+set_type_name_entity_type :: proc(entity: ^Entity, type: ^Type) {
+	entity.type = type
+	if tn, ok := &entity.variant.(Entity_Type_Name); ok {
+		tn.type = type
+	}
+}
+
+// add_global_constant registers a constant under `name` in `scope`.
+// C++ Reference: checker.cpp:1012-1016 (add_global_constant)
+@(private = "file")
+add_global_constant :: proc(scope: ^Scope, name: string, type: ^Type, value: Exact_Value, alloc: mem.Allocator) {
+	if type == nil {
+		return
+	}
+	token := make_token_ident(name)
+	entity := alloc_entity_constant(scope, token, type, value, alloc)
+	entity.state = .Resolved
+	scope_insert(scope, entity)
+}
+
+// C++ Reference: checker.cpp:1019-1021 (add_global_string_constant)
+@(private = "file")
+add_global_string_constant :: proc(scope: ^Scope, name: string, value: string, alloc: mem.Allocator) {
+	add_global_constant(scope, name, t_untyped_string, exact_value_string(value), alloc)
+}
+
+// C++ Reference: checker.cpp:1023-1025 (add_global_bool_constant)
+@(private = "file")
+add_global_bool_constant :: proc(scope: ^Scope, name: string, value: bool, alloc: mem.Allocator) {
+	add_global_constant(scope, name, t_untyped_bool, exact_value_bool(value), alloc)
+}
+
+// add_global_enum_type synthesizes a named enum type whose members are `values`.
+//
+// C++ Reference: checker.cpp:1049-1091 (add_global_enum_type)
+//
+// The type-name entity is deliberately NOT inserted into the builtin scope: exactly as in
+// C++, these enum types are anonymous as far as checked code is concerned. Only the constants
+// derived from them (ODIN_OS, ODIN_ENDIAN, ...) are visible, and the enum's own scope exists
+// so that an implicit selector (`.Little`) has fields to resolve against. Callers that do want
+// the name visible (intrinsics.Atomic_Memory_Order) insert the returned entity themselves.
+@(private = "file")
+add_global_enum_type :: proc(
+	builtin_scope: ^Scope,
+	type_name: string,
+	values: []Global_Enum_Value,
+	backing_type: ^Type,
+	alloc: mem.Allocator,
+) -> (
+	fields: []^Entity,
+	named_type: ^Type,
+) {
+	scope := create_scope(builtin_scope, alloc)
+	entity := alloc_entity_type_name(scope, make_token_ident(type_name), nil, .Resolved, alloc)
+
+	enum_type := alloc_type_enum()
+	named_type = alloc_type_named(type_name, enum_type, entity)
+	set_base_type(named_type, enum_type)
+	set_type_name_entity_type(entity, named_type)
+
+	et := &enum_type.variant.(Type_Enum)
+	et.base_type = backing_type != nil ? backing_type : t_int
+	et.scope = scope
+
+	field_array := make([dynamic]^Entity, 0, len(values), alloc)
+	for v in values {
+		e := alloc_entity_constant(scope, make_token_ident(v.name), named_type, exact_value_i64(v.value), alloc)
+		e.flags += {.Visited}
+		e.state = .Resolved
+		append(&field_array, e)
+		scope_insert(scope, e)
+	}
+
+	et.fields = field_array
+	et.min_value_index = 0
+	et.max_value_index = i64(len(values) - 1)
+	if len(values) > 0 {
+		et.min_value = exact_value_i64(values[0].value)
+		et.max_value = exact_value_i64(values[len(values) - 1].value)
+	}
+
+	return field_array[:], named_type
+}
+
+// add_global_enum_constant registers `name` as a constant of the enum whose members are
+// `fields`, picking the member whose value is `value`.
+//
+// C++ Reference: checker.cpp:1092-1102 (add_global_enum_constant)
+//
+// DEVIATION: C++ calls GB_PANIC when no member matches. The port cannot: the port's own
+// target tables are a superset of the C++ ones (Target_Os_Kind still carries the retired
+// Essence and Haiku entries - see the note in package_resolver.odin and open task #5), so a
+// build context naming one of those has no member to select. Registering nothing leaves the
+// name undeclared, which is a diagnostic rather than a crash.
+@(private = "file")
+add_global_enum_constant :: proc(
+	scope: ^Scope,
+	fields: []^Entity,
+	values: []Global_Enum_Value,
+	name: string,
+	value: i64,
+	alloc: mem.Allocator,
+) {
+	for v, i in values {
+		if v.value == value {
+			field := fields[i]
+			add_global_constant(scope, name, field.type, field.variant.(Entity_Constant).value, alloc)
+			return
+		}
+	}
+}
+
+// odin_os_enum_value maps a target OS onto the C++ TargetOsKind ordinal.
+// C++ Reference: build_settings.cpp:14-31
+//
+// The port's Target_Os_Kind still carries Essence and Haiku, which upstream retired; both
+// map to Unknown here so that the synthesized Odin_OS_Type matches C++ member-for-member.
+@(private = "file")
+odin_os_enum_value :: proc(os: Target_Os_Kind) -> i64 {
+	switch os {
+	case .Invalid:
+		return 0
+	case .Windows:
+		return 1
+	case .Darwin:
+		return 2
+	case .Linux:
+		return 3
+	case .Freebsd:
+		return 4
+	case .Openbsd:
+		return 5
+	case .Netbsd:
+		return 6
+	case .Wasi:
+		return 7
+	case .Js:
+		return 8
+	case .Orca:
+		return 9
+	case .Freestanding:
+		return 10
+	}
+	return 0
+}
+
+// odin_subtarget_enum_value maps a subtarget onto the C++ Subtarget ordinal.
+// C++ Reference: build_settings.cpp:169-178
+//
+// The port has no Playdate subtarget yet (open task #5) and carries an `Invalid` sentinel
+// where C++ puts Playdate; `Invalid` is never a selected subtarget, so it maps to Default.
+@(private = "file")
+odin_subtarget_enum_value :: proc(st: Subtarget) -> i64 {
+	switch st {
+	case .Default, .Invalid:
+		return 0
+	case .IPhone:
+		return 1
+	case .IPhoneSimulator:
+		return 2
+	case .Android:
+		return 3
+	}
+	return 0
+}
+
+// odin_calling_convention_enum_value maps a calling convention onto the C++ ProcCC ordinal.
+// C++ Reference: parser.hpp:288-311
+odin_calling_convention_enum_value :: proc(cc: Calling_Convention) -> i64 {
+	switch cc {
+	case .Odin:
+		return 1
+	case .Contextless:
+		return 2
+	case .C:
+		return 3
+	case .Std:
+		return 4
+	case .Fast:
+		return 5
+	case .None:
+		return 6
+	case .Naked:
+		return 7
+	case .Inline_Asm:
+		return 8
+	case .Win64:
+		return 9
+	case .SysV:
+		return 10
+	case .Preserve_None:
+		return 11
+	case .Preserve_Most:
+		return 12
+	case .Preserve_All:
+		return 13
+	case .Invalid:
+		return 0
+	}
+	return 0
+}
+
+// parse_minimum_os_version turns "major.minor.revision" into (major*10000)+(minor*100)+revision.
+// C++ Reference: checker.cpp:1338-1352
+@(private = "file")
+parse_minimum_os_version :: proc(s: string) -> i64 {
+	if len(s) == 0 {
+		return 0
+	}
+	// C++ uses sscanf("%d.%d.%d"), which leaves any component it could not read at its
+	// initial value - 0 for revision, indeterminate for major/minor, in practice 0.
+	parts: [3]i64
+	idx := 0
+	seen_digit := false
+	for ch in s {
+		if ch >= '0' && ch <= '9' {
+			parts[idx] = parts[idx] * 10 + i64(ch - '0')
+			seen_digit = true
+		} else if ch == '.' {
+			if !seen_digit {
+				break
+			}
+			idx += 1
+			seen_digit = false
+			if idx >= len(parts) {
+				break
+			}
+		} else {
+			break
+		}
+	}
+	return parts[0] * 10000 + parts[1] * 100 + parts[2]
+}
+
+// populate_builtin_package_scope populates the universe scope: builtin types, the ODIN_*
+// build constants and their enum types, and the builtin/intrinsics procedures.
+//
+// C++ Reference: checker.cpp:1113-1592 (init_universal)
+//
+// Everything here that describes the target is read from `build_context`, never from the
+// host, because the checker supports cross-target checking. C++ guarantees the ordering by
+// running init_build_context in main before init_universal; the port has no main, so this
+// calls ensure_build_context_initialized directly.
 populate_builtin_package_scope :: proc(info: ^Checker_Info, allocator := context.allocator) {
 	if info.builtin_package == nil {
 		return
@@ -356,86 +644,485 @@ populate_builtin_package_scope :: proc(info: ^Checker_Info, allocator := context
 		return
 	}
 
-	// Helper to create and register a builtin type entity
-	add_builtin_type :: proc(scope: ^Scope, name: string, type: ^Type, alloc: mem.Allocator) {
-		if type == nil {
-			return
-		}
-		token := make_token_ident(name)
-		entity := alloc_entity_type_name(scope, token, type, .Resolved, alloc)
-		scope_insert(scope, entity)
-	}
+	// Every implicit allocation below (alloc_type, the big.Int digits behind
+	// exact_value_i64, the enum field arrays) must come from the checker's allocator, not
+	// from whatever context the embedder happened to call init_checker under. The universe
+	// entities live exactly as long as the Checker does.
+	context.allocator = allocator
+
+	// C++ runs init_build_context (main.cpp) long before init_universal; without a target
+	// here every ODIN_* constant below would describe the zero value instead of the target.
+	ensure_build_context_initialized()
+
+	bc := &build_context
+
+	// ------------------------------------------------------------------------------
+	// Types
+	// C++ Reference: checker.cpp:1120-1133
+	//
+	// C++ walks the `basic_types` table and registers every entry whose name has no space
+	// in it (which is how "invalid type", "llvm bool" and every "untyped x" are skipped).
+	// The port keeps that filtering implicit by naming the registered types outright.
+	// ------------------------------------------------------------------------------
+
+	// C++ Reference: checker.cpp:1123-1129 - `-bedrock` drops the 128-bit integers.
+	bedrock := bc.bedrock
 
 	// Boolean types
-	add_builtin_type(builtin_scope, "bool", t_bool, allocator)
-	add_builtin_type(builtin_scope, "b8", t_b8, allocator)
-	add_builtin_type(builtin_scope, "b16", t_b16, allocator)
-	add_builtin_type(builtin_scope, "b32", t_b32, allocator)
-	add_builtin_type(builtin_scope, "b64", t_b64, allocator)
+	add_global_type_entity(builtin_scope, "bool", t_bool, allocator)
+	add_global_type_entity(builtin_scope, "b8", t_b8, allocator)
+	add_global_type_entity(builtin_scope, "b16", t_b16, allocator)
+	add_global_type_entity(builtin_scope, "b32", t_b32, allocator)
+	add_global_type_entity(builtin_scope, "b64", t_b64, allocator)
 
 	// Integer types
-	add_builtin_type(builtin_scope, "i8", t_i8, allocator)
-	add_builtin_type(builtin_scope, "i16", t_i16, allocator)
-	add_builtin_type(builtin_scope, "i32", t_i32, allocator)
-	add_builtin_type(builtin_scope, "i64", t_i64, allocator)
-	add_builtin_type(builtin_scope, "i128", t_i128, allocator)
-	add_builtin_type(builtin_scope, "int", t_int, allocator)
+	add_global_type_entity(builtin_scope, "i8", t_i8, allocator)
+	add_global_type_entity(builtin_scope, "i16", t_i16, allocator)
+	add_global_type_entity(builtin_scope, "i32", t_i32, allocator)
+	add_global_type_entity(builtin_scope, "i64", t_i64, allocator)
+	add_global_type_entity(builtin_scope, "int", t_int, allocator)
 
-	add_builtin_type(builtin_scope, "u8", t_u8, allocator)
-	add_builtin_type(builtin_scope, "u16", t_u16, allocator)
-	add_builtin_type(builtin_scope, "u32", t_u32, allocator)
-	add_builtin_type(builtin_scope, "u64", t_u64, allocator)
-	add_builtin_type(builtin_scope, "u128", t_u128, allocator)
-	add_builtin_type(builtin_scope, "uint", t_uint, allocator)
-	add_builtin_type(builtin_scope, "uintptr", t_uintptr, allocator)
+	add_global_type_entity(builtin_scope, "u8", t_u8, allocator)
+	add_global_type_entity(builtin_scope, "u16", t_u16, allocator)
+	add_global_type_entity(builtin_scope, "u32", t_u32, allocator)
+	add_global_type_entity(builtin_scope, "u64", t_u64, allocator)
+	add_global_type_entity(builtin_scope, "uint", t_uint, allocator)
+	add_global_type_entity(builtin_scope, "uintptr", t_uintptr, allocator)
 
 	// Floating point types
-	add_builtin_type(builtin_scope, "f16", t_f16, allocator)
-	add_builtin_type(builtin_scope, "f32", t_f32, allocator)
-	add_builtin_type(builtin_scope, "f64", t_f64, allocator)
+	add_global_type_entity(builtin_scope, "f16", t_f16, allocator)
+	add_global_type_entity(builtin_scope, "f32", t_f32, allocator)
+	add_global_type_entity(builtin_scope, "f64", t_f64, allocator)
 
 	// Character types
-	add_builtin_type(builtin_scope, "rune", t_rune, allocator)
-	add_builtin_type(builtin_scope, "byte", t_u8, allocator) // byte is alias for u8
+	add_global_type_entity(builtin_scope, "rune", t_rune, allocator)
+	add_global_type_entity(builtin_scope, "byte", t_u8, allocator) // byte is alias for u8
 
 	// Complex types
-	add_builtin_type(builtin_scope, "complex32", t_complex32, allocator)
-	add_builtin_type(builtin_scope, "complex64", t_complex64, allocator)
-	add_builtin_type(builtin_scope, "complex128", t_complex128, allocator)
+	add_global_type_entity(builtin_scope, "complex32", t_complex32, allocator)
+	add_global_type_entity(builtin_scope, "complex64", t_complex64, allocator)
+	add_global_type_entity(builtin_scope, "complex128", t_complex128, allocator)
 
 	// Quaternion types
-	add_builtin_type(builtin_scope, "quaternion64", t_quaternion64, allocator)
-	add_builtin_type(builtin_scope, "quaternion128", t_quaternion128, allocator)
-	add_builtin_type(builtin_scope, "quaternion256", t_quaternion256, allocator)
+	add_global_type_entity(builtin_scope, "quaternion64", t_quaternion64, allocator)
+	add_global_type_entity(builtin_scope, "quaternion128", t_quaternion128, allocator)
+	add_global_type_entity(builtin_scope, "quaternion256", t_quaternion256, allocator)
 
 	// String types
-	add_builtin_type(builtin_scope, "string", t_string, allocator)
-	add_builtin_type(builtin_scope, "cstring", t_cstring, allocator)
+	add_global_type_entity(builtin_scope, "string", t_string, allocator)
+	add_global_type_entity(builtin_scope, "cstring", t_cstring, allocator)
+
+	// UTF-16 string types
+	// C++ Reference: types.cpp:529-530 (basic_types entries string16/cstring16)
+	add_global_type_entity(builtin_scope, "string16", t_string16, allocator)
+	add_global_type_entity(builtin_scope, "cstring16", t_cstring16, allocator)
 
 	// Pointer and special types
-	add_builtin_type(builtin_scope, "rawptr", t_rawptr, allocator)
-	add_builtin_type(builtin_scope, "typeid", t_typeid, allocator)
-	add_builtin_type(builtin_scope, "any", t_any, allocator)
+	add_global_type_entity(builtin_scope, "rawptr", t_rawptr, allocator)
+	add_global_type_entity(builtin_scope, "typeid", t_typeid, allocator)
+	add_global_type_entity(builtin_scope, "any", t_any, allocator)
 
-	// Boolean constants
-	// C++ Reference: init_preload(), builtin_procs.cpp
-	add_builtin_const :: proc(scope: ^Scope, name: string, type: ^Type, value: Exact_Value, alloc: mem.Allocator) {
-		if type == nil {
-			return
-		}
-		token := make_token_ident(name)
-		entity := alloc_entity_constant(scope, token, type, value)
-		entity.state = .Resolved
-		scope_insert(scope, entity)
+	// Explicitly-endian types
+	// C++ Reference: types.cpp:537-562 (the "// Endian" block of basic_types)
+	add_global_type_entity(builtin_scope, "i16le", t_i16le, allocator)
+	add_global_type_entity(builtin_scope, "u16le", t_u16le, allocator)
+	add_global_type_entity(builtin_scope, "i32le", t_i32le, allocator)
+	add_global_type_entity(builtin_scope, "u32le", t_u32le, allocator)
+	add_global_type_entity(builtin_scope, "i64le", t_i64le, allocator)
+	add_global_type_entity(builtin_scope, "u64le", t_u64le, allocator)
+
+	add_global_type_entity(builtin_scope, "i16be", t_i16be, allocator)
+	add_global_type_entity(builtin_scope, "u16be", t_u16be, allocator)
+	add_global_type_entity(builtin_scope, "i32be", t_i32be, allocator)
+	add_global_type_entity(builtin_scope, "u32be", t_u32be, allocator)
+	add_global_type_entity(builtin_scope, "i64be", t_i64be, allocator)
+	add_global_type_entity(builtin_scope, "u64be", t_u64be, allocator)
+
+	if !bedrock {
+		add_global_type_entity(builtin_scope, "i128", t_i128, allocator)
+		add_global_type_entity(builtin_scope, "u128", t_u128, allocator)
+		add_global_type_entity(builtin_scope, "i128le", t_i128le, allocator)
+		add_global_type_entity(builtin_scope, "u128le", t_u128le, allocator)
+		add_global_type_entity(builtin_scope, "i128be", t_i128be, allocator)
+		add_global_type_entity(builtin_scope, "u128be", t_u128be, allocator)
 	}
 
-	add_builtin_const(builtin_scope, "true", t_untyped_bool, exact_value_bool(true), allocator)
-	add_builtin_const(builtin_scope, "false", t_untyped_bool, exact_value_bool(false), allocator)
-	add_builtin_const(builtin_scope, "nil", t_untyped_nil, nil, allocator)
+	add_global_type_entity(builtin_scope, "f16le", t_f16le, allocator)
+	add_global_type_entity(builtin_scope, "f32le", t_f32le, allocator)
+	add_global_type_entity(builtin_scope, "f64le", t_f64le, allocator)
+
+	add_global_type_entity(builtin_scope, "f16be", t_f16be, allocator)
+	add_global_type_entity(builtin_scope, "f32be", t_f32be, allocator)
+	add_global_type_entity(builtin_scope, "f64be", t_f64be, allocator)
+
+	// ------------------------------------------------------------------------------
+	// Constants
+	// C++ Reference: checker.cpp:1145-1477
+	// ------------------------------------------------------------------------------
+
+	// DEVIATION: C++ registers `nil` with alloc_entity_nil (Entity_Nil). The port has
+	// alloc_entity_nil, but nothing in check_ident handles the .Nil entity kind, so `nil`
+	// stays a constant of type untyped nil - observationally the same thing.
+	add_global_constant(builtin_scope, "nil", t_untyped_nil, nil, allocator)
+	add_global_bool_constant(builtin_scope, "true", true, allocator)
+	add_global_bool_constant(builtin_scope, "false", false, allocator)
+
+	add_global_string_constant(builtin_scope, "ODIN_VENDOR", bc.ODIN_VENDOR, allocator)
+	add_global_string_constant(builtin_scope, "ODIN_VERSION", bc.ODIN_VERSION, allocator)
+	add_global_string_constant(builtin_scope, "ODIN_ROOT", bc.ODIN_ROOT, allocator)
+	add_global_string_constant(builtin_scope, "ODIN_BUILD_PROJECT_NAME", bc.ODIN_BUILD_PROJECT_NAME, allocator)
+
+	add_global_bool_constant(builtin_scope, "ODIN_BEDROCK", bedrock, allocator)
+
+	// Odin_Windows_Subsystem_Type / ODIN_WINDOWS_SUBSYSTEM
+	// C++ Reference: checker.cpp:1160-1180
+	{
+		values := []Global_Enum_Value {
+			{"Unknown", 0},
+			{"Boot_Application", 1},
+			{"Console", 2},
+			{"EFI_Application", 3},
+			{"EFI_Boot_Service_Driver", 4},
+			{"EFI_Rom", 5},
+			{"EFI_Runtime_Driver", 6},
+			{"Native", 7},
+			{"Posix", 8},
+			{"Windows", 9},
+			{"Windows_CE", 10},
+		}
+		fields, _ := add_global_enum_type(builtin_scope, "Odin_Windows_Subsystem_Type", values, nil, allocator)
+		add_global_enum_constant(
+			builtin_scope,
+			fields,
+			values,
+			"ODIN_WINDOWS_SUBSYSTEM",
+			i64(bc.ODIN_WINDOWS_SUBSYSTEM),
+			allocator,
+		)
+		add_global_string_constant(
+			builtin_scope,
+			"ODIN_WINDOWS_SUBSYSTEM_STRING",
+			windows_subsystem_names[bc.ODIN_WINDOWS_SUBSYSTEM],
+			allocator,
+		)
+	}
+
+	// Odin_OS_Type / ODIN_OS
+	// C++ Reference: checker.cpp:1182-1199
+	{
+		values := []Global_Enum_Value {
+			{"Unknown", 0},
+			{"Windows", 1},
+			{"Darwin", 2},
+			{"Linux", 3},
+			{"FreeBSD", 4},
+			{"OpenBSD", 5},
+			{"NetBSD", 6},
+			{"WASI", 7},
+			{"JS", 8},
+			{"Orca", 9},
+			{"Freestanding", 10},
+		}
+		fields, _ := add_global_enum_type(builtin_scope, "Odin_OS_Type", values, nil, allocator)
+		add_global_enum_constant(
+			builtin_scope,
+			fields,
+			values,
+			"ODIN_OS",
+			odin_os_enum_value(bc.metrics.os),
+			allocator,
+		)
+		add_global_string_constant(builtin_scope, "ODIN_OS_STRING", bc.ODIN_OS, allocator)
+	}
+
+	// Odin_Arch_Type / ODIN_ARCH
+	// C++ Reference: checker.cpp:1201-1214
+	{
+		values := []Global_Enum_Value {
+			{"Unknown", 0},
+			{"amd64", 1},
+			{"i386", 2},
+			{"arm32", 3},
+			{"arm64", 4},
+			{"wasm32", 5},
+			{"wasm64p32", 6},
+			{"riscv64", 7},
+		}
+		fields, _ := add_global_enum_type(builtin_scope, "Odin_Arch_Type", values, nil, allocator)
+		add_global_enum_constant(builtin_scope, fields, values, "ODIN_ARCH", i64(bc.metrics.arch), allocator)
+		add_global_string_constant(builtin_scope, "ODIN_ARCH_STRING", bc.ODIN_ARCH, allocator)
+	}
+
+	add_global_string_constant(builtin_scope, "ODIN_MICROARCH_STRING", get_final_microarchitecture(), allocator)
+
+	// Odin_Build_Mode_Type / ODIN_BUILD_MODE
+	// C++ Reference: checker.cpp:1218-1230
+	{
+		values := []Global_Enum_Value {
+			{"Executable", 0},
+			{"Dynamic", 1},
+			{"Static", 2},
+			{"Object", 3},
+			{"Assembly", 4},
+			{"LLVM_IR", 5},
+		}
+		fields, _ := add_global_enum_type(builtin_scope, "Odin_Build_Mode_Type", values, nil, allocator)
+		add_global_enum_constant(builtin_scope, fields, values, "ODIN_BUILD_MODE", i64(bc.build_mode), allocator)
+	}
+
+	// Odin_Endian_Type / ODIN_ENDIAN
+	// C++ Reference: checker.cpp:1232-1241
+	//
+	// This is the pair that `#assert(ODIN_ENDIAN == .Little)` needs: the constant must carry
+	// a real enum type, or the implicit selector on the right has nothing to infer from.
+	{
+		values := []Global_Enum_Value{{"Little", 0}, {"Big", 1}}
+		fields, _ := add_global_enum_type(builtin_scope, "Odin_Endian_Type", values, nil, allocator)
+		endian := target_endians[bc.metrics.arch]
+		add_global_enum_constant(builtin_scope, fields, values, "ODIN_ENDIAN", i64(endian), allocator)
+		add_global_string_constant(builtin_scope, "ODIN_ENDIAN_STRING", target_endian_names[endian], allocator)
+	}
+
+	// Odin_Platform_Subtarget_Type / ODIN_PLATFORM_SUBTARGET
+	// C++ Reference: checker.cpp:1243-1255
+	{
+		values := []Global_Enum_Value {
+			{"Default", 0},
+			{"iPhone", 1},
+			{"iPhoneSimulator", 2},
+			{"Android", 3},
+			{"Playdate", 4},
+		}
+		fields, _ := add_global_enum_type(builtin_scope, "Odin_Platform_Subtarget_Type", values, nil, allocator)
+		add_global_enum_constant(
+			builtin_scope,
+			fields,
+			values,
+			"ODIN_PLATFORM_SUBTARGET",
+			odin_subtarget_enum_value(bc.subtarget),
+			allocator,
+		)
+	}
+
+	// Odin_Error_Pos_Style_Type / ODIN_ERROR_POS_STYLE
+	// C++ Reference: checker.cpp:1257-1265
+	{
+		values := []Global_Enum_Value{{"Default", 0}, {"Unix", 1}}
+		fields, _ := add_global_enum_type(builtin_scope, "Odin_Error_Pos_Style_Type", values, nil, allocator)
+		add_global_enum_constant(
+			builtin_scope,
+			fields,
+			values,
+			"ODIN_ERROR_POS_STYLE",
+			i64(bc.ODIN_ERROR_POS_STYLE),
+			allocator,
+		)
+	}
+
+	// Odin_Calling_Convention / ODIN_DEFAULT_CALLING_CONVENTION
+	// C++ Reference: checker.cpp:1310-1336
+	{
+		values := []Global_Enum_Value {
+			{"Invalid", 0},
+			{"Odin", 1},
+			{"Contextless", 2},
+			{"CDecl", 3},
+			{"Std_Call", 4},
+			{"Fast_Call", 5},
+			{"None", 6},
+			{"Naked", 7},
+			{"_", 8}, // ProcCC_InlineAsm, deliberately unnameable in C++ too
+			{"Win64", 9},
+			{"SysV", 10},
+			{"PreserveNone", 11},
+			{"PreserveMost", 12},
+			{"PreserveAll", 13},
+		}
+		fields, named_type := add_global_enum_type(builtin_scope, "Odin_Calling_Convention", values, t_u8, allocator)
+		t_odin_calling_convention = named_type
+		add_global_enum_constant(
+			builtin_scope,
+			fields,
+			values,
+			"ODIN_DEFAULT_CALLING_CONVENTION",
+			odin_calling_convention_enum_value(default_calling_convention()),
+			allocator,
+		)
+	}
+
+	// ODIN_MINIMUM_OS_VERSION
+	// C++ Reference: checker.cpp:1338-1352
+	add_global_constant(
+		builtin_scope,
+		"ODIN_MINIMUM_OS_VERSION",
+		t_untyped_integer,
+		exact_value_i64(parse_minimum_os_version(bc.minimum_os_version_string)),
+		allocator,
+	)
+
+	// C++ Reference: checker.cpp:1354-1368
+	add_global_bool_constant(builtin_scope, "ODIN_DEBUG", bc.ODIN_DEBUG, allocator)
+	add_global_bool_constant(builtin_scope, "ODIN_DISABLE_ASSERT", bc.ODIN_DISABLE_ASSERT, allocator)
+	add_global_bool_constant(
+		builtin_scope,
+		"ODIN_DEFAULT_TO_NIL_ALLOCATOR",
+		bc.ODIN_DEFAULT_TO_NIL_ALLOCATOR,
+		allocator,
+	)
+	add_global_bool_constant(builtin_scope, "ODIN_NO_BOUNDS_CHECK", bc.no_bounds_check, allocator)
+	add_global_bool_constant(builtin_scope, "ODIN_NO_TYPE_ASSERT", bc.no_type_assert, allocator)
+	add_global_bool_constant(
+		builtin_scope,
+		"ODIN_DEFAULT_TO_PANIC_ALLOCATOR",
+		bc.ODIN_DEFAULT_TO_PANIC_ALLOCATOR,
+		allocator,
+	)
+	add_global_bool_constant(builtin_scope, "ODIN_NO_CRT", bc.no_crt, allocator)
+	add_global_bool_constant(builtin_scope, "ODIN_USE_SEPARATE_MODULES", bc.use_separate_modules, allocator)
+	add_global_bool_constant(builtin_scope, "ODIN_TEST", .Test in bc.command_kind, allocator)
+	add_global_bool_constant(builtin_scope, "ODIN_NO_ENTRY_POINT", bc.no_entry_point, allocator)
+	add_global_bool_constant(
+		builtin_scope,
+		"ODIN_FOREIGN_ERROR_PROCEDURES",
+		bc.ODIN_FOREIGN_ERROR_PROCEDURES,
+		allocator,
+	)
+	add_global_bool_constant(builtin_scope, "ODIN_NO_RTTI", bc.no_rtti, allocator)
+	add_global_bool_constant(builtin_scope, "ODIN_VALGRIND_SUPPORT", bc.ODIN_VALGRIND_SUPPORT, allocator)
+
+	// ODIN_COMPILE_TIMESTAMP
+	// C++ Reference: checker.cpp:1370 (odin_compile_timestamp, checker.cpp:1104-1109):
+	// nanoseconds since the Unix epoch, captured while the universe is being built.
+	add_global_constant(
+		builtin_scope,
+		"ODIN_COMPILE_TIMESTAMP",
+		t_untyped_integer,
+		exact_value_i64(time.to_unix_nanoseconds(time.now())),
+		allocator,
+	)
+
+	// ODIN_VERSION_HASH
+	// C++ Reference: checker.cpp:1372-1382 - the GIT_SHA the compiler was built with, empty
+	// when it was not defined. The checker is not built with one, so it is always empty.
+	add_global_string_constant(builtin_scope, "ODIN_VERSION_HASH", "", allocator)
+
+	// __ODIN_LLVM_F16_SUPPORTED
+	// C++ Reference: checker.cpp:1384-1397
+	{
+		f16_supported := true
+		if is_arch_wasm() {
+			f16_supported = false
+		} else if bc.metrics.os == .Darwin && bc.metrics.arch == .Amd64 {
+			// NOTE(laytan) in C++: see #3222.
+			f16_supported = false
+		}
+		add_global_bool_constant(builtin_scope, "__ODIN_LLVM_F16_SUPPORTED", f16_supported, allocator)
+	}
+
+	// Odin_Sanitizer_Flag / Odin_Sanitizer_Flags / ODIN_SANITIZER_FLAGS
+	// C++ Reference: checker.cpp:1399-1424
+	{
+		values := []Global_Enum_Value{{"Address", 0}, {"Memory", 1}, {"Thread", 2}}
+		_, enum_type := add_global_enum_type(builtin_scope, "Odin_Sanitizer_Flag", values, nil, allocator)
+
+		bit_set_type := alloc_type_bit_set()
+		bst := &bit_set_type.variant.(Type_Bit_Set)
+		bst.elem = enum_type
+		bst.underlying = t_u32
+		bst.lower = 0
+		bst.upper = 2
+
+		TYPE_NAME :: "Odin_Sanitizer_Flags"
+		scope := create_scope(builtin_scope, allocator)
+		entity := alloc_entity_type_name(scope, make_token_ident(TYPE_NAME), nil, .Resolved, allocator)
+		named_type := alloc_type_named(TYPE_NAME, bit_set_type, entity)
+		set_base_type(named_type, bit_set_type)
+		set_type_name_entity_type(entity, named_type)
+
+		add_global_constant(
+			builtin_scope,
+			"ODIN_SANITIZER_FLAGS",
+			named_type,
+			exact_value_u64(u64(transmute(u32)bc.sanitizer_flags)),
+			allocator,
+		)
+	}
+
+	// Odin_Optimization_Mode / ODIN_OPTIMIZATION_MODE
+	// C++ Reference: checker.cpp:1426-1437
+	{
+		values := []Global_Enum_Value {
+			{"None", -1},
+			{"Minimal", 0},
+			{"Size", 1},
+			{"Speed", 2},
+			{"Aggressive", 3},
+		}
+		fields, _ := add_global_enum_type(builtin_scope, "Odin_Optimization_Mode", values, nil, allocator)
+		add_global_enum_constant(
+			builtin_scope,
+			fields,
+			values,
+			"ODIN_OPTIMIZATION_MODE",
+			i64(bc.optimization_level),
+			allocator,
+		)
+	}
 
 	// Add builtin procedures (len, cap, size_of, etc.)
-	// C++ Reference: checker.cpp:1354-1376
+	// C++ Reference: checker.cpp:1480-1508
 	intrinsics_scope := info.intrinsics_package != nil ? info.intrinsics_package.scope : nil
+
+	// intrinsics.Atomic_Memory_Order
+	// C++ Reference: checker.cpp:1296-1308
+	//
+	// This is what gives `intrinsics.atomic_load_explicit(p, .Acquire)` a type to resolve
+	// its implicit selector against; t_atomic_memory_order had no producer before this.
+	if intrinsics_scope != nil {
+		values := []Global_Enum_Value {
+			{"Relaxed", 0},
+			{"Consume", 1},
+			{"Acquire", 2},
+			{"Release", 3},
+			{"Acq_Rel", 4},
+			{"Seq_Cst", 5},
+		}
+		_, named_type := add_global_enum_type(builtin_scope, "Atomic_Memory_Order", values, nil, allocator)
+		t_atomic_memory_order = named_type
+		scope_insert(intrinsics_scope, named_type.variant.(Type_Named).type_name)
+	}
+
+	// intrinsics.Fast_Math_Flag / intrinsics.Fast_Math_Flags
+	// C++ Reference: checker.cpp:1267-1294
+	if intrinsics_scope != nil {
+		values := []Global_Enum_Value {
+			{"Allow_Reassoc", 0},
+			{"No_NaNs", 1},
+			{"No_Infs", 2},
+			{"No_Signed_Zeros", 3},
+			{"Allow_Reciprocal", 4},
+			{"Allow_Contract", 5},
+			{"Approx_Func", 6},
+		}
+		_, flag_type := add_global_enum_type(builtin_scope, "Fast_Math_Flag", values, t_u8, allocator)
+		scope_insert(intrinsics_scope, flag_type.variant.(Type_Named).type_name)
+
+		bit_set_type := alloc_type_bit_set()
+		bst := &bit_set_type.variant.(Type_Bit_Set)
+		bst.elem = flag_type
+		bst.underlying = t_u32
+		bst.lower = 0
+		bst.upper = i64(len(values) - 1)
+
+		TYPE_NAME :: "Fast_Math_Flags"
+		scope := create_scope(builtin_scope, allocator)
+		entity := alloc_entity_type_name(scope, make_token_ident(TYPE_NAME), nil, .Resolved, allocator)
+		named_type := alloc_type_named(TYPE_NAME, bit_set_type, entity)
+		set_base_type(named_type, bit_set_type)
+		set_type_name_entity_type(entity, named_type)
+
+		scope_insert(intrinsics_scope, entity)
+	}
 
 	for id in Builtin_Proc_Id {
 		proc_info := builtin_proc_infos[id]
@@ -452,6 +1139,15 @@ populate_builtin_package_scope :: proc(info: ^Checker_Info, allocator := context
 			target_scope = intrinsics_scope
 		}
 		scope_insert(target_scope, entity)
+	}
+
+	// `expand_to_tuple` is the deprecated spelling of `expand_values`, registered as a second
+	// builtin entity with the same id.
+	// C++ Reference: checker.cpp:1510-1516
+	{
+		entity := alloc_entity_builtin("expand_to_tuple", .Expand_Values, .Builtin, allocator)
+		entity.state = .Resolved
+		scope_insert(builtin_scope, entity)
 	}
 }
 

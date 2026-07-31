@@ -373,9 +373,22 @@ find_or_generate_polymorphic_procedure :: proc(old_ctx: ^Checker_Context, base_e
 	}
 
 	// Clone identifier
-	// C++ lines 582-583
+	// C++ Reference: check_expr.cpp:588-589
+	//   Ast *ident = clone_ast(base_entity->identifier);
+	//   Token token = ident->Ident.token;
+	//
+	// The token must come from the *cloned identifier*, not from base_entity.token.
+	// add_entity_use overwrites entity.identifier with the most recent use-site
+	// identifier (checker.cpp:2143 does exactly the same), so when the base entity was
+	// reached through a procedure group its own token and its identifier can name
+	// different procedures -- e.g. base_entity is `syscall2` while its identifier is the
+	// `syscall` at the call site. Taking the token from the identifier keeps the two in
+	// step, which is what add_entity_and_decl_info asserts.
 	ident := clone_ast_node(base_entity.identifier)
 	token := base_entity.token
+	if ident_expr, ident_ok := ident.derived.(^ast.Ident); ident_ok {
+		token = make_token_from_ident(ident_expr)
+	}
 
 	// Create declaration info for the specialized procedure
 	// C++ lines 584-590

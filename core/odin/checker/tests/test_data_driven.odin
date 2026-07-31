@@ -94,7 +94,7 @@ run_single_case :: proc(t: ^testing.T, suite: Test_Suite, tc: Test_Case) {
 
 // run_positive_case verifies code compiles without errors
 run_positive_case :: proc(t: ^testing.T, suite: Test_Suite, tc: Test_Case) {
-	result := check_source_internal(tc.source)
+	result := check_source_internal(t, tc.source)
 
 	if !result.parse_ok {
 		testing.expectf(t, false, "[%s] %s: Parse failed unexpectedly", tc.id, tc.name)
@@ -115,7 +115,7 @@ run_positive_case :: proc(t: ^testing.T, suite: Test_Suite, tc: Test_Case) {
 
 // run_negative_case verifies code produces expected errors
 run_negative_case :: proc(t: ^testing.T, suite: Test_Suite, tc: Test_Case) {
-	result := check_source_capture_errors(tc.source)
+	result := check_source_capture_errors(t, tc.source)
 	defer destroy_test_result(&result)
 
 	// Must have at least one error

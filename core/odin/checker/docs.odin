@@ -284,8 +284,8 @@ append_comment_group_string :: proc(indent: i32, buf: ^strings.Builder, g: ^ast.
 print_doc_expr :: proc(expr: ^ast.Node, writer: ^strings.Builder, short_form := false) {
 	// C++ Reference: docs.cpp:186-192
 	s := short_form ? expr_to_string_shorthand(expr) : expr_to_string(expr)
+	defer delete(s)
 	strings.write_string(writer, s)
-	// Note: expr_to_string allocates with context.allocator, no manual free needed
 }
 
 // ======================================================================================
@@ -375,6 +375,7 @@ print_doc_package :: proc(info: ^Checker_Info, pkg: ^ast.Package, writer: ^strin
 			// C++ lines 269-275: Print type if present
 			if type_expr != nil {
 				t := expr_to_string(type_expr)
+				defer delete(t)
 				fmt.sbprintf(writer, ": %s ", t)
 			} else {
 				strings.write_string(writer, " :")

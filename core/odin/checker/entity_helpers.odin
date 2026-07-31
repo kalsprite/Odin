@@ -554,10 +554,13 @@ add_entity_and_decl_info :: proc(ctx: ^Checker_Context, identifier: ^ast.Node, e
 
 	#partial switch ident in identifier.derived {
 	case ^ast.Ident:
+		// C++ Reference: checker.cpp:2219 - GB_ASSERT(identifier->Ident.token.string == e->token.string)
 		assert(ident.name == e.token.text)
 
 	case:
-		error(identifier, "A variable declaration must be an identifier, got '%s'", expr_to_string(identifier))
+		ident_str := expr_to_string(identifier)
+		defer delete(ident_str)
+		error(identifier, "A variable declaration must be an identifier, got '%s'", ident_str)
 		return
 	}
 
@@ -1149,13 +1152,20 @@ pop_scope :: proc(ctx: ^Checker_Context, prev: ^Scope) {
 // C++ Reference: /mnt/c/odin/src/checker.cpp:3161-3205
 // ======================================================================================
 
-// get_runtime_package returns the core:runtime package
-// C++ Reference: checker.cpp:887-903
+// get_runtime_package returns the base:runtime package, or nil if it was not loaded.
+//
+// C++ Reference: checker.cpp:899-915 (get_runtime_package). The C++ version looks the package
+// up by path and GB_ASSERTs it is present, which it can do because parse_packages seeds
+// base:runtime unconditionally before any checking starts (src/parser.cpp:7067) - a compiler
+// run with no runtime package is a compiler bug there.
+//
+// This is a library, and check_files can be called with a file list the caller assembled
+// itself, which is entirely legitimate and includes no runtime. Asserting would turn that into
+// a crash in the host process, so the absent case is reported by returning nil instead. Both
+// callers - add_package_dependency via get_core_package, and find_core_entity - already treat
+// a missing runtime as "no dependency to record" / "no such type", so nil propagates into the
+// same degraded-but-correct behaviour the checker already has when ODIN_ROOT is unset.
 get_runtime_package :: proc(info: ^Checker_Info) -> ^ast.Package {
-	// Direct access - runtime_package is set during checker initialization
-	if info.runtime_package == nil {
-		panic("Runtime package not initialized - check checker setup")
-	}
 	return info.runtime_package
 }
 
@@ -1312,28 +1322,54 @@ proc_group_entities_cloned :: proc(ctx: ^Checker_Context, o: ^Operand, allocator
 
 // ======================================================================================
 // TYPE PATH MANAGEMENT
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3207-3226
+// C++ Reference: /mnt/c/odin/src/checker.cpp:3425-3453
 // ======================================================================================
 
-// Type path is used for cycle detection during type checking
-// The C++ version uses an array that's pushed/popped during type resolution
+// Type path is used for cycle detection during type checking.
+// The C++ version uses an array that's pushed/popped during type resolution, referenced
+// through a pointer stored in the CheckerContext so that every copy of a context shares
+// one path.
+
+// new_checker_type_path allocates a fresh, empty type path.
+// C++ Reference: checker.cpp:3427-3436
+//
+// C++ recycles these through a thread-local free list backed by the permanent allocator;
+// here the path is heap allocated and released by destroy_checker_type_path. The observable
+// semantics -- a brand new, empty path -- are identical.
+new_checker_type_path :: proc(allocator := context.allocator) -> ^Checker_Type_Path {
+	tp := new(Checker_Type_Path, allocator)
+	tp^ = make(Checker_Type_Path, 0, 16, allocator)
+	return tp
+}
+
+// destroy_checker_type_path releases a type path allocated by new_checker_type_path.
+// C++ Reference: checker.cpp:3438-3443
+destroy_checker_type_path :: proc(tp: ^Checker_Type_Path, allocator := context.allocator) {
+	if tp == nil {
+		return
+	}
+	delete(tp^)
+	free(tp, allocator)
+}
 
 // check_type_path_push adds an entity to the type checking path
-// C++ Reference: checker.cpp:3240-3243
+// C++ Reference: checker.cpp:3445-3449
 check_type_path_push :: proc(ctx: ^Checker_Context, e: ^Entity) {
+	assert(ctx.type_path != nil)
 	assert(e != nil)
-	append(&ctx.type_path, e)
+	append(ctx.type_path, e)
 }
 
 // check_type_path_pop removes the last entity from the type checking path
-// C++ Reference: checker.cpp:3245-3247
+// C++ Reference: checker.cpp:3450-3453
 check_type_path_pop :: proc(ctx: ^Checker_Context) -> ^Entity {
-	assert(len(ctx.type_path) > 0)
-	return pop(&ctx.type_path)
+	assert(ctx.type_path != nil)
+	assert(len(ctx.type_path^) > 0)
+	return pop(ctx.type_path)
 }
 
 // check_cycle checks if the current entity is part of a type cycle
-// C++ Reference: check_expr.cpp:1667-1687
+// C++ Reference: check_expr.cpp:1803-1823
 check_cycle :: proc(ctx: ^Checker_Context, curr: ^Entity, report: bool) -> bool {
 	if curr == nil {
 		return false
@@ -1341,15 +1377,19 @@ check_cycle :: proc(ctx: ^Checker_Context, curr: ^Entity, report: bool) -> bool 
 	if curr.state != .In_Progress {
 		return false
 	}
+	if ctx.type_path == nil {
+		return false
+	}
 
 	// Search through the type path for the current entity
-	for prev, i in ctx.type_path {
+	type_path := ctx.type_path^
+	for prev, i in type_path {
 		if prev == curr {
 			if report {
 				error_token(curr.token, "Illegal declaration cycle of '%s'", curr.token.text)
 				// Print the cycle chain
-				for j := i; j < len(ctx.type_path); j += 1 {
-					cycle_ent := ctx.type_path[j]
+				for j := i; j < len(type_path); j += 1 {
+					cycle_ent := type_path[j]
 					error_token(cycle_ent.token, "\t%s refers to", cycle_ent.token.text)
 				}
 				error_token(curr.token, "\t%s", curr.token.text)
@@ -1436,8 +1476,11 @@ make_token_ident :: proc(s: string) -> tokenizer.Token {
 init_mem_allocator :: proc(c: ^Checker) {
 	info := &c.info
 
-	// Check if already initialized (idempotent)
-	if info.cached_allocator != nil {
+	// NOTE: the guard keys off the GLOBAL, not info.cached_allocator, matching C++
+	// (checker.cpp:3570). reset_runtime_type_globals clears the globals but not the cached_ fields,
+	// so guarding on the cached field would return early on a second checker in the same process
+	// and leave t_allocator nil.
+	if t_allocator != nil {
 		return
 	}
 
@@ -1448,14 +1491,20 @@ init_mem_allocator :: proc(c: ^Checker) {
 		return
 	}
 
-	// Cache the type and pointer type
+	// C++ Reference: checker.cpp:3573-3575. The checker reads the GLOBALS (t_allocator has 9 read
+	// sites); the info.cached_ fields are written here for symmetry but are not read anywhere.
+	// Assigning only the cached fields was why every `context.allocator` failed.
+	t_allocator = allocator_type
+	t_allocator_ptr = alloc_type_pointer(allocator_type)
+
 	info.cached_allocator = allocator_type
-	info.cached_allocator_ptr = alloc_type_pointer(allocator_type)
+	info.cached_allocator_ptr = t_allocator_ptr
 
 	// Also cache Allocator_Error enum type
-	// C++ Reference: checker.cpp:3356-3358
+	// C++ Reference: checker.cpp:3575
 	allocator_error := find_core_type(c, "Allocator_Error")
 	if allocator_error != nil {
+		t_allocator_error = allocator_error
 		info.cached_allocator_error = allocator_error
 	}
 }
@@ -1465,8 +1514,8 @@ init_mem_allocator :: proc(c: ^Checker) {
 init_core_context :: proc(c: ^Checker) {
 	info := &c.info
 
-	// Check if already initialized (idempotent)
-	if info.cached_context != nil {
+	// NOTE: guard on the GLOBAL, matching C++ (checker.cpp:3579). See init_mem_allocator.
+	if t_context != nil {
 		return
 	}
 
@@ -1477,9 +1526,16 @@ init_core_context :: proc(c: ^Checker) {
 		return
 	}
 
-	// Cache the type and pointer type
+	// C++ Reference: checker.cpp:3582-3583. The checker reads the globals - check_expr.odin:6729
+	// assigns `o.type = t_context` for the `context` implicit, and check_equivalence.odin:827 and
+	// check_deferred.odin:353 compare against it. Leaving t_context nil made every `context.X`
+	// selector report "Cannot use a selector expression on nil-value expression", which is why
+	// `allocator := context.allocator` - the most common idiom in core - failed everywhere.
+	t_context = context_type
+	t_context_ptr = alloc_type_pointer(context_type)
+
 	info.cached_context = context_type
-	info.cached_context_ptr = alloc_type_pointer(context_type)
+	info.cached_context_ptr = t_context_ptr
 }
 
 // init_preload initializes core runtime types that the checker needs
@@ -1507,4 +1563,8 @@ init_preload :: proc(c: ^Checker) {
 	// Initialize Objective-C types from intrinsics package
 	// C++ Reference: checker.cpp (objc type handling)
 	init_objc_types(c)
+
+	// Initialize c_va_list from intrinsics package
+	// C++ Reference: checker.cpp:1528-1591
+	init_c_va_list_types(c)
 }

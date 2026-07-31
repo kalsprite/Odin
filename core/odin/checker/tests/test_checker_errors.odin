@@ -14,7 +14,6 @@ import "base:runtime"
 import "core:odin/ast"
 import "core:odin/parser"
 import "core:odin/tokenizer"
-import "core:sync"
 import "core:testing"
 
 import checker ".."
@@ -24,7 +23,7 @@ import checker ".."
 // =============================================================================
 
 // Helper to check that code produces errors
-check_expects_error :: proc(src: string) -> (has_errors: bool, error_count: int) {
+check_expects_error :: proc(t: ^testing.T, src: string) -> (has_errors: bool, error_count: int) {
 	file := new(ast.File)
 	file.fullpath = "test_error.odin"
 	file.src = src
@@ -39,8 +38,8 @@ check_expects_error :: proc(src: string) -> (has_errors: bool, error_count: int)
 	}
 
 	// Serialize access to global error collector to avoid race conditions
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	c := &checker.Checker{}
 	checker.init_checker(c)
@@ -72,7 +71,7 @@ test_error_type_mismatch_int_string :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 x: int = "hello"  // ERROR: cannot assign string to int
@@ -85,7 +84,7 @@ test_error_type_mismatch_bool_int :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 x: bool = 42  // ERROR: cannot assign int to bool
@@ -98,7 +97,7 @@ test_error_return_type_mismatch :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 foo :: proc() -> int {
@@ -117,7 +116,7 @@ test_error_undefined_identifier :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 x := undefined_variable  // ERROR: undefined identifier
@@ -130,7 +129,7 @@ test_error_undefined_type :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 x: UndefinedType  // ERROR: undefined type
@@ -143,7 +142,7 @@ test_error_undefined_procedure :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -162,7 +161,7 @@ test_error_invalid_binary_op :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 x := "hello" + 42  // ERROR: cannot add string and int
@@ -175,7 +174,7 @@ test_error_invalid_unary_op :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 x := -"hello"  // ERROR: cannot negate string
@@ -192,7 +191,7 @@ test_error_wrong_arg_count :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 add :: proc(a, b: int) -> int {
@@ -211,7 +210,7 @@ test_error_wrong_arg_type :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 add :: proc(a, b: int) -> int {
@@ -234,7 +233,7 @@ test_error_redeclaration :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 x: int = 1
@@ -252,7 +251,7 @@ test_error_non_bool_condition :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -273,7 +272,7 @@ test_error_undefined_field :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 Point :: struct {
@@ -297,7 +296,7 @@ test_error_break_outside_loop :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -312,7 +311,7 @@ test_error_continue_outside_loop :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -331,7 +330,7 @@ test_error_index_non_indexable :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -347,7 +346,7 @@ test_error_index_wrong_type :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -363,7 +362,7 @@ test_error_index_with_float :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -379,7 +378,7 @@ test_error_index_with_bool :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -395,7 +394,7 @@ test_error_index_negative_constant :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -411,7 +410,7 @@ test_error_index_out_of_bounds_constant :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -427,7 +426,7 @@ test_error_index_exactly_at_length :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -447,7 +446,7 @@ test_error_enum_array_wrong_enum_type :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 Color :: enum { Red, Green, Blue }
@@ -466,7 +465,7 @@ test_error_enum_array_integer_index :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 Color :: enum { Red, Green, Blue }
@@ -491,7 +490,7 @@ test_error_slice_index_string :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -507,7 +506,7 @@ test_error_slice_range_wrong_type :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -523,7 +522,7 @@ test_error_slice_negative_start :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -543,7 +542,7 @@ test_error_dynamic_array_string_index :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -563,7 +562,7 @@ test_error_string_float_index :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -579,7 +578,7 @@ test_error_string_negative_index :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -599,7 +598,7 @@ test_error_map_wrong_key_type :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -615,7 +614,7 @@ test_error_map_incompatible_key :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -637,7 +636,7 @@ test_error_matrix_string_index :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -653,7 +652,7 @@ test_error_2d_array_string_indices :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -669,7 +668,7 @@ test_error_nested_array_out_of_bounds :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -689,7 +688,7 @@ test_error_pointer_string_index :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -706,7 +705,7 @@ test_error_multi_pointer_string_index :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -727,7 +726,7 @@ test_error_array_too_many_elements :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 arr: [3]int = {1, 2, 3, 4, 5}  // ERROR: too many elements
@@ -740,7 +739,7 @@ test_error_array_element_type_mismatch :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 arr: [3]int = {1, "hello", 3}  // ERROR: element type mismatch
@@ -757,7 +756,7 @@ test_error_invalid_enum_member :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 Color :: enum { Red, Green, Blue }
@@ -778,7 +777,7 @@ test_error_deref_non_pointer :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -798,7 +797,7 @@ test_error_struct_unknown_field_in_literal :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 Point :: struct { x, y: int }
@@ -813,7 +812,7 @@ test_error_struct_field_type_mismatch :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 Point :: struct { x, y: int }
@@ -832,7 +831,7 @@ test_error_use_after_scope :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() -> int {
@@ -854,7 +853,7 @@ test_error_assign_to_constant :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 X :: 42
@@ -875,7 +874,7 @@ test_error_call_non_procedure :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 x: int = 42
@@ -896,7 +895,7 @@ test_error_compare_incompatible_types :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() -> bool {
@@ -915,7 +914,7 @@ test_error_slice_non_sliceable :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -935,7 +934,7 @@ test_error_decl_wrong_number_multi_assign :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -950,7 +949,7 @@ test_error_decl_too_few_values :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -965,7 +964,7 @@ test_error_decl_untyped_nil :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -980,7 +979,7 @@ test_error_decl_assign_nil_to_int :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 x: int = nil  // ERROR: cannot assign nil to int
@@ -993,7 +992,7 @@ test_error_decl_compound_assign_type_mismatch :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1009,7 +1008,7 @@ test_error_decl_assign_proc_to_int :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 foo :: proc() {}
@@ -1023,7 +1022,7 @@ test_error_decl_struct_to_int :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 Point :: struct { x, y: int }
@@ -1038,7 +1037,7 @@ test_error_decl_enum_to_string :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 Color :: enum { Red, Green, Blue }
@@ -1053,7 +1052,7 @@ test_error_decl_array_to_slice_mismatch :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 arr: [5]int = {1, 2, 3, 4, 5}
@@ -1067,7 +1066,7 @@ test_error_assign_to_literal :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1082,7 +1081,7 @@ test_error_assign_to_expression :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1099,7 +1098,7 @@ test_error_assign_to_proc_call :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 foo :: proc() -> int { return 42 }
@@ -1116,7 +1115,7 @@ test_error_decl_distinct_type_mismatch :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 MyInt :: distinct int
@@ -1132,7 +1131,7 @@ test_error_decl_incompatible_pointer_types :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1153,7 +1152,7 @@ test_error_if_string_condition :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1170,7 +1169,7 @@ test_error_if_float_condition :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1187,7 +1186,7 @@ test_error_if_pointer_condition :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1206,7 +1205,7 @@ test_error_if_struct_condition :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 Point :: struct { x, y: int }
@@ -1226,7 +1225,7 @@ test_error_if_initializer_not_bool :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1243,7 +1242,7 @@ test_error_if_undefined_in_condition :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1260,7 +1259,7 @@ test_error_if_undefined_in_else :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1280,7 +1279,7 @@ test_error_inline_if_type_mismatch :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1295,7 +1294,7 @@ test_error_inline_if_non_bool_condition :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1310,7 +1309,7 @@ test_error_else_if_non_bool :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {
@@ -1330,7 +1329,7 @@ test_error_if_comparison_type_mismatch :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	has_error, _ := check_expects_error(`
+	has_error, _ := check_expects_error(t, `
 package test
 
 test :: proc() {

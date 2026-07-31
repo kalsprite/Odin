@@ -213,6 +213,13 @@ Calling_Convention :: enum {
 	Inline_Asm,
 	Win64,
 	SysV,
+	// C++ Reference: parser.hpp:304-306
+	Preserve_None,
+	Preserve_Most,
+	Preserve_All,
+	// C++ ProcCC_Invalid. Appended rather than placed first so existing ordinals do not shift;
+	// note C++ has Invalid as the ZERO value while this enum's zero remains .Odin.
+	Invalid,
 }
 
 // ============================================================================
@@ -270,6 +277,21 @@ Entity :: struct {
 	id:                 u64,
 	state:              Entity_State,
 	flags:              Entity_Flags, // bit_set[Entity_Flag;u64]
+
+	// Set once by the parallel procedure-body checker and read from other worker threads.
+	//
+	// This deliberately does NOT live in `flags`. `flags` is mutated by non-atomic
+	// read-modify-write (`e.flags += {.Used}` and similar) from ~108 sites, many on worker
+	// threads. Publishing this bit into the same word with sync.atomic_or meant a concurrent
+	// non-atomic `+=` would read the whole set, modify its own bit and write back, silently
+	// dropping this one - which is what produced the intermittent
+	// `assert(.Proc_Body_Checked in ...)` failure in check_proc.odin.
+	//
+	// C++ shares a word for the equivalent bit but serialises the whole body check under
+	// proc_checked_mutex; this port deliberately narrowed that mutex (it previously serialised
+	// every procedure body in the program and deadlocked on any panic), so the bit needs its own
+	// storage instead. Access only via sync.atomic_load / sync.atomic_store.
+	proc_body_checked:  bool,
 	min_dep_count:      i32,
 	token:              tokenizer.Token,
 	scope:              ^Scope,
@@ -348,7 +370,11 @@ Entity_Flag :: enum u64 {
 	Static                   = 17, // Static variable
 	Implicit_Reference       = 18, // Implicit reference (like C++ const &)
 	Soa_Ptr_Field            = 19, // SOA pointer field
-	Proc_Body_Checked        = 20, // Procedure body has been checked
+	// UNUSED - do not read or set. The ordinal is kept so the set stays aligned with C++'s
+	// EntityFlag_ProcBodyChecked. The actual state now lives in Entity.proc_body_checked, because
+	// publishing it into this word with atomic_or raced with the ~108 non-atomic `flags +=` sites.
+	// See the note on that field.
+	Proc_Body_Checked        = 20,
 	C_Var_Arg                = 21, // C vararg parameter
 	No_Broadcast             = 22, // #no_broadcast attribute
 	Any_Int                  = 23, // Generic integer parameter
@@ -586,6 +612,8 @@ Builtin_Proc_Id :: enum {
 	Count_Zeros,
 	Count_Trailing_Zeros,
 	Count_Leading_Zeros,
+	Count_Trailing_Ones,
+	Count_Leading_Ones,
 	Reverse_Bits,
 	Byte_Swap,
 
@@ -692,11 +720,18 @@ Builtin_Proc_Id :: enum {
 	Simd_Shuffle,
 	Simd_Select,
 	Simd_Runtime_Swizzle,
+	Simd_Odd_Even,
+	Simd_Sums_Of_N,
+	Simd_Pairwise_Add,
+	Simd_Pairwise_Sub,
 	Simd_Ceil,
 	Simd_Floor,
 	Simd_Trunc,
 	Simd_Nearest,
+	Simd_Approx_Recip,
+	Simd_Approx_Recip_Sqrt,
 	Simd_To_Bits,
+	Simd_To_Bits_Signed,
 	Simd_Lanes_Reverse,
 	Simd_Lanes_Rotate_Left,
 	Simd_Lanes_Rotate_Right,
@@ -707,6 +742,8 @@ Builtin_Proc_Id :: enum {
 	Simd_Masked_Expand_Load,
 	Simd_Masked_Compress_Store,
 	Simd_Indices,
+	Simd_Interleave,
+	Simd_Deinterleave,
 
 	// Platform specific SIMD intrinsics
 	Simd_X86_MM_Shuffle,
@@ -729,9 +766,10 @@ Builtin_Proc_Id :: enum {
 	Type_Is_Endian_Little,
 	Type_Is_Endian_Big,
 	Type_Is_Unsigned,
-	Type_Is_Signed,
 	Type_Is_Ordered,
 	Type_Is_Comparable,
+	Type_Is_Simple_Compare, // easily compared using memcmp
+	Type_Is_Nearly_Simple_Compare, // easily compared using memcmp (including floats)
 	Type_Is_Numeric,
 	Type_Is_Ordered_Numeric,
 	Type_Is_Pointer,
@@ -748,8 +786,10 @@ Builtin_Proc_Id :: enum {
 	Type_Is_Bit_Field,
 	Type_Is_Map,
 	Type_Is_Matrix,
+	Type_Is_Matrix_Row_Major,
+	Type_Is_Matrix_Column_Major,
 	Type_Is_Simd_Vector,
-	Type_Is_Soa_Pointer,
+	Type_Is_Internally_Pointer_Like,
 	Type_Is_Subtype_Of,
 	Type_Has_Nil,
 	Type_Field_Index_Of,
@@ -767,6 +807,7 @@ Builtin_Proc_Id :: enum {
 	Type_Proc_Return_Count,
 	Type_Proc_Parameter_Type,
 	Type_Proc_Return_Type,
+	Type_Proc_Calling_Convention,
 	Type_Polymorphic_Record_Parameter_Count,
 	Type_Polymorphic_Record_Parameter_Value,
 	Type_Enum_Is_Contiguous,
@@ -778,6 +819,8 @@ Builtin_Proc_Id :: enum {
 
 	// Additional type intrinsics
 	Type_Field_Type,
+	Type_Field_Bit_Offset,
+	Type_Field_Bit_Size,
 	Type_Has_Field,
 	Type_Has_Shared_Fields,
 	Type_Is_Named,
@@ -829,8 +872,18 @@ Builtin_Proc_Id :: enum {
 	Read_Cycle_Counter,
 	Read_Cycle_Counter_Frequency,
 	Expect,
+	Likely,
+	Unlikely,
 	Syscall,
 	Syscall_Bsd,
+
+	Entry_Point, // intrinsics.__entry_point
+
+	// C variadic intrinsics
+	C_Va_Start,
+	C_Va_End,
+	C_Va_Copy,
+	C_Va_Arg,
 
 	// WebAssembly intrinsics
 	Wasm_Memory_Grow,
@@ -1163,6 +1216,7 @@ Decl_Info :: struct {
 	where_clauses_evaluated: bool,
 	foreign_require_results: bool,
 	proc_checked_state:      Proc_Checked_State,
+	proc_checked_mutex:      sync.Mutex,  // C++ Reference: checker.hpp - guards the proc_checked_state transition in check_proc_info
 	defer_used:              int,
 	defer_use_checked:       bool,
 	comment:                 ^Comment_Group,

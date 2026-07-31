@@ -11,6 +11,7 @@
 
 package checker
 
+import "core:math/big"
 
 // ============================================================================
 // SIMD Type Helper Functions
@@ -1314,5 +1315,299 @@ check_builtin_simd_x86_mm_shuffle :: proc(ctx: ^Checker_Context, operand: ^Opera
 	operand.mode = .Constant
 	operand.type = t_untyped_integer
 	operand.value = exact_value_i64(i64(result))
+	return true
+}
+
+// ============================================================================
+// SIMD Odd/Even (interleave the odd lanes of one vector with the even of another)
+// C++ Reference: /mnt/c/odin/src/check_builtin.cpp, `case BuiltinProc_simd_odd_even:`
+// ============================================================================
+
+check_builtin_simd_odd_even :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
+	builtin_name := "simd_odd_even"
+
+	if len(call.args) != 2 {
+		error(call, "'%s' expected 2 arguments, got %d", builtin_name, len(call.args))
+		return false
+	}
+
+	x: Operand
+	check_expr(ctx, &x, call.args[0])
+	if x.mode == .Invalid {
+		return false
+	}
+
+	y: Operand
+	check_expr_with_type_hint(ctx, &y, call.args[1], x.type)
+	if y.mode == .Invalid {
+		return false
+	}
+
+	convert_to_typed(ctx, &y, x.type)
+	if y.mode == .Invalid {
+		return false
+	}
+
+	if !is_type_simd_vector(x.type) {
+		error(call.args[0], "'%s' expected a simd vector type", builtin_name)
+		return false
+	}
+
+	if !is_type_simd_vector(y.type) {
+		error(call.args[1], "'%s' expected a simd vector type", builtin_name)
+		return false
+	}
+
+	if !are_types_identical(x.type, y.type) {
+		error(call, "'%s' expected 2 arguments of the same type", builtin_name)
+		return false
+	}
+
+	operand.mode = .Value
+	operand.type = x.type
+	return true
+}
+
+// ============================================================================
+// SIMD Sums Of N (horizontal sums over groups of N lanes)
+// C++ Reference: /mnt/c/odin/src/check_builtin.cpp, `case BuiltinProc_simd_sums_of_n:`
+// ============================================================================
+
+check_builtin_simd_sums_of_n :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
+	builtin_name := "simd_sums_of_n"
+
+	if len(call.args) != 2 {
+		error(call, "'%s' expected 2 arguments, got %d", builtin_name, len(call.args))
+		return false
+	}
+
+	x: Operand
+	check_expr(ctx, &x, call.args[0])
+	if x.mode == .Invalid {
+		return false
+	}
+
+	if !is_type_simd_vector(x.type) {
+		error(call.args[0], "'%s' expected a simd vector type", builtin_name)
+		return false
+	}
+
+	bt := base_type(x.type)
+	simd := bt.variant.(Type_Simd_Vector)
+	max_count := u64(simd.count)
+	elem := simd.elem
+
+	y: Operand
+	check_expr(ctx, &y, call.args[1])
+	if y.mode == .Invalid {
+		return false
+	}
+
+	arg_type := base_type(y.type)
+	if !is_type_integer(arg_type) || y.mode != .Constant {
+		error(call.args[1], "Indices to '%s' must be constant integers", builtin_name)
+		return false
+	}
+
+	if exact_value_to_i64(y.value) < 0 {
+		error(call.args[1], "Negative '%s' index", builtin_name)
+		return false
+	}
+
+	n := exact_value_to_u64(y.value)
+
+	if !(is_power_of_two(i64(n)) && n >= 2) {
+		error(call.args[1], "'%s' requires a power of two 'n' parameter >= 2, got %d", builtin_name, n)
+		return false
+	}
+
+	if n > max_count {
+		error(call.args[1], "'%s' requires that the 'n' parameter is <= than the #simd length, got %d vs %d", builtin_name, n, max_count)
+		return false
+	}
+
+	if max_count % n != 0 {
+		error(call.args[1], "'%s' requires the #simd length to be a multiple of the 'n' parameter, got #simd length=%d, n=%d", builtin_name, max_count, n)
+		return false
+	}
+
+	operand.mode = .Value
+
+	result_count := max_count / n
+	if result_count == 1 {
+		operand.type = elem
+	} else {
+		operand.type = alloc_type_simd_vector(i64(result_count), elem)
+	}
+	return true
+}
+
+// ============================================================================
+// SIMD To Bits Signed (reinterpret as signed integer vector)
+// C++ Reference: /mnt/c/odin/src/check_builtin.cpp, `case BuiltinProc_simd_to_bits_signed:`
+// ============================================================================
+
+check_builtin_simd_to_bits_signed :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
+	builtin_name := "simd_to_bits_signed"
+
+	if len(call.args) != 1 {
+		error(call, "'%s' expected 1 argument, got %d", builtin_name, len(call.args))
+		return false
+	}
+
+	x: Operand
+	check_expr(ctx, &x, call.args[0])
+	if x.mode == .Invalid {
+		return false
+	}
+
+	if !is_type_simd_vector(x.type) {
+		error(call.args[0], "'%s' expected a simd vector type", builtin_name)
+		return false
+	}
+
+	elem := base_array_type(x.type)
+	count := get_array_type_count(x.type)
+	sz := type_size_of(elem)
+
+	bit_elem: ^Type
+	switch sz {
+	case 1:
+		bit_elem = t_i8
+	case 2:
+		bit_elem = t_i16
+	case 4:
+		bit_elem = t_i32
+	case 8:
+		bit_elem = t_i64
+	case:
+		error(call.args[0], "'%s' unsupported element size %d", builtin_name, sz)
+		return false
+	}
+
+	operand.mode = .Value
+	operand.type = alloc_type_simd_vector(count, bit_elem)
+	return true
+}
+
+// ============================================================================
+// SIMD Interleave (concatenate N vectors of the same type, lane-interleaved)
+// C++ Reference: /mnt/c/odin/src/check_builtin.cpp, `case BuiltinProc_simd_interleave:`
+// ============================================================================
+
+check_builtin_simd_interleave :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
+	builtin_name := "simd_interleave"
+
+	if len(call.args) < 1 {
+		error(call, "'%s' expected at least 1 argument", builtin_name)
+		return false
+	}
+
+	x: Operand
+	check_expr(ctx, &x, call.args[0])
+	if x.mode == .Invalid {
+		return false
+	}
+
+	if !is_type_simd_vector(x.type) {
+		error(call.args[0], "'%s' expected a simd vector type", builtin_name)
+		return false
+	}
+
+	for i in 1 ..< len(call.args) {
+		y: Operand
+		check_expr_with_type_hint(ctx, &y, call.args[i], x.type)
+		if y.mode == .Invalid {
+			return false
+		}
+		if !is_type_simd_vector(y.type) {
+			error(call.args[i], "'%s' expected a simd vector type", builtin_name)
+			return false
+		}
+		if !are_types_identical(x.type, y.type) {
+			expected_str := type_to_string(x.type)
+			got_str := type_to_string(y.type)
+			error(call.args[i], "'%s' all argument types must match, expected %s, got %s", builtin_name, expected_str, got_str)
+			return false
+		}
+	}
+
+	elem := base_array_type(x.type)
+	base_count := get_array_type_count(x.type)
+	count := base_count * i64(len(call.args))
+
+	MAX_COUNT :: i64(64)
+	if count > MAX_COUNT {
+		error(call, "'%s' exceeds the maximum #simd count %d, got %d", builtin_name, MAX_COUNT, count)
+		return false
+	}
+
+	operand.mode = .Value
+	operand.type = alloc_type_simd_vector(count, elem)
+	return true
+}
+
+// ============================================================================
+// SIMD Deinterleave (split a vector into N equal sub-vectors)
+// C++ Reference: /mnt/c/odin/src/check_builtin.cpp, `case BuiltinProc_simd_deinterleave:`
+// ============================================================================
+
+check_builtin_simd_deinterleave :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
+	builtin_name := "simd_deinterleave"
+
+	if len(call.args) != 2 {
+		error(call, "'%s' expected 2 arguments, got %d", builtin_name, len(call.args))
+		return false
+	}
+
+	x: Operand
+	check_expr(ctx, &x, call.args[0])
+	if x.mode == .Invalid {
+		return false
+	}
+
+	if !is_type_simd_vector(x.type) {
+		error(call.args[0], "'%s' expected a simd vector type", builtin_name)
+		return false
+	}
+
+	elem := base_array_type(x.type)
+	max_count := get_array_type_count(x.type)
+
+	n: Operand
+	check_expr(ctx, &n, call.args[1])
+	if n.mode == .Invalid {
+		return false
+	}
+	if n.mode != .Constant {
+		error(call.args[1], "'%s' expected a constant integer divisible by the count of the #simd vector", builtin_name)
+		return false
+	}
+	if _, is_integer := n.value.(big.Int); !is_integer {
+		error(call.args[1], "'%s' expected a constant integer divisible by the count of the #simd vector", builtin_name)
+		return false
+	}
+
+	divisor := exact_value_to_i64(n.value)
+	if divisor < 1 || divisor > max_count || (max_count % divisor != 0) {
+		error(
+			call.args[1],
+			"'%s' expected a constant integer divisible by the count of the #simd vector , got %d, which must have been divisible by %d",
+			builtin_name,
+			divisor,
+			max_count,
+		)
+		return false
+	}
+
+	base_vector := alloc_type_simd_vector(max_count / divisor, elem)
+
+	field_types := make([]^Type, divisor, context.temp_allocator)
+	for i in 0 ..< divisor {
+		field_types[i] = base_vector
+	}
+
+	operand.mode = .Value
+	operand.type = alloc_type_tuple_from_field_types(ctx.checker, field_types)
 	return true
 }

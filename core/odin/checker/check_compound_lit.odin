@@ -55,6 +55,7 @@ check_compound_literal_field_values :: proc(ctx: ^Checker_Context, elems: []^ast
 		// Reference: C++ lines 9570-9576
 		if implicit_sel, is_implicit := field_expr.derived.(^ast.Implicit_Selector_Expr); is_implicit {
 			expr_str := expr_to_string(field_expr)
+			defer delete(expr_str)
 			error(field_expr, "Field names do not start with a '.', remove the '.' in structure literal")
 			field_expr = implicit_sel.field
 			_ = expr_str
@@ -65,6 +66,7 @@ check_compound_literal_field_values :: proc(ctx: ^Checker_Context, elems: []^ast
 		ident, is_ident := field_expr.derived.(^ast.Ident)
 		if !is_ident {
 			expr_str := expr_to_string(field_expr)
+			defer delete(expr_str)
 			error(elem, "Invalid field name '%s' in structure literal", expr_str)
 			continue
 		}
@@ -651,7 +653,15 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 
 				seen_field_value := false
 
-				for elem, index in cl.elems {
+				// `index` is the field this element fills, which runs ahead of
+				// the element position once a multi-valued element expands
+				// across several fields (`S{returns_two(), 3}`).
+				// `handled_elem_count` is how many fields have been filled.
+				index := 0
+				handled_elem_count := 0
+				for elem in cl.elems {
+					defer index += 1
+
 					if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
 						seen_field_value = true
 						error(elem, "Mixture of 'field = value' and value elements in a literal is not allowed")
@@ -669,18 +679,46 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 					field := ts.fields[index]
 
 					elem_operand := Operand{}
-					check_expr_or_type(ctx, &elem_operand, elem, entity_type(field))
+					check_multi_expr_with_type_hint(ctx, &elem_operand, elem, entity_type(field))
 
-					// Check if can be constant
-					// Reference: C++ lines 9922-9927
-					if elem_cannot_be_constant(entity_type(field)) {
+					if elem_operand.type != nil && elem_operand.type.kind == .Tuple {
+						// A multi-valued element spreads across consecutive fields.
+						// C++ Reference: check_expr.cpp check_compound_literal,
+						// the `is_type_tuple(o.type)` branch of the struct
+						// positional element loop.
 						is_constant = false
-					}
-					if is_constant {
-						is_constant = check_is_operand_compound_lit_constant(ctx, &elem_operand, entity_type(field))
-					}
 
-					check_assignment(ctx, &elem_operand, entity_type(field), "structure literal")
+						tuple := elem_operand.type.variant.(Type_Tuple)
+						count := len(tuple.variables)
+						for src_field, jj in tuple.variables {
+							if index + jj >= field_count {
+								error(elem, "Too many values in structure literal, expected %d, got %d", field_count, index + count)
+								break
+							}
+							src_operand := elem_operand
+							src_operand.type = src_field.type
+
+							dst_field := ts.fields[index + jj]
+							check_assignment(ctx, &src_operand, entity_type(dst_field), "structure literal")
+						}
+
+						index += count - 1
+						handled_elem_count += count
+					} else {
+						check_not_tuple(ctx, &elem_operand)
+
+						// Check if can be constant
+						// Reference: C++ lines 9922-9927
+						if elem_cannot_be_constant(entity_type(field)) {
+							is_constant = false
+						}
+						if is_constant {
+							is_constant = check_is_operand_compound_lit_constant(ctx, &elem_operand, entity_type(field))
+						}
+
+						check_assignment(ctx, &elem_operand, entity_type(field), "structure literal")
+						handled_elem_count += 1
+					}
 				}
 
 				// Validate element count
@@ -690,7 +728,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 						if len(cl.elems) < min_field_count {
 							error(node, "Too few values in structure literal, expected at least %d, got %d", min_field_count, len(cl.elems))
 						}
-					} else {
+					} else if handled_elem_count != field_count {
 						error(node, "Too few values in structure literal, expected %d, got %d", field_count, len(cl.elems))
 					}
 				}
@@ -851,7 +889,13 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			} else {
 				// Positional elements (non-indexed)
 				// Reference: C++ lines 10112-10142
-				for elem, index in cl.elems {
+				// `max` counts the slots consumed, which is more than the number
+				// of elements once a multi-valued element expands
+				// (`[]int{returns_two(), 3}`).
+				for elem in cl.elems {
+					index := max
+					defer max += 1
+
 					if elem == nil {
 						error(node, "Invalid literal element")
 						continue
@@ -862,21 +906,35 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 						continue
 					}
 
-					if 0 <= max_type_count && max_type_count <= i64(index) {
+					if 0 <= max_type_count && max_type_count <= index {
 						error(elem, "Index %d is out of bounds (>= %d) for %s", index, max_type_count, context_name)
 					}
 
 					operand := Operand{}
-					check_expr_or_type(ctx, &operand, elem, elem_type)
-					check_assignment(ctx, &operand, elem_type, context_name)
+					check_multi_expr_with_type_hint(ctx, &operand, elem, elem_type)
 
-					if is_constant {
-						is_constant = check_is_operand_compound_lit_constant(ctx, &operand, elem_type)
+					if operand.type != nil && operand.type.kind == .Tuple {
+						// A multi-valued element spreads across consecutive slots.
+						// C++ Reference: check_expr.cpp check_compound_literal,
+						// the `is_type_tuple(operand.type)` branch of the
+						// array/slice positional element loop.
+						is_constant = false
+
+						tuple := operand.type.variant.(Type_Tuple)
+						for tuple_field in tuple.variables {
+							elem_operand := operand
+							elem_operand.type = tuple_field.type
+							check_assignment(ctx, &elem_operand, elem_type, context_name)
+						}
+
+						max += i64(len(tuple.variables)) - 1
+					} else {
+						check_assignment(ctx, &operand, elem_type, context_name)
+
+						if is_constant {
+							is_constant = check_is_operand_compound_lit_constant(ctx, &operand, elem_type)
+						}
 					}
-				}
-
-				if max < i64(len(cl.elems)) {
-					max = i64(len(cl.elems))
 				}
 			}
 		}
@@ -1377,6 +1435,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 						ident, is_ident := fv.field.derived.(^ast.Ident)
 						if !is_ident {
 							expr_str := expr_to_string(fv.field)
+							defer delete(expr_str)
 							error(elem, "Invalid field name '%s' in 'any' literal", expr_str)
 							continue
 						}

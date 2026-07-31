@@ -388,6 +388,7 @@ check_collect_entities_all_worker_proc :: proc(task: rawptr) -> int {
 
 	// Create checker context for this file
 	ctx := make_checker_context(t.checker)
+	defer destroy_checker_context(&ctx)
 
 	// Set up context for file
 	ctx.file = t.file
@@ -452,6 +453,7 @@ check_collect_entities_all :: proc(c: ^Checker) {
 		for _, file in c.info.files {
 			// Create checker context for this file
 			ctx := make_checker_context(c)
+			defer destroy_checker_context(&ctx)
 
 			ctx.file = file
 			ctx.pkg = file.pkg
@@ -474,6 +476,7 @@ check_collect_entities_all :: proc(c: ^Checker) {
 	// This must happen after entity collection is complete for all files
 	for _, file in c.info.files {
 		ctx := make_checker_context(c)
+		defer destroy_checker_context(&ctx)
 		ctx.file = file
 		ctx.pkg = file.pkg
 		file_scope := c.info.file_scopes[file]
@@ -568,7 +571,7 @@ type_of_expr :: proc(expr: ^ast.Node, info: ^Checker_Info) -> ^Type {
 	}
 
 	// Check type_and_value_map (C++ equivalent: info->type_and_value_of_expr)
-	if tav, ok := info.type_and_value_map[rawptr(expr)]; ok {
+	if tav, ok := tav_lookup(info, expr); ok {
 		if tav.mode != .Invalid {
 			return tav.type
 		}
@@ -1411,10 +1414,16 @@ check_add_foreign_import_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 // make_checker_context creates a new checker context for a file
 // C++ Reference: Context initialization in checker.cpp
 // Used by check_collect_entities_all to create per-file contexts
+// The returned context owns a freshly allocated type path; pair every call with
+// `defer destroy_checker_context(&ctx)`.
+// C++ Reference: checker.cpp:1685-1693 (init_checker_context)
 make_checker_context :: proc(c: ^Checker) -> Checker_Context {
 	ctx := Checker_Context{}
 	ctx.checker = c
 	ctx.info = &c.info
+	// C++ line 1691: ctx->type_path = new_checker_type_path()
+	ctx.type_path = new_checker_type_path(c.allocator)
+	ctx.type_level = 0
 	return ctx
 }
 

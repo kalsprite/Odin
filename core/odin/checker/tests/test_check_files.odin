@@ -7,7 +7,6 @@ import "base:runtime"
 import "core:odin/ast"
 import "core:odin/parser"
 import "core:odin/tokenizer"
-import "core:sync"
 import "core:testing"
 
 import checker ".."
@@ -39,8 +38,8 @@ test_collect_entities :: proc(t: ^testing.T) {
 	file.pkg = pkg
 
 	// Serialize access to global error collector to avoid race conditions
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	// Checker init
 	c := &checker.Checker{}

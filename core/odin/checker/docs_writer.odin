@@ -698,6 +698,14 @@ basic_type_name :: proc(type: ^Type) -> string {
 // C++ Reference: docs_format.cpp calling convention string handling
 get_calling_convention_name :: proc(cc: Calling_Convention) -> string {
 	switch cc {
+	case .Preserve_None:
+		return "preserve/none"
+	case .Preserve_Most:
+		return "preserve/most"
+	case .Preserve_All:
+		return "preserve/all"
+	case .Invalid:
+		return "invalid"
 	case .Odin:
 		return "odin"
 	case .Contextless:
@@ -1491,7 +1499,7 @@ doc_write_docs :: proc(w: ^Doc_Writer) {
 
 // doc_write_to_file writes the buffer to a file
 doc_write_to_file :: proc(w: ^Doc_Writer, filename: string) -> bool {
-	return os.write_entire_file(filename, w.data)
+	return os.write_entire_file(filename, w.data) == nil
 }
 
 // odin_doc_write is the main entry point for writing .odin-doc files

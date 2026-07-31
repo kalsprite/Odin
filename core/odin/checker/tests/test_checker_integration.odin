@@ -15,14 +15,93 @@ import "core:log"
 import "core:odin/ast"
 import "core:odin/parser"
 import "core:odin/tokenizer"
+import "core:path/filepath"
 import "core:sync"
 import "core:testing"
 
 import checker ".."
 
-// Mutex to serialize test access to the global error collector
-// This is necessary because tests run in parallel but share the global error state
+// =============================================================================
+// SERIALISING ACCESS TO THE CHECKER'S PROCESS-GLOBAL STATE
+// =============================================================================
+//
+// test_error_mutex serialises the tests that touch the checker's package-level globals -
+// global_error_collector, the basic-type singletons, the runtime type globals. Only one
+// test may be inside such a region at a time, and the default test runner is
+// multi-threaded, so the mutex is doing real work.
+//
+// Acquire it with lock_checker_globals / release it with unlock_checker_globals. Do NOT
+// use sync.lock(&test_error_mutex) + `defer sync.unlock(...)` directly.
+//
+// WHY `defer` ALONE IS NOT ENOUGH
+//
+// When a test dies from a panic, a failed assertion, a bounds-check failure, a memory
+// access violation or a timeout, core:testing's assertion handler ends the thread with
+// runtime.trap() (core/testing/signal_handler.odin:48). trap() does not unwind, so
+// deferred statements never run. A mutex held at that moment stays locked for the rest of
+// the process: the next test to call sync.lock() blocks in futex_wait forever, and the run
+// hangs until the runner's timeout instead of failing the one bad test and carrying on.
+//
+// This is not hypothetical - it is what a panic in the checker used to do to this suite.
+//
+// HOW THE RELEASE IS MADE TO HAPPEN ANYWAY
+//
+// Every acquisition also registers the release with testing.cleanup. The runner invokes
+// cleanups from its own main thread after it has stopped the faulted task
+// (core/testing/runner.odin:845 for signals, :777 for timeouts, :166 for tests that return
+// normally), so by the time the cleanup runs the previous holder is provably gone and
+// releasing the mutex on its behalf races with nothing.
+//
+// WHY THE TICKET
+//
+// A test may enter and leave the region several times (check_file, check_expects_error and
+// friends each take the mutex for the duration of one check), and a cleanup registered by
+// an earlier acquisition can run long after that acquisition released the mutex - possibly
+// while a *different* test now holds it. Each acquisition therefore takes a unique ticket
+// and records it as the current owner; a release only fires if its own ticket is still the
+// owner. The in-scope release and the safety-net cleanup can never release each other's
+// acquisition, and every release is exact.
 test_error_mutex: sync.Mutex
+
+// guard_next_ticket is only ever incremented while test_error_mutex is held.
+@(private = "file")
+guard_next_ticket: u64
+
+// guard_owner_ticket is the ticket of the current holder, or 0 when the mutex is free.
+@(private = "file")
+guard_owner_ticket: u64
+
+// lock_checker_globals acquires test_error_mutex for the calling test and returns the
+// ticket that identifies this acquisition. Pair it with:
+//
+//	ticket := lock_checker_globals(t)
+//	defer unlock_checker_globals(ticket)
+lock_checker_globals :: proc(t: ^testing.T) -> (ticket: u64) {
+	sync.lock(&test_error_mutex)
+	guard_next_ticket += 1
+	ticket = guard_next_ticket
+	sync.atomic_store(&guard_owner_ticket, ticket)
+
+	// t.cleanups has to outlive every allocator the test itself installs: most tests set
+	// context.allocator to the temp allocator behind a TEMP_GUARD, and the runner recycles
+	// its per-task allocator as soon as the task slot is reused. Register from a default
+	// (heap) context so the record is still valid when the runner walks it, on whichever
+	// thread that turns out to be.
+	context = runtime.default_context()
+	testing.cleanup(t, proc(user_data: rawptr) {
+		unlock_checker_globals(u64(uintptr(user_data)))
+	}, rawptr(uintptr(ticket)))
+	return
+}
+
+// unlock_checker_globals releases test_error_mutex if, and only if, `ticket` still owns it.
+// It is safe to call more than once for the same ticket and safe to call from a thread
+// other than the one that acquired it - sync.Mutex tracks no owning thread.
+unlock_checker_globals :: proc(ticket: u64) {
+	if _, was_owner := sync.atomic_compare_exchange_strong(&guard_owner_ticket, ticket, 0); was_owner {
+		sync.unlock(&test_error_mutex)
+	}
+}
 
 // Disable threading in tests to avoid cleanup issues with temp allocator
 @(init)
@@ -36,6 +115,68 @@ disable_threaded_checker :: proc "contextless" () {
 cleanup_test_thread_pool :: proc "contextless" () {
 	context = runtime.default_context()
 	checker.destroy_global_thread_pool()
+}
+
+// =============================================================================
+// SOURCE-ANCHORED PACKAGE PATHS
+// =============================================================================
+//
+// Package paths used by the integration tests must NOT be relative to the process's
+// current working directory. `odin test core/odin/checker/tests` (the normal invocation)
+// runs with CWD at the repo root, while running the suite from inside the tests directory
+// puts CWD somewhere else entirely - and a relative path that silently resolves nowhere
+// makes the whole suite vacuous.
+//
+// `#directory` is a compile-time constant holding the directory of THIS source file, so
+// everything derived from it is independent of where the test binary is launched from.
+// The C++ implementation (`dir_from_path`, src/parser.cpp) keeps the trailing path
+// separator, e.g. ".../core/odin/checker/tests/". `filepath.join` normalises the result,
+// so the trailing separator and the ".." elements are both cleaned away - which is why
+// these paths are joined rather than concatenated.
+
+// Directory of this source file: "<odin_root>/core/odin/checker/tests/"
+TESTS_DIR :: #directory
+
+// Absolute, CWD-independent directory anchors.
+// tests -> checker -> odin -> core -> <odin_root>
+ODIN_ROOT_DIR:   string // <odin_root>
+ODIN_CORE_DIR:   string // <odin_root>/core
+ODIN_VENDOR_DIR: string // <odin_root>/vendor
+
+@(init)
+init_source_anchored_dirs :: proc "contextless" () {
+	// Allocated with the default (heap) allocator so these outlive the per-test temp
+	// allocator scopes that the tests below install.
+	context = runtime.default_context()
+
+	err: runtime.Allocator_Error
+
+	ODIN_ROOT_DIR, err = filepath.join({TESTS_DIR, "..", "..", "..", ".."})
+	ensure(err == nil, "failed to derive ODIN_ROOT_DIR from #directory")
+
+	ODIN_CORE_DIR, err = filepath.join({ODIN_ROOT_DIR, "core"})
+	ensure(err == nil, "failed to derive ODIN_CORE_DIR from #directory")
+
+	ODIN_VENDOR_DIR, err = filepath.join({ODIN_ROOT_DIR, "vendor"})
+	ensure(err == nil, "failed to derive ODIN_VENDOR_DIR from #directory")
+}
+
+// pkg_path joins a directory anchor with a package path relative to it.
+// Allocated with the current context allocator (the temp allocator inside tests).
+pkg_path :: proc(dir: string, rel: string) -> string {
+	path, err := filepath.join({dir, rel})
+	ensure(err == nil, "failed to join package path")
+	return path
+}
+
+// core_pkg returns the absolute path of a package under <odin_root>/core.
+core_pkg :: proc(rel: string) -> string {
+	return pkg_path(ODIN_CORE_DIR, rel)
+}
+
+// vendor_pkg returns the absolute path of a package under <odin_root>/vendor.
+vendor_pkg :: proc(rel: string) -> string {
+	return pkg_path(ODIN_VENDOR_DIR, rel)
 }
 
 // =============================================================================
@@ -64,10 +205,10 @@ parse_source :: proc(src: string, filename := "test.odin") -> (^ast.File, bool) 
 }
 
 // Helper to run checker on parsed file
-check_file :: proc(file: ^ast.File) -> bool {
+check_file :: proc(t: ^testing.T, file: ^ast.File) -> bool {
 	// Serialize access to global error collector to avoid race conditions
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	c := &checker.Checker{}
 	checker.init_checker(c)
@@ -100,7 +241,7 @@ test_check_empty_package :: proc(t: ^testing.T) {
 	file, parse_ok := parse_source(`package test`)
 	testing.expect(t, parse_ok, "Should parse empty package")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check empty package without errors")
 }
 
@@ -118,7 +259,7 @@ z: bool = true
 `)
 	testing.expect(t, parse_ok, "Should parse variable declarations")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check variable declarations without errors")
 }
 
@@ -136,7 +277,7 @@ add :: proc(a, b: int) -> int {
 `)
 	testing.expect(t, parse_ok, "Should parse procedure")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check procedure without errors")
 }
 
@@ -156,7 +297,7 @@ origin := Point{0, 0}
 `)
 	testing.expect(t, parse_ok, "Should parse struct")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check struct without errors")
 }
 
@@ -178,7 +319,7 @@ c := Color.Red
 `)
 	testing.expect(t, parse_ok, "Should parse enum")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check enum without errors")
 }
 
@@ -203,7 +344,7 @@ e: u8 = 255
 f: i64 = -9999
 `)
 	testing.expect(t, parse_ok, "Should parse typed declarations")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check typed declarations without errors")
 }
 
@@ -223,7 +364,7 @@ d := true        // infers bool
 e := 'x'         // infers rune
 `)
 	testing.expect(t, parse_ok, "Should parse type inference declarations")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check type inference without errors")
 }
 
@@ -247,7 +388,7 @@ swap :: proc() {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse multi-declarations")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check multi-declarations without errors")
 }
 
@@ -267,7 +408,7 @@ d: bool
 e: [5]int
 `)
 	testing.expect(t, parse_ok, "Should parse zero-value declarations")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check zero-value declarations without errors")
 }
 
@@ -286,7 +427,7 @@ MESSAGE :: "Hello, World!"
 IS_DEBUG :: true
 `)
 	testing.expect(t, parse_ok, "Should parse constant declarations")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check constant declarations without errors")
 }
 
@@ -304,7 +445,7 @@ MIN_I8 : i8 : -128
 PI : f32 : 3.14159
 `)
 	testing.expect(t, parse_ok, "Should parse typed constants")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check typed constants without errors")
 }
 
@@ -326,7 +467,7 @@ s: MyString = "hello"
 arr: IntArray
 `)
 	testing.expect(t, parse_ok, "Should parse type aliases")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check type aliases without errors")
 }
 
@@ -346,7 +487,7 @@ id: UserId = UserId(42)
 email: Email = Email("user@example.com")
 `)
 	testing.expect(t, parse_ok, "Should parse distinct types")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check distinct types without errors")
 }
 
@@ -375,7 +516,7 @@ compound_ops :: proc() {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse compound assignments")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check compound assignments without errors")
 }
 
@@ -397,7 +538,7 @@ pointer_decl :: proc() {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse pointer declarations")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check pointer declarations without errors")
 }
 
@@ -415,7 +556,7 @@ nil_pointer :: proc() {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse nil pointer declaration")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check nil pointer without errors")
 }
 
@@ -432,7 +573,7 @@ y: i32 = i32(314)
 z: u8 = u8(255)
 `)
 	testing.expect(t, parse_ok, "Should parse casts in declarations")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check casts in declarations without errors")
 }
 
@@ -456,7 +597,7 @@ basic_if :: proc() {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse basic if")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check basic if without errors")
 }
 
@@ -478,7 +619,7 @@ if_else :: proc() -> int {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse if-else")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check if-else without errors")
 }
 
@@ -505,7 +646,7 @@ grade :: proc(score: int) -> string {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse if-else-if chain")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check if-else-if chain without errors")
 }
 
@@ -529,7 +670,7 @@ if_with_init :: proc() {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse if with initializer")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check if with initializer without errors")
 }
 
@@ -552,7 +693,7 @@ if_ok_idiom :: proc() {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse if with ok idiom")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check if with ok idiom without errors")
 }
 
@@ -573,7 +714,7 @@ if_do :: proc() {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse if do single statement")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check if do without errors")
 }
 
@@ -603,7 +744,7 @@ nested_if :: proc() -> int {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse nested if")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check nested if without errors")
 }
 
@@ -642,7 +783,7 @@ logical_if :: proc() {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse if with logical operators")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check if with logical operators without errors")
 }
 
@@ -672,7 +813,7 @@ comparisons :: proc() {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse if with comparisons")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check if with comparisons without errors")
 }
 
@@ -696,7 +837,7 @@ inline_if :: proc() {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse inline if expressions")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check inline if expressions without errors")
 }
 
@@ -721,7 +862,7 @@ nil_check :: proc() {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse if with nil check")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check if with nil check without errors")
 }
 
@@ -743,7 +884,7 @@ type_assert :: proc(v: Value) -> int {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse if with type assertion")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check if with type assertion without errors")
 }
 
@@ -766,7 +907,7 @@ when_test :: proc() -> int {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse when statement")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check when statement without errors")
 }
 
@@ -790,7 +931,7 @@ test_array :: proc() {
 `)
 	testing.expect(t, parse_ok, "Should parse array indexing")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check array indexing without errors")
 }
 
@@ -812,7 +953,7 @@ test_enum_array :: proc() {
 `)
 	testing.expect(t, parse_ok, "Should parse enumerated array")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check enumerated array without errors")
 }
 
@@ -832,7 +973,7 @@ test_slice :: proc() {
 `)
 	testing.expect(t, parse_ok, "Should parse slice indexing")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check slice indexing without errors")
 }
 
@@ -852,7 +993,7 @@ test_matrix :: proc() {
 `)
 	testing.expect(t, parse_ok, "Should parse matrix indexing")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check matrix indexing without errors")
 }
 
@@ -871,7 +1012,7 @@ test_string :: proc() {
 `)
 	testing.expect(t, parse_ok, "Should parse string indexing")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check string indexing without errors")
 }
 
@@ -893,7 +1034,7 @@ test_2d :: proc() {
 `)
 	testing.expect(t, parse_ok, "Should parse 2D array indexing")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check 2D array indexing without errors")
 }
 
@@ -917,7 +1058,7 @@ e := 10 % 3
 `)
 	testing.expect(t, parse_ok, "Should parse arithmetic")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check arithmetic without errors")
 }
 
@@ -938,7 +1079,7 @@ f := 7 != 8
 `)
 	testing.expect(t, parse_ok, "Should parse comparisons")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check comparisons without errors")
 }
 
@@ -956,7 +1097,7 @@ c := !true
 `)
 	testing.expect(t, parse_ok, "Should parse logical ops")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check logical ops without errors")
 }
 
@@ -983,7 +1124,7 @@ test_if :: proc() -> int {
 `)
 	testing.expect(t, parse_ok, "Should parse if statement")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check if statement without errors")
 }
 
@@ -1005,7 +1146,7 @@ test_for :: proc() -> int {
 `)
 	testing.expect(t, parse_ok, "Should parse for loop")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check for loop without errors")
 }
 
@@ -1030,7 +1171,7 @@ test_switch :: proc(x: int) -> string {
 `)
 	testing.expect(t, parse_ok, "Should parse switch statement")
 
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check switch statement without errors")
 }
 
@@ -1056,7 +1197,7 @@ outer :: proc() -> int {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse nested procedures")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check nested procedures without errors")
 }
 
@@ -1078,7 +1219,7 @@ use_identity :: proc() -> int {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse generic procedure")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check generic procedure without errors")
 }
 
@@ -1109,7 +1250,7 @@ get_int :: proc(v: Value) -> int {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse union type")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check union type without errors")
 }
 
@@ -1136,7 +1277,7 @@ has_north :: proc(d: Direction_Set) -> bool {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse bit_set")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check bit_set without errors")
 }
 
@@ -1156,7 +1297,7 @@ cleanup_test :: proc() -> int {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse defer statement")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check defer statement without errors")
 }
 
@@ -1179,7 +1320,7 @@ use_or_else :: proc() -> int {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse or_else")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check or_else without errors")
 }
 
@@ -1203,7 +1344,7 @@ identity_matrix :: proc() -> Mat4 {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse matrix type")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check matrix type without errors")
 }
 
@@ -1230,7 +1371,7 @@ update_particles :: proc(ps: ^Particles) {
 }
 `)
 	testing.expect(t, parse_ok, "Should parse SOA struct")
-	check_ok := check_file(file)
+	check_ok := check_file(t, file)
 	testing.expect(t, check_ok, "Should check SOA struct without errors")
 }
 
@@ -1245,22 +1386,32 @@ test_check_real_package :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Serialize access to global error collector
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	// Test with a simpler package - core/odin/tokenizer (fewer dependencies)
-	_, parse_err, check_err := checker.check_package_from_path("../../tokenizer")
+	path := core_pkg("odin/tokenizer")
+	res := checker.check_package_from_path(path)
+	defer checker.destroy_package_check_result(&res)
 
-	if parse_err > 0 {
-		log.errorf("Parse errors: %d", parse_err)
+	if res.parse_errors > 0 {
+		log.errorf("Parse errors: %d", res.parse_errors)
 	}
-	if check_err > 0 {
-		log.errorf("Check errors: %d", check_err)
+	if res.check_errors > 0 {
+		log.errorf("Check errors: %d", res.check_errors)
 	}
+
+	// A package that fails to load reports 0 parse errors and 0 check errors, so the
+	// load itself has to be asserted or the rest of this test is vacuous.
+	testing.expectf(t, res.load_ok, "Should load %s (loaded %d files)", path, res.total_files)
+
+	// A run cut short by the error cap is neither a pass nor an ordinary failure: the
+	// checker abandoned the package partway, so nothing below proves anything about it.
+	expect_not_limit_reached(t, path, res)
 
 	// For now, just check that we can load and attempt to check without crashing
 	// Full error-free checking requires more complete checker implementation
-	testing.expectf(t, parse_err == 0, "Should have no parse errors (got %d)", parse_err)
+	testing.expectf(t, res.parse_errors == 0, "Should have no parse errors (got %d)", res.parse_errors)
 }
 
 // Test checking the parser package (more complex, has imports)
@@ -1270,24 +1421,32 @@ test_check_parser_package :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Serialize access to global error collector
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	// Test with the parser package (depends on tokenizer and ast)
-	_, parse_err, check_err := checker.check_package_from_path("../../parser")
+	path := core_pkg("odin/parser")
+	res := checker.check_package_from_path(path)
+	// The result owns its diagnostics; the global collector check_package_from_path used is
+	// already gone by the time it returns.
+	defer checker.destroy_package_check_result(&res)
 
-	if parse_err > 0 {
-		log.errorf("Parse errors: %d", parse_err)
+	if res.parse_errors > 0 {
+		log.errorf("Parse errors: %d", res.parse_errors)
 	}
-	if check_err > 0 {
-		log.errorf("Check errors: %d", check_err)
-		checker.print_all_errors()
+	if res.check_errors > 0 {
+		log.errorf("Check errors: %d", res.check_errors)
+		checker.print_package_diagnostics(&res)
 	}
 
-	testing.expectf(t, parse_err == 0, "Should have no parse errors (got %d)", parse_err)
+	testing.expectf(t, res.load_ok, "Should load %s (loaded %d files)", path, res.total_files)
+	testing.expectf(t, res.parse_errors == 0, "Should have no parse errors (got %d)", res.parse_errors)
+	// A truncated run is reported on its own, never folded into the check-error warning
+	// below: "N check errors" from an abandoned run is not the same measurement.
+	expect_not_limit_reached(t, path, res)
 	// Log check errors but don't fail - we're still implementing full checking
-	if check_err > 0 {
-		log.warnf("Parser package has %d check errors (implementation in progress)", check_err)
+	if res.check_errors > 0 && !res.limit_reached {
+		log.warnf("Parser package has %d check errors (implementation in progress)", res.check_errors)
 	}
 }
 
@@ -1298,23 +1457,27 @@ test_check_ast_package :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Serialize access to global error collector
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	// Test with the ast package
-	_, parse_err, check_err := checker.check_package_from_path("../../ast")
+	path := core_pkg("odin/ast")
+	res := checker.check_package_from_path(path)
+	defer checker.destroy_package_check_result(&res)
 
-	if parse_err > 0 {
-		log.errorf("Parse errors: %d", parse_err)
+	if res.parse_errors > 0 {
+		log.errorf("Parse errors: %d", res.parse_errors)
 	}
-	if check_err > 0 {
-		log.errorf("Check errors: %d", check_err)
-		checker.print_all_errors()
+	if res.check_errors > 0 {
+		log.errorf("Check errors: %d", res.check_errors)
+		checker.print_package_diagnostics(&res)
 	}
 
-	testing.expectf(t, parse_err == 0, "Should have no parse errors (got %d)", parse_err)
-	if check_err > 0 {
-		log.warnf("AST package has %d check errors (implementation in progress)", check_err)
+	testing.expectf(t, res.load_ok, "Should load %s (loaded %d files)", path, res.total_files)
+	testing.expectf(t, res.parse_errors == 0, "Should have no parse errors (got %d)", res.parse_errors)
+	expect_not_limit_reached(t, path, res)
+	if res.check_errors > 0 && !res.limit_reached {
+		log.warnf("AST package has %d check errors (implementation in progress)", res.check_errors)
 	}
 }
 
@@ -1325,39 +1488,54 @@ test_check_checker_package :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Serialize access to global error collector
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	// Test with the checker package itself (self-hosting)
-	_, parse_err, check_err := checker.check_package_from_path("..")
+	path := core_pkg("odin/checker")
+	res := checker.check_package_from_path(path)
+	defer checker.destroy_package_check_result(&res)
 
-	if parse_err > 0 {
-		log.errorf("Parse errors: %d", parse_err)
+	if res.parse_errors > 0 {
+		log.errorf("Parse errors: %d", res.parse_errors)
 	}
-	if check_err > 0 {
-		log.errorf("Check errors: %d", check_err)
-		checker.print_all_errors()
+	if res.check_errors > 0 {
+		log.errorf("Check errors: %d", res.check_errors)
+		checker.print_package_diagnostics(&res)
 	}
 
-	testing.expectf(t, parse_err == 0, "Should have no parse errors (got %d)", parse_err)
-	if check_err > 0 {
-		log.warnf("Checker package has %d check errors (implementation in progress)", check_err)
+	testing.expectf(t, res.load_ok, "Should load %s (loaded %d files)", path, res.total_files)
+	testing.expectf(t, res.parse_errors == 0, "Should have no parse errors (got %d)", res.parse_errors)
+	expect_not_limit_reached(t, path, res)
+	if res.check_errors > 0 && !res.limit_reached {
+		log.warnf("Checker package has %d check errors (implementation in progress)", res.check_errors)
 	}
 }
 
 // =============================================================================
-// RUNTIME TYPE EXTRACTION TESTS
+// RUNTIME PACKAGE SEEDING TESTS
 // =============================================================================
 
-// Test that runtime types are extracted and available
+// base:runtime must be a REAL parsed package, seeded by the loader - not synthesized.
+//
+// This used to assert the opposite: that init_checker produced a runtime package of its own,
+// built by extract_runtime_types out of placeholder entities. That was the workaround for the
+// parser refusing `package runtime` unless ast.Package.kind is .Runtime, and it is what made
+// every runtime type resolve to something unusable (struct fields typed untyped_nil, distinct
+// types with no base).
+//
+// The contract now matches the C++ compiler's: base:runtime is added first, serially, before
+// every other package, with an explicit Package_Runtime kind (src/parser.cpp:7062-7071), and
+// the checker finds it by looking it up among the ordinary packages (src/checker.cpp:899).
+// So there is nothing for init_checker to make, and the assertions below are about the loader.
 @(test)
-test_runtime_type_extraction :: proc(t: ^testing.T) {
+test_runtime_package_is_seeded_by_loader :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Serialize access to global error collector
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	c := &checker.Checker{}
 	checker.init_checker(c)
@@ -1366,22 +1544,49 @@ test_runtime_type_extraction :: proc(t: ^testing.T) {
 	checker.init_error_collector(100)
 	defer checker.destroy_error_collector()
 
-	// Check that runtime package was created
-	runtime_pkg := c.info.runtime_package
-	testing.expect(t, runtime_pkg != nil, "Runtime package should be created by extractor")
+	// Nothing is synthesized at init time any more.
+	testing.expect(t, c.info.runtime_package == nil,
+		"init_checker must not create a runtime package; the loader owns that now")
 
-	if runtime_pkg != nil {
-		testing.expect(t, runtime_pkg.scope != nil, "Runtime package should have a scope")
-		testing.expectf(t, runtime_pkg.name == "runtime", "Runtime package name should be 'runtime', got '%s'", runtime_pkg.name)
+	// Loading ANY package seeds base:runtime, because every package needs it - the loader does
+	// not wait to see an `import \"base:runtime\"` before pulling it in, exactly as the C++
+	// compiler does not.
+	path := core_pkg("unicode/utf8")
+	load_result, _ := checker.load_package_with_dependencies(path, &c.info)
+	defer delete(load_result.packages)
+
+	runtime_pkg := c.info.runtime_package
+	testing.expect(t, runtime_pkg != nil, "Loader should have seeded base:runtime")
+	if runtime_pkg == nil {
+		return
 	}
 
-	// Check that runtime is registered under both names
-	pkg1, has1 := c.info.packages["runtime"]
-	pkg2, has2 := c.info.packages["base:runtime"]
-	testing.expect(t, has1, "Runtime should be registered under 'runtime'")
-	testing.expect(t, has2, "Runtime should be registered under 'base:runtime'")
-	if has1 && has2 {
-		testing.expect(t, pkg1 == pkg2, "Both registrations should point to same package")
+	// The kind is the whole point: it is what lets `package runtime` parse at all.
+	testing.expectf(t, runtime_pkg.kind == .Runtime,
+		"Runtime package kind should be .Runtime, got %v", runtime_pkg.kind)
+
+	// A real parse leaves real files and a name read out of the source, rather than a name
+	// assigned by the constructor of a synthetic package.
+	testing.expect(t, len(runtime_pkg.files) > 0,
+		"Runtime package should have parsed files; 0 means every file was rejected")
+	testing.expectf(t, runtime_pkg.name == "runtime",
+		"Runtime package name should be 'runtime', got '%s'", runtime_pkg.name)
+
+	// It is registered like any other package: under the import path callers write, and under
+	// its own fullpath.
+	by_import, has_import := c.info.packages["base:runtime"]
+	testing.expect(t, has_import, "Runtime should be registered under 'base:runtime'")
+	by_path, has_path := c.info.packages[runtime_pkg.fullpath]
+	testing.expect(t, has_path, "Runtime should be registered under its fullpath")
+	if has_import && has_path {
+		testing.expect(t, by_import == by_path && by_import == runtime_pkg,
+			"Every registration should point at the one seeded package")
+	}
+
+	// It is loaded FIRST - ahead of the root package and everything the root imports.
+	if len(load_result.packages) > 0 {
+		testing.expect(t, load_result.packages[0] == runtime_pkg,
+			"base:runtime must be the first package loaded, as in src/parser.cpp:7067")
 	}
 }
 
@@ -1408,7 +1613,7 @@ get_allocator :: proc() -> runtime.Allocator {
 
 	// The check may have errors since we only extract type shapes,
 	// not full type information. The important thing is it doesn't crash.
-	_ = check_file(file)
+	_ = check_file(t, file)
 }
 
 // =============================================================================
@@ -1421,16 +1626,20 @@ test_check_core_fmt :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	// check_package_from_path initializes ODIN_ROOT internally
-	// Use relative path from checker/tests to core/fmt
-	_, parse_err, check_err := checker.check_package_from_path("../../../../fmt")
+	// Path is anchored to this source file, not to the process CWD
+	path := core_pkg("fmt")
+	res := checker.check_package_from_path(path)
+	defer checker.destroy_package_check_result(&res)
 
-	testing.expectf(t, parse_err == 0, "core:fmt should have no parse errors (got %d)", parse_err)
-	if check_err > 0 {
-		log.warnf("core:fmt has %d check errors (runtime extractor provides limited type info)", check_err)
+	testing.expectf(t, res.load_ok, "Should load %s (loaded %d files)", path, res.total_files)
+	testing.expectf(t, res.parse_errors == 0, "core:fmt should have no parse errors (got %d)", res.parse_errors)
+	expect_not_limit_reached(t, path, res)
+	if res.check_errors > 0 && !res.limit_reached {
+		log.warnf("core:fmt has %d check errors (runtime extractor provides limited type info)", res.check_errors)
 	}
 }
 
@@ -1440,15 +1649,19 @@ test_check_core_strings :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
-	// Use relative path from checker/tests to core/strings
-	_, parse_err, check_err := checker.check_package_from_path("../../../../strings")
+	// Path is anchored to this source file, not to the process CWD
+	path := core_pkg("strings")
+	res := checker.check_package_from_path(path)
+	defer checker.destroy_package_check_result(&res)
 
-	testing.expectf(t, parse_err == 0, "core:strings should have no parse errors (got %d)", parse_err)
-	if check_err > 0 {
-		log.warnf("core:strings has %d check errors", check_err)
+	testing.expectf(t, res.load_ok, "Should load %s (loaded %d files)", path, res.total_files)
+	testing.expectf(t, res.parse_errors == 0, "core:strings should have no parse errors (got %d)", res.parse_errors)
+	expect_not_limit_reached(t, path, res)
+	if res.check_errors > 0 && !res.limit_reached {
+		log.warnf("core:strings has %d check errors", res.check_errors)
 	}
 }
 
@@ -1459,145 +1672,198 @@ test_check_all_core_packages :: proc(t: ^testing.T) {
 	context.allocator = context.temp_allocator
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-	sync.lock(&test_error_mutex)
-	defer sync.unlock(&test_error_mutex)
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
-	// List of core packages to test (relative to checker/tests)
-	// Comprehensive test of core library packages
+	// Packages to test, named RELATIVE TO their anchor directory (<odin_root>/core and
+	// <odin_root>/vendor respectively). The absolute path is built below from
+	// `#directory`, so these resolve identically no matter what the CWD is.
 	core_packages := []string{
 		// Basic packages
-		"../../../../fmt",
-		"../../../../strings",
-		"../../../../mem",
-		"../../../../io",
-		"../../../../os",
-		"../../../../bufio",
-		"../../../../bytes",
-		"../../../../log",
-		"../../../../math",
-		"../../../../slice",
-		"../../../../sort",
-		"../../../../time",
-		"../../../../reflect",
-		"../../../../flags",
-		"../../../../strconv",
-		"../../../../dynlib",
-		"../../../../sync",
-		"../../../../thread",
-		"../../../../simd",
-		"../../../../terminal",
+		"fmt",
+		"strings",
+		"mem",
+		"io",
+		"os",
+		"bufio",
+		"bytes",
+		"log",
+		"math",
+		"slice",
+		"sort",
+		"time",
+		"reflect",
+		"flags",
+		"strconv",
+		"dynlib",
+		"sync",
+		"thread",
+		"simd",
+		"terminal",
 		// Text
-		"../../../../text/scanner",
-		"../../../../text/regex",
+		"text/scanner",
+		"text/regex",
 		// Unicode
-		"../../../../unicode",
-		"../../../../unicode/utf8",
-		"../../../../unicode/utf16",
+		"unicode",
+		"unicode/utf8",
+		"unicode/utf16",
 		// Path
-		"../../../../path",
-		"../../../../path/filepath",
+		"path",
+		"path/filepath",
 		// Encoding
-		"../../../../encoding/json",
-		"../../../../encoding/xml",
-		"../../../../encoding/base64",
-		"../../../../encoding/csv",
-		"../../../../encoding/hex",
-		"../../../../encoding/endian",
+		"encoding/json",
+		"encoding/xml",
+		"encoding/base64",
+		"encoding/csv",
+		"encoding/hex",
+		"encoding/endian",
 		// Container
-		"../../../../container/queue",
-		"../../../../container/bit_array",
-		"../../../../container/small_array",
-		"../../../../container/priority_queue",
-		"../../../../container/avl",
-		"../../../../container/lru",
-		"../../../../container/rbtree",
+		"container/queue",
+		"container/bit_array",
+		"container/small_array",
+		"container/priority_queue",
+		"container/avl",
+		"container/lru",
+		"container/rbtree",
 		// Crypto/Hash
-		"../../../../hash",
-		"../../../../crypto",
-		"../../../../crypto/hash",
-		"../../../../crypto/aes",
-		"../../../../crypto/md5",
+		"hash",
+		"crypto",
+		"crypto/hash",
+		"crypto/aes",
+		// NOTE: md5 lives under crypto/legacy; the old "crypto/md5" entry pointed at a
+		// directory that has not existed for some time and was never noticed because the
+		// harness reported unresolvable paths as passes.
+		"crypto/legacy/md5",
 		// Compress
-		"../../../../compress",
-		"../../../../compress/gzip",
-		"../../../../compress/zlib",
+		"compress",
+		"compress/gzip",
+		"compress/zlib",
 		// Network
-		"../../../../net",
+		"net",
 		// Image
-		"../../../../image",
-		"../../../../image/png",
+		"image",
+		"image/png",
 		// Debug
-		"../../../../debug/pe",
+		"debug/pe",
 		// C interop
-		"../../../../c",
-		"../../../../c/libc",
+		"c",
+		"c/libc",
 		// Odin packages (self-hosting)
-		"../../../../odin/tokenizer",
-		"../../../../odin/parser",
-		"../../../../odin/ast",
-		// Vendor packages - STB
-		"../../../../../vendor/stb/image",
-		"../../../../../vendor/stb/truetype",
-		"../../../../../vendor/stb/rect_pack",
-		"../../../../../vendor/stb/easy_font",
-		"../../../../../vendor/stb/sprintf",
-		"../../../../../vendor/stb/vorbis",
-		// Vendor packages - Graphics/UI
-		"../../../../../vendor/microui",
-		"../../../../../vendor/fontstash",
-		"../../../../../vendor/nanovg",
-		"../../../../../vendor/glfw",
-		"../../../../../vendor/OpenGL",
-		"../../../../../vendor/sdl2",
-		"../../../../../vendor/sdl3",
-		"../../../../../vendor/raylib",
-		"../../../../../vendor/vulkan",
-		"../../../../../vendor/wgpu",
-		"../../../../../vendor/egl",
-		// Vendor packages - Audio
-		"../../../../../vendor/miniaudio",
-		"../../../../../vendor/portmidi",
-		// Vendor packages - Other
-		"../../../../../vendor/commonmark",
-		"../../../../../vendor/cgltf",
-		"../../../../../vendor/box2d",
-		"../../../../../vendor/curl",
-		"../../../../../vendor/ENet",
-		"../../../../../vendor/ggpo",
-		"../../../../../vendor/libc",
-		"../../../../../vendor/zlib",
-		"../../../../../vendor/lua/lua54",
-		"../../../../../vendor/OpenEXRCore",
+		"odin/tokenizer",
+		"odin/parser",
+		"odin/ast",
+	}
+
+	vendor_packages := []string{
+		// STB
+		"stb/image",
+		"stb/truetype",
+		"stb/rect_pack",
+		"stb/easy_font",
+		"stb/sprintf",
+		"stb/vorbis",
+		// Graphics/UI
+		"microui",
+		"fontstash",
+		"nanovg",
+		"glfw",
+		"OpenGL",
+		"sdl2",
+		"sdl3",
+		"raylib",
+		"vulkan",
+		"wgpu",
+		"egl",
+		// Audio
+		"miniaudio",
+		"portmidi",
+		// Other
+		"commonmark",
+		"cgltf",
+		"box2d",
+		"curl",
+		"ENet",
+		"ggpo",
+		"libc",
+		"zlib",
+		// NOTE: the Lua bindings are versioned by directory ("5.4"), not "lua54". Same
+		// story as crypto/legacy/md5: a stale entry that the old harness silently passed.
+		"lua/5.4",
+		"OpenEXRCore",
+	}
+
+	total := len(core_packages) + len(vendor_packages)
+
+	paths := make([dynamic]string, 0, total, context.allocator)
+	for rel in core_packages {
+		append(&paths, core_pkg(rel))
+	}
+	for rel in vendor_packages {
+		append(&paths, vendor_pkg(rel))
 	}
 
 	passed := 0
-	failed := 0
+	check_failed := 0
 	parse_failed := 0
+	load_failed := 0
+	limit_reached := 0
 
-	for pkg_path in core_packages {
-		_, parse_err, check_err := checker.check_package_from_path(pkg_path)
+	for path in paths {
+		res := checker.check_package_from_path(path)
+		// Each result owns its own diagnostics, so 40 results do not fight over one shared
+		// buffer - but that also means each one has to be released. Odin's `defer` is
+		// scope-based, so this fires at the end of every iteration, not at the end of the loop.
+		defer checker.destroy_package_check_result(&res)
 
-		if parse_err > 0 {
+		switch {
+		case res.parse_errors > 0:
 			parse_failed += 1
-			log.warnf("PARSE FAIL: %s (%d errors)", pkg_path, parse_err)
-		} else if check_err > 0 {
-			failed += 1
+			log.warnf("PARSE FAIL: %s (%d errors)", path, res.parse_errors)
+		case !res.load_ok:
+			// The package could not be located / produced no files at all. This is NOT a
+			// clean check - it means the checker never ran on anything.
+			load_failed += 1
+			log.errorf("LOAD FAIL: %s (loaded %d files)", path, res.total_files)
+		case res.limit_reached:
+			// The error cap tripped and the checker unwound partway through. This is its own
+			// bucket, deliberately ahead of the check-error case: `check_errors` here is a
+			// truncated prefix, so lumping it in with completed-but-failing packages would
+			// corrupt that number's meaning. (Before the cap stopped calling os.exit(1),
+			// this case killed the entire test binary - CPP_DEVIATIONS.md [EMBED-1].)
+			limit_reached += 1
+			log.errorf("LIMIT REACHED: %s (abandoned after %d recorded errors)", path, res.check_errors)
+		case res.check_errors > 0 || !res.check_ok:
+			check_failed += 1
 			// Don't log each failure - just count them
-		} else {
+		case:
 			passed += 1
 		}
 	}
 
-	total := len(core_packages)
-	log.infof("Core package check results: %d/%d passed, %d check errors, %d parse errors",
-		passed, total, failed, parse_failed)
+	log.infof(
+		"Core package check results: %d/%d passed, %d with check errors, %d hit the error limit, "+
+		"%d with parse errors, %d failed to load",
+		passed, total, check_failed, limit_reached, parse_failed, load_failed,
+	)
+
+	// A package that never loaded is a harness failure, not a checker result: it has to be
+	// reported separately, otherwise "0 check errors" is indistinguishable from "checked
+	// nothing at all".
+	testing.expectf(t, load_failed == 0, "Should load every package (%d failed to load)", load_failed)
 
 	// We expect no parse errors
 	testing.expectf(t, parse_failed == 0, "Should have no parse errors (got %d)", parse_failed)
 
-	// Log success rate for informational purposes
-	if passed < total {
-		log.warnf("%d/%d core packages have check errors (expected with partial runtime extraction)",
-			failed, total)
-	}
+	// A package that blew through the error cap was only partially checked, so it is reported
+	// separately from packages that were checked to completion and found wanting.
+	testing.expectf(
+		t,
+		limit_reached == 0,
+		"%d/%d packages hit the error limit and were left incompletely checked",
+		limit_reached,
+		total,
+	)
+
+	// And every package that loaded and parsed should check cleanly
+	testing.expectf(t, check_failed == 0, "%d/%d packages have check errors", check_failed, total)
 }

@@ -141,7 +141,10 @@ check_is_operand_compound_lit_constant :: proc(ctx: ^Checker_Context, o: ^Operan
 // Handles most common expression types for readable error reporting.
 expr_to_string :: proc(expr: ^ast.Node, allocator := context.allocator) -> string {
 	if expr == nil {
-		return "<nil>"
+		// NOTE: must be allocator-owned like the builder path below. Returning a string literal
+		// here made every `delete(expr_to_string(...))` call site an invalid free whenever the
+		// expression happened to be nil.
+		return strings.clone("<nil>", allocator)
 	}
 
 	builder := strings.builder_make(allocator)
@@ -152,7 +155,10 @@ expr_to_string :: proc(expr: ^ast.Node, allocator := context.allocator) -> strin
 // expr_to_string_shorthand is like expr_to_string but uses "..." for compound types
 expr_to_string_shorthand :: proc(expr: ^ast.Node, allocator := context.allocator) -> string {
 	if expr == nil {
-		return "<nil>"
+		// NOTE: see expr_to_string - must be allocator-owned so callers can free it
+		// unconditionally. name_canonicalization.odin:397 picks between the two helpers in a
+		// ternary and deletes the result, so both nil paths have to agree.
+		return strings.clone("<nil>", allocator)
 	}
 
 	builder := strings.builder_make(allocator)
@@ -718,6 +724,7 @@ is_constant_string :: proc(ctx: ^Checker_Context, builtin_name: string, expr: ^a
 	// C++ Reference: line 260-262
 	// Must include both expression string and type string
 	expr_str := expr_to_string(op.expr)
+	defer delete(expr_str)
 	type_str := type_to_string(op.type)
 	error_node(op.expr, "'%s' expected a constant string value, got %s of type %s", builtin_name, expr_str, type_str)
 	return false
@@ -898,8 +905,7 @@ check_is_not_addressable :: proc(ctx: ^Checker_Context, o: ^Operand) -> bool {
 	// Check stored is_bit_field flag from type_and_value_map
 	// This catches both direct bit field access and nested access through bit fields
 	if o.expr != nil {
-		key := rawptr(o.expr)
-		if tv, found := ctx.info.type_and_value_map[key]; found {
+		if tv, found := tav_lookup(ctx.info, o.expr); found {
 			if tv.is_bit_field {
 				return true // Not addressable
 			}
@@ -1130,8 +1136,6 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 			xt := type_to_string(x.type)
 			yt := type_to_string(y.type)
 			expr_str := expr_to_string(x.expr)
-			defer delete(xt)
-			defer delete(yt)
 			defer delete(expr_str)
 			error_token(binary_expr.op, "Mismatched types in interval expression '%s' : '%s' vs '%s'", expr_str, xt, yt)
 		}
@@ -1445,6 +1449,10 @@ check_integer_exceed_suggestion :: proc(ctx: ^Checker_Context, value: Exact_Valu
 // calling_convention_to_string returns a string representation of a calling convention
 calling_convention_to_string :: proc(cc: Calling_Convention) -> string {
 	switch cc {
+	case .Preserve_None: return "preserve/none"
+	case .Preserve_Most: return "preserve/most"
+	case .Preserve_All: return "preserve/all"
+	case .Invalid: return "invalid"
 	case .Odin: return "odin"
 	case .Contextless: return "contextless"
 	case .C: return "c"
@@ -1459,3 +1467,47 @@ calling_convention_to_string :: proc(cc: Calling_Convention) -> string {
 	return "unknown"
 }
 
+
+// populate_proc_parameter_list returns the parameter entity list used as the
+// left-hand side when unpacking a call's positional arguments, so that each
+// argument gets the matching parameter's type as its type hint.
+//
+// For an unspecialized polymorphic signature the polymorphic slots are left nil:
+// their types are not known until instantiation, so hinting with them would be
+// wrong.
+//
+// C++ Reference: /mnt/c/odin/src/check_expr.cpp populate_proc_parameter_list
+populate_proc_parameter_list :: proc(ctx: ^Checker_Context, proc_type: ^Type, allocator := context.temp_allocator) -> []^Entity {
+	if proc_type == nil || proc_type == t_invalid {
+		return nil
+	}
+
+	bt := base_type(proc_type)
+	if bt == nil || bt.kind != .Proc {
+		return nil
+	}
+	pt, is_proc := &bt.variant.(Type_Proc)
+	if !is_proc {
+		return nil
+	}
+	if pt.params == nil {
+		return nil
+	}
+	params, is_tuple := &pt.params.variant.(Type_Tuple)
+	if !is_tuple {
+		return nil
+	}
+
+	if !pt.is_polymorphic || pt.is_poly_specialized {
+		return params.variables[:]
+	}
+
+	// NOTE(bill): Create 'lhs' list in order to ignore parameters which are polymorphic
+	lhs := make([]^Entity, len(params.variables), allocator)
+	for e, i in params.variables {
+		if e != nil && !is_type_polymorphic(e.type) {
+			lhs[i] = e
+		}
+	}
+	return lhs
+}

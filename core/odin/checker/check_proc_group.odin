@@ -17,52 +17,58 @@ import "core:strings"
 // MAXIMUM_TYPE_DISTANCE is defined in check_equivalence.odin (value: 10)
 // Reference: /mnt/c/odin/src/check_expr.cpp:665
 
-// might_return_multiple_values checks if an expression could yield multiple values
-// (e.g., a procedure call returning a tuple). Used for arity filtering in proc groups.
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:6880-6920
+// strip_or_return_expr peels `or_return` / `or_break` / `or_continue` wrappers
+// and parentheses off an expression.
+// C++ Reference: /mnt/c/odin/src/parser.cpp strip_or_return_expr
+strip_or_return_expr :: proc(node: ^ast.Expr) -> ^ast.Expr {
+	n := node
+	for {
+		if n == nil {
+			return nil
+		}
+		#partial switch e in n.derived {
+		case ^ast.Or_Return_Expr:
+			n = e.expr
+		case ^ast.Or_Branch_Expr:
+			n = e.expr
+		case ^ast.Paren_Expr:
+			n = e.expr
+		case:
+			return n
+		}
+	}
+}
+
+// might_return_multiple_values checks if an expression could yield multiple values.
+// Used for arity filtering in proc groups: when an argument might expand into
+// several values, the candidate list must not be pruned by argument count.
+//
+// NOTE(bill): The only thing that may have multiple values will be a call
+// expression (assuming `or_return` and `()` will be stripped). This is a purely
+// syntactic test on purpose — at this point in checking the callee may not be
+// resolved yet, so asking for its result arity would answer "one value" for
+// every not-yet-checked call and prune away every viable candidate.
+//
+// C++ Reference: /mnt/c/odin/src/check_expr.cpp check_call_arguments_proc_group,
+// the `max_arg_count = ISIZE_MAX` loops.
 might_return_multiple_values :: proc(ctx: ^Checker_Context, expr: ^ast.Expr) -> bool {
 	if expr == nil {
 		return false
 	}
 
-	// Get inner expression (skip parens and field values)
-	inner := unparen_expr(expr)
-	if fv, is_fv := inner.derived.(^ast.Field_Value); is_fv {
-		inner = unparen_expr(fv.value)
+	// Named arguments carry the candidate expression in the value
+	inner := expr
+	if fv, is_fv := unparen_expr(inner).derived.(^ast.Field_Value); is_fv {
+		inner = fv.value
 	}
 
-	// Check if it's a call expression
-	call, is_call := inner.derived.(^ast.Call_Expr)
-	if !is_call {
+	inner = strip_or_return_expr(inner)
+	if inner == nil {
 		return false
 	}
 
-	// Try to get the callee's type without fully evaluating
-	// We need to check if the callee returns multiple values
-	callee_entity := entity_of_node(ctx.info, call.expr)
-	if callee_entity == nil {
-		// Can't determine - assume might return multiple
-		// This is conservative but safe for filtering
-		return false
-	}
-
-	proc_type := base_type(entity_type(callee_entity))
-	if proc_type == nil || proc_type.kind != .Proc {
-		return false
-	}
-
-	pt := &proc_type.variant.(Type_Proc)
-	if pt.results == nil {
-		return false
-	}
-
-	// Check if result is a tuple with more than one element
-	if pt.results.kind == .Tuple {
-		tuple := &pt.results.variant.(Type_Tuple)
-		return len(tuple.variables) > 1
-	}
-
-	return false
+	_, is_call := inner.derived.(^ast.Call_Expr)
+	return is_call
 }
 
 // Proc_Type_Overload_Kind classifies how two procedure types differ
@@ -735,6 +741,10 @@ check_call_arguments_internal :: proc(
 			total_score += arg_score
 		}
 
+		if !report_missing_parameters(pt, params, visited[:], call_node, show_error) {
+			return false
+		}
+
 		data.result_type = pt.results
 		data.score = int(total_score)
 		return true
@@ -775,9 +785,69 @@ check_call_arguments_internal :: proc(
 		total_score += arg_score
 	}
 
+	{
+		// Every parameter past the positional operands is unfilled.
+		positional_visited := make([]bool, len(params.variables), context.temp_allocator)
+		for i in 0 ..< min(len(positional_operands), len(params.variables)) {
+			positional_visited[i] = true
+		}
+		if !report_missing_parameters(pt, params, positional_visited, call_node, show_error) {
+			return false
+		}
+	}
+
 	data.result_type = pt.results
 	data.score = int(total_score)
 	return true
+}
+
+// report_missing_parameters rejects a candidate that leaves a required parameter
+// unfilled. Without it a call is scored purely on the arguments it does supply,
+// so a 3-parameter procedure would happily "match" a 2-argument call and end up
+// tied with the correct 2-parameter overload.
+//
+// A parameter may be legitimately absent when it has a default value, when it is
+// the variadic parameter (which may be empty), or when it is a polymorphic type
+// or constant parameter resolved during instantiation rather than passed.
+//
+// C++ Reference: /mnt/c/odin/src/check_expr.cpp check_call_arguments_internal,
+// the `for (isize i = 0; i < pt->param_count; i++) if (!visited[i])` loop that
+// sets `CallArgumentError_ParameterMissing`.
+report_missing_parameters :: proc(pt: ^Type_Proc, params: ^Type_Tuple, visited: []bool, call_node: ^ast.Node, show_error: bool) -> bool {
+	ok := true
+	for e, i in params.variables {
+		if i < len(visited) && visited[i] {
+			continue
+		}
+		if e == nil {
+			continue
+		}
+		// The variadic parameter may be empty
+		if pt.variadic && i == pt.variadic_index {
+			continue
+		}
+		// Polymorphic type/constant parameters are resolved during instantiation
+		#partial switch e.kind {
+		case .Type_Name, .Constant:
+			continue
+		}
+		// A default value stands in for the missing argument
+		if v, is_var := e.variant.(Entity_Variable); is_var {
+			if v.param_value.kind != .Invalid {
+				continue
+			}
+		}
+
+		if show_error {
+			if e.token.text != "" {
+				error_node(call_node, "Missing argument for parameter '%s'", e.token.text)
+			} else {
+				error_node(call_node, "Missing argument for parameter at position %d", i)
+			}
+		}
+		ok = false
+	}
+	return ok
 }
 
 // check_call_arguments_single checks a single procedure candidate
@@ -913,14 +983,29 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 		defer delete(args_split.positional)
 		defer delete(args_split.named)
 
-		// Check positional arguments only
-		// Reference: /mnt/c/odin/src/check_expr.cpp:7556-7567
-		positional_operands := make([]Operand, len(args_split.positional))
-		defer delete(positional_operands)
-
-		for arg, i in args_split.positional {
-			check_expr_base(ctx, &positional_operands[i], arg, nil)
+		// Check positional arguments, unpacking any multi-valued expression and
+		// hinting each argument with the sole candidate's matching parameter type.
+		//
+		// C++ Reference: /mnt/c/odin/src/check_expr.cpp check_call_arguments_proc_group,
+		// the `procs.count == 1` branch's
+		// `check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index)`.
+		//
+		// No flags: neither `---` nor optional-ok spreading is legal at a call site.
+		positional_args := call.args[:len(args_split.positional)]
+		positional_operands_dyn := make([dynamic]Operand, 0, 2 * len(positional_args))
+		defer delete(positional_operands_dyn)
+		{
+			lhs: []^Entity = nil
+			unpack_variadic_index := -1
+			if proc_type != nil && proc_type.kind == .Proc {
+				lhs = populate_proc_parameter_list(ctx, proc_type)
+				if pt, is_proc := &proc_type.variant.(Type_Proc); is_proc && pt.variadic {
+					unpack_variadic_index = pt.variadic_index
+				}
+			}
+			check_unpack_arguments(ctx, lhs, &positional_operands_dyn, positional_args, {}, unpack_variadic_index)
 		}
+		positional_operands := positional_operands_dyn[:]
 
 		// Check named arguments using helper function
 		// Reference: /mnt/c/odin/src/check_expr.cpp:7041
@@ -949,14 +1034,102 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	defer delete(args_split.positional)
 	defer delete(args_split.named)
 
-	// Check positional arguments only
-	// Reference: /mnt/c/odin/src/check_expr.cpp:7556-7567
-	positional_operands := make([]Operand, len(args_split.positional))
-	defer delete(positional_operands)
+	// Check positional arguments, unpacking any multi-valued expression.
+	//
+	// C++ Reference: /mnt/c/odin/src/check_expr.cpp check_call_arguments_proc_group,
+	// the multi-candidate
+	// `check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index)`.
+	//
+	// NOTE(bill): the `lhs` here improves type inference for procedure groups
+	// where the same positional parameter has the same type (and ellipsis) in
+	// every candidate; where the candidates disagree the slot is left nil so no
+	// type hint is applied.
+	positional_args := call.args[:len(args_split.positional)]
+	positional_operands_dyn := make([dynamic]Operand, 0, 2 * len(positional_args))
+	defer delete(positional_operands_dyn)
+	{
+		lhs: []^Entity = nil
+		variadic_index := -1
 
-	for arg, i in args_split.positional {
-		check_expr_base(ctx, &positional_operands[i], arg, nil)
+		// Smallest parameter count across all candidates
+		proc_arg_count := -1
+		for p in procs {
+			bt := base_type(entity_type(p))
+			if bt != nil && bt.kind == .Proc {
+				cpt := &bt.variant.(Type_Proc)
+				if proc_arg_count < 0 {
+					proc_arg_count = cpt.param_count
+				} else {
+					proc_arg_count = min(proc_arg_count, cpt.param_count)
+				}
+			}
+		}
+
+		if proc_arg_count > 0 {
+			lhs = make([]^Entity, proc_arg_count, context.temp_allocator)
+			for param_index in 0 ..< proc_arg_count {
+				e: ^Entity = nil
+				for p in procs {
+					bt := base_type(entity_type(p))
+					if bt == nil || bt.kind != .Proc {
+						continue
+					}
+					cpt := &bt.variant.(Type_Proc)
+					if cpt.params == nil || cpt.params.kind != .Tuple {
+						continue
+					}
+					vars := cpt.params.variant.(Type_Tuple).variables
+					if param_index >= len(vars) {
+						continue
+					}
+
+					if e == nil {
+						e = vars[param_index]
+					} else {
+						f := vars[param_index]
+						if e == f {
+							continue
+						}
+						if f != nil && are_types_identical(e.type, f.type) {
+							ee := .Ellipsis in e.flags
+							fe := .Ellipsis in f.flags
+							if ee == fe {
+								continue
+							}
+						}
+						// NOTE(bill): Entities are not close enough to be used
+						e = nil
+						break
+					}
+				}
+				lhs[param_index] = e
+			}
+
+			// Only hint into the variadic slot when every candidate is
+			// polymorphic and agrees on where the variadic parameter is.
+			for p in procs {
+				bt := base_type(entity_type(p))
+				if bt == nil || bt.kind != .Proc {
+					continue
+				}
+				cpt := &bt.variant.(Type_Proc)
+				if cpt.is_polymorphic {
+					if variadic_index == -1 {
+						variadic_index = cpt.variadic_index
+					} else if variadic_index != cpt.variadic_index {
+						variadic_index = -1
+						break
+					}
+				} else {
+					variadic_index = -1
+					break
+				}
+			}
+		}
+
+		check_unpack_arguments(ctx, lhs, &positional_operands_dyn, positional_args, {}, variadic_index)
 	}
+	positional_operands := positional_operands_dyn[:]
 
 	// Check named arguments using helper function
 	// Reference: /mnt/c/odin/src/check_expr.cpp:7124-7153
@@ -1074,7 +1247,6 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 			for op, i in positional_operands {
 				if op.type != nil {
 					type_str := type_to_string(op.type)
-					defer delete(type_str)
 					error_line("\t[%d] %s", i, type_str)
 				} else {
 					error_line("\t[%d] <unknown>", i)
@@ -1125,7 +1297,6 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 			// Print full procedure signature with parameter types for better diagnostics
 			if candidate.type != nil {
 				type_str := type_to_string(candidate.type)
-				defer delete(type_str)
 				error_line("\tCandidate: %s :: %s", candidate.token.text, type_str)
 			} else {
 				error_line("\tCandidate: %s", candidate.token.text)

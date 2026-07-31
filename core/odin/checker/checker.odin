@@ -586,6 +586,8 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Count_Zeros = {name = "count_zeros", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Count_Trailing_Zeros = {name = "count_trailing_zeros", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Count_Leading_Zeros = {name = "count_leading_zeros", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Count_Trailing_Ones = {name = "count_trailing_ones", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Count_Leading_Ones = {name = "count_leading_ones", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Reverse_Bits = {name = "reverse_bits", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Byte_Swap = {name = "byte_swap", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
@@ -698,11 +700,18 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Simd_Shuffle = {name = "simd_shuffle", arg_count = 2, variadic = true, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Select = {name = "simd_select", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Runtime_Swizzle = {name = "simd_runtime_swizzle", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Simd_Odd_Even = {name = "simd_odd_even", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Simd_Sums_Of_N = {name = "simd_sums_of_n", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Simd_Pairwise_Add = {name = "simd_pairwise_add", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Simd_Pairwise_Sub = {name = "simd_pairwise_sub", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Ceil = {name = "simd_ceil", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Floor = {name = "simd_floor", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Trunc = {name = "simd_trunc", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Nearest = {name = "simd_nearest", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Simd_Approx_Recip = {name = "simd_approx_recip", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Simd_Approx_Recip_Sqrt = {name = "simd_approx_recip_sqrt", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_To_Bits = {name = "simd_to_bits", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Simd_To_Bits_Signed = {name = "simd_to_bits_signed", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Lanes_Reverse = {name = "simd_lanes_reverse", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Lanes_Rotate_Left = {name = "simd_lanes_rotate_left", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Lanes_Rotate_Right = {name = "simd_lanes_rotate_right", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -713,6 +722,8 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Simd_Masked_Expand_Load = {name = "simd_masked_expand_load", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Masked_Compress_Store = {name = "simd_masked_compress_store", arg_count = 3, variadic = false, kind = .Stmt, pkg = .Intrinsics},
 	.Simd_Indices = {name = "simd_indices", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Simd_Interleave = {name = "simd_interleave", arg_count = 1, variadic = true, kind = .Expr, pkg = .Intrinsics},
+	.Simd_Deinterleave = {name = "simd_deinterleave", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_X86_MM_Shuffle = {name = "simd_x86__MM_SHUFFLE", arg_count = 4, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	// Type intrinsics
 	.Type_Base_Type = {name = "type_base_type", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -732,9 +743,10 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Type_Is_Endian_Little = {name = "type_is_endian_little", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Endian_Big = {name = "type_is_endian_big", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Unsigned = {name = "type_is_unsigned", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
-	.Type_Is_Signed = {name = "type_is_signed", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Ordered = {name = "type_is_ordered", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Comparable = {name = "type_is_comparable", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Type_Is_Simple_Compare = {name = "type_is_simple_compare", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Type_Is_Nearly_Simple_Compare = {name = "type_is_nearly_simple_compare", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Numeric = {name = "type_is_numeric", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Ordered_Numeric = {name = "type_is_ordered_numeric", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Pointer = {name = "type_is_pointer", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -751,8 +763,10 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Type_Is_Bit_Field = {name = "type_is_bit_field", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Map = {name = "type_is_map", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Matrix = {name = "type_is_matrix", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Type_Is_Matrix_Row_Major = {name = "type_is_matrix_row_major", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Type_Is_Matrix_Column_Major = {name = "type_is_matrix_column_major", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Simd_Vector = {name = "type_is_simd_vector", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
-	.Type_Is_Soa_Pointer = {name = "type_is_soa_pointer", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Type_Is_Internally_Pointer_Like = {name = "type_is_internally_pointer_like", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Subtype_Of = {name = "type_is_subtype_of", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Has_Nil = {name = "type_has_nil", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Field_Index_Of = {name = "type_field_index_of", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -770,6 +784,7 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Type_Proc_Return_Count = {name = "type_proc_return_count", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Proc_Parameter_Type = {name = "type_proc_parameter_type", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Proc_Return_Type = {name = "type_proc_return_type", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Type_Proc_Calling_Convention = {name = "type_proc_calling_convention", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Polymorphic_Record_Parameter_Count = {name = "type_polymorphic_record_parameter_count", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Polymorphic_Record_Parameter_Value = {name = "type_polymorphic_record_parameter_value", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Enum_Is_Contiguous = {name = "type_enum_is_contiguous", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -781,6 +796,8 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 
 	// Additional type intrinsics
 	.Type_Field_Type = {name = "type_field_type", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Type_Field_Bit_Offset = {name = "type_field_bit_offset", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Type_Field_Bit_Size = {name = "type_field_bit_size", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Has_Field = {name = "type_has_field", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Has_Shared_Fields = {name = "type_has_shared_fields", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Named = {name = "type_is_named", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -832,8 +849,17 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Read_Cycle_Counter = {name = "read_cycle_counter", arg_count = 0, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Read_Cycle_Counter_Frequency = {name = "read_cycle_counter_frequency", arg_count = 0, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Expect = {name = "expect", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Likely = {name = "likely", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Unlikely = {name = "unlikely", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Syscall = {name = "syscall", arg_count = 1, variadic = true, kind = .Expr, pkg = .Intrinsics},
 	.Syscall_Bsd = {name = "syscall_bsd", arg_count = 1, variadic = true, kind = .Expr, pkg = .Intrinsics},
+	.Entry_Point = {name = "__entry_point", arg_count = 0, variadic = false, kind = .Stmt, pkg = .Intrinsics},
+
+	// C variadic intrinsics
+	.C_Va_Start = {name = "c_va_start", arg_count = 2, variadic = false, kind = .Stmt, pkg = .Intrinsics},
+	.C_Va_End = {name = "c_va_end", arg_count = 1, variadic = false, kind = .Stmt, pkg = .Intrinsics},
+	.C_Va_Copy = {name = "c_va_copy", arg_count = 2, variadic = false, kind = .Stmt, pkg = .Intrinsics},
+	.C_Va_Arg = {name = "c_va_arg", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// WebAssembly intrinsics
 	.Wasm_Memory_Grow = {name = "wasm_memory_grow", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -1152,10 +1178,22 @@ Checker_Context :: struct {
 	collect_delayed_decls:             bool, // Enable delayed declaration queueing
 
 	// Type path for cycle detection
-	// C++ Reference: checker.hpp:559 - CheckerTypePath *type_path
-	// Used to track entities during type resolution to detect cyclic dependencies
-	type_path:                         [dynamic]^Entity,
+	// C++ Reference: checker.hpp:819 - CheckerTypePath *type_path
+	// Used to track entities during type resolution to detect cyclic dependencies.
+	//
+	// NOTE: This MUST be a pointer, exactly as in C++. A Checker_Context is copied by
+	// value in many places (`c := ctx^`); every copy has to keep pushing onto and
+	// popping from the *same* path, otherwise (a) the path each copy sees is a stale
+	// snapshot so cycle detection misses, and (b) the aliased [dynamic] headers each
+	// grow the shared backing store independently, which frees it out from under the
+	// other copies and corrupts the heap.
+	type_path:                         ^Checker_Type_Path,
 }
+
+// Checker_Type_Path is the stack of entities currently being resolved, used to detect
+// illegal declaration cycles.
+// C++ Reference: checker.hpp:613 - typedef Array<Entity *> CheckerTypePath
+Checker_Type_Path :: distinct [dynamic]^Entity
 
 // Checker is the top-level type checker
 Checker :: struct {

@@ -279,6 +279,7 @@ check_import_entities :: proc(c: ^Checker) {
 
 	// Process packages in dependency order (C++ line 5873-5909)
 	ctx := make_checker_context(c)
+	defer destroy_checker_context(&ctx)
 
 	for pkg_index in 0 ..< len(package_order) {
 		node := package_order[pkg_index]
@@ -660,6 +661,14 @@ reset_checker_context :: proc(ctx: ^Checker_Context, file: ^ast.File) {
 	if ctx == nil || file == nil {
 		return
 	}
+
+	// C++ Reference: checker.cpp:1716-1717, 1726-1727
+	// The type path object is retained across the reset, but emptied, so that a context
+	// reused for the next file does not inherit a stale (or leaked) cycle-detection path.
+	if ctx.type_path != nil {
+		clear(ctx.type_path)
+	}
+	ctx.type_level = 0
 
 	ctx.file = file
 	ctx.scope = ctx.info.file_scopes[file]

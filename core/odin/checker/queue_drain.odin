@@ -277,6 +277,20 @@ task_deque_take :: proc(deque: ^Task_Deque) -> (task: Task, result: Grab_Result)
 				sync.atomic_store_explicit(&deque.bottom, bot + 1, .Relaxed)
 				return {}, .Empty
 			}
+
+			// C++ Reference: thread_pool.cpp:132 - `thread->queue.bottom.store(bot + 1, relaxed);`
+			//
+			// The last element has just been claimed by bumping `top` to bot+1, so the deque is
+			// now empty and `bottom` MUST be restored to bot+1 as well - on the CAS-success path
+			// exactly as on the CAS-failure path above. Leaving `bottom` at `bot` leaves the
+			// deque at size -1 (bottom == top-1), which is not a state Chase-Lev can recover
+			// from: the next push writes its task at index `bot` and sets bottom = bot+1 == top,
+			// so both `take` (top <= bot is false) and `steal` (top < bottom is false) report the
+			// deque empty and that task is lost forever - while `tasks_left` was already
+			// incremented for it. Enough of those and `thread_pool_wait` blocks on a counter no
+			// running task will ever decrement, with every worker asleep on `tasks_available`:
+			// a permanent deadlock of the whole checker.
+			sync.atomic_store_explicit(&deque.bottom, bot + 1, .Relaxed)
 		}
 		return task, .Success
 	} else {
@@ -743,6 +757,30 @@ drain_intrinsics_entry_point_usage :: proc(info: ^Checker_Info) -> [dynamic]^ast
 	return usages
 }
 
+// check_intrinsics_entry_point_usage drains intrinsics_entry_point_usage and reports every
+// `intrinsics.__entry_point()` call in a program that has no entry point to run.
+//
+// C++ Reference: checker.cpp:7900-7909
+//
+// This is the normal-path consumer of that queue; without it the queue would still be
+// non-empty when mpsc_destroy asserts on it.
+check_intrinsics_entry_point_usage :: proc(c: ^Checker) {
+	for {
+		node, ok := queue.mpsc_dequeue(&c.info.intrinsics_entry_point_usage)
+		if !ok {
+			break
+		}
+		if c.info.entry_point != nil || node == nil {
+			continue
+		}
+		file := get_file_from_node(&c.info, node)
+		if file != nil && file.pkg != nil && file.pkg.kind == .Runtime {
+			continue
+		}
+		error_node(node, "usage of intrinsics.__entry_point will be a no-op")
+	}
+}
+
 // drain_objc_class_implementations collects Objective-C class implementations
 // C++ Reference: ObjC classes are processed during ObjC validation
 // Should be called during Objective-C checking phase
@@ -873,6 +911,66 @@ drain_all_queues :: proc(c: ^Checker) {
 	// - No worker is still modifying shared state
 	// - Safe to proceed to next sequential phase
 	thread_pool_wait()
+}
+
+// discard_abandoned_queue_work empties the queues whose consuming phase was skipped because
+// check_files unwound early on the error cap.
+//
+// This is NOT a substitute for the real drains. Every queue below has a phase that owns it on
+// the normal path (check_foreign_import_fullpaths, check_deferred_procedures, ...), and those
+// phases stay responsible for it. But an unwind returns *between* phases by design - the whole
+// point is to stop doing work once the diagnostics are being thrown away - so whatever the
+// abandoned phases would have consumed is still sitting in their queues, and
+// destroy_checker_info / destroy_checker require every queue to be empty.
+//
+// Dropping the entries is the correct disposal here, not a leak: these queues carry borrowed
+// handles (^Entity, ^Type, ^ast.Node, Untyped_Expr_Info), all of which are owned by the
+// checker's allocator and torn down with it. Unlike the five queues that
+// check_merge_queues_into_arrays moves into Checker_Info arrays, nothing takes ownership of
+// these on the normal path either - the consuming phase reads the entry, acts on it, and lets
+// it go. The only thing lost by discarding is the work itself, which is exactly what unwinding
+// already decided to skip.
+//
+// Call this ONLY on the abort path. On a run that reaches the bottom of check_files these
+// queues must be empty on their own, and the assertions in mpsc_destroy are what proves it.
+discard_abandoned_queue_work :: proc(c: ^Checker) {
+	discard_all :: proc(q: ^queue.MPSC_Queue($T)) {
+		for {
+			if _, ok := queue.mpsc_dequeue(q); !ok {
+				break
+			}
+		}
+	}
+
+	// Consumed on the normal path by the minimum dependency set generation.
+	// C++ Reference: checker.cpp:2980
+	discard_all(&c.info.required_global_variable_queue)
+
+	// Consumed on the normal path by check_foreign_import_fullpaths (Phase 5).
+	// C++ Reference: checker.cpp:5722, 5791
+	discard_all(&c.info.foreign_imports_to_check_fullpaths)
+	discard_all(&c.info.foreign_decls_to_check)
+
+	// Consumed on the normal path by the late validation phases.
+	// C++ Reference: checker.cpp:7903 (intrinsics.__entry_point usage)
+	discard_all(&c.info.intrinsics_entry_point_usage)
+	// C++ Reference: llvm_backend.cpp:1571 - the backend, not the checker, consumes these,
+	// which is why C++ leaves this queue alive at teardown (checker.cpp:1678 is commented
+	// out). We destroy it, so it has to be emptied here.
+	discard_all(&c.info.objc_class_implementations)
+
+	// Consumed on the normal path by Phase 6 post-processing.
+	// C++ Reference: checker.cpp:6869, 7335
+	discard_all(&c.procs_with_deferred_to_check)
+	discard_all(&c.procs_with_objc_context_provider_to_check)
+
+	// Consumed on the normal path when untyped expression values are finalised.
+	// C++ Reference: checker.cpp:7835
+	discard_all(&c.global_untyped_queue)
+
+	// Consumed on the normal path by check_merge_queues_into_arrays (completed inline).
+	// C++ Reference: checker.cpp:7445-7447
+	discard_all(&c.soa_types_to_complete)
 }
 
 // verify_queues_empty checks that all primary queues are empty after draining

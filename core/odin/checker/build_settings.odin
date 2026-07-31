@@ -29,11 +29,9 @@ Target_Os_Kind :: enum u16 {
 	Windows,
 	Darwin,
 	Linux,
-	Essence,
 	Freebsd,
 	Openbsd,
 	Netbsd,
-	Haiku,
 	Wasi,
 	Js,
 	Orca,
@@ -46,11 +44,9 @@ target_os_names := [Target_Os_Kind]string {
 	.Windows      = "windows",
 	.Darwin       = "darwin",
 	.Linux        = "linux",
-	.Essence      = "essence",
 	.Freebsd      = "freebsd",
 	.Openbsd      = "openbsd",
 	.Netbsd       = "netbsd",
-	.Haiku        = "haiku",
 	.Wasi         = "wasi",
 	.Js           = "js",
 	.Orca         = "orca",
@@ -389,6 +385,22 @@ Build_Context :: struct {
 	ODIN_ERROR_POS_STYLE:               Error_Pos_Style,
 	endian_kind:                        Target_Endian_Kind,
 
+	// C++: build_settings.cpp:622 - `-bedrock`. Drops 128-bit integers from the universe
+	// scope and disallows `map`.
+	bedrock:                            bool,
+	// C++: build_settings.cpp:579. Backend-only in effect, but ODIN_USE_SEPARATE_MODULES is
+	// visible to checked code, so init_build_context derives it exactly as C++ does.
+	use_separate_modules:               bool,
+	use_single_module:                  bool,
+	// C++ keeps the selected subtarget in the global `selected_subtarget`
+	// (build_settings.cpp:941) rather than in BuildContext; the port stores it here so that
+	// ODIN_PLATFORM_SUBTARGET has a source.
+	subtarget:                          Subtarget,
+	// C++: build_settings.cpp - `-minimum-os-version`, normalized in init_build_context.
+	minimum_os_version_string:          string,
+	// C++: build_settings.cpp - `-microarch`. Empty means "use the target default".
+	microarch:                          string,
+
 	// In bytes
 	ptr_size:                           i64, // Size of a pointer, must be >= 4
 	int_size:                           i64, // Size of a int/uint, must be >= 4
@@ -664,25 +676,7 @@ target_netbsd_arm64 := Target_Metrics {
 	target_triplet = "aarch64-unknown-netbsd-elf",
 }
 
-target_haiku_amd64 := Target_Metrics {
-	os             = .Haiku,
-	arch           = .Amd64,
-	ptr_size       = 8,
-	int_size       = 8,
-	max_align      = AMD64_MAX_ALIGNMENT,
-	max_simd_align = 32,
-	target_triplet = "x86_64-unknown-haiku",
-}
 
-target_essence_amd64 := Target_Metrics {
-	os             = .Essence,
-	arch           = .Amd64,
-	ptr_size       = 8,
-	int_size       = 8,
-	max_align      = AMD64_MAX_ALIGNMENT,
-	max_simd_align = 32,
-	target_triplet = "x86_64-pc-none-elf",
-}
 
 target_freestanding_wasm32 := Target_Metrics {
 	os             = .Freestanding,
@@ -824,8 +818,6 @@ named_targets := []Named_Target_Metrics {
 	{"darwin_amd64", &target_darwin_amd64},
 	{"darwin_arm64", &target_darwin_arm64},
 
-	{"essence_amd64", &target_essence_amd64},
-
 	{"linux_i386", &target_linux_i386},
 	{"linux_amd64", &target_linux_amd64},
 	{"linux_arm64", &target_linux_arm64},
@@ -843,7 +835,6 @@ named_targets := []Named_Target_Metrics {
 	{"netbsd_arm64", &target_netbsd_arm64},
 
 	{"openbsd_amd64", &target_openbsd_amd64},
-	{"haiku_amd64", &target_haiku_amd64},
 
 	{"freestanding_wasm32", &target_freestanding_wasm32},
 	{"wasi_wasm32", &target_wasi_wasm32},
@@ -889,6 +880,39 @@ get_all_target_names :: proc() -> []string {
 // C++: build_settings.cpp:1706-2025
 // ======================================================================================
 
+// HOST_TARGET_NAME names the platform the checker itself was built for, in the same
+// "<os>_<arch>" form as the entries of named_targets.
+//
+// C++ picks the host with a block of #ifdefs (build_settings.cpp:1750-1802). ODIN_OS_STRING and
+// ODIN_ARCH_STRING are that same information in the same form - constants of the tool, fixed
+// when it was compiled - so this is a translation of that block, not a hardcoded target: it is
+// only ever consulted when no cross target was requested.
+HOST_TARGET_NAME :: ODIN_OS_STRING + "_" + ODIN_ARCH_STRING
+
+// default_target_metrics returns the metrics for the host platform.
+//
+// Falls back to linux_amd64 for a host that has no entry in named_targets, which can only
+// happen for a platform the checker cannot be built for anyway.
+default_target_metrics :: proc() -> ^Target_Metrics {
+	if metrics := get_target_metrics_from_name(HOST_TARGET_NAME); metrics != nil {
+		return metrics
+	}
+	return &target_linux_amd64
+}
+
+// ensure_build_context_initialized gives build_context a target if it does not already have one.
+//
+// Nothing in init_checker sets a target up, so without this the build context reaches the
+// package loader zeroed - metrics.os == .Invalid - and every platform-suffixed and every
+// `#+build`-tagged file in the tree would be judged as belonging to some other platform and
+// dropped. Guarded on metrics.os so that an embedder that has already chosen a target (the
+// cross-checking case) keeps it.
+ensure_build_context_initialized :: proc() {
+	if build_context.metrics.os == .Invalid {
+		init_build_context()
+	}
+}
+
 // Initialize build context with target metrics
 // C++: build_settings.cpp:1706-2025
 // This function sets up the build context from the provided target metrics.
@@ -911,13 +935,9 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 
 	// Default host platform detection
 	// C++: build_settings.cpp:1750-1802
-	// For the checker, we default to linux_amd64 if no cross_target provided.
-	// In practice, the compiler will pass the correct target.
 	metrics := cross_target
 	if metrics == nil {
-		// Default to linux_amd64 (most common dev environment)
-		// The C++ version uses compile-time #ifdefs here
-		metrics = &target_linux_amd64
+		metrics = default_target_metrics()
 	}
 
 	// Check for cross-compilation
@@ -993,6 +1013,85 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 			panic("Unknown architecture for subtarget:android")
 		}
 	}
+
+	// C++ records the selected subtarget in a global (build_settings.cpp:941); the port keeps
+	// it on the build context so ODIN_PLATFORM_SUBTARGET can be derived from it.
+	bc.subtarget = subtarget
+
+	// Minimum OS version defaults.
+	// C++: build_settings.cpp:2041-2053. Only darwin has a default; every other target
+	// leaves the string empty, which init_universal turns into ODIN_MINIMUM_OS_VERSION == 0.
+	if metrics.os == .Darwin && !bc.minimum_os_version_string_given {
+		switch subtarget {
+		case .IPhone, .IPhoneSimulator:
+			// NOTE(harold) in C++: 17.4 is when os_sync_wait_on_address was added.
+			bc.minimum_os_version_string = "17.4.0"
+		case .Default, .Android, .Invalid:
+			bc.minimum_os_version_string = "11.0.0"
+		}
+	}
+
+	// Optimization level defaults.
+	// C++: build_settings.cpp:2070-2081
+	if !bc.custom_optimization_level {
+		// C++: when building with `-debug` but no explicit optimization level, default to
+		// `-o:none` to improve debug symbol generation.
+		bc.optimization_level = bc.ODIN_DEBUG ? -1 : 0
+	}
+	bc.optimization_level = clamp(bc.optimization_level, -1, 3)
+
+	// Separate modules.
+	// C++: build_settings.cpp:2027 (wasm forces it off), 2083-2085 (-o:none/-o:minimal turn
+	// it on for non-wasm), 2087-2089 (`-use-single-module` turns it back off).
+	// The port has no LTO support, so the `-lto:thin` branch (C++ 2091-2110) is not ported.
+	if is_arch_wasm() {
+		bc.use_separate_modules = false
+	} else if bc.optimization_level <= 0 {
+		bc.use_separate_modules = true
+	}
+	if bc.use_single_module {
+		bc.use_separate_modules = false
+	}
+
+	// C++: build_settings.cpp:2114-2121
+	bc.ODIN_VALGRIND_SUPPORT = false
+	if bc.metrics.os != .Windows && bc.metrics.arch == .Amd64 {
+		bc.ODIN_VALGRIND_SUPPORT = true
+	}
+
+	// C++: build_settings.cpp:2123-2125
+	if bc.metrics.os == .Freestanding {
+		bc.ODIN_DEFAULT_TO_NIL_ALLOCATOR = !bc.ODIN_DEFAULT_TO_PANIC_ALLOCATOR
+	}
+}
+
+// get_default_microarchitecture returns the microarchitecture used when none was requested.
+// C++: llvm_backend.cpp:33-52
+get_default_microarchitecture :: proc() -> string {
+	#partial switch build_context.metrics.arch {
+	case .Amd64:
+		// NOTE(bill) in C++: x86-64-v2 is more than enough for everyone.
+		if build_context.metrics.os == .Freestanding {
+			return "x86-64"
+		}
+		return "x86-64-v2"
+	case .Riscv64:
+		return "generic-rv64"
+	}
+	return "generic"
+}
+
+// get_final_microarchitecture resolves ODIN_MICROARCH_STRING.
+// C++: llvm_backend.cpp:54-63
+//
+// DEVIATION: C++ resolves the literal string "native" through LLVMGetHostCPUName(). The
+// checker does not link LLVM, so "native" is returned verbatim. It can only be reached by an
+// embedder that sets build_context.microarch itself, since the checker parses no flags.
+get_final_microarchitecture :: proc() -> string {
+	if len(build_context.microarch) == 0 {
+		return get_default_microarchitecture()
+	}
+	return build_context.microarch
 }
 
 // Initialize build context from target name string
@@ -1115,9 +1214,13 @@ strings_eq_ignore_case :: proc(a, b: string) -> bool {
 // Example: "foo_linux.odin" is excluded when targeting Windows
 //          "bar_amd64.odin" is excluded when targeting ARM
 is_excluded_target_filename :: proc(name: string) -> bool {
-	// Remove extension
+	// Remove extension.
+	//
+	// C++: remove_extension_from_path (src/path.cpp:8) leaves a name whose *last* character is
+	// a '.' untouched, rather than stripping an empty extension off it. The guard is reproduced
+	// here so "foo." keeps its dot in both implementations.
 	name_no_ext := name
-	{
+	if !(len(name) != 0 && name[len(name) - 1] == '.') {
 		dot_idx := 0
 		found := false
 		for i := len(name) - 1; i >= 0; i -= 1 {

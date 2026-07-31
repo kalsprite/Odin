@@ -300,11 +300,15 @@ is_exact_value_zero :: proc(v: Exact_Value) -> bool {
 		return true
 	}
 
-	#partial switch &val in v {
+	#partial switch val in v {
 	case bool:
 		return !val // false is considered zero
 	case big.Int:
-		is_zero, _ := big.is_zero(&val)
+		// NOTE: big.is_zero needs a pointer, but `v` is passed by value, so the union payload
+		// is not addressable. A local copy is equivalent here: any mutation the query performs
+		// (clearing an uninitialized Int) was already being discarded through the by-value `v`.
+		i := val
+		is_zero, _ := big.is_zero(&i)
 		return is_zero
 	case f64:
 		return val == 0.0
@@ -1467,11 +1471,8 @@ compare_exact_values_compound_lit :: proc(ctx: ^Checker_Context, x, y: Exact_Val
 		}
 
 		// Get type_and_value for each element
-		x_key := rawptr(x_val)
-		y_key := rawptr(y_val)
-
-		x_tv, x_found := ctx.info.type_and_value_map[x_key]
-		y_tv, y_found := ctx.info.type_and_value_map[y_key]
+		x_tv, x_found := tav_lookup(ctx.info, x_val)
+		y_tv, y_found := tav_lookup(ctx.info, y_val)
 
 		if !x_found || !y_found {
 			return false
@@ -1783,7 +1784,7 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 		return
 	}
 
-	#partial switch &val in v {
+	#partial switch val in v {
 	// C++ line 1073-1074: Boolean
 	case bool:
 		strings.write_string(buf, val ? "true" : "false")
@@ -1818,7 +1819,9 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 	case big.Int:
 		// C++ line 1104: Convert BigInt to string using int_itoa_string
 		// The Odin API is: int_itoa_string :: proc(a: ^Int, radix := i8(10), zero_terminate := false, allocator := context.allocator) -> (res: string, err: Error)
-		str, err := big.int_itoa_string(&val, 10, false, context.temp_allocator)
+		// NOTE: see is_exact_value_zero - `v` is by value, so take an addressable copy.
+		i := val
+		str, err := big.int_itoa_string(&i, 10, false, context.temp_allocator)
 		if err == nil {
 			strings.write_string(buf, str)
 		}

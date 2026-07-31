@@ -10,6 +10,7 @@ C++ Reference: /mnt/c/odin/src/check_builtin.cpp
 
 */
 
+import "core:container/queue"
 import "core:fmt"
 import "core:math"
 import "core:math/big"
@@ -166,8 +167,11 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	case .Type_Elem_Type:
 		result = check_builtin_type_elem(ctx, operand, call)
 
-	case .Type_Is_Boolean, .Type_Is_Integer, .Type_Is_Rune, .Type_Is_Float, .Type_Is_Complex, .Type_Is_Quaternion, .Type_Is_String, .Type_Is_Cstring, .Type_Is_Typeid, .Type_Is_Any, .Type_Is_Endian_Platform, .Type_Is_Endian_Little, .Type_Is_Endian_Big, .Type_Is_Unsigned, .Type_Is_Signed, .Type_Is_Ordered, .Type_Is_Comparable, .Type_Is_Numeric, .Type_Is_Ordered_Numeric, .Type_Is_Pointer, .Type_Is_Multi_Pointer, .Type_Is_Array, .Type_Is_Enumerated_Array, .Type_Is_Dynamic_Array, .Type_Is_Slice, .Type_Is_Struct, .Type_Is_Union, .Type_Is_Enum, .Type_Is_Proc, .Type_Is_Bit_Set, .Type_Is_Bit_Field, .Type_Is_Map, .Type_Is_Matrix, .Type_Is_Simd_Vector, .Type_Is_Soa_Pointer:
+	case .Type_Is_Boolean, .Type_Is_Integer, .Type_Is_Rune, .Type_Is_Float, .Type_Is_Complex, .Type_Is_Quaternion, .Type_Is_String, .Type_Is_Cstring, .Type_Is_Typeid, .Type_Is_Any, .Type_Is_Endian_Platform, .Type_Is_Endian_Little, .Type_Is_Endian_Big, .Type_Is_Unsigned, .Type_Is_Ordered, .Type_Is_Comparable, .Type_Is_Simple_Compare, .Type_Is_Nearly_Simple_Compare, .Type_Is_Numeric, .Type_Is_Ordered_Numeric, .Type_Is_Pointer, .Type_Is_Multi_Pointer, .Type_Is_Array, .Type_Is_Enumerated_Array, .Type_Is_Dynamic_Array, .Type_Is_Slice, .Type_Is_Struct, .Type_Is_Union, .Type_Is_Enum, .Type_Is_Proc, .Type_Is_Bit_Set, .Type_Is_Bit_Field, .Type_Is_Map, .Type_Is_Matrix, .Type_Is_Simd_Vector, .Type_Is_Internally_Pointer_Like:
 		result = check_builtin_type_is_predicate(ctx, operand, call, id)
+
+	case .Type_Is_Matrix_Row_Major, .Type_Is_Matrix_Column_Major:
+		result = check_builtin_type_is_matrix_major(ctx, operand, call, id)
 
 	case .Type_Is_Subtype_Of:
 		result = check_builtin_type_is_subtype_of(ctx, operand, call)
@@ -203,6 +207,9 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	case .Type_Proc_Parameter_Type, .Type_Proc_Return_Type:
 		result = check_builtin_type_proc_type_at_index(ctx, operand, call, id)
 
+	case .Type_Proc_Calling_Convention:
+		result = check_builtin_type_proc_calling_convention(ctx, operand, call)
+
 	case .Type_Polymorphic_Record_Parameter_Count:
 		result = check_builtin_type_polymorphic_record_parameter_count(ctx, operand, call)
 
@@ -230,6 +237,9 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	// Additional type intrinsics
 	case .Type_Field_Type:
 		result = check_builtin_type_field_type(ctx, operand, call)
+
+	case .Type_Field_Bit_Offset, .Type_Field_Bit_Size:
+		result = check_builtin_type_field_bit(ctx, operand, call, id)
 
 	case .Type_Has_Field:
 		result = check_builtin_type_has_field(ctx, operand, call)
@@ -288,7 +298,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		result = check_builtin_clamp(ctx, operand, call)
 
 	// Bit manipulation intrinsics
-	case .Count_Ones, .Count_Zeros, .Count_Trailing_Zeros, .Count_Leading_Zeros, .Reverse_Bits:
+	case .Count_Ones, .Count_Zeros, .Count_Trailing_Zeros, .Count_Leading_Zeros, .Count_Trailing_Ones, .Count_Leading_Ones, .Reverse_Bits:
 		result = check_builtin_bit_count(ctx, operand, call, id)
 
 	case .Byte_Swap:
@@ -317,7 +327,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:720-1612
 
 	// SIMD binary numeric operations
-	case .Simd_Add, .Simd_Sub, .Simd_Mul, .Simd_Div, .Simd_Min, .Simd_Max, .Simd_Rem:
+	case .Simd_Add, .Simd_Sub, .Simd_Mul, .Simd_Div, .Simd_Min, .Simd_Max, .Simd_Rem, .Simd_Pairwise_Add, .Simd_Pairwise_Sub:
 		result = check_builtin_simd_binary_numeric(ctx, operand, call, id)
 
 	// SIMD integer binary operations (saturating, bitwise)
@@ -377,8 +387,14 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	case .Simd_Runtime_Swizzle:
 		result = check_builtin_simd_runtime_swizzle(ctx, operand, call)
 
-	// SIMD rounding operations
-	case .Simd_Ceil, .Simd_Floor, .Simd_Trunc, .Simd_Nearest:
+	case .Simd_Odd_Even:
+		result = check_builtin_simd_odd_even(ctx, operand, call)
+
+	case .Simd_Sums_Of_N:
+		result = check_builtin_simd_sums_of_n(ctx, operand, call)
+
+	// SIMD rounding and reciprocal approximation operations
+	case .Simd_Ceil, .Simd_Floor, .Simd_Trunc, .Simd_Nearest, .Simd_Approx_Recip, .Simd_Approx_Recip_Sqrt:
 		result = check_builtin_simd_rounding(ctx, operand, call, id)
 
 	// SIMD lanes manipulation
@@ -395,6 +411,16 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	// SIMD to_bits
 	case .Simd_To_Bits:
 		result = check_builtin_simd_to_bits(ctx, operand, call)
+
+	case .Simd_To_Bits_Signed:
+		result = check_builtin_simd_to_bits_signed(ctx, operand, call)
+
+	// SIMD interleave/deinterleave
+	case .Simd_Interleave:
+		result = check_builtin_simd_interleave(ctx, operand, call)
+
+	case .Simd_Deinterleave:
+		result = check_builtin_simd_deinterleave(ctx, operand, call)
 
 	// Platform-specific SIMD
 	case .Simd_X86_MM_Shuffle:
@@ -447,8 +473,18 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	case .Expect:
 		result = check_builtin_expect(ctx, operand, call)
 
+	case .Likely, .Unlikely:
+		result = check_builtin_likely(ctx, operand, call, id)
+
 	case .Syscall, .Syscall_Bsd:
 		result = check_builtin_syscall(ctx, operand, call, id)
+
+	case .Entry_Point:
+		result = check_builtin_entry_point(ctx, operand, call)
+
+	// C variadic intrinsics
+	case .C_Va_Start, .C_Va_End, .C_Va_Copy, .C_Va_Arg:
+		result = check_builtin_c_procedure(ctx, operand, call, id)
 
 	// WebAssembly intrinsics
 	case .Wasm_Memory_Grow:
@@ -581,7 +617,13 @@ check_builtin_len_cap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 
 	} else if is_type_array(op_type) {
 		// Array length - always constant
-		arr := op_type.variant.(Type_Array)
+		//
+		// NOTE: must go through base_type. is_type_array unwraps named types internally, so it
+		// answers true for e.g. `distinct [N]T`, but the variant then lives on the BASE type -
+		// asserting on op_type directly crashes with "Invalid type assertion from Type_Variant to
+		// Type_Array, actual type: Type_Named". Every sibling branch here already does this.
+		bt := base_type(op_type)
+		arr := bt.variant.(Type_Array)
 		mode = .Constant
 		value = exact_value_i64(arr.count)
 		result_type = t_untyped_integer
@@ -750,7 +792,9 @@ check_builtin_type_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 	// C++ Reference: check_builtin.cpp:2890-2897
 	// NOTE(bill): Prevent type cycles for procedure declarations
 	if ctx.curr_proc_sig == o.type {
-		error_node(o.expr, "Invalid cyclic type usage from 'type_of', got '%s'", expr_to_string(o.expr))
+		expr_str := expr_to_string(o.expr)
+		defer delete(expr_str)
+		error_node(o.expr, "Invalid cyclic type usage from 'type_of', got '%s'", expr_str)
 		return false
 	}
 
@@ -1038,15 +1082,13 @@ check_builtin_atomic_store :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	builtin_name := builtin_proc_infos[id].name
 	_ = builtin_name // unused but kept for consistency
 
-	// First arg must be pointer
+	// First arg must be a normal (non-rawptr) pointer
+	// C++ Reference: check_builtin.cpp:6183 - is_type_normal_pointer(operand->type, &elem)
 	elem: ^Type
-	if !is_type_pointer(operand.type) {
+	if !is_type_normal_pointer(operand.type, &elem) {
 		error_node(operand.expr, "Expected a pointer for '%s'", builtin_name)
 		return false
 	}
-
-	ptr_type := operand.type.variant.(Type_Pointer)
-	elem = ptr_type.elem
 
 	// Validate element type is atomic-compatible
 	if !check_atomic_ptr_argument(operand, builtin_name, elem) {
@@ -1085,15 +1127,13 @@ check_builtin_atomic_load :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 	builtin_name := builtin_proc_infos[id].name
 	_ = builtin_name // unused but kept for consistency
 
-	// First arg must be pointer
+	// First arg must be a normal (non-rawptr) pointer
+	// C++ Reference: check_builtin.cpp:6183 - is_type_normal_pointer(operand->type, &elem)
 	elem: ^Type
-	if !is_type_pointer(operand.type) {
+	if !is_type_normal_pointer(operand.type, &elem) {
 		error_node(operand.expr, "Expected a pointer for '%s'", builtin_name)
 		return false
 	}
-
-	ptr_type := operand.type.variant.(Type_Pointer)
-	elem = ptr_type.elem
 
 	// Validate element type is atomic-compatible
 	if !check_atomic_ptr_argument(operand, builtin_name, elem) {
@@ -1127,15 +1167,13 @@ check_builtin_atomic_rmw :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 	builtin_name := builtin_proc_infos[id].name
 	_ = builtin_name // unused but kept for consistency
 
-	// First arg must be pointer
+	// First arg must be a normal (non-rawptr) pointer
+	// C++ Reference: check_builtin.cpp:6183 - is_type_normal_pointer(operand->type, &elem)
 	elem: ^Type
-	if !is_type_pointer(operand.type) {
+	if !is_type_normal_pointer(operand.type, &elem) {
 		error_node(operand.expr, "Expected a pointer for '%s'", builtin_name)
 		return false
 	}
-
-	ptr_type := operand.type.variant.(Type_Pointer)
-	elem = ptr_type.elem
 
 	// Validate element type is atomic-compatible
 	if !check_atomic_ptr_argument(operand, builtin_name, elem) {
@@ -1178,15 +1216,13 @@ check_builtin_atomic_compare_exchange :: proc(ctx: ^Checker_Context, operand: ^O
 	builtin_name := builtin_proc_infos[id].name
 	_ = builtin_name // unused but kept for consistency
 
-	// First arg must be pointer
+	// First arg must be a normal (non-rawptr) pointer
+	// C++ Reference: check_builtin.cpp:6183 - is_type_normal_pointer(operand->type, &elem)
 	elem: ^Type
-	if !is_type_pointer(operand.type) {
+	if !is_type_normal_pointer(operand.type, &elem) {
 		error_node(operand.expr, "Expected a pointer for '%s'", builtin_name)
 		return false
 	}
-
-	ptr_type := operand.type.variant.(Type_Pointer)
-	elem = ptr_type.elem
 
 	// Validate element type is atomic-compatible
 	if !check_atomic_ptr_argument(operand, builtin_name, elem) {
@@ -1510,7 +1546,8 @@ check_builtin_objc_ivar_get :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 	// Determine result type based on hint
 	// C++ ref: check_builtin.cpp:450-454
 	result_type: ^Type
-	if type_hint != nil && is_type_pointer(type_hint) {
+	// C++ Reference: check_builtin.cpp:462 - `type_hint->kind == Type_Pointer` (a rawptr hint is not usable here)
+	if type_hint != nil && type_hint.kind == .Pointer {
 		hint_ptr := type_hint.variant.(Type_Pointer)
 		if hint_ptr.elem == ivar_type {
 			result_type = type_hint
@@ -1768,6 +1805,7 @@ check_builtin_offset_of_impl :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 			field_arg = sel.field
 		} else {
 			expr_str := expr_to_string(arg0)
+			defer delete(expr_str)
 			error_node(call.args[0], "Invalid expression for 'offset_of', '%s' is not a selector expression", expr_str)
 			return false
 		}
@@ -1831,7 +1869,6 @@ check_builtin_offset_of_impl :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 		if struc.scope != nil {
 			if is_type_polymorphic(bt) {
 				type_str := type_to_string(type)
-				defer delete(type_str)
 				error_node(field_arg, "Cannot use 'offset_of' on an unspecialized polymorphic struct type, got '%s'", type_str)
 				return false
 			}
@@ -1841,7 +1878,6 @@ check_builtin_offset_of_impl :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 			// A struct is incomplete if it has no fields AND no AST node (forward declaration)
 			if len(struc.fields) == 0 && struc.node == nil {
 				type_str := type_to_string(type)
-				defer delete(type_str)
 				error_node(field_arg, "Cannot use 'offset_of' on incomplete struct declaration, got '%s'", type_str)
 				return false
 			}
@@ -3361,7 +3397,14 @@ cache_load_file_directive :: proc(
 			return nil, false
 		}
 		base_dir := filepath.dir(file.fullpath)
-		path = filepath.join({base_dir, original_path})
+		joined, join_err := filepath.join({base_dir, original_path})
+		if join_err != nil {
+			if err_on_not_found {
+				error_node(call, "Failed to '#load' file: %s; could not resolve path", original_path)
+			}
+			return nil, false
+		}
+		path = joined
 	}
 
 	// Lock the cache mutex
@@ -3403,8 +3446,10 @@ cache_load_file_directive :: proc(
 			cache.file_error = .None if cache.exists else .Not_Exists
 
 		case .Contents:
-			data, read_ok := os.read_entire_file(path)
-			if read_ok {
+			// NOTE: the contents are retained in the load-file cache for the lifetime of the
+			// checker, so they must not come from the temporary allocator.
+			data, read_err := os.read_entire_file(path, context.allocator)
+			if read_err == nil {
 				cache.exists = true
 				cache.data = data
 				cache.file_error = .None
@@ -3572,6 +3617,45 @@ check_builtin_jmag_kmag :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 // check_builtin_expand_values handles expand_values() builtin
 // expand_values(v) expands a struct/array into its individual values
 // C++ Reference: check_builtin.cpp:3850-3920
+// expand_values_tuple_type builds the tuple type that `expand_values(x)` / `**x` yields.
+//
+// C++ Reference: check_expr.cpp:3016-3033 (the Token_MulMul case) and check_builtin.cpp's
+// BuiltinProc_expand_values, which construct the same tuple.
+//
+// Struct -> a tuple of every field type. Array -> a tuple of `count` copies of the element type.
+// A one-element tuple collapses to the bare element type, matching C++
+// (`if (tuple->Tuple.variables.count == 1) o->type = tuple->Tuple.variables[0]->type;`).
+//
+// NOTE: C++ imposes NO limit on the array length here. The previous implementation rejected arrays
+// longer than 4 ("requires array size <= 4"), which was invented.
+expand_values_tuple_type :: proc(ctx: ^Checker_Context, type: ^Type) -> (^Type, bool) {
+	bt := base_type(type)
+	if bt == nil {
+		return nil, false
+	}
+
+	types: [dynamic]^Type
+	defer delete(types)
+
+	#partial switch v in bt.variant {
+	case Type_Struct:
+		for field in v.fields {
+			append(&types, field.type)
+		}
+	case Type_Array:
+		for _ in 0 ..< v.count {
+			append(&types, v.elem)
+		}
+	case:
+		return nil, false
+	}
+
+	if len(types) == 1 {
+		return types[0], true
+	}
+	return alloc_type_tuple_from_field_types(ctx.checker, types[:]), true
+}
+
 check_builtin_expand_values :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	if len(call.args) != 1 {
 		error_node(call, "'expand_values' requires exactly 1 argument, got %d", len(call.args))
@@ -3583,43 +3667,14 @@ check_builtin_expand_values :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 		return false
 	}
 
-	bt := base_type(operand.type)
-
-	// Must be a struct or array type
-	#partial switch v in bt.variant {
-	case Type_Struct:
-		// Returns a tuple of all field values
-		// C++ Reference: check_builtin.cpp:3880-3895
-		field_types := make([dynamic]^Type, len(v.fields))
-		for field, i in v.fields {
-			field_types[i] = field.type
-		}
-		result_type := alloc_type_tuple_from_field_types(ctx.checker, field_types[:])
-		operand.mode = .Value
-		operand.type = result_type
-		return true
-
-	case Type_Array:
-		// Returns a tuple of all element values
-		// C++ Reference: check_builtin.cpp:3896-3910
-		if v.count > 0 && v.count <= 4 {
-			// For small arrays, create tuple of element types
-			elem_types := make([dynamic]^Type, v.count)
-			for i in 0 ..< v.count {
-				elem_types[i] = v.elem
-			}
-			result_type := alloc_type_tuple_from_field_types(ctx.checker, elem_types[:])
-			operand.mode = .Value
-			operand.type = result_type
-			return true
-		} else {
-			error_node(call, "'expand_values' on arrays requires array size <= 4, got %d", v.count)
-			return false
-		}
+	result, ok := expand_values_tuple_type(ctx, operand.type)
+	if !ok {
+		error_node(call, "'expand_values' requires a struct or array type, got %s", type_to_string(operand.type))
+		return false
 	}
-
-	error_node(call, "'expand_values' requires a struct or array type, got %s", type_to_string(operand.type))
-	return false
+	operand.mode = .Value
+	operand.type = result
+	return true
 }
 
 // check_builtin_compress_values handles compress_values() builtin
@@ -3841,7 +3896,8 @@ check_builtin_raw_data :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^
 	} else if is_type_array(bt) {
 		arr := bt.variant.(Type_Array)
 		elem_type = arr.elem
-	} else if is_type_pointer(bt) {
+	// C++ Reference: check_builtin.cpp:5512 - `case Type_Pointer:` (rawptr has no element type)
+	} else if bt.kind == .Pointer {
 		ptr := bt.variant.(Type_Pointer)
 		if is_type_array(ptr.elem) {
 			arr := base_type(ptr.elem).variant.(Type_Array)
@@ -4002,12 +4058,16 @@ check_builtin_type_is_predicate :: proc(ctx: ^Checker_Context, operand: ^Operand
 		result = is_type_endian_big(input_type)
 	case .Type_Is_Unsigned:
 		result = is_type_unsigned(input_type)
-	case .Type_Is_Signed:
-		result = is_type_integer(input_type) && !is_type_unsigned(input_type)
 	case .Type_Is_Ordered:
 		result = is_type_ordered(input_type)
 	case .Type_Is_Comparable:
 		result = is_type_comparable(input_type)
+	case .Type_Is_Simple_Compare:
+		result = is_type_simple_compare(input_type)
+	case .Type_Is_Nearly_Simple_Compare:
+		result = is_type_nearly_simple_compare(input_type)
+	case .Type_Is_Internally_Pointer_Like:
+		result = is_type_internally_pointer_like(input_type)
 	case .Type_Is_Numeric:
 		result = is_type_numeric(input_type)
 	case .Type_Is_Ordered_Numeric:
@@ -4042,8 +4102,6 @@ check_builtin_type_is_predicate :: proc(ctx: ^Checker_Context, operand: ^Operand
 		result = is_type_matrix(input_type)
 	case .Type_Is_Simd_Vector:
 		result = is_type_simd_vector(input_type)
-	case .Type_Is_Soa_Pointer:
-		result = is_type_soa_pointer(input_type)
 	case .Type_Is_Named:
 		result = is_type_named(input_type)
 	case .Type_Is_Cstring16:
@@ -7167,4 +7225,277 @@ check_builtin_type_union_tag_type :: proc(ctx: ^Checker_Context, operand: ^Opera
 	operand.type = union_tag_type(type_op.type)
 
 	return true
+}
+
+// ===========================================================================
+// Branch hints, extra bit queries, matrix layout and C varargs
+// ===========================================================================
+
+// check_builtin_likely handles likely(cond) and unlikely(cond)
+// C++ Reference: check_builtin.cpp, `case BuiltinProc_likely:` / `case BuiltinProc_unlikely:`
+check_builtin_likely :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
+	builtin_name := builtin_proc_infos[id].name
+
+	if len(call.args) != 1 {
+		error_node(call, "'%s' requires exactly 1 argument, got %d", builtin_name, len(call.args))
+		return false
+	}
+
+	x: Operand
+	check_expr(ctx, &x, call.args[0])
+	if x.mode == .Invalid {
+		return false
+	}
+
+	if !is_type_boolean(x.type) {
+		type_str := type_to_string(x.type)
+		error_node(x.expr, "Expected a boolean expression to '%s', got %s", builtin_name, type_str)
+		operand^ = x // minimize error propagation
+		return true
+	}
+
+	if x.mode == .Constant {
+		// NOTE(bill): just completely ignore this intrinsic entirely
+		operand^ = x
+		return true
+	}
+
+	operand.mode = .Value
+	operand.type = x.type
+	return true
+}
+
+// check_builtin_type_is_matrix_major handles type_is_matrix_row_major and type_is_matrix_column_major
+// C++ Reference: check_builtin.cpp, `case BuiltinProc_type_is_matrix_row_major:`
+//
+// Deviation: C++ reads `bt->Matrix.is_row_major` off the *unbased* type, which is only
+// correct when the argument is an unnamed matrix type; for a named matrix it reads another
+// variant's storage. The port reads the based type, which is what that code intends.
+check_builtin_type_is_matrix_major :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
+	builtin_name := builtin_proc_infos[id].name
+
+	if len(call.args) != 1 {
+		error_node(call, "'%s' requires exactly 1 argument, got %d", builtin_name, len(call.args))
+		return false
+	}
+
+	bt := check_type(ctx, call.args[0])
+	if bt == nil || bt == t_invalid {
+		error_node(call.args[0], "Expected a type for '%s'", builtin_name)
+		return false
+	}
+
+	type := base_type(bt)
+	mat, is_matrix := type.variant.(Type_Matrix)
+	if !is_matrix {
+		type_str := type_to_string(bt)
+		error_node(call.args[0], "Expected a matrix type for '%s', got '%s'", builtin_name, type_str)
+		return false
+	}
+
+	result: bool
+	if id == .Type_Is_Matrix_Row_Major {
+		result = mat.is_row_major == true
+	} else {
+		result = mat.is_row_major == false
+	}
+
+	operand.mode = .Constant
+	operand.type = t_untyped_bool
+	operand.value = exact_value_bool(result)
+	return true
+}
+
+// check_builtin_type_field_bit handles type_field_bit_offset and type_field_bit_size
+// C++ Reference: check_builtin.cpp, `case BuiltinProc_type_field_bit_offset:`
+//
+// Both are bit_field specific. An unknown field name is not an error in C++; the result
+// is simply 0.
+check_builtin_type_field_bit :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
+	builtin_name := builtin_proc_infos[id].name
+
+	if len(call.args) != 2 {
+		error_node(call, "'%s' requires exactly 2 arguments, got %d", builtin_name, len(call.args))
+		return false
+	}
+
+	bt := check_type(ctx, call.args[0])
+	if bt == nil || bt == t_invalid {
+		error_node(call.args[0], "Expected a type for '%s'", builtin_name)
+		return false
+	}
+
+	type := base_type(bt)
+	bf, is_bit_field := type.variant.(Type_Bit_Field)
+	if !is_bit_field {
+		error_node(call.args[0], "Expected a bit field type for '%s'", builtin_name)
+		operand.mode = .Invalid
+		operand.type = t_invalid
+		return false
+	}
+
+	x: Operand
+	check_expr(ctx, &x, call.args[1])
+	field_name, name_ok := x.value.(string)
+	if !is_type_string(x.type) || x.mode != .Constant || !name_ok {
+		error_node(call.args[1], "Expected a constant string for field argument")
+		return false
+	}
+
+	bit_offset: i64 = 0
+	bit_size: i64 = 0
+	for f, i in bf.fields {
+		if f == nil || .Bit_Field_Field not_in f.flags {
+			continue
+		}
+		if f.token.text == field_name {
+			if i < len(bf.bit_offsets) {
+				bit_offset = i64(bf.bit_offsets[i])
+			}
+			if i < len(bf.bit_sizes) {
+				bit_size = i64(bf.bit_sizes[i])
+			}
+			break
+		}
+	}
+
+	value: i64 = 0
+	#partial switch id {
+	case .Type_Field_Bit_Offset:
+		value = bit_offset
+	case .Type_Field_Bit_Size:
+		value = bit_size
+	}
+
+	operand.mode = .Constant
+	operand.type = t_untyped_integer
+	operand.value = exact_value_i64(value)
+	return true
+}
+
+// check_builtin_type_proc_calling_convention handles type_proc_calling_convention(P)
+// C++ Reference: check_builtin.cpp, `case BuiltinProc_type_proc_calling_convention:`
+check_builtin_type_proc_calling_convention :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
+	builtin_name := "type_proc_calling_convention"
+
+	if len(call.args) != 1 {
+		error_node(call, "'%s' requires exactly 1 argument, got %d", builtin_name, len(call.args))
+		return false
+	}
+
+	check_expr_or_type(ctx, operand, call.args[0])
+	if operand.mode != .Type || !is_type_proc(operand.type) {
+		error_node(call.args[0], "Expected a procedure type for '%s'", builtin_name)
+		return false
+	}
+
+	if is_type_polymorphic(operand.type) {
+		error_node(call.args[0], "Expected a non-polymorphic procedure type for '%s'", builtin_name)
+		return false
+	}
+
+	pt := base_type(operand.type).variant.(Type_Proc)
+
+	operand.mode = .Constant
+	operand.type = t_odin_calling_convention
+	operand.value = exact_value_i64(odin_calling_convention_enum_value(pt.calling_convention))
+	return true
+}
+
+// check_builtin_entry_point handles intrinsics.__entry_point()
+// C++ Reference: check_builtin.cpp, `case BuiltinProc___entry_point:`
+//
+// The recorded call sites are what mark the program as having an explicit entry point;
+// they are drained by drain_intrinsics_entry_point_usage.
+check_builtin_entry_point :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
+	operand.mode = .No_Value
+	operand.type = nil
+	queue.mpsc_enqueue(&ctx.info.intrinsics_entry_point_usage, call)
+	return true
+}
+
+// check_builtin_c_procedure handles c_va_start, c_va_end, c_va_copy and c_va_arg
+// C++ Reference: check_builtin.cpp, `gb_internal bool check_builtin_c_procedure(...)`
+check_builtin_c_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
+	builtin_name := builtin_proc_infos[id].name
+
+	// check_c_va_list_operand validates that `expr` is a `^intrinsics.c_va_list`.
+	check_c_va_list_operand :: proc(ctx: ^Checker_Context, expr: ^ast.Expr, builtin_name: string) -> (ok: bool) {
+		x: Operand
+		check_expr(ctx, &x, expr)
+		if x.mode == .Invalid {
+			return false
+		}
+		if t_c_va_list_ptr == nil {
+			// 'intrinsics.c_va_list' never resolved, so there is nothing to compare against.
+			error_node(expr, "'%s' expected a value of type ^intrinsics.c_va_list, but 'intrinsics.c_va_list' could not be resolved", builtin_name)
+			return false
+		}
+		if !are_types_identical(x.type, t_c_va_list_ptr) {
+			list_str := type_to_string(t_c_va_list_ptr)
+			type_str := type_to_string(x.type)
+			error_node(expr, "'%s' expected a value of type %s, got type %s", builtin_name, list_str, type_str)
+			return false
+		}
+		return true
+	}
+
+	#partial switch id {
+	case .C_Va_Start:
+		if !check_c_va_list_operand(ctx, call.args[0], builtin_name) {
+			return false
+		}
+
+		args: Operand
+		check_expr(ctx, &args, call.args[1])
+		if args.mode == .Invalid {
+			return false
+		}
+		e := entity_of_node(ctx.info, args.expr)
+		if e == nil || .C_Var_Arg not_in e.flags {
+			error_node(call.args[0], "'%s' expected a `#c_vararg` parameter", builtin_name)
+		}
+
+		operand.mode = .No_Value
+		operand.type = nil
+		return true
+
+	case .C_Va_End:
+		if !check_c_va_list_operand(ctx, call.args[0], builtin_name) {
+			return false
+		}
+
+		operand.mode = .No_Value
+		operand.type = nil
+		return true
+
+	case .C_Va_Copy:
+		if !check_c_va_list_operand(ctx, call.args[0], builtin_name) {
+			return false
+		}
+		if !check_c_va_list_operand(ctx, call.args[1], builtin_name) {
+			return false
+		}
+
+		operand.mode = .No_Value
+		operand.type = nil
+		return true
+
+	case .C_Va_Arg:
+		if !check_c_va_list_operand(ctx, call.args[0], builtin_name) {
+			return false
+		}
+
+		type := check_type(ctx, call.args[1])
+		if type == nil || type == t_invalid {
+			error_node(call.args[1], "'%s' expected a type as the second parameter to intrinsics.%s", builtin_name, builtin_name)
+			return false
+		}
+
+		operand.mode = .Value
+		operand.type = type
+		return true
+	}
+
+	return false
 }

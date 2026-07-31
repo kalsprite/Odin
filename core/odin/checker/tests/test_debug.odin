@@ -4,7 +4,6 @@ import "core:fmt"
 import "core:odin/ast"
 import "core:odin/parser"
 import "core:odin/tokenizer"
-import "core:sync"
 import "core:testing"
 import checker ".."
 
@@ -39,8 +38,8 @@ c := Color.Red
     fmt.println("DEBUG: Parsed file OK")
 
     // Serialize access to global error collector to avoid race conditions
-    sync.lock(&test_error_mutex)
-    defer sync.unlock(&test_error_mutex)
+    checker_globals_ticket := lock_checker_globals(t)
+    defer unlock_checker_globals(checker_globals_ticket)
 
     // Initialize checker
     c := &checker.Checker{}
@@ -105,8 +104,8 @@ copy :: proc(dst: #no_alias ^int, src: ^int) {
     fmt.println("DEBUG: Parsed file OK")
 
     // Serialize access to global error collector to avoid race conditions
-    sync.lock(&test_error_mutex)
-    defer sync.unlock(&test_error_mutex)
+    checker_globals_ticket := lock_checker_globals(t)
+    defer unlock_checker_globals(checker_globals_ticket)
 
     // Initialize checker
     c := &checker.Checker{}
@@ -185,8 +184,8 @@ x: int = 42
     }
 
     // Serialize access to global error collector to avoid race conditions
-    sync.lock(&test_error_mutex)
-    defer sync.unlock(&test_error_mutex)
+    checker_globals_ticket := lock_checker_globals(t)
+    defer unlock_checker_globals(checker_globals_ticket)
 
     // Initialize checker
     c := &checker.Checker{}

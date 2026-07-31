@@ -109,8 +109,17 @@ init :: proc(t: ^Tokenizer, src: string, path: string, err: Error_Handler = defa
 
 	if !intrinsics.atomic_load(&_global_keyword_lut_initialized) {
 		_global_keyword_spin_lock()
-		ok := keyword_lut_init(&global_keyword_lut)
-		intrinsics.atomic_store(&_global_keyword_lut_initialized, ok)
+		// The flag MUST be re-tested here. The load above is only a fast path: two threads
+		// reaching `init` for the first time can both observe it as false, and the second
+		// one arrives here after the first has already filled the table in. Building the
+		// table twice trips `assert(entry.kind == .Invalid, name)` inside
+		// keyword_lut_init, and an assertion does not unwind - so the spin lock would
+		// never be released and every later tokenizer.init in the process would spin on
+		// it forever.
+		if !intrinsics.atomic_load(&_global_keyword_lut_initialized) {
+			ok := keyword_lut_init(&global_keyword_lut)
+			intrinsics.atomic_store(&_global_keyword_lut_initialized, ok)
+		}
 		_global_keyword_spin_unlock()
 	}
 
