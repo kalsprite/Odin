@@ -484,10 +484,10 @@ load_package_with_dependencies :: proc(
 		if info != nil {
 			// Register by import path if we have one
 			if len(import_path) > 0 {
-				info.packages[import_path] = pkg
+				register_package(info, import_path, pkg)
 			}
 			// Also register by fullpath as a fallback
-			info.packages[pkg_path] = pkg
+			register_package(info, pkg_path, pkg)
 
 			// This is the analogue of get_runtime_package (src/checker.cpp:899), which finds
 			// the runtime by looking its path up in info->packages and asserts it is there.

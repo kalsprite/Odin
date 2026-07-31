@@ -103,6 +103,10 @@ check_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^Type, n
 		// Dynamic array type ([dynamic]T)
 		return check_dynamic_array_type(ctx, n, type, named_type)
 
+	case ^ast.Fixed_Capacity_Dynamic_Array_Type:
+		// Fixed-capacity dynamic array type ([dynamic; N]T)
+		return check_fixed_capacity_dynamic_array_type(ctx, n, type, named_type)
+
 	// Note: Slice types are handled as Array_Type with no size in Odin's AST
 
 	case ^ast.Struct_Type:
@@ -255,7 +259,15 @@ make_soa_struct_internal :: proc(ctx: ^Checker_Context, array_type_expr: ^ast.No
 	// C++ lines 3075-3079: Verify element is a valid type
 	// Valid types: structs, raw unions, and small arrays (count <= 4)
 	bt := base_type(elem)
-	is_polymorphic := generic_type != nil
+
+	// C++ Reference: check_type.cpp:3279 - `bool is_polymorphic = is_type_polymorphic(elem);`
+	//
+	// This asked a different question: `generic_type != nil` is "was an array COUNT generic
+	// supplied?". `#soa[]$E` has no count, so the flag was false and the polymorphic element `$E`
+	// fell into the "not a valid element" error below, which meant `$T/#soa[]$E` never formed a
+	// distinct type and base:runtime's `delete`/`make` groups reported their #soa overloads as
+	// duplicates of the plain ones.
+	is_polymorphic := is_type_polymorphic(elem)
 
 	is_valid_elem := false
 	if is_type_struct(bt) {
@@ -270,8 +282,11 @@ make_soa_struct_internal :: proc(ctx: ^Checker_Context, array_type_expr: ^ast.No
 	}
 
 	if !is_polymorphic && !is_valid_elem {
-		error(elem_expr, "#soa element must be a struct, raw union, or array of length 4 or below")
-		return t_invalid
+		// C++ Reference: check_type.cpp:3281-3286. C++'s wording, and C++ returns a plain ARRAY of
+		// the element rather than t_invalid so the declaration still yields a usable type.
+		str := type_to_string(elem)
+		error(elem_expr, "Invalid type for an #soa array, expected a struct or array of length 4 or below, got '%s'", str)
+		return make_array_type(elem, count, generic_type)
 	}
 
 	// Handle struct-specific checks
@@ -302,6 +317,10 @@ make_soa_struct_internal :: proc(ctx: ^Checker_Context, array_type_expr: ^ast.No
 	ts.soa_kind = soa_kind
 	ts.soa_elem = elem
 	ts.soa_count = count
+	// C++ Reference: check_type.cpp:3302 - `soa_struct->Struct.is_polymorphic = is_polymorphic;`
+	// This assignment was missing entirely, so nothing downstream could tell a polymorphic #soa
+	// struct from a concrete one - complete_soa_type then asserted on the Generic element.
+	ts.is_polymorphic = is_polymorphic
 	ts.node = array_type_expr
 
 	// C++ lines 3108-3110: Copy struct properties (structs only)
@@ -328,9 +347,17 @@ make_soa_struct_internal :: proc(ctx: ^Checker_Context, array_type_expr: ^ast.No
 	// C++ lines 3118-3120: Allocate mutex for thread-safe completion
 	ts.soa_mutex = new(sync.Mutex, ctx.checker.allocator)
 
-	// C++ lines 3122-3125: Queue for completion
-	// The completion happens during drain_and_complete_soa_types
-	queue.mpsc_enqueue(&ctx.checker.soa_types_to_complete, t)
+	// C++ Reference: check_type.cpp:3430-3440. C++ enqueues ONLY in the `else` branch, i.e. when the
+	// struct is not already complete. A polymorphic #soa struct is marked complete immediately (it
+	// has no fields to build until instantiation) and is never queued.
+	//
+	// The port queued unconditionally. That was harmless while polymorphic elements were rejected
+	// outright, but once they are accepted these structs get created during INSTANTIATION - after
+	// drain_and_complete_soa_types has already run - so the queue was still non-empty at teardown
+	// and tripped "MPSC queue must be empty before destroy" (core/mem/tlsf).
+	if !is_polymorphic {
+		queue.mpsc_enqueue(&ctx.checker.soa_types_to_complete, t)
+	}
 
 	return t
 }
@@ -546,7 +573,7 @@ check_array_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^T
 			tag_directive, tag_ok := at.tag.derived.(^ast.Basic_Directive)
 			if !tag_ok {
 				error(at.tag, "Expected a basic directive for array tag")
-				type^ = make_array_type(elem, count)
+				type^ = make_array_type(elem, count, generic_type)
 				return
 			}
 
@@ -562,14 +589,14 @@ check_array_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^T
 				if !is_type_valid_vector_elem(elem) && !is_type_polymorphic(elem) {
 					elem_str := type_to_string(elem)
 					error(at.elem, "Invalid element type for #simd, expected an integer, float, boolean, or 'rawptr', got '%s'", elem_str)
-					type^ = make_array_type(elem, count)
+					type^ = make_array_type(elem, count, generic_type)
 					return
 				}
 
 				if generic_type != nil {
 					// Generic count - allow for polymorphic specialization
 				} else if count < 1 || !is_power_of_two(count) {
-					type^ = make_array_type(elem, count)
+					type^ = make_array_type(elem, count, generic_type)
 					if ctx.disallow_polymorphic_return_types && count == 0 {
 						return
 					}
@@ -589,12 +616,12 @@ check_array_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^T
 				}
 			} else {
 				error(at.tag, "Invalid tag applied to array, got #%s", tag_name)
-				type^ = make_array_type(elem, count)
+				type^ = make_array_type(elem, count, generic_type)
 			}
 		} else {
 			// Regular array: [N]T
 			// C++ line 3339
-			type^ = make_array_type(elem, count)
+			type^ = make_array_type(elem, count, generic_type)
 		}
 	} else {
 		// Slice: []T or tagged slices (#soa)
@@ -629,7 +656,29 @@ check_array_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^T
 
 check_dynamic_array_type :: proc(ctx: ^Checker_Context, dat: ^ast.Dynamic_Array_Type, type: ^^Type, named_type: ^Type) -> bool {
 	elem := check_type(ctx, dat.elem)
-	type^ = make_dynamic_array_type(elem)
+
+	// C++ Reference: check_type.cpp:3811-3827.
+	//
+	// The tag was ignored entirely, so `#soa[dynamic]T` silently built a PLAIN dynamic array. Two
+	// consequences: #soa dynamic arrays did not work at all, and `$T/#soa[dynamic]$E` was
+	// indistinguishable from `$T/[dynamic]$E`, which is why base:runtime's `delete` and `make`
+	// groups reported those overloads as duplicates.
+	if dat.tag != nil {
+		if bd, is_bd := dat.tag.derived_expr.(^ast.Basic_Directive); is_bd {
+			if bd.name == "soa" {
+				type^ = make_soa_struct_dynamic_array(ctx, dat, dat.elem, elem)
+			} else {
+				error_node(dat.tag, "Invalid tag applied to dynamic array, got #%s", bd.name)
+				type^ = make_dynamic_array_type(elem)
+			}
+		} else {
+			error_node(dat.tag, "Invalid tag applied to dynamic array")
+			type^ = make_dynamic_array_type(elem)
+		}
+	} else {
+		type^ = make_dynamic_array_type(elem)
+	}
+
 	set_base_type(named_type, type^)
 	return true
 }
@@ -1866,22 +1915,25 @@ check_polymorphic_record_type :: proc(ctx: ^Checker_Context, original_type: ^Typ
 	return nil
 }
 
+// C++ Reference: types.cpp:2242-2247
 is_type_untyped_uninit :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
-	if bt.kind != .Basic {
+	if bt == nil || bt.kind != .Basic {
 		return false
 	}
 	basic := bt.variant.(Type_Basic)
 	return basic.kind == .Untyped_Uninit
 }
 
+// C++ Reference: types.cpp:2236-2241
 is_type_untyped_nil :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
-	if bt.kind != .Basic {
+	if bt == nil || bt.kind != .Basic {
 		return false
 	}
 	basic := bt.variant.(Type_Basic)
-	return basic.kind == .Untyped_Nil
+	// NOTE(bill): checking for `nil` or `---` at once is just to improve the error handling
+	return basic.kind == .Untyped_Nil || basic.kind == .Untyped_Uninit
 }
 
 // type_deref dereferences pointer and SOA pointer types
@@ -2092,17 +2144,32 @@ check_enum_type_expr :: proc(ctx: ^Checker_Context, et: ^ast.Enum_Type, type: ^^
 	// Create the enum type
 	enum_type := new(Type, ctx.checker.allocator)
 	enum_type.kind = .Enum
-	enum_type.variant = Type_Enum {
-		base_type = t_int,
-		node      = et,
-		scope     = ctx.scope,
-	}
 
 	type^ = enum_type
 	set_base_type(named_type, enum_type)
 
-	// Delegate to the full check_enum_type function
+	// C++ Reference: check_type.cpp:3890-3892 wraps check_enum_type in
+	// check_open_scope/check_close_scope, and check_type.cpp:885 stores THAT scope
+	// (the enum's own) as Enum.scope. The members are then added into it.
+	//
+	// Storing the enclosing scope here instead is wrong three ways:
+	//   1. the duplicate-member check (scope_lookup_current, below) sees every
+	//      package-level declaration and false-positives on any enum member whose
+	//      name collides with one — e.g. core/reflect's `Type_Kind.Bit_Field`
+	//      against its package-level `Bit_Field :: struct`;
+	//   2. selector resolution against Enum.scope (C++ check_expr.cpp:9332) would
+	//      search the wrong scope;
+	//   3. check_decl_helpers.odin:1368 takes `original_enum.scope.parent` to
+	//      recover the enclosing scope (mirroring check_decl.cpp:419), which lands
+	//      on the grandparent when `scope` is already the enclosing one.
+	check_open_scope(ctx, et)
+	enum_type.variant = Type_Enum {
+		base_type = t_int,
+		node      = et,
+		scope     = ctx.scope, // C++ check_type.cpp:885 — the freshly opened enum scope
+	}
 	check_enum_type(ctx, enum_type, named_type, et)
+	check_close_scope(ctx)
 
 	return true
 }
@@ -2359,8 +2426,21 @@ check_enum_type :: proc(ctx: ^Checker_Context, enum_type: ^Type, named_type: ^Ty
 			}
 
 			if o.mode != .Invalid {
-				// For enum field values, check assignment to the base type (e.g., int)
-				// not the enum type itself. This allows integer literals like `A = 0`.
+				// DELIBERATE DEVIATION, measured. C++ (check_type.cpp:958) passes
+				// `constant_type` here — the named enum type, not the backing integer.
+				// Matching C++ exactly costs +12,008 diagnostics (97,160 -> 109,168,
+				// measured with sweep_det.sh), because this port's check_assignment cannot
+				// convert an untyped integer constant to an enum type: every ordinary
+				// `A = 0` member becomes "Cannot convert '0' to 'X' from 'untyped integer'".
+				//
+				// So base_type is a COMPENSATION for that missing conversion, not a
+				// considered choice. It has a real cost of its own: it breaks the legal
+				// cross-reference form `B = A` between members of one enum (e.g. core/io's
+				// `Empty = Unsupported`), which reports the member's own enum type as
+				// unassignable to i32.
+				//
+				// Fix the untyped-integer-to-enum conversion first; then switch this line
+				// to constant_type and re-measure. Do not switch it before.
 				check_assignment(ctx, &o, base_type, "enumeration")
 			}
 
@@ -2436,14 +2516,17 @@ check_enum_type :: proc(ctx: ^Checker_Context, enum_type: ^Type, named_type: ^Ty
 		}
 
 		// Check for duplicate names and add to scope
+		// C++ Reference: check_type.cpp:1015-1022. Note that C++ adds the entity to
+		// the scope and records the field ONLY when the name is not already taken;
+		// a duplicate is reported and otherwise skipped entirely.
 		existing := scope_lookup_current(ctx.scope, name)
 		if existing != nil {
 			error(ident, "'%s' is already declared in this enumeration", name)
+		} else {
+			add_entity(ctx, ctx.scope, nil, entity)
+			append(&et.fields, entity)
+			add_entity_use(ctx, field, entity)
 		}
-
-		// Add entity to scope
-		append(&et.fields, entity)
-		add_entity_use(ctx, field, entity)
 	}
 
 	assert(len(et.fields) <= len(node.fields))
@@ -2966,15 +3049,30 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 		return false
 	}
 
-	// Validate element type is numeric (integer or float)
-	// C++ lines 2882-2890
-	if !is_type_integer(elem) && !is_type_float(elem) && !is_type_complex(elem) && !is_type_quaternion(elem) {
-		type_str := type_to_string(elem)
-		error_node(mt.elem, "matrix element type must be numeric, got '%s'", type_str)
-		// Do not leave the half-built matrix type published to the caller.
-		type^ = t_invalid
-		set_base_type(named_type, t_invalid)
-		return false
+	// Validate the element type.
+	// C++ Reference: check_type.cpp check_matrix_type, the is_type_valid_for_matrix_elems block.
+	//
+	// C++ reports and CONTINUES here - it falls through to its `type_assign:` label and allocates the
+	// matrix regardless. The port used to publish t_invalid and bail, turning one bad element type
+	// into a cascade at every use of the matrix.
+	if !is_type_valid_for_matrix_elems(elem) {
+		// C++ keeps a narrow escape for `proc($T: typeid) -> matrix[2, 2]T`, where the element
+		// expression names a typeid-valued type alias. Its own comment marks this a HACK; it is
+		// reproduced rather than generalised, because widening it would accept element types C++
+		// rejects.
+		escaped := false
+		if elem == t_typeid {
+			e := entity_of_node(ctx.info, mt.elem)
+			if e != nil && e.kind == .Type_Name {
+				if tn, tn_ok := e.variant.(Entity_Type_Name); tn_ok && tn.is_type_alias {
+					escaped = true
+				}
+			}
+		}
+		if !escaped {
+			type_str := type_to_string(elem)
+			error_node(mt.elem, "Matrix elements types are limited to integers, floats, and complex, got %s", type_str)
+		}
 	}
 
 	mat.elem = elem
@@ -3091,33 +3189,124 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	return true
 }
 
-check_map_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Map_Type, type: ^^Type, named_type: ^Type) -> bool {
-	key := check_type(ctx, mt.key)
-	value := check_type(ctx, mt.value)
+// check_map_type_expr checks a `map[K]V` type expression
+// C++ Reference: check_type.cpp:3042-3086 (check_map_type)
+// check_fixed_capacity_dynamic_array_type checks a `[dynamic; N]T` type expression.
+// C++ Reference: check_type.cpp:3830-3852 (case_ast_node(dat, FixedCapacityDynamicArrayType, e))
+check_fixed_capacity_dynamic_array_type :: proc(
+	ctx: ^Checker_Context,
+	dat: ^ast.Fixed_Capacity_Dynamic_Array_Type,
+	type: ^^Type,
+	named_type: ^Type,
+) -> bool {
+	// C++ Reference: check_type.cpp:3831-3836. check_array_count also handles a polymorphic count,
+	// which is how `[dynamic; $N]$E` gets its generic capacity - the operand comes back as a Type
+	// whose kind is Generic.
+	o: Operand
+	capacity := check_array_count(ctx, &o, dat.capacity)
+	generic_capacity: ^Type = nil
+	if o.mode == .Type && o.type != nil && o.type.kind == .Generic {
+		generic_capacity = o.type
+	}
 
-	// C++ Reference: check_type.cpp - check_is_valid_map_key
-	// Validate that key type is hashable (can't be slice, dynamic array, map, or contain them)
-	if key != nil {
-		key_base := base_type(key)
-		if is_type_slice(key_base) {
-			error(mt.key, "A slice cannot be used as a map key type")
-			type^ = t_invalid
-			return false
-		}
-		if is_type_dynamic_array(key_base) {
-			error(mt.key, "A dynamic array cannot be used as a map key type")
-			type^ = t_invalid
-			return false
-		}
-		if is_type_map(key_base) {
-			error(mt.key, "A map cannot be used as a map key type")
-			type^ = t_invalid
-			return false
+	// C++ Reference: check_type.cpp:3838-3841
+	if capacity < 0 {
+		error_node(dat.capacity, "? can only be used in conjunction with compound literals of fixed-length arrays")
+		capacity = 0
+	}
+
+	elem := check_type(ctx, dat.elem)
+
+	// C++ Reference: check_type.cpp:3844-3849. C++ asserts the tag is a BasicDirective and then
+	// always reports it as invalid; no tag is accepted on this type.
+	if dat.tag != nil {
+		if bd, is_bd := dat.tag.derived_expr.(^ast.Basic_Directive); is_bd {
+			error_node(dat.tag, "Invalid tag applied to fixed capacity dynamic array, got #%s", bd.name)
+		} else {
+			error_node(dat.tag, "Invalid tag applied to fixed capacity dynamic array")
 		}
 	}
 
+	// C++ Reference: check_type.cpp:3850-3852
+	type^ = make_fixed_capacity_dynamic_array_type(elem, capacity, generic_capacity)
+	set_base_type(named_type, type^)
+	return true
+}
+
+check_map_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Map_Type, type: ^^Type, named_type: ^Type) -> bool {
+	// C++ Reference: check_type.cpp:3046-3057
+	if mt.key == nil {
+		if mt.value != nil {
+			value := check_type(ctx, mt.value)
+			// NOTE: no delete - type_to_string returns either a string literal ("<no type>",
+			// "<invalid>") or a temp-allocator string, unlike expr_to_string which is caller-owned.
+			str := type_to_string(value)
+			error_node(mt, "Missing map key type, got 'map[]%s'", str)
+		} else {
+			error_node(mt, "Missing map key type, got 'map[]T'")
+		}
+		type^ = t_invalid
+		return false
+	}
+
+	key := check_type(ctx, mt.key)
+	value := check_type(ctx, mt.value)
+
+	// C++ Reference: check_type.cpp:3062-3070.
+	//
+	// NOTE: this replaces a hand-rolled trio of rejections (slice / dynamic array / map key) that had
+	// no C++ counterpart. Those also returned false and left type^ = t_invalid, abandoning the map
+	// entirely; C++ reports and CONTINUES, still building the type and running the inits below, so a
+	// bad key yields one diagnostic in C++ where the port produced a cascade from the missing type.
+	if !is_type_valid_for_keys(key) {
+		if is_type_boolean(key) {
+			error_node(mt, "A boolean cannot be used as a key for a map, use an array instead for this case")
+		} else {
+			str := type_to_string(key)
+			error_node(mt, "Invalid type of a key for a map, got '%s'", str)
+		}
+	}
+	// C++ Reference: check_type.cpp:3071-3075
+	//
+	// REGRESSION GUARD: this check is skipped for a polymorphic key. C++ runs it unconditionally,
+	// but C++'s type_size_of has no Type_Generic case and evidently does not report 0 for one -
+	// base:runtime's `delete_map :: proc(m: $T/map[$K]$V, ...)` compiles under C++, and would not if
+	// this fired. This port's type_size_of DOES return 0 for a generic, so porting the check
+	// verbatim made every `map[$K]$V` signature report "Invalid type of a key for a map of size 0,
+	// got '$K'" - 3 in core/unicode, 7 in core/slice, 3 in core/math/linalg. A polymorphic key has
+	// no size until it is instantiated, so there is nothing to judge here.
+	if !is_type_polymorphic(key) && type_size_of(key) == 0 {
+		str := type_to_string(key)
+		error_node(mt, "Invalid type of a key for a map of size 0, got '%s'", str)
+	}
+
+	// C++ Reference: check_type.cpp:3077-3078
 	type^ = make_map_type(key, value)
 	set_base_type(named_type, type^)
+
+	// C++ Reference: check_type.cpp:3079
+	add_map_key_type_dependencies(ctx, key)
+
+	// C++ Reference: check_type.cpp:3081-3082. Both calls were missing. init_core_map_type is
+	// what populates t_map_info / t_map_cell_info / t_raw_map (and, via init_mem_allocator,
+	// t_allocator, which init_map_internal_types asserts on).
+	init_core_map_type(ctx.checker)
+
+	// NOTE: C++ can call init_map_internal_types unconditionally because the compiler always has
+	// base:runtime loaded, so init_core_map_type -> init_mem_allocator always sets t_allocator.
+	// This port is also used as a library on package sets that never load base:runtime, where
+	// find_core_type returns nil and init_mem_allocator returns early by design (see its comment).
+	// In that case t_allocator stays nil and init_map_internal_types' assert would fire, so gate on
+	// the precondition C++ gets for free rather than on a weakened assert.
+	if t_allocator != nil {
+		init_map_internal_types(type^)
+	}
+
+	// C++ Reference: check_type.cpp:3084-3086
+	if ctx.info.build_context != nil && ctx.info.build_context.bedrock {
+		error_node(mt, "'map' is not a valid type when using '-bedrock'")
+	}
+
 	return true
 }
 
@@ -3180,8 +3369,11 @@ check_procedure_type :: proc(ctx: ^Checker_Context, proc_type: ^Type, proc_type_
 	case ast.Proc_Calling_Convention_Extra:
 		// Foreign block default - use foreign context's default
 		if v == .Foreign_Block_Default {
+			// C++ Reference: check_type.cpp:2630-2635 (`if (c->foreign_context.default_cc > 0)`,
+			// where 0 is ProcCC_Invalid). See Foreign_Context.default_cc_set for why the
+			// port cannot use the enum's zero value as the "unset" sentinel.
 			cc = .C // Default to C
-			if ctx.foreign_context.default_cc != .None {
+			if ctx.foreign_context.default_cc_set {
 				cc = ctx.foreign_context.default_cc
 			}
 		}
@@ -4568,12 +4760,26 @@ union_variant_index_types_equal :: proc(v: ^Type, vt: ^Type) -> bool {
 // ============================================================================
 
 // polymorphic_assign_index binds a generic count parameter to a concrete value
-// Used for generic array counts, SIMD vector counts, and matrix dimensions
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:1323-1350
+// Used for generic array counts, SIMD vector counts, matrix dimensions, and fixed dynamic capacities
+// C++ Reference: /mnt/c/odin/src/check_expr.cpp:1389-1419
+//
+// TWO DIVERGENCES FIXED HERE, both of which broke `[$N]$E`:
+//
+//  1. The entity was read from Type_Generic.entity. C++ does NOT do that - it looks the entity up in
+//     the generic's own scope by name (`scope_lookup(gt->Generic.scope, gt->Generic.interned_name)`).
+//     For a generic COUNT the `entity` field is never populated, so every branch fell through to the
+//     bare `return false` at the end and `[$N]$E` simply never unified. That is why
+//     `proc(a: $T/[$N]$E)` could not be called with a `[4]int`, while `[4]$E` and `[]$E` worked.
+//
+//  2. The mutations were unconditional. C++ guards every write with modify_type, because callers run
+//     speculative match attempts with modify_type = false (the Generic arm of
+//     is_polymorphic_type_assignable does exactly that when testing a specialization). Mutating the
+//     entity into a Constant during a trial match permanently corrupts it for later real matches.
 polymorphic_assign_index :: proc(
-	gt: ^^Type, // Generic type (Type_Generic) - will be cleared after binding
+	gt: ^^Type, // Generic type (Type_Generic) - cleared after binding when modify_type
 	dst_count: ^i64, // Destination count to set
 	source_count: i64, // Source count value
+	modify_type: bool, // False for speculative matches: check only, do not bind
 ) -> bool {
 	// If gt is nil or already cleared, just set the count
 	if gt == nil || gt^ == nil {
@@ -4593,51 +4799,62 @@ polymorphic_assign_index :: proc(
 
 	generic := gt^.variant.(Type_Generic)
 
-	// If the generic has been specialized, handle it
-	// C++ Reference: check_expr.cpp:1324-1344
-	if generic.entity != nil {
-		if generic.entity.kind == .Type_Name {
-			// Convert Type_Name to Constant with the source count value
-			// C++ Reference: check_expr.cpp:1324-1331
-			gt^ = nil
-			if dst_count != nil {
-				dst_count^ = source_count
-			}
+	// C++ Reference: check_expr.cpp:1392-1393. C++ resolves the entity by name from the generic's
+	// scope and asserts it exists. The stored `entity` field is consulted only as a fallback, since
+	// it is populated for some generics and not others.
+	e: ^Entity
+	if generic.scope != nil && generic.name != "" {
+		e = scope_lookup(generic.scope, generic.name)
+	}
+	if e == nil {
+		e = generic.entity
+	}
+	if e == nil {
+		return false
+	}
 
-			// Mutate the entity to become a constant
-			generic.entity.kind = .Constant
-			generic.entity.variant = Entity_Constant {
+	if e.kind == .Type_Name {
+		// C++ Reference: check_expr.cpp:1394-1403
+		if dst_count != nil {
+			dst_count^ = source_count
+		}
+		if modify_type {
+			gt^ = nil
+			e.kind = .Constant
+			e.variant = Entity_Constant {
 				type  = t_untyped_integer,
 				value = exact_value_i64(source_count),
 			}
-			return true
+			set_entity_type(e, t_untyped_integer)
+		}
+		return true
+	} else if e.kind == .Constant {
+		// C++ Reference: check_expr.cpp:1404-1416
+		constant := e.variant.(Entity_Constant)
 
-		} else if generic.entity.kind == .Constant {
-			// Verify the constant matches the source count
-			// C++ Reference: check_expr.cpp:1332-1342
-			constant := generic.entity.variant.(Entity_Constant)
-
-			// Extract integer value from constant
-			#partial switch &v in constant.value {
-			case big.Int:
-				// Convert big.Int to i64 and verify it matches
-				count, err := big.int_get_i64(&v)
-				if err != nil {
-					return false // Overflow or invalid value
-				}
-				if count != source_count {
-					return false // Count mismatch
-				}
-				gt^ = nil
-				if dst_count != nil {
-					dst_count^ = source_count
-				}
-				return true
-			case:
-				// Non-integer constant value
+		count: i64
+		#partial switch &v in constant.value {
+		case big.Int:
+			c, err := big.int_get_i64(&v)
+			if err != nil {
 				return false
 			}
+			count = c
+		case:
+			// C++ requires ExactValue_Integer; anything else is not a valid count.
+			return false
 		}
+
+		if count != source_count {
+			return false
+		}
+		if dst_count != nil {
+			dst_count^ = source_count
+		}
+		if modify_type {
+			gt^ = nil
+		}
+		return true
 	}
 
 	return false
@@ -4927,10 +5144,21 @@ is_polymorphic_type_assignable :: proc(
 	if poly_base.kind == .Generic {
 		generic := poly_base.variant.(Type_Generic)
 
-		// Check specialized constraint if exists
+		// C++ Reference: check_expr.cpp:1422-1427
+		//
+		// TWO DIVERGENCES FIXED HERE:
+		//  1. This called is_polymorphic_type_assignable directly. C++ calls
+		//     check_type_specialization_to, which additionally handles Named/Struct/Union
+		//     specializations before delegating to is_polymorphic_type_assignable on the base types
+		//     (check_type.cpp:1626). Calling the inner function skipped all of that.
+		//  2. It hardcoded modify_type = false. C++ threads the caller's modify_type through. That
+		//     is what allows polymorphic_assign_index to convert the count entity of `[$N]$E` from
+		//     Entity_TypeName into Entity_Constant during the REAL match. With false hardcoded the
+		//     conversion never happened, so `N` stayed a generic TYPE inside the instantiated body -
+		//     `x := N` reported "Cannot assign a non-specialized polymorphic type '$N'" and
+		//     `#assert(N == 8)` reported "'N' is not an expression but a type".
 		if generic.specialized != nil {
-			// Verify source matches the constraint
-			if !is_polymorphic_type_assignable(ctx, generic.specialized, source, compound, false) {
+			if !check_type_specialization_to(ctx, generic.specialized, source, compound, modify_type) {
 				return false
 			}
 		}
@@ -4993,7 +5221,7 @@ is_polymorphic_type_assignable :: proc(
 		// Handle generic count for arrays with polymorphic sizes
 		// C++ Reference: check_expr.cpp:1411-1414
 		if poly_arr.generic_count != nil {
-			if !polymorphic_assign_index(&poly_arr.generic_count, &poly_arr.count, source_arr.count) {
+			if !polymorphic_assign_index(&poly_arr.generic_count, &poly_arr.count, source_arr.count, modify_type) {
 				return false
 			}
 		}
@@ -5047,6 +5275,31 @@ is_polymorphic_type_assignable :: proc(
 		poly_dyn := poly_base.variant.(Type_Dynamic_Array)
 		source_dyn := source_base.variant.(Type_Dynamic_Array)
 		return is_polymorphic_type_assignable(ctx, poly_dyn.elem, source_dyn.elem, compound, modify_type)
+	}
+
+	// === Type_FixedCapacityDynamicArray === (C++ check_expr.cpp:1578-1595)
+	//
+	// `[dynamic; $N]$E` against a concrete `[dynamic; 8]int`: bind N to the source capacity, then
+	// require the capacities to agree before recursing on the element type. Mirrors the Array arm
+	// above, which does the same for `[$N]$E`.
+	if poly_base.kind == .Fixed_Capacity_Dynamic_Array && source_base.kind == .Fixed_Capacity_Dynamic_Array {
+		poly_fc := &poly_base.variant.(Type_Fixed_Capacity_Dynamic_Array)
+		source_fc := source_base.variant.(Type_Fixed_Capacity_Dynamic_Array)
+
+		// C++ Reference: check_expr.cpp:1580-1589
+		if poly_fc.generic_capacity != nil {
+			if !polymorphic_assign_index(&poly_fc.generic_capacity, &poly_fc.capacity, source_fc.capacity, modify_type) {
+				return false
+			}
+		}
+
+		// C++ Reference: check_expr.cpp:1590. C++ returns false when the capacities disagree, so a
+		// concrete mismatch is simply not assignable.
+		if poly_fc.capacity != source_fc.capacity {
+			return false
+		}
+
+		return is_polymorphic_type_assignable(ctx, poly_fc.elem, source_fc.elem, compound, modify_type)
 	}
 
 	// === Type_Map === (C++ lines 1623-1633)
@@ -5176,7 +5429,7 @@ is_polymorphic_type_assignable :: proc(
 		// C++ Reference: check_expr.cpp:1632-1636
 		if poly_mat.generic_row_count != nil {
 			poly_mat.stride_in_bytes = 0
-			if !polymorphic_assign_index(&poly_mat.generic_row_count, &poly_mat.row_count, source_mat.row_count) {
+			if !polymorphic_assign_index(&poly_mat.generic_row_count, &poly_mat.row_count, source_mat.row_count, modify_type) {
 				return false
 			}
 		}
@@ -5185,7 +5438,7 @@ is_polymorphic_type_assignable :: proc(
 		// C++ Reference: check_expr.cpp:1638-1642
 		if poly_mat.generic_column_count != nil {
 			poly_mat.stride_in_bytes = 0
-			if !polymorphic_assign_index(&poly_mat.generic_column_count, &poly_mat.column_count, source_mat.column_count) {
+			if !polymorphic_assign_index(&poly_mat.generic_column_count, &poly_mat.column_count, source_mat.column_count, modify_type) {
 				return false
 			}
 		}
@@ -5210,7 +5463,7 @@ is_polymorphic_type_assignable :: proc(
 		// Handle generic count for SIMD vectors with polymorphic sizes
 		// C++ Reference: check_expr.cpp:1653-1656
 		if poly_sv.generic_count != nil {
-			if !polymorphic_assign_index(&poly_sv.generic_count, &poly_sv.count, source_sv.count) {
+			if !polymorphic_assign_index(&poly_sv.generic_count, &poly_sv.count, source_sv.count, modify_type) {
 				return false
 			}
 		}
@@ -5285,6 +5538,15 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 		extra_field_count = 1 // Slice: __$len only
 	case .Dynamic:
 		extra_field_count = 3 // Dynamic: __$len, __$cap, allocator
+	}
+
+	// C++ Reference: check_type.cpp:3319-3326. A polymorphic #soa element (`#soa[]$E`) has no
+	// concrete struct to spread into fields yet, so C++ sets field_count = 0, zeroes soa_count and
+	// marks the struct complete without building anything - the real fields appear at instantiation.
+	// Without this the Generic element reaches the assert below and aborts the whole run.
+	if ts.is_polymorphic {
+		ts.soa_count = 0
+		return true
 	}
 
 	// C++ lines 2978-2982: Get source struct information

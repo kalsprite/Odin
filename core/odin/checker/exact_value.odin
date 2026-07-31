@@ -521,13 +521,33 @@ big_int_and_not :: proc(dst, x, y: ^big.Int) {
 // The bit_count parameter specifies the fixed width for masking the result
 big_int_not :: proc(dst, x: ^big.Int, bit_count: i32, is_signed: bool) {
 	// For small bit counts, use direct computation for correctness
-	if bit_count <= 64 {
-		x_val, x_err := big.int_get_u64(x)
+	if bit_count > 0 && bit_count <= 64 {
+		// NOTE: read as SIGNED. int_get_u64 fails outright on a negative input, which sent every
+		// `~x` where x < 0 down the arbitrary-precision path below.
+		x_val, x_err := big.int_get_i64(x)
 		if x_err == nil {
-			// Create mask for the bit count
-			mask := u64(1 << uint(bit_count)) - 1
-			result := (~x_val) & mask
-			big.internal_int_set_from_integer(dst, result, false)
+			// Mask for the bit count. Computed this way because `1 << 64` is not representable.
+			mask: u64 = ~u64(0)
+			if bit_count < 64 {
+				mask = (u64(1) << uint(bit_count)) - 1
+			}
+
+			result := (~u64(x_val)) & mask
+
+			// C++ Reference: big_int_not(dst, x, precision, signed) - the `signed` flag is what
+			// makes the result wrap into the type rather than stay a bare magnitude.
+			//
+			// This function IGNORED is_signed and always stored the masked value as a positive
+			// integer. `~i16(0x7fff)` therefore produced 32768 instead of -32768, and the caller's
+			// check_is_expressible then reported "Numeric value '32768' from 'i16' cannot be
+			// represented by 'i16'". core/c's whole INT*_MIN block is written as `~INT*_MAX`.
+			if is_signed && (result & (u64(1) << uint(bit_count - 1))) != 0 {
+				// Top bit set: two's-complement negative. Sign-extend into i64.
+				signed_result := i64(result | ~mask)
+				big.internal_int_set_from_integer(dst, signed_result, false)
+			} else {
+				big.internal_int_set_from_integer(dst, result, false)
+			}
 			return
 		}
 	}

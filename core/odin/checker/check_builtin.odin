@@ -46,15 +46,47 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		// These are checked inside their handlers
 		break
 
-	case .Swizzle, .Complex, .Real, .Imag, .Conj, .Min, .Max:
-		// These check their first argument internally
-		// C++ Reference: check_builtin.cpp:2430-2431 - min/max must check first arg as type-or-expr
+	case .Min, .Max:
+		// C++ Reference: check_builtin.cpp:2811-2812. min/max must check the first argument as
+		// type-or-expr, so they do it themselves.
+		//
+		// NOTE: .Swizzle, .Complex, .Real, .Imag and .Conj used to be listed here too, but C++
+		// does NOT exclude them (check_builtin.cpp:2803-2824) - they fall through to the default
+		// arm and have args[0] checked into `operand`. Their handlers are written against that
+		// contract: C++'s swizzle case opens with `if (!operand->type) return false;`, and the
+		// complex/conj cases open with `Operand x = *operand;`. Excluding them here left `operand`
+		// holding the builtin itself (mode = .Builtin, type = nil), so `complex(a, b)` reached
+		// convert_to_typed with a nil-typed operand and segfaulted. base:runtime and core/strings
+		// both hit this.
 		break
 
 	case:
 		// Default: check first arg as multi-expr
+		//
+		// A `field = value` first argument is NOT pre-checked here. C++ gates named arguments
+		// immediately after this switch (check_builtin.cpp:2856-2868): they are rejected for every
+		// builtin except soa_zip and quaternion, whose handlers resolve the names themselves. Since
+		// no expression dispatch - C++'s or this port's - has a case for ^ast.Field_Value, feeding
+		// one in here produced "Expression type not yet supported: ^Field_Value" for every
+		// `quaternion(w=..., x=..., y=..., z=...)` in base:runtime: 31 diagnostics in core/bytes,
+		// 32 in core/strings.
 		if arg_count > 0 {
-			check_expr(ctx, operand, call.args[0])
+			if _, is_field_value := call.args[0].derived_expr.(^ast.Field_Value); !is_field_value {
+				check_expr(ctx, operand, call.args[0])
+			}
+		}
+	}
+
+	// C++ Reference: check_builtin.cpp:2856-2868. Only soa_zip and quaternion accept `field = value`.
+	if arg_count > 0 {
+		if _, is_field_value := call.args[0].derived_expr.(^ast.Field_Value); is_field_value {
+			#partial switch id {
+			case .Soa_Zip, .Quaternion:
+				// okay
+			case:
+				error_node(call, "'field = value' calling is not allowed on built-in procedures")
+				return false
+			}
 		}
 	}
 
@@ -2302,9 +2334,8 @@ check_builtin_conj :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.
 check_builtin_swizzle :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, type_hint: ^Type) -> bool {
 	builtin_name := "swizzle"
 
-	// First argument should be checked initially
-	// C++ Reference: check_builtin.cpp:2994-2996
-	check_expr(ctx, operand, call.args[0])
+	// C++ Reference: check_builtin.cpp:3410-3414. args[0] is already checked into `operand` by
+	// the prologue's default arm; C++ only guards on the result here.
 	if operand.type == nil {
 		return false
 	}
@@ -3525,12 +3556,82 @@ check_builtin_quaternion :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		return false
 	}
 
-	// Check all four arguments as expressions
+	// C++ Reference: check_builtin.cpp:3571-3672.
+	//
+	// `quaternion` is one of only two builtins that accept `field = value` arguments (the other is
+	// soa_zip). The port checked each argument with plain check_expr, so a named argument arrived as
+	// an ^ast.Field_Value and fell through to "Expression type not yet supported". Every
+	// `quaternion(w=..., x=..., y=..., z=...)` in base:runtime hit this - 31 diagnostics in
+	// core/bytes, 32 in core/strings.
 	args: [4]Operand
-	for i := 0; i < 4; i += 1 {
-		check_expr(ctx, &args[i], call.args[i])
-		if args[i].mode == .Invalid {
-			return false
+
+	_, first_is_field_value := call.args[0].derived_expr.(^ast.Field_Value)
+
+	// C++ Reference: check_builtin.cpp:3574-3587 - named and positional must not be mixed.
+	for arg in call.args {
+		_, arg_is_fv := arg.derived_expr.(^ast.Field_Value)
+		if arg_is_fv != first_is_field_value {
+			error_node(arg, "Mixture of 'field = value' and value elements in the procedure call 'quaternion' is not allowed")
+			operand.type = t_untyped_quaternion
+			operand.mode = .Constant
+			operand.value = exact_value_quaternion(0, 0, 0, 0)
+			return true
+		}
+	}
+
+	if first_is_field_value {
+		// C++ Reference: check_builtin.cpp:3605-3670. Two naming styles are accepted but must not be
+		// mixed: 1 = x/y/z/w, 2 = imag/jmag/kmag/real. Index 3 is the real component in both.
+		fields_set: [4]u32
+		for i in 0 ..< 4 {
+			fv := call.args[i].derived_expr.(^ast.Field_Value)
+			ident, is_ident := fv.field.derived_expr.(^ast.Ident)
+			if !is_ident {
+				error_node(fv.field, "Expected an identifier for field argument")
+				return false
+			}
+			index := -1
+			style: u32 = 0
+			switch ident.name {
+			case "x":    index = 0; style = 1
+			case "y":    index = 1; style = 1
+			case "z":    index = 2; style = 1
+			case "w":    index = 3; style = 1
+			case "imag": index = 0; style = 2
+			case "jmag": index = 1; style = 2
+			case "kmag": index = 2; style = 2
+			case "real": index = 3; style = 2
+			case:
+				error_node(fv.field, "Unknown name for 'quaternion', expected (w, x, y, z; or real, imag, jmag, kmag), got '%s'", ident.name)
+				return false
+			}
+			if fields_set[index] != 0 {
+				error_node(fv.field, "Previously assigned field: '%s'", ident.name)
+				return false
+			}
+			fields_set[index] = style
+
+			check_expr(ctx, &args[index], fv.value)
+			if args[index].mode == .Invalid {
+				return false
+			}
+		}
+		// C++ Reference: check_builtin.cpp:3665-3670
+		for i in 1 ..< 4 {
+			if fields_set[i] != fields_set[i - 1] {
+				error_node(call, "Mixture of xyzw and real/etc is not allowed with 'quaternion'")
+				break
+			}
+		}
+	} else {
+		// C++ Reference: check_builtin.cpp:3672-3680. C++ REQUIRES named arguments here and still
+		// checks the positional ones so later diagnostics are not suppressed.
+		error_node(call, "'quaternion' requires that all arguments are named (w, x, y, z; or real, imag, jmag, kmag)")
+		for i in 0 ..< 4 {
+			check_expr(ctx, &args[i], call.args[i])
+			if args[i].mode == .Invalid {
+				return false
+			}
 		}
 	}
 
@@ -3975,10 +4076,37 @@ check_builtin_type_elem :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp:6787-6812
+	//
+	// C++ emits NO error for a kind it does not recognise - it simply leaves operand->type as it
+	// was and sets the mode to Type. That is deliberate: a polymorphic `$T` passes straight through
+	// and is resolved at instantiation. The port invented an error here
+	// ("requires a type with an element type ...") which has no C++ counterpart, and it is what
+	// broke every `ELEM_TYPE(T)` in core/math/linalg once polymorphic matrix procedures became
+	// checkable.
 	bt := base_type(operand.type)
-	elem_type: ^Type = nil
+	elem_type := operand.type
 
 	#partial switch v in bt.variant {
+	case Type_Basic:
+		// C++ Reference: check_builtin.cpp:6793-6802. Complex and quaternion decay to their
+		// component float type. These were missing entirely.
+		#partial switch v.kind {
+		case .Complex32:
+			elem_type = t_f16
+		case .Complex64:
+			elem_type = t_f32
+		case .Complex128:
+			elem_type = t_f64
+		case .Quaternion64:
+			elem_type = t_f16
+		case .Quaternion128:
+			elem_type = t_f32
+		case .Quaternion256:
+			elem_type = t_f64
+		}
+	case Type_Pointer:
+		elem_type = v.elem
 	case Type_Array:
 		elem_type = v.elem
 	case Type_Enumerated_Array:
@@ -3987,20 +4115,12 @@ check_builtin_type_elem :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		elem_type = v.elem
 	case Type_Dynamic_Array:
 		elem_type = v.elem
-	case Type_Pointer:
-		elem_type = v.elem
-	case Type_Multi_Pointer:
-		elem_type = v.elem
-	case Type_Matrix:
-		elem_type = v.elem
 	case Type_Simd_Vector:
 		elem_type = v.elem
 	}
-
-	if elem_type == nil {
-		error_node(call, "'type_elem_type' requires a type with an element type (array, slice, pointer, etc.), got %s", type_to_string(operand.type))
-		return false
-	}
+	// NOTE: C++ has no Matrix or MultiPointer arm here, so for those the type passes through
+	// unchanged. Adding those two arms was tried and measured identical on core/math/linalg (767
+	// either way), so there is no evidence for deviating from C++ and the arms are not carried.
 
 	operand.mode = .Type
 	operand.type = elem_type

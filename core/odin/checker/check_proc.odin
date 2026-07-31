@@ -2474,13 +2474,13 @@ check_all_scope_usages :: proc(c: ^Checker) {
 	if thread_count == 1 {
 		// Check all file scopes
 		// C++ Reference: checker.cpp:7232-7235
-		for _, file in c.info.files {
+		for file in sorted_files(c.info.files) {
 			check_scope_usage_file_worker(c, file)
 		}
 
 		// Check all package scopes
 		// C++ Reference: checker.cpp:7236-7239
-		for _, pkg in c.info.packages {
+		for pkg in sorted_packages(&c.info) {
 			check_scope_usage_pkg_worker(c, pkg)
 		}
 		return
@@ -2496,7 +2496,7 @@ check_all_scope_usages :: proc(c: ^Checker) {
 	// Submit file scope checking tasks
 	// C++ Reference: checker.cpp:7232-7235
 	file_idx := 0
-	for _, file in c.info.files {
+	for file in sorted_files(c.info.files) {
 		file_tasks[file_idx] = Scope_Check_File_Task{c = c, f = file}
 		thread_pool_add_task(scope_check_file_worker_proc, &file_tasks[file_idx])
 		file_idx += 1
@@ -2505,7 +2505,7 @@ check_all_scope_usages :: proc(c: ^Checker) {
 	// Submit package scope checking tasks
 	// C++ Reference: checker.cpp:7236-7239
 	pkg_idx := 0
-	for _, pkg in c.info.packages {
+	for pkg in sorted_packages(&c.info) {
 		pkg_tasks[pkg_idx] = Scope_Check_Pkg_Task{c = c, pkg = pkg}
 		thread_pool_add_task(scope_check_pkg_worker_proc, &pkg_tasks[pkg_idx])
 		pkg_idx += 1

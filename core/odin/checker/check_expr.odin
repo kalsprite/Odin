@@ -10,6 +10,7 @@ following the logic in check_expr.cpp from the Odin compiler.
 import "core:fmt"
 import "core:math/big"
 import "core:odin/ast"
+import "core:reflect"
 import "core:odin/tokenizer"
 import "core:os"
 import "core:path/filepath"
@@ -479,6 +480,29 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 		}
 	}
 
+	// C++ Reference: check_expr.cpp:2047-2056. Import and library names carry no type, and C++
+	// handles them in its kind switch by reporting the not-in-selector-form error (when not allowed)
+	// and RETURNING THE ENTITY.
+	//
+	// This port extracted the type first and bailed on nil, and get_entity_type returns nil for
+	// exactly these kinds - so the .Import_Name and .Library_Name arms further down were
+	// UNREACHABLE and check_ident always returned nil for them. That broke `_ :: intrinsics`, the
+	// standard idiom for marking an import used: check_const_decl never saw the entity, so its
+	// override-aliased-entity switch could not fire and it reported
+	// "Invalid declaration value 'intrinsics'" instead.
+	#partial switch entity.kind {
+	case .Import_Name:
+		if !allow_import_name {
+			error(node, "Use of import name '%s' not in selector form 'x.y'", name)
+		}
+		return entity
+	case .Library_Name:
+		if !allow_import_name {
+			error(node, "Use of library '%s' not in foreign block", name)
+		}
+		return entity
+	}
+
 	// Extract type from entity - different variants store it differently
 	entity_type := get_entity_type(entity)
 	if entity_type == nil {
@@ -607,17 +631,28 @@ parse_exact_value_from_token :: proc(tok: tokenizer.Token) -> Exact_Value {
 	case .Integer:
 		// Parse integer literal
 		// Handle different bases: 0b (binary), 0o (octal), 0d (decimal), 0x (hex), 0h (hex)
-		// Use parse_i64_maybe_prefixed which auto-detects base from prefix
-		value, ok := strconv.parse_i64_maybe_prefixed(text)
-		if ok {
-			return exact_value_i64(value)
-		}
-		// Try unsigned if signed failed (for large positive values)
+		//
+		// Parse as UNSIGNED first. An integer literal token never carries a sign - `-x` is a
+		// unary operator applied to the literal - so the unsigned reading is always the correct
+		// one, and only the representation choice remains.
+		//
+		// This used to try parse_i64_maybe_prefixed first and fall back to unsigned only when
+		// that FAILED. It never failed: strconv.parse_i64_maybe_prefixed reports ok=true for
+		// values above max(i64), silently wrapping them negative - 0xaaefdd6dcd770416 came back
+		// as -6129437104159652842. So the fallback was dead code and every u64-range constant
+		// became a negative i64, after which check_representable_as_constant correctly refused
+		// to convert it to u64. core/hash/crc.odin alone produced 388 such errors.
 		uvalue, uok := strconv.parse_u64_maybe_prefixed(text)
 		if uok {
+			// Prefer the signed representation when it fits, matching how the rest of the
+			// checker treats untyped integer constants.
+			if uvalue <= u64(max(i64)) {
+				return exact_value_i64(i64(uvalue))
+			}
 			return exact_value_u64(uvalue)
 		}
-		// Invalid integer
+		// NOTE: literals wider than u64 land here and yield nil. C++ carries these in a BigInt
+		// (exact_value_integer_from_string); this port does not yet.
 		return nil
 
 	case .Float:
@@ -6990,7 +7025,7 @@ check_expr_base :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		return .Expr
 
 	// Type expression nodes - these are all types, not expressions
-	case ^ast.Distinct_Type, ^ast.Typeid_Type, ^ast.Poly_Type, ^ast.Proc_Type, ^ast.Pointer_Type, ^ast.Multi_Pointer_Type, ^ast.Array_Type, ^ast.Dynamic_Array_Type, ^ast.Struct_Type, ^ast.Union_Type, ^ast.Enum_Type, ^ast.Map_Type, ^ast.Bit_Set_Type, ^ast.Matrix_Type:
+	case ^ast.Distinct_Type, ^ast.Typeid_Type, ^ast.Poly_Type, ^ast.Proc_Type, ^ast.Pointer_Type, ^ast.Multi_Pointer_Type, ^ast.Array_Type, ^ast.Dynamic_Array_Type, ^ast.Fixed_Capacity_Dynamic_Array_Type, ^ast.Struct_Type, ^ast.Union_Type, ^ast.Enum_Type, ^ast.Map_Type, ^ast.Bit_Set_Type, ^ast.Matrix_Type:
 		// Reference: /mnt/c/odin/src/check_expr.cpp:11738-11756
 		o.mode = .Type
 		o.type = check_type(ctx, node)
@@ -7002,7 +7037,10 @@ check_expr_base :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 
 	case:
 		// Unsupported expression type - report error
-		error(node, "Expression type not yet supported: %T", derived)
+		// NOTE: `derived` is an ast.Any_Node here (this is the default arm of the type switch),
+		// so "%T" printed the union's own name - every one of these read "Any_Node", which says
+		// nothing about what is actually unhandled. Report the variant instead.
+		error(node, "Expression type not yet supported: %v", reflect.union_variant_typeid(node.derived))
 		o.mode = .Invalid
 		o.type = t_invalid
 		return .Stmt

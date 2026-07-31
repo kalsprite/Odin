@@ -527,7 +527,25 @@ is_type_untyped :: proc(t: ^Type) -> bool {
 
 // is_type_typed checks if type is a concrete type
 is_type_typed :: proc(t: ^Type) -> bool {
-	return !is_type_untyped(t) && t != t_invalid
+	// C++ Reference: types.cpp:1419-1426
+	//   t = base_type(t); if (t == nullptr) return false;
+	//   if (t->kind == Type_Basic) return (t->Basic.flags & BasicFlag_Untyped) == 0;
+	//   return true;
+	//
+	// NOTE: this returns TRUE for t_invalid, which is a Basic type carrying no flags and so is
+	// not "untyped". The previous implementation added `&& t != t_invalid`, which had no C++
+	// counterpart and made callers diverge: internal_check_is_assignable_to would trip its
+	// `c == nil` assert on an invalid type where C++ simply falls through
+	// check_distance_between_types and answers -1, i.e. "not assignable".
+	bt := base_type(t)
+	if bt == nil {
+		return false
+	}
+	if bt.kind == .Basic {
+		basic := bt.variant.(Type_Basic)
+		return .Untyped not_in basic.flags
+	}
+	return true
 }
 
 // is_type_boolean checks if type is a boolean
@@ -1317,12 +1335,15 @@ make_pointer_type :: proc(elem: ^Type, allocator := context.allocator) -> ^Type 
 }
 
 // make_array_type creates an array type
-make_array_type :: proc(elem: ^Type, count: i64, allocator := context.allocator) -> ^Type {
+// C++ Reference: types.cpp:1076-1085 (alloc_type_array). The generic_count parameter records the
+// `$N` of `[$N]T`; without it polymorphic_assign_index is never reached and `[$N]$E` cannot bind.
+make_array_type :: proc(elem: ^Type, count: i64, generic_count: ^Type = nil, allocator := context.allocator) -> ^Type {
 	t := new(Type, allocator)
 	t.kind = .Array
 	t.variant = Type_Array {
-		elem  = elem,
-		count = count,
+		elem          = elem,
+		count         = count,
+		generic_count = generic_count,
 	}
 	return t
 }
@@ -1343,6 +1364,26 @@ make_dynamic_array_type :: proc(elem: ^Type, allocator := context.allocator) -> 
 	t.kind = .Dynamic_Array
 	t.variant = Type_Dynamic_Array {
 		elem = elem,
+	}
+	return t
+}
+
+// make_fixed_capacity_dynamic_array_type creates a `[dynamic; N]T` type.
+// C++ Reference: types.cpp:1141-1155 (alloc_type_fixed_capacity_dynamic_array). The two C++ branches
+// are identical apart from assigning generic_capacity, so this is a single path.
+make_fixed_capacity_dynamic_array_type :: proc(
+	elem: ^Type,
+	capacity: i64,
+	generic_capacity: ^Type = nil,
+	allocator := context.allocator,
+) -> ^Type {
+	t := new(Type, allocator)
+	t.kind = .Fixed_Capacity_Dynamic_Array
+	t.variant = Type_Fixed_Capacity_Dynamic_Array {
+		elem             = elem,
+		capacity         = capacity,
+		generic_capacity = generic_capacity,
+		padding_needed   = -1, // C++ initialises to -1, meaning "not yet computed"
 	}
 	return t
 }
@@ -3845,35 +3886,24 @@ is_type_union_maybe_pointer :: proc(t: ^Type) -> bool {
 }
 
 // is_type_valid_for_keys checks if a type can be used as a map key
-// C++ Reference: checker.cpp:2242-2269
+// C++ Reference: types.cpp:2260-2269
+//
+// NOTE: this used to hand-roll a structural walk (Basic-except-typeid, pointer, enum, array-of-valid,
+// struct-of-valid, everything else false). C++ asks three much simpler questions, and the two disagree
+// in both directions - the old version rejected typeid, unions and raw unions that C++ accepts (they
+// are comparable and non-zero-sized), and accepted zero-sized structs that C++ rejects.
 is_type_valid_for_keys :: proc(t: ^Type) -> bool {
-	bt := base_type(t)
-
-	#partial switch v in bt.variant {
-	case Type_Basic:
-		// All basic types except typeid can be keys
-		return v.kind != .Typeid
-	case Type_Pointer, Type_Multi_Pointer:
-		return true
-	case Type_Enum:
-		return true
-	case Type_Array:
-		// Arrays can be keys if their element type can
-		return is_type_valid_for_keys(v.elem)
-	case Type_Struct:
-		// Structs can be keys if all fields can
-		if v.is_raw_union {
-			return false
-		}
-		for field in v.fields {
-			if !is_type_valid_for_keys(field.type) {
-				return false
-			}
-		}
+	ct := core_type(t)
+	if ct == nil {
+		return false
+	}
+	if ct.kind == .Generic {
 		return true
 	}
-
-	return false
+	if is_type_untyped(ct) {
+		return false
+	}
+	return type_size_of(ct) > 0 && is_type_comparable(ct)
 }
 
 // is_type_valid_bit_set_elem checks if a type can be a bit_set element
@@ -3909,7 +3939,12 @@ is_type_valid_vector_elem :: proc(t: ^Type) -> bool {
 }
 
 // is_type_valid_for_matrix_elems checks if a type can be a matrix element
-// C++ Reference: types.cpp:1639-1652
+// C++ Reference: types.cpp:1707-1721
+//
+// NOTE: this was correct all along but check_matrix_type_expr never called it - it hand-rolled
+// `!is_type_integer && !is_type_float && !is_type_complex && !is_type_quaternion` instead, which both
+// REJECTED Generic (so `matrix[$R, $C]$E` could never be declared) and ACCEPTED quaternion (which C++
+// does not). Only check_builtin.odin used this. Now wired into check_matrix_type_expr as well.
 is_type_valid_for_matrix_elems :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {

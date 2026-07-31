@@ -761,89 +761,70 @@ add_map_set_dependencies :: proc(ctx: ^Checker_Context, t: ^Type) {
 	add_package_dependency(ctx, "runtime", "__dynamic_map_reserve")
 }
 
-// add_map_key_type_dependencies adds dependencies based on the map key type's requirements
-// for hashing and equality comparison
-// C++ Reference: check_expr.cpp:2765-2820
+// add_map_key_type_dependencies adds the runtime hasher dependencies a map key type requires
+// C++ Reference: check_type.cpp:2988-3040
+//
+// NOTE: the previous implementation invented procedure names that do not exist in base:runtime -
+// __default_hash_string / __default_eq_string / __default_hash_ptr / __default_hash_int / ... and a
+// parallel __default_eq_* family that base:runtime has no equivalent of at all. Because
+// add_package_dependency silently returns when scope_lookup misses (C++ asserts there instead), every
+// one of those calls was a no-op, so this function registered nothing. The real names are
+// default_hasher, default_hasher_string, default_hasher_cstring, default_hasher_f64,
+// default_hasher_complex128 and default_hasher_quaternion256.
 add_map_key_type_dependencies :: proc(ctx: ^Checker_Context, key_type: ^Type) {
-	if ctx.decl == nil || key_type == nil {
+	key := core_type(key_type)
+	if key == nil {
 		return
 	}
 
-	bt := base_type(key_type)
-	if bt == nil {
-		return
-	}
-
-	// Add hash and equality procedure dependencies based on key type
-	// Maps need hash and equality functions for their key types
-
-	// Check for string and cstring first (they're Basic types)
-	if is_type_string(bt) {
-		add_package_dependency(ctx, "runtime", "__default_hash_string")
-		add_package_dependency(ctx, "runtime", "__default_eq_string")
-		return
-	}
-	if is_type_cstring(bt) {
-		add_package_dependency(ctx, "runtime", "__default_hash_cstring")
-		add_package_dependency(ctx, "runtime", "__default_eq_cstring")
-		return
-	}
-
-	#partial switch bt.kind {
-	case .Pointer, .Multi_Pointer, .Proc:
-		// Pointer-like keys use pointer hash/eq
-		add_package_dependency(ctx, "runtime", "__default_hash_ptr")
-		add_package_dependency(ctx, "runtime", "__default_eq_ptr")
-
-	case .Basic:
-		// Basic types use appropriate hash/eq based on size
-		if is_type_integer(bt) || is_type_boolean(bt) || is_type_rune(bt) {
-			// Integer-like types
-			add_package_dependency(ctx, "runtime", "__default_hash_int")
-			add_package_dependency(ctx, "runtime", "__default_eq_int")
-		} else if is_type_float(bt) {
-			// Float types
-			add_package_dependency(ctx, "runtime", "__default_hash_float")
-			add_package_dependency(ctx, "runtime", "__default_eq_float")
-		} else if is_type_complex(bt) {
-			// Complex types
-			add_package_dependency(ctx, "runtime", "__default_hash_complex")
-			add_package_dependency(ctx, "runtime", "__default_eq_complex")
+	if is_type_cstring(key) {
+		add_package_dependency(ctx, "runtime", "default_hasher_cstring")
+	} else if is_type_string(key) {
+		add_package_dependency(ctx, "runtime", "default_hasher_string")
+	} else if !is_type_polymorphic(key) {
+		if !is_type_comparable(key) {
+			return
 		}
 
-	case .Enum:
-		// Enum keys use integer hash/eq
-		add_package_dependency(ctx, "runtime", "__default_hash_int")
-		add_package_dependency(ctx, "runtime", "__default_eq_int")
+		if is_type_simple_compare(key) {
+			add_package_dependency(ctx, "runtime", "default_hasher")
+			return
+		}
 
-	case .Array:
-		// Fixed arrays use array hash/eq
-		arr := bt.variant.(Type_Array)
-		add_package_dependency(ctx, "runtime", "__default_hash_array")
-		add_package_dependency(ctx, "runtime", "__default_eq_array")
-		// Also add dependencies for element type
-		add_map_key_type_dependencies(ctx, arr.elem)
-
-	case .Struct:
-		// Struct keys use struct hash/eq
-		add_package_dependency(ctx, "runtime", "__default_hash_struct")
-		add_package_dependency(ctx, "runtime", "__default_eq_struct")
-		// Add dependencies for each field type
-		st := bt.variant.(Type_Struct)
-		for field in st.fields {
-			if field != nil {
-				add_map_key_type_dependencies(ctx, entity_type(field))
+		if basic, is_basic := key.variant.(Type_Basic); is_basic {
+			if .Quaternion in basic.flags {
+				add_package_dependency(ctx, "runtime", "default_hasher_f64")
+				add_package_dependency(ctx, "runtime", "default_hasher_quaternion256")
+				return
+			} else if .Complex in basic.flags {
+				add_package_dependency(ctx, "runtime", "default_hasher_f64")
+				add_package_dependency(ctx, "runtime", "default_hasher_complex128")
+				return
+			} else if .Float in basic.flags {
+				add_package_dependency(ctx, "runtime", "default_hasher_f64")
+				return
 			}
 		}
 
-	case .Union:
-		// Union keys use union hash/eq
-		add_package_dependency(ctx, "runtime", "__default_hash_union")
-		add_package_dependency(ctx, "runtime", "__default_eq_union")
-		// Add dependencies for each variant type
-		ut := bt.variant.(Type_Union)
-		for variant in ut.variants {
-			add_map_key_type_dependencies(ctx, variant)
+		#partial switch v in key.variant {
+		case Type_Struct:
+			add_package_dependency(ctx, "runtime", "default_hasher")
+			for field in v.fields {
+				if field != nil {
+					add_map_key_type_dependencies(ctx, entity_type(field))
+				}
+			}
+		case Type_Union:
+			add_package_dependency(ctx, "runtime", "default_hasher")
+			for variant in v.variants {
+				add_map_key_type_dependencies(ctx, variant)
+			}
+		case Type_Enumerated_Array:
+			add_package_dependency(ctx, "runtime", "default_hasher")
+			add_map_key_type_dependencies(ctx, v.elem)
+		case Type_Array:
+			add_package_dependency(ctx, "runtime", "default_hasher")
+			add_map_key_type_dependencies(ctx, v.elem)
 		}
 	}
 }
@@ -1538,6 +1519,43 @@ init_core_context :: proc(c: ^Checker) {
 	info.cached_context_ptr = t_context_ptr
 }
 
+// init_core_map_type initializes the cached map-internal types from core:runtime
+// C++ Reference: checker.cpp:3604-3617 (init_core_map_type)
+//
+// These globals back the `intrinsics.type_map_info` / `intrinsics.type_map_cell_info` builtins
+// and the map runtime layout. Nothing in the port initialised them, so they stayed nil after
+// reset_runtime_type_globals (types.odin:377-382) - and check_builtin_type_map_cell_info would
+// hand `operand.type = t_map_cell_info_ptr` (nil) back with mode = .Value. A nil-typed operand
+// then reached check_init_variable, where `assert(is_type_typed(t))` fired: base:runtime's
+// dynamic_map_internal.odin does exactly this at line 242 (`INFO_HS := intrinsics.type_map_cell_info(Map_Hash)`).
+init_core_map_type :: proc(c: ^Checker) {
+	// NOTE: guard on the GLOBAL, matching C++ (checker.cpp:3605). See init_mem_allocator.
+	if t_map_info != nil {
+		return
+	}
+
+	// C++ Reference: checker.cpp:3608. init_map_internal_types asserts t_allocator is set, and
+	// this is what guarantees it for callers that reach a map type before init_preload runs.
+	init_mem_allocator(c)
+
+	map_info := find_core_type(c, "Map_Info")
+	map_cell_info := find_core_type(c, "Map_Cell_Info")
+	raw_map := find_core_type(c, "Raw_Map")
+	if map_info == nil || map_cell_info == nil || raw_map == nil {
+		// Runtime package not loaded - skip initialization
+		return
+	}
+
+	// C++ Reference: checker.cpp:3609-3616
+	t_map_info = map_info
+	t_map_cell_info = map_cell_info
+	t_raw_map = raw_map
+
+	t_map_info_ptr = alloc_type_pointer(map_info)
+	t_map_cell_info_ptr = alloc_type_pointer(map_cell_info)
+	t_raw_map_ptr = alloc_type_pointer(raw_map)
+}
+
 // init_preload initializes core runtime types that the checker needs
 // This caches Allocator, Context, Source_Code_Location, Type_Info, and ObjC types
 // for use in codegen and runtime operations.
@@ -1559,6 +1577,10 @@ init_preload :: proc(c: ^Checker) {
 	// Initialize Source_Code_Location type
 	// C++ Reference: checker.cpp:3363-3367
 	init_core_source_code_location(c)
+
+	// Initialize the map-internal types (Map_Info, Map_Cell_Info, Raw_Map)
+	// C++ Reference: checker.cpp:3630
+	init_core_map_type(c)
 
 	// Initialize Objective-C types from intrinsics package
 	// C++ Reference: checker.cpp (objc type handling)

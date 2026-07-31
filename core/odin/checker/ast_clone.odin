@@ -557,6 +557,24 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 		n.body = cast(^ast.Stmt)clone_ast_node(n.body, file)
 		return n
 
+	case ^ast.Tag_Stmt:
+		// `#some_unknown_tag stmt`
+		//
+		// The parser emits Tag_Stmt as its FALLBACK for an unrecognised statement tag
+		// (core/odin/parser/parser.odin:1576-1582), so this only appears in already-erroneous code -
+		// but it reaches here whenever such a statement sits inside a polymorphic procedure body,
+		// because instantiation clones the body. Without this case that panicked the whole run.
+		//
+		// C++ has no equivalent: its AST has no TagStmt kind at all, so there is nothing to mirror.
+		// core/odin/ast/clone.odin (the shipped cloner) does handle it, and this matches that shape.
+		n := new(ast.Tag_Stmt)
+		n^ = variant^
+		n.node.stmt_base.tav = {}
+		n.node.stmt_base.derived = n
+		n.node.derived_stmt = n
+		n.stmt = cast(^ast.Stmt)clone_ast_node(n.stmt, file)
+		return n
+
 	case ^ast.Defer_Stmt:
 		// C++ lines 383-385
 		n := new(ast.Defer_Stmt)
@@ -731,6 +749,51 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 		n.node.expr_base.derived = n
 		n.node.derived_expr = n
 		n.elem = cast(^ast.Expr)clone_ast_node(n.elem, file)
+		return n
+
+	case ^ast.Matrix_Index_Expr:
+		// `m[i, j]`
+		// C++ Reference: parser.cpp:251-255 - clones expr, row_index, column_index.
+		//
+		// Reachable as soon as polymorphic matrix procedures can be declared: instantiating
+		// `proc(m: $T/matrix[$R, $C]$E)` clones the body, and any m[i, j] in it lands here.
+		n := new(ast.Matrix_Index_Expr)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		n.expr = cast(^ast.Expr)clone_ast_node(n.expr, file)
+		n.row_index = cast(^ast.Expr)clone_ast_node(n.row_index, file)
+		n.column_index = cast(^ast.Expr)clone_ast_node(n.column_index, file)
+		return n
+
+	case ^ast.Relative_Type:
+		// C++ Reference: parser.cpp:441-444 - clones tag and type.
+		n := new(ast.Relative_Type)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		n.tag = cast(^ast.Expr)clone_ast_node(n.tag, file)
+		n.type = cast(^ast.Expr)clone_ast_node(n.type, file)
+		return n
+
+	case ^ast.Fixed_Capacity_Dynamic_Array_Type:
+		// `[dynamic; N]T`
+		// C++ Reference: parser.cpp:461-464 - clones elem, capacity AND tag.
+		//
+		// Without this case clone_ast_node hit its "unhandled AST variant" panic, so ANY attempt to
+		// instantiate a polymorphic procedure whose signature mentions [dynamic; $N]$E aborted the
+		// whole package check (exit 132). That is why such procedures appeared to have unchecked
+		// bodies - checking never got that far.
+		n := new(ast.Fixed_Capacity_Dynamic_Array_Type)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		n.elem = cast(^ast.Expr)clone_ast_node(n.elem, file)
+		n.capacity = cast(^ast.Expr)clone_ast_node(n.capacity, file)
+		n.tag = cast(^ast.Expr)clone_ast_node(n.tag, file)
 		return n
 
 	case ^ast.Struct_Type:

@@ -319,3 +319,27 @@ build/
 cmake-build*/
 CMakeLists.txt
 sandbox/
+
+# Checker branch build artifacts
+/check_tokenizer
+/quick_test
+/quick_test2
+/spec_builtins
+/spec_conversions
+/spec_directives
+/spec_errors
+/spec_semantics
+/test_auto_cast
+/test_check
+/test_checker_on_core
+/test_extractor
+/test_simple
+/tsan_test
+core/odin/checker/*.o
+core/odin/checker/tests/debug_nested
+core/odin/checker/tests/poly_test
+core/odin/checker/tests/quick_test_bin
+core/odin/checker/tests/spec_advanced/spec_advanced
+core/odin/checker/tests/spec_conversions/spec_conversions
+core/odin/checker/tests/spec_directives/spec_directives
+core/odin/checker/tests/spec_semantics/spec_semantics

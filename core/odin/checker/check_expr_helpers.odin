@@ -1,5 +1,6 @@
 package checker
 
+import expr_fmt "core:fmt"
 import "core:math/big"
 import "core:odin/ast"
 import "core:odin/tokenizer"
@@ -444,6 +445,19 @@ write_expr_to_string :: proc(builder: ^strings.Builder, node: ^ast.Node, shortha
 		strings.write_string(builder, "[dynamic]")
 		write_expr_to_string(builder, derived.elem, shorthand)
 
+	case ^ast.Fixed_Capacity_Dynamic_Array_Type:
+		// `[dynamic; N]T`. The checker does not yet build a type for this (see the open parity
+		// task), but it must at least be printable - without this case it fell through to the
+		// fallback below and every diagnostic mentioning one said "(BadExpr)", which reads as a
+		// parse failure. The parser handles this form fine, including a polymorphic capacity.
+		if derived.tag != nil {
+			write_expr_to_string(builder, derived.tag, false)
+		}
+		strings.write_string(builder, "[dynamic; ")
+		write_expr_to_string(builder, derived.capacity, shorthand)
+		strings.write_string(builder, "]")
+		write_expr_to_string(builder, derived.elem, shorthand)
+
 	case ^ast.Map_Type:
 		strings.write_string(builder, "map[")
 		write_expr_to_string(builder, derived.key, shorthand)
@@ -654,8 +668,17 @@ write_expr_to_string :: proc(builder: ^strings.Builder, node: ^ast.Node, shortha
 		}
 
 	case:
-		// Fallback for unhandled expression types
-		strings.write_string(builder, "(BadExpr)")
+		// Fallback for unhandled expression types.
+		//
+		// NOTE: this used to write "(BadExpr)", which is actively misleading - it names a real
+		// AST node (ast.Bad_Expr, produced by the parser on a syntax error), so a diagnostic
+		// like "Invalid type expression: (BadExpr)" reads as "the parser failed here" when in
+		// fact the parser succeeded and it is this printer that has no case for the node.
+		if node != nil {
+			expr_fmt.sbprintf(builder, "<unprintable %T>", node.derived)
+		} else {
+			strings.write_string(builder, "<nil>")
+		}
 	}
 }
 

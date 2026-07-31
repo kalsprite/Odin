@@ -562,9 +562,9 @@ check_entity_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, name
 		return
 	}
 
-	// C++ Reference: check_decl.cpp:1901-1903
-	if e.flags & {.Lazy} != {} {
-		// mutex_lock(&ctx.info.lazy_mutex)
+	// C++ Reference: check_decl.cpp:1994-1996
+	if .Lazy in e.flags {
+		sync.recursive_mutex_lock(&ctx.info.lazy_mutex)
 	}
 
 	// C++ Reference: check_decl.cpp:1905
@@ -584,9 +584,12 @@ check_entity_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, name
 				e.state = .Resolved
 				set_base_type(named_type, t_invalid)
 				// goto end
-				if e.flags & {.Lazy} != {} {
-					// append(&ctx.info.entities, e)
-					// mutex_unlock(&ctx.info.lazy_mutex)
+				// C++ Reference: check_decl.cpp:2071-2075 (the `end:` label). This is the
+				// early-exit path, and C++ reaches `end:` here too, so it registers and
+				// unlocks exactly as the normal path does.
+				if .Lazy in e.flags {
+					append(&ctx.info.entities, e)
+					sync.recursive_mutex_unlock(&ctx.info.lazy_mutex)
 				}
 				return
 			}
@@ -649,10 +652,16 @@ check_entity_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, name
 
 	// end: label
 	// NOTE(bill): Add it to the list of checked entities
-	// C++ Reference: check_decl.cpp:1964-1968
-	if e.flags & {.Lazy} != {} {
-		// append(&ctx.info.entities, e)
-		// mutex_unlock(&ctx.info.lazy_mutex)
+	// C++ Reference: check_decl.cpp:2071-2075
+	//
+	// Both the append and the mutex were commented out. Consequences: lazily-checked entities
+	// never reached info.entities, so every later pass that walks that array (the unused-entity
+	// and global-init passes) silently skipped them; and concurrent lazy resolution of the same
+	// entity was unguarded, which is a source of duplicated work and spurious
+	// "Illegal declaration cycle" reports.
+	if .Lazy in e.flags {
+		append(&ctx.info.entities, e)
+		sync.recursive_mutex_unlock(&ctx.info.lazy_mutex)
 	}
 }
 
@@ -1511,9 +1520,39 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 		defer delete(entity_set)
 
 		// C++ Reference: check_decl.cpp:1776-1805
-		for arg in pg.args {
+		for arg_ in pg.args {
+			arg := arg_
 			e: ^Entity = nil
 			o := Operand{}
+
+			// C++ Reference: check_decl.cpp:1856-1870 - `member where COND`.
+			//
+			// Both parsers represent this as a Binary_Expr whose operator token is `where`
+			// (parser.cpp:2534-2538, and core/odin/parser/parser.odin:2566-2573 does the same), so
+			// no AST node is needed - but this loop never unwrapped it and reported "Expected a
+			// valid entity name in procedure group, got binary expression". One such member damages
+			// the whole group, and base:runtime uses the form six times
+			// (`delete_map where MAP_ENABLED` and friends), which is why `make` and `delete` could
+			// not resolve.
+			if be, is_be := arg.derived.(^ast.Binary_Expr); is_be && be.op.kind == .Where {
+				cond := Operand{}
+				check_expr(ctx, &cond, be.right)
+				if cond.mode != .Invalid {
+					is_bool_const := false
+					if cond.mode == .Constant && is_type_boolean(cond.type) {
+						if _, bok := cond.value.(bool); bok {
+							is_bool_const = true
+						}
+					}
+					if !is_bool_const {
+						error(arg, "Expected a constant binary expression for the 'where' clause")
+					} else if b, _ := cond.value.(bool); !b {
+						// Condition is false: the member is excluded from the group.
+						continue
+					}
+				}
+				arg = be.left
+			}
 
 			// C++ Reference: check_decl.cpp:1779-1783
 			if _, ok := arg.derived.(^ast.Ident); ok {

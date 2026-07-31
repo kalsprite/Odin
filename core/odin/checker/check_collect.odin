@@ -19,6 +19,7 @@ Note: This file uses types and procedures from checker.odin (Checker_Context, Op
 
 import "core:container/queue"
 import "core:odin/ast"
+import "core:sync"
 import "core:odin/tokenizer"
 import "core:strings"
 import "core:slice"
@@ -315,12 +316,12 @@ check_create_file_scopes :: proc(c: ^Checker) {
 	// For our implementation, we'll need packages to be registered first
 
 	// C++ line 5715-5730: Process each package
-	for _, pkg in c.info.packages {
+	for pkg in sorted_packages(&c.info) {
 		// C++ line 5718: Sort files by name (for deterministic order)
 		// C++ Reference: checker.cpp:5719-5725 (sort_file_by_name comparator)
 		// Extract files from map to slice for sorting
 		file_list := make([dynamic]^ast.File, 0, len(pkg.files), context.temp_allocator)
-		for _, file in pkg.files {
+		for file in sorted_files(pkg.files) {
 			append(&file_list, file)
 		}
 
@@ -426,7 +427,7 @@ check_collect_entities_all :: proc(c: ^Checker) {
 
 		// Set up tasks for each file
 		task_idx := 0
-		for _, file in c.info.files {
+		for file in sorted_files(c.info.files) {
 			file_scope := c.info.file_scopes[file]
 			if file_scope == nil {
 				assert(false, "File scope missing for file - check_create_file_scopes not run?")
@@ -450,7 +451,7 @@ check_collect_entities_all :: proc(c: ^Checker) {
 		thread_pool_wait()
 	} else {
 		// Single-threaded fallback
-		for _, file in c.info.files {
+		for file in sorted_files(c.info.files) {
 			// Create checker context for this file
 			ctx := make_checker_context(c)
 			defer destroy_checker_context(&ctx)
@@ -474,7 +475,7 @@ check_collect_entities_all :: proc(c: ^Checker) {
 	// Process delayed declarations for all files
 	// C++ Reference: checker.cpp:5885-5957 (process all delayed_decls_queues)
 	// This must happen after entity collection is complete for all files
-	for _, file in c.info.files {
+	for file in sorted_files(c.info.files) {
 		ctx := make_checker_context(c)
 		defer destroy_checker_context(&ctx)
 		ctx.file = file
@@ -647,84 +648,53 @@ check_arity_match :: proc(ctx: ^Checker_Context, vd: ^ast.Value_Decl, is_global:
 check_builtin_attributes :: proc(ctx: ^Checker_Context, e: ^Entity, attributes: []^ast.Attribute) {
 	// C++ Reference: checker.cpp - processes various builtin attributes
 	// Process attributes and store in Attribute_Context
-	ac := Attribute_Context{}
-	check_decl_attributes(ctx, attributes, &ac)
-
-	// Transfer attribute values to entity fields
-	// C++ Reference: checker.cpp - sets entity fields from attribute context
-	if len(ac.deprecated_message) > 0 {
-		e.deprecated_message = ac.deprecated_message
-	}
-	if len(ac.warning_message) > 0 {
-		e.warning_message = ac.warning_message
-	}
-
-	// Handle procedure-specific attributes
-	if e.kind == .Procedure {
-		if proc_ent, ok := &e.variant.(Entity_Procedure); ok {
-			if len(ac.link_name) > 0 {
-				proc_ent.link_name = ac.link_name
+	// C++ Reference: checker.cpp:4790-4800. An @(builtin) declaration is added to the BUILTIN
+	// PACKAGE SCOPE so it resolves everywhere without an import. Nothing in this port did that, so
+	// every @(builtin) proc group in base:runtime - append, resize, reserve, delete, make, clear and
+	// the rest - was undeclared in every consuming package.
+	for attr in attributes {
+		for elem in attr.elems {
+			attr_name := ""
+			has_value := false
+			#partial switch en in elem.derived {
+			case ^ast.Ident:
+				attr_name = en.name
+			case ^ast.Field_Value:
+				if fi, fi_ok := en.field.derived.(^ast.Ident); fi_ok {
+					attr_name = fi.name
+					has_value = true
+				}
 			}
-			if len(ac.link_prefix) > 0 {
-				proc_ent.link_prefix = ac.link_prefix
+			if attr_name != "builtin" {
+				continue
 			}
-			if len(ac.link_suffix) > 0 {
-				proc_ent.link_suffix = ac.link_suffix
+			// C++ Reference: checker.cpp:4796-4798
+			if has_value {
+				error(elem, "'builtin' cannot have a field value")
 			}
-			if ac.deferred_procedure.entity != nil {
-				proc_ent.deferred_procedure = ac.deferred_procedure
-			}
-			if ac.is_export {
-				proc_ent.is_export = true
-			}
-		}
-	}
-
-	// Handle variable-specific attributes
-	if e.kind == .Variable {
-		if var_ent, ok := &e.variant.(Entity_Variable); ok {
-			if len(ac.link_name) > 0 {
-				var_ent.link_name = ac.link_name
-			}
-			if len(ac.link_prefix) > 0 {
-				var_ent.link_prefix = ac.link_prefix
-			}
-			if len(ac.link_suffix) > 0 {
-				var_ent.link_suffix = ac.link_suffix
-			}
-			if ac.is_export {
-				var_ent.is_export = true
-			}
-			if len(ac.thread_local_model) > 0 {
-				var_ent.thread_local_model = ac.thread_local_model
-			}
-			if len(ac.link_section) > 0 {
-				var_ent.link_section = ac.link_section
-			}
-			if ac.is_static {
-				var_ent.is_static = true
-			}
-			if ac.rodata {
-				var_ent.is_rodata = true
+			if ctx.info != nil && ctx.info.builtin_package != nil && ctx.info.builtin_package.scope != nil {
+				sync.mutex_lock(&ctx.info.builtin_mutex)
+				add_entity(ctx, ctx.info.builtin_package.scope, nil, e)
+				sync.mutex_unlock(&ctx.info.builtin_mutex)
 			}
 		}
 	}
 
-	// Handle procedure tags (test, init, fini, require_results)
-	if e.kind == .Procedure {
-		if ac.test {
-			e.flags |= {.Test}
-		}
-		if ac.init {
-			e.flags |= {.Init}
-		}
-		if ac.fini {
-			e.flags |= {.Fini}
-		}
-		if ac.require_results {
-			e.flags |= {.Require_Results}
-		}
-	}
+	// C++ Reference: checker.cpp:4754-4818. C++ evaluates NO attribute values here - it registers
+	// @(builtin) declarations (above) and returns. Values are evaluated later, once every
+	// declaration in the file is in scope.
+	//
+	// Evaluating them during collection means a value naming a constant declared later in the file
+	// is not yet visible. That is fine for a plain forward reference, but NOT for one declared
+	// inside a file-scope `when` block, since those are collected after the declarations preceding
+	// them. core/c/libc is built on exactly that shape - `@(link_name=LSETLOCALE)` with LSETLOCALE
+	// defined in a later `when ODIN_OS == .NetBSD { ... } else { ... }` - which produced
+	// "Expected a string value for 'link_name'" plus "Undeclared name: ...".
+	//
+	// KNOWN GAP, tracked separately: the code removed from here was the only place that populated
+	// entity.link_name, link_prefix, link_suffix, deferred_procedure and is_export. C++ sets those
+	// from its own attribute pass in check_proc_decl / check_var_decl; this port has no equivalent
+	// yet. They are codegen-facing rather than semantic, so nothing in the checker reads them today.
 }
 
 // check_collect_entities_from_when_stmt evaluates a when statement and collects entities
@@ -898,7 +868,7 @@ check_collect_entities :: proc(ctx: ^Checker_Context, nodes: []^ast.Stmt) {
 		for decl in nodes {
 			#partial switch _ in decl.derived {
 			case ^ast.Foreign_Block_Decl:
-				check_foreign_block_decl(ctx, decl)
+				check_add_foreign_block_decl(ctx, decl)
 			}
 		}
 
@@ -1213,7 +1183,27 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 					if proc_ent, ok6 := &e.variant.(Entity_Procedure); ok6 {
 						proc_ent.is_foreign = true
 						proc_ent.foreign_library_ident = fl
-						// C++ line 4679-4691: Calling convention handled in check_proc_type
+						// C++ Reference: checker.cpp:5016-5034. The foreign block's calling
+						// convention is resolved HERE, while foreign_context is still live,
+						// and written back into the AST node. By the time check_procedure_type
+						// runs the node no longer says .Foreign_Block_Default, so that
+						// function's own fallback never fires for these procedures.
+						if proc_lit.type != nil {
+							extra, is_extra := proc_lit.type.calling_convention.(ast.Proc_Calling_Convention_Extra)
+							if is_extra && extra == .Foreign_Block_Default {
+								cc := Calling_Convention.C // C++ line 5019
+								if ctx.foreign_context.default_cc_set {
+									cc = ctx.foreign_context.default_cc
+								} else if is_arch_wasm() {
+									// C++ line 5022-5028
+									error_node(init, "For wasm related targets, it is required that you either define the @(default_calling_convention=<string>) on the foreign block or explicitly assign it on the procedure signature")
+									error_line("\tSuggestion: when dealing with normal Odin code (e.g. js_wasm32), use \"contextless\"; when dealing with Emscripten like code, use \"c\"\n")
+								}
+								// C++ line 5034: write the resolved convention back.
+								proc_lit.type.calling_convention = calling_convention_to_string(cc)
+							}
+						}
+
 						proc_ent.link_prefix = ctx.foreign_context.link_prefix
 						proc_ent.link_suffix = ctx.foreign_context.link_suffix
 					}
@@ -1459,6 +1449,50 @@ process_delayed_import_decls :: proc(ctx: ^Checker_Context, file: ^ast.File) {
 //
 // Foreign blocks may be delayed during initial collection. This function processes them
 // after imports have been resolved.
+// check_add_foreign_block_decl COLLECTS the declarations inside a foreign block.
+// C++ Reference: checker.cpp:5097-5117 (check_add_foreign_block_decl)
+//
+// This is distinct from check_foreign_block_decl (check_stmt.odin), which CHECKS a foreign block in
+// statement position via check_stmt_list. The two were conflated: the collection sites called the
+// statement checker, so a foreign block's procedures were type-checked but never added to any scope.
+// Every `foreign { ... }` declaration was therefore undeclared at its use sites - 103 of them in
+// core/c/libc/math.odin alone, plus the proc-group errors cascading from those.
+//
+// Returns true when collect_file_decls signalled that new declarations became visible, so callers can
+// propagate the restart the same way they do for a file-scope `when`.
+check_add_foreign_block_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) -> bool {
+	fb, ok := decl.derived.(^ast.Foreign_Block_Decl)
+	if !ok {
+		return false
+	}
+
+	// C++ Reference: checker.cpp:5100-5107
+	c := ctx^
+	foreign_library := fb.foreign_library
+	if foreign_library != nil {
+		if _, is_ident := foreign_library.derived.(^ast.Ident); is_ident {
+			c.foreign_context.curr_library = foreign_library
+		} else {
+			error_node(foreign_library, "Foreign block name must be an identifier or 'export'")
+			c.foreign_context.curr_library = nil
+		}
+	}
+
+	// C++ Reference: checker.cpp:5109
+	check_foreign_block_attributes(&c, fb.attributes)
+
+	// C++ Reference: checker.cpp:5111-5116
+	block, block_ok := fb.body.derived.(^ast.Block_Stmt)
+	if !block_ok {
+		return false
+	}
+	if c.collect_delayed_decls && c.scope != nil && .File in c.scope.flags {
+		return collect_file_decls(&c, block.stmts)
+	}
+	check_collect_entities(&c, block.stmts)
+	return false
+}
+
 process_delayed_foreign_block_decls :: proc(ctx: ^Checker_Context, file: ^ast.File) {
 	if file == nil {
 		return
@@ -1470,7 +1504,7 @@ process_delayed_foreign_block_decls :: proc(ctx: ^Checker_Context, file: ^ast.Fi
 		// C++ Reference: checker.cpp:5940
 		// Note: C++ calls check_add_foreign_block_decl, but we have check_foreign_block_decl
 		// which is the actual implementation (check_stmt.odin:1728)
-		check_foreign_block_decl(ctx, stmt)
+		check_add_foreign_block_decl(ctx, stmt)
 	}
 	// Clear the queue after processing (C++ line 5942)
 	clear(&file.delayed_decls_foreign_block)

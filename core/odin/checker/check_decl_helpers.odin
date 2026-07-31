@@ -791,6 +791,35 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				continue
 			}
 
+			// @(objc_context_provider=proc_name) - procedure supplying the `context` for
+			// Odin-calling-convention ObjC methods on this class.
+			// C++ Reference: checker.cpp, check_decl_attribute (the `name ==
+			// "objc_context_provider"` branch, between "objc_ivar" and "raddbg_type_view").
+			if name == "objc_context_provider" {
+				if value == nil {
+					error(elem, "Expected a procedure entity for '%s'", name)
+					continue
+				}
+
+				o := Operand{}
+				check_expr(ctx, &o, value)
+				e := entity_of_node(ctx.info, o.expr)
+
+				// C++ only acts when an entity was resolved; an unresolvable value falls
+				// through to the generic unknown-attribute handling.
+				if e != nil {
+					if ac.objc_context_provider != nil {
+						error(elem, "Previous usage of a 'objc_context_provider' attribute")
+					}
+					if e.kind != .Procedure {
+						error(elem, "'objc_context_provider' must refer to a procedure")
+					} else {
+						ac.objc_context_provider = e
+					}
+					continue
+				}
+			}
+
 			// @(objc_is_class_method) - Mark as ObjC class method (not instance method)
 			if name == "objc_is_class_method" {
 				if value != nil {
@@ -1515,8 +1544,30 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 			// Handle objc_is_implement attribute
 			if effective_ac.objc_is_implementation {
 				type_name.objc_is_implementation = true
+				type_name.objc_ivar = effective_ac.objc_ivar
+				type_name.objc_context_provider = effective_ac.objc_context_provider
 				// Queue for later processing
 				queue.mpsc_enqueue(&ctx.checker.info.objc_class_implementations, e)
+
+				// Enqueue the context_provider proc to be checked once it is resolved.
+				// C++ Reference: check_decl.cpp, immediately after the
+				// objc_class_implementations enqueue in the same block. This is the sole
+				// producer for procs_with_objc_context_provider_to_check; without it
+				// check_objc_context_provider_procedures always sees an empty queue.
+				if type_name.objc_context_provider != nil {
+					queue.mpsc_enqueue(
+						&ctx.checker.procs_with_objc_context_provider_to_check,
+						e,
+					)
+				}
+			} else {
+				// C++ Reference: check_decl.cpp, the `else` of the objc_is_implementation
+				// branch inside the objc_class block.
+				if effective_ac.objc_ivar != nil {
+					error(e.token, "@(objc_ivar) may only be applied when the @(obj_implement) attribute is also applied")
+				} else if effective_ac.objc_context_provider != nil {
+					error(e.token, "@(objc_context_provider) may only be applied when the @(obj_implement) attribute is also applied")
+				}
 			}
 
 			// C++ Reference: check_decl.cpp:557-590

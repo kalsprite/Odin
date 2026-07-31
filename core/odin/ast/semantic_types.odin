@@ -82,6 +82,7 @@ Type_Kind :: enum {
 	Enumerated_Array,
 	Slice,
 	Dynamic_Array,
+	Fixed_Capacity_Dynamic_Array,
 	Map,
 	Struct,
 	Union,
@@ -1021,6 +1022,16 @@ Type_Dynamic_Array :: struct {
 	elem: ^Type,
 }
 
+// Type_Fixed_Capacity_Dynamic_Array is `[dynamic; N]T` - a dynamic array with inline storage for a
+// fixed number of elements and no allocator.
+// C++ Reference: types.cpp:252-257 TYPE_KIND(FixedCapacityDynamicArray)
+Type_Fixed_Capacity_Dynamic_Array :: struct {
+	capacity:         i64,
+	generic_capacity: ^Type, // non-nil when the capacity is polymorphic, e.g. [dynamic; $N]T
+	elem:             ^Type,
+	padding_needed:   i64, // -1 if unknown
+}
+
 Type_Map :: struct {
 	key:                 ^Type,
 	value:               ^Type,
@@ -1164,6 +1175,7 @@ Type_Variant :: union {
 	Type_Enumerated_Array,
 	Type_Slice,
 	Type_Dynamic_Array,
+	Type_Fixed_Capacity_Dynamic_Array,
 	Type_Map,
 	Type_Struct,
 	Type_Union,

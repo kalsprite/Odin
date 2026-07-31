@@ -13,6 +13,7 @@ C++ References:
 */
 
 import "core:odin/ast"
+import "core:slice"
 
 // ======================================================================================
 // FILE FLAGS
@@ -400,7 +401,7 @@ Package_Filter :: #type proc(pkg: ^ast.Package) -> bool
 // filter_packages returns all packages matching a predicate
 filter_packages :: proc(info: ^Checker_Info, predicate: Package_Filter) -> [dynamic]^ast.Package {
 	result := make([dynamic]^ast.Package)
-	for _, pkg in info.packages {
+	for pkg in sorted_packages(info) {
 		if predicate(pkg) {
 			append(&result, pkg)
 		}
@@ -417,10 +418,101 @@ get_normal_packages :: proc(info: ^Checker_Info) -> [dynamic]^ast.Package {
 // Includes fullpath checking for init packages
 get_special_packages :: proc(info: ^Checker_Info) -> [dynamic]^ast.Package {
 	result := make([dynamic]^ast.Package)
-	for _, pkg in info.packages {
+	for pkg in sorted_packages(info) {
 		if is_package_special(info, pkg) {
 			append(&result, pkg)
 		}
 	}
 	return result
+}
+
+
+// ======================================================================================
+// DETERMINISTIC ITERATION
+// ======================================================================================
+//
+// Checker_Info stores packages and files in `map`s. Odin derives a map's hash seed from the
+// map's DATA POINTER (base/runtime/dynamic_map_internal.odin:198-205), so with ASLR the
+// iteration order of any map differs on every run of the same binary. In the checker that
+// reorders entity resolution, which changes which cascades fire - measured on core/log as
+// 542 vs 717 diagnostics across runs, with the diagnostic SETS differing, not just their order.
+//
+// The C++ checker does not have this problem: it keeps packages and files in Arrays appended in
+// deterministic order, and sorts explicitly where an order is required (checker.cpp:6052
+// `array_sort(pkg->files, sort_file_by_name)`).
+//
+// Any order-sensitive walk over info.packages / info.files must go through these helpers.
+// The returned slices use the temp allocator by default.
+
+// register_package inserts a package under `key` and records its discovery order.
+// Every write to info.packages must go through here so packages_ordered stays complete.
+register_package :: proc(info: ^Checker_Info, key: string, pkg: ^ast.Package) {
+	if pkg == nil {
+		return
+	}
+	if _, existed := info.packages[key]; !existed {
+		info.packages[key] = pkg
+		// A package can be reachable under more than one key (import path vs resolved path);
+		// only record it once in the ordering.
+		for p in info.packages_ordered {
+			if p == pkg {
+				return
+			}
+		}
+		append(&info.packages_ordered, pkg)
+	}
+}
+
+// sorted_packages returns the packages in discovery order, matching C++'s walk over the
+// `parser->packages` Array. Falls back to sorting by fullpath for any package that predates the
+// ordered registry, so the result is deterministic either way.
+//
+// NOTE: do NOT sort by pkg.order here. That field is only assigned in check_import_entities
+// (check_import_export.odin:293, from the topologically sorted import graph), which runs AFTER
+// create_package_scopes, check_create_file_scopes and check_collect_entities_all - so during those
+// passes every pkg.order is still 0 and sorting on it degenerates to alphabetical.
+sorted_packages :: proc(info: ^Checker_Info, allocator := context.temp_allocator) -> []^ast.Package {
+	out := make([dynamic]^ast.Package, 0, len(info.packages), allocator)
+	seen := make(map[^ast.Package]bool, len(info.packages), allocator)
+	for pkg in info.packages_ordered {
+		if pkg != nil && !(pkg in seen) {
+			seen[pkg] = true
+			append(&out, pkg)
+		}
+	}
+	// Any package registered without going through register_package.
+	rest := make([dynamic]^ast.Package, 0, len(info.packages), allocator)
+	for _, pkg in info.packages {
+		if pkg != nil && !(pkg in seen) {
+			seen[pkg] = true
+			append(&rest, pkg)
+		}
+	}
+	slice.sort_by(rest[:], proc(a, b: ^ast.Package) -> bool {
+		return a.fullpath < b.fullpath
+	})
+	append(&out, ..rest[:])
+	return out[:]
+}
+
+// sorted_files returns the files in a stable order.
+// C++ Reference: checker.cpp:6040-6046 (sort_file_by_name) sorts on the BASENAME, not the full
+// path; fullpath is the tie-break here so files sharing a basename across directories are still
+// ordered deterministically.
+sorted_files :: proc(files: map[string]^ast.File, allocator := context.temp_allocator) -> []^ast.File {
+	out := make([dynamic]^ast.File, 0, len(files), allocator)
+	for _, file in files {
+		if file != nil {
+			append(&out, file)
+		}
+	}
+	slice.sort_by(out[:], proc(a, b: ^ast.File) -> bool {
+		a_name := filename_from_path(a.fullpath)
+		b_name := filename_from_path(b.fullpath)
+		if a_name != b_name {
+			return a_name < b_name
+		}
+		return a.fullpath < b.fullpath
+	})
+	return out[:]
 }

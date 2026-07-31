@@ -566,6 +566,105 @@ This document tracks deviations between the Odin checker implementation and the 
 
 ---
 
+## Intentional Divergences (Embeddability)
+
+Deviations in this section are **not** parity regressions to be fixed. They exist because this
+package is a library that runs inside a host process (the test binary, a language server, an
+editor plugin), whereas the C++ checker *is* the process and may freely end it.
+
+### [EMBED-1] Error cap latches a flag instead of exiting the process
+- **File**: `error.odin` (`Error_Collector.limit_reached`, `error_limit_reached`, `error_va`,
+  `syntax_error_va`, `error_line_va`), `check_files.odin` (`check_files` unwind points),
+  `check_proc.odin` (`check_procedure_bodies`, `check_proc_info_worker_proc`),
+  `package_resolver.odin` (`Package_Check_Result.limit_reached`)
+- **C++ ref**: `error.cpp:535-563` (`error_va`), `error.cpp:637-667` (`syntax_error_va`)
+- **Issue**: When the error count exceeds `max_error_count`, C++ calls `print_all_errors()`
+  followed by `exit(1)`. Ported literally, that killed whatever process embedded the checker -
+  a single over-noisy package aborted the entire `core/odin/checker/tests` binary with no test
+  summary, no per-package results, and no further packages checked, which made the checker's
+  accuracy unmeasurable.
+- **Status**: [x] DIVERGENT BY DESIGN - The cap itself is unchanged and no diagnostic is
+  suppressed to stay under it. On the tripping error, `Error_Collector.limit_reached` is
+  latched (`sync.atomic_store`, matching how `count` and `error_values` are already guarded)
+  and the diagnostic is dropped - C++ also drops it, since it prints the *previously* collected
+  errors and exits before `push_error_value`. Subsequent reports return immediately, so
+  `error_values` stops growing while the fact of truncation is retained in the flag.
+  `check_files` unwinds at the next phase boundary and the procedure-body loop / thread-pool
+  worker stop taking new work, so the run ends promptly instead of grinding on producing
+  dropped diagnostics. The condition reaches callers on the global error collector - the same
+  channel `error_count()` already travels on - via `error_limit_reached()`, and
+  `check_package_from_path` surfaces it as `Package_Check_Result.limit_reached`, a third
+  outcome distinct from "clean" and "checked and found N errors".
+  Also divergent: the C++ `print_all_errors()` at the cap is **not** performed. A library must
+  not write to the host's stderr uninvited; the host calls `print_all_errors()` itself.
+  `compiler_error` (`error.odin`) and `exit_with_errors` (`error.odin`) deliberately keep
+  `os.exit(1)`. Neither is reachable from a library code path - both have zero callers in this
+  package, internal invariants are enforced with `assert` instead - and terminating is the
+  entire contract of `exit_with_errors`, which exists for a command-line front end to end its
+  own process. They are documented as host-driver-only and must never acquire an internal
+  caller.
+
+---
+
+### [EMBED-2] Check results own their diagnostics instead of pointing at a global collector
+- **File**: `error.odin` (`take_error_values`, `destroy_error_values`, `print_error_values`,
+  `print_errors_standard`, `print_errors_json`), `package_resolver.odin`
+  (`Package_Check_Result.diagnostics`, `destroy_package_check_result`,
+  `print_package_diagnostics`, `check_package_from_path`)
+- **C++ ref**: `error.cpp:28` (`global_error_collector`), `error.cpp:865-1033`
+  (`print_all_errors`), `error.cpp:897` (`GB_ASSERT(any_errors() || any_warnings())`)
+- **Issue**: In C++ the collector is a process-global whose lifetime *is* the process, so
+  "report" and "print" can be arbitrarily far apart and `print_all_errors()` reading a global
+  is unremarkable. Here `check_package_from_path` owns a bounded collector lifetime
+  (`init_error_collector` ... `destroy_error_collector`) and returns after tearing it down. It
+  returned `check_errors = N` while destroying the only storage those N diagnostics lived in,
+  so the natural caller - `if res.check_errors > 0 { print_all_errors() }` - printed from a
+  zeroed collector and tripped the parity assertion at `error.odin` `print_all_errors`. The
+  count was real; the diagnostics it counted were freed. A count a caller cannot act on is not
+  a result.
+- **Status**: [x] DIVERGENT BY DESIGN - `Package_Check_Result` now **owns** its diagnostics.
+  `take_error_values` detaches the collector's `[dynamic]Error_Value` (a move, not a copy - the
+  values are already self-contained, each `Error_Value.msg` being its own allocation) and zeroes
+  `count` / `warning_count` / `errors_already_printed` to match, while leaving `limit_reached`
+  latched, since truncation is a property of the run rather than of who holds the values. The
+  caller frees with `destroy_package_check_result` (which frees every `msg`, exactly as
+  `destroy_error_collector` does) and prints with `print_package_diagnostics`. Results for
+  different packages therefore coexist instead of clobbering one shared buffer - the
+  check-every-core-package loop depends on this.
+  `print_all_errors()` is unchanged for host drivers that own the collector themselves; its body
+  was merely parameterised over the storage as `print_error_values`, so the owned-list path and
+  the global path print through identical sorting/merging code rather than two implementations
+  that can drift.
+  The `GB_ASSERT(any_errors() || any_warnings())` at `error.cpp:897` is **kept**, not relaxed.
+  Every C++ call site upholds it, either by guarding with `if (any_errors() || any_warnings())`
+  (`error.cpp:804`, `error.cpp:820`) or by having just reported a diagnostic (`error.cpp:539`,
+  `609`, `641`, `673`); it is a real precondition, and it is what exposed this bug. Only its
+  message was expanded to name the likely cause and point at `print_package_diagnostics`.
+  `print_error_values` carries no such assertion, because a caller-owned list has no global
+  precondition to violate and an empty one is a legitimate no-op.
+
+### [EMBED-3] A missing runtime package returns nil instead of asserting
+- **File**: `entity_helpers.odin` (`get_runtime_package`), `type_info.odin` (`find_core_entity`)
+- **C++ ref**: `checker.cpp:899-915` (`get_runtime_package`), `checker.cpp:3484`
+  (`GB_ASSERT(type_info_entity != nullptr)`), `parser.cpp:7067` (runtime seeded in
+  `parse_packages`)
+- **Issue**: C++ can assert that `base:runtime` is present, and that its scope is populated,
+  because `parse_packages` seeds it unconditionally before any checking begins - a compiler run
+  without a runtime package is a compiler bug there, so the assert can only ever fire on one.
+  The loader here seeds it the same way (`load_package_with_dependencies`), but `check_files` is
+  a public entry point and can legitimately be handed a file list the caller assembled itself,
+  containing no runtime at all. Every test that checks a snippet of source does exactly that.
+  Ported literally, the assert turned that supported usage into a panic in the host process.
+- **Status**: [x] DIVERGENT BY DESIGN - `get_runtime_package` returns nil, and
+  `find_core_entity` returns nil for both "no runtime package" and "runtime package has no
+  scope yet". Both callers already treat nil as "nothing to do": `add_package_dependency`
+  records no dependency, and `init_preload` leaves `t_type_info` and the other preload
+  singletons nil, which is the same degraded state the checker already entered whenever
+  `ODIN_ROOT` could not be found. No diagnostic is suppressed and nothing is checked
+  differently on the path where runtime *is* present, which is every path the loader drives.
+
+---
+
 ## Progress Summary
 
 **Original Issues (76):** 76/76 addressed
@@ -585,3 +684,172 @@ This document tracks deviations between the Odin checker implementation and the 
 - 83 fixed
 - 6 blocked (infrastructure dependency)
 - 3 OK/design difference
+
+---
+
+## Package file selection (build tags and platform filename suffixes)
+
+The loader now excludes files that do not belong to the target being checked, by both
+mechanisms the C++ compiler uses: the filename suffix (`is_excluded_target_filename`,
+`build_settings.cpp:996`, applied to the directory listing in `parser.cpp:5996`) and the
+`#+build` tag (`parse_build_tag`, `parser.cpp:6404`, applied in `parse_file` at
+`parser.cpp:6889` before any declaration is parsed). See `collect_package_for_target` in
+`package_resolver.odin`. What follows is what still differs.
+
+### [FILE-1] `#+build bedrock` is ignored
+- **File**: `core/odin/parser/file_tags.odin` (shipped core, shared with other tools)
+- **C++ ref**: `parser.cpp:6448-6451`
+- **Issue**: C++ matches `bedrock` / `!bedrock` against `build_context.bedrock`.
+  `parse_file_tags` recognises neither, so the token is dropped and the group is treated as
+  unconstrained. `base/runtime`'s three `#+build !bedrock` files therefore come out included -
+  which is the right answer for a non-bedrock build, and the checker has no `bedrock` flag to
+  make any other answer meaningful.
+- **Status**: [ ] OPEN - `Build_Context` now has a `bedrock` flag (always false, no flag parser), so `parse_file_tags` could match it
+
+### [FILE-2] `#+test` is ignored
+- **File**: `core/odin/parser/file_tags.odin`
+- **C++ ref**: `parser.cpp:6785-6788`
+- **Issue**: C++ excludes a `#+test` file unless the command is `odin test`. `File_Tags` has no
+  field for it, so such a file is always included. Nothing under `core`, `base` or `vendor`
+  uses the tag today.
+- **Status**: [ ] OPEN
+
+### [FILE-3] Subtargets are not matched
+- **File**: `core/odin/parser/file_tags.odin` (`// TODO(bill)` in `parse_file_tags`)
+- **C++ ref**: `parser.cpp:6470-6489`
+- **Issue**: `#+build darwin:iphone` matches on the OS alone; the subtarget half is parsed and
+  discarded. Only affects targets whose subtarget is not `.Default`.
+- **Status**: [ ] OPEN
+
+### [FILE-4] No "no .odin files for this platform" diagnostic
+- **File**: `package_resolver.odin`
+- **C++ ref**: `parser.cpp:5976-5988`
+- **Issue**: When every file in an imported directory is excluded, C++ reports "Directory
+  contains no .odin files for the specified platform" at the import site. The loader instead
+  registers an empty package, so the failure surfaces later as undeclared names.
+- **Status**: [ ] OPEN
+
+### [FILE-5] `build_project_name` groups point at freed memory
+- **File**: `core/odin/parser/file_tags.odin`
+- **Issue**: `parse_file_tags` deletes `build_project_name_strings` and then returns
+  `build_project_names`, whose elements are slices *into* that deleted buffer.
+  `match_build_tags` reads them. Unreachable from `core`, `base` or `vendor` (nothing there
+  uses `#+build-project-name`), but any user package that does would read freed memory.
+- **Status**: [ ] OPEN - upstream bug in shipped core, not checker-specific
+
+## Universe scope (`init_universal`)
+
+### [UNIV-1] Enum types synthesized for the ODIN_* constants use the port's own ordinals for OS
+- **File**: `checker_lifecycle.odin` (`odin_os_enum_value`, `odin_subtarget_enum_value`)
+- **C++ ref**: `checker.cpp:1182-1199`, `build_settings.cpp:14-31`, `build_settings.cpp:169-178`
+- **Issue**: `Odin_OS_Type` and `Odin_Platform_Subtarget_Type` are registered with exactly the
+  C++ member names and C++ ordinals, but the port's `Target_Os_Kind` still carries the retired
+  `Essence` and `Haiku` targets and has no `Playdate` subtarget (open task #5). Both retired
+  OSes map to `Unknown`, and the `Invalid` subtarget sentinel maps to `Default`. Cross-checking
+  `essence_amd64` / `haiku_amd64` therefore yields `ODIN_OS == .Unknown` instead of a real
+  member. Every target C++ still supports is exact.
+- **Status**: [ ] OPEN - resolves itself when task #5 realigns the target tables
+
+### [UNIV-2] `add_global_enum_constant` does not panic on an unmatched value
+- **File**: `checker_lifecycle.odin`
+- **C++ ref**: `checker.cpp:1092-1102`
+- **Issue**: C++ `GB_PANIC`s when no enum member carries the requested value. The port skips the
+  registration instead, because [UNIV-1] makes an unmatched value reachable. The symptom is an
+  undeclared name rather than a compiler crash.
+- **Status**: [ ] OPEN - tied to [UNIV-1]
+
+### [UNIV-3] `ODIN_MICROARCH_STRING` cannot resolve `native`
+- **File**: `build_settings.odin` (`get_final_microarchitecture`)
+- **C++ ref**: `llvm_backend.cpp:54-63`
+- **Issue**: C++ turns `-microarch:native` into `LLVMGetHostCPUName()`. The checker does not link
+  LLVM, so the literal string is returned. Unreachable through the checker's own API (it parses
+  no flags); only an embedder that sets `build_context.microarch` itself can hit it.
+- **Status**: [ ] OPEN - benign
+
+### [UNIV-4] `ODIN_VERSION_HASH` is always empty
+- **File**: `checker_lifecycle.odin`
+- **C++ ref**: `checker.cpp:1372-1382`
+- **Issue**: C++ emits the `GIT_SHA` its build was configured with. The checker has no such
+  define, which is the same result C++ produces for a build without one.
+- **Status**: [ ] OPEN - benign
+
+### [UNIV-5] `nil` is a constant entity, not an `Entity_Nil`
+- **File**: `checker_lifecycle.odin`
+- **C++ ref**: `checker.cpp:1148`
+- **Issue**: C++ registers `nil` with `alloc_entity_nil` (`Entity_Nil`). The port has
+  `alloc_entity_nil`, but `check_ident` has no `.Nil` arm, so `nil` stays a constant of type
+  untyped nil. Observationally identical today.
+- **Status**: [ ] OPEN
+
+### [UNIV-6] Not yet registered from `init_universal`
+- **File**: `checker_lifecycle.odin`
+- **C++ ref**: `checker.cpp:1135-1143`, `1518-1592`
+- **Issue**: still absent from the universe/intrinsics scopes:
+  - `t_equal_proc`, `t_hasher_proc`, `t_map_get_proc` are never allocated (`t_equal_proc` is
+    read by `check_builtin.odin` and is nil there).
+  - `intrinsics.objc_ivar` and `intrinsics.objc_instancetype` do not exist; `objc_object`,
+    `objc_selector` and `objc_class` are pulled out of `base:runtime` by `type_info.odin`
+    instead of being declared in the intrinsics scope.
+  - `intrinsics.c_va_list` / `t_c_va_list_ptr`: the globals and a resolver
+    (`init_c_va_list_types`) now exist, but they source the type from the package's own
+    `c_va_list :: struct{...}` declaration rather than synthesizing the per-ABI struct, and
+    that declaration is not currently reachable through a selector (same failure as
+    `intrinsics.objc_object`), so both stay nil in practice. The `c_va_*` builtins are
+    implemented and will validate correctly once the declaration resolves.
+  - The pointer/slice singletons `t_u8_multi_ptr`, `t_u16_ptr`, `t_u16_multi_ptr`, `t_int_ptr`,
+    `t_i64_ptr`, `t_f64_ptr`, `t_string_slice`.
+- **Status**: [ ] OPEN
+
+### [UNIV-7] The builtin package scope carries only `ScopeFlag_Pkg`
+- **File**: `checker_lifecycle.odin` (`create_builtin_package`)
+- **C++ ref**: `checker.cpp:1035-1039`
+- **Issue**: C++ sets `ScopeFlag_Pkg | ScopeFlag_Global | ScopeFlag_Builtin` and marks the
+  package `Package_Builtin`; the port sets `{.Pkg}` and `.Normal`. The visible consequence is
+  that `create_scope` links the synthesized enum scopes into the builtin scope's child chain,
+  which C++ deliberately skips. Nothing walks that chain today (`destroy_scope` is never
+  called on it).
+- **Status**: [ ] OPEN
+
+### [UNIV-8] `Proc_Body_Checked` is published before `ProcCheckedState_Checked`
+- **File**: `check_proc.odin`
+- **C++ ref**: `checker.cpp:6598-6606`
+- **Issue**: C++ stores the state first and sets the entity flag second; it can, because
+  `proc_checked_mutex` is held across the whole of `check_proc_body_for_proc_info`. The port
+  deliberately narrows that guard to the state transition alone, which makes the window
+  observable, so the two writes are swapped. This closes one window but does NOT fix the
+  underlying `.Proc_Body_Checked` assertion (open task #34): that fires because `Entity.flags`
+  is mutated with non-atomic read-modify-write (`e.flags += {.Used}`) from ~100 sites while
+  this bit is set with `sync.atomic_or`, so a concurrent `+=` can drop it. Measured at ~1% of
+  `core/unicode` runs both before and after this change.
+- **Status**: [ ] OPEN - see task #34
+
+## Builtin procedures
+
+### [BLTN-1] `type_is_matrix_row_major` reads the based type, not the argument type
+- **File**: `check_builtin.odin` (`check_builtin_type_is_matrix_major`)
+- **C++ ref**: `check_builtin.cpp`, `case BuiltinProc_type_is_matrix_row_major:`
+- **Issue**: C++ computes `type = base_type(bt)` and validates `type->kind == Type_Matrix`, but
+  then reads `bt->Matrix.is_row_major` off the *unbased* `bt`. That is only correct when the
+  argument is an unnamed matrix type; for a named matrix (`Mat :: matrix[2,2]f32`) it reinterprets
+  `TypeNamed` storage as `TypeMatrix`. The port reads `is_row_major` from the based type, which is
+  what the surrounding code intends and the only reading expressible in Odin.
+- **Status**: [ ] OPEN - deliberate; the port is correct where C++ is UB
+
+### [BLTN-2] `count_*_ones` / `count_*_zeros` do not constant-fold
+- **File**: `check_builtin.odin` (`check_builtin_bit_count`)
+- **C++ ref**: `check_builtin.cpp`, `case BuiltinProc_count_ones:` .. `case BuiltinProc_reverse_bits:`
+- **Issue**: pre-existing. C++ folds a constant integer argument to a constant result (via
+  `mp_pack` over the big-int limbs); the port always yields `Addressing_Value`. Adding
+  `count_trailing_ones` / `count_leading_ones` inherits the same gap - the argument validation and
+  result type are exact, only the folding is missing.
+- **Status**: [ ] OPEN
+
+### [BLTN-3] `#c_vararg` parameters can still be referenced directly
+- **File**: `check_expr.odin` (`check_ident`, `Entity_Variable` arm)
+- **C++ ref**: `check_expr.cpp:2004`, `check_builtin.cpp:768-771`
+- **Issue**: C++ rejects any use of a `#c_vararg` parameter outside `c_va_start`, gating it on
+  `CheckerContext::allow_c_vararg_param`, which `c_va_start` flips for the duration of its second
+  argument. The port has neither the gate nor the context field, so `c_va_start` does not need to
+  toggle anything, and the "'#c_vararg' parameter cannot be used directly" diagnostic is missing.
+  `c_va_start` still verifies that its second argument resolves to an entity carrying `.C_Var_Arg`.
+- **Status**: [ ] OPEN

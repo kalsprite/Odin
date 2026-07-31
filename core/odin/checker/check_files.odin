@@ -130,6 +130,13 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// C++ line 7333: init_preload(c)
 	init_preload(c)
 
+	// Hand every untyped expression collected during global checking over to the queue that
+	// resolve_global_untyped_expressions drains.
+	// C++ Reference: check_parsed_files, TIME_SECTION("add global untyped expression to
+	// queue") - add_untyped_expressions(&c->info, &c->info.global_untyped), directly after
+	// init_preload and before the builtin_ctx.decl handoff into check_procedure_bodies.
+	add_untyped_expressions(&c.info, &c.info.global_untyped)
+
 	// Unwind point: skip procedure body checking, which is by far the most expensive phase
 	// and the one most likely to keep generating dropped diagnostics.
 	if error_limit_reached() {
@@ -182,9 +189,30 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// C++ Reference: checker.cpp:7348-7400
 	// =========================================================================
 
+	// Report unused variables/procedures/imports and shadowed declarations across every
+	// file scope and package scope.
+	// C++ Reference: check_parsed_files, TIME_SECTION("check all scope usages"), directly
+	// after the check_merge_queues_into_arrays that follows check_foreign_import_fullpaths
+	// and before "add basic type information"/check_for_type_cycles. That is the position
+	// below: the only thing between it and the merge is the error-cap unwind guard, which
+	// is a no-op on a run that has not hit the cap.
+	//
+	// It must stay AFTER that guard, not before it. Entities are marked .Used while their
+	// procedure bodies are checked, so on a truncated Phase 5 every entity in every body
+	// that never got checked still looks unused - running this phase there would emit a
+	// flood of false "declared but not used" on top of an already-truncated report.
+	check_all_scope_usages(c)
+
 	// Check deferred procedures (procedures with defer statements)
 	// C++ line 7373: check_deferred_procedures(c)
 	check_deferred_procedures(c)
+
+	// Validate @(objc_context_provider) procedure signatures.
+	// C++ Reference: check_parsed_files, TIME_SECTION("check objc context provider
+	// procedures"), immediately after check_deferred_procedures. This is the sole consumer
+	// of procs_with_objc_context_provider_to_check; without it that queue is a producer-only
+	// dead end and no @(objc_context_provider) signature is ever validated.
+	check_objc_context_provider_procedures(c)
 
 	// Sort init/fini procedures by priority
 	// C++ line 7377: check_sort_init_and_fini_procedures(c)
@@ -221,6 +249,28 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// C++ Reference: checker.cpp:7441-7463
 	check_entry_point(c)
 
+	// @(instrumentation_enter) and @(instrumentation_exit) only make sense as a pair.
+	// C++ Reference: check_parsed_files, TIME_SECTION("check instrumentation calls") - an
+	// inline block (not a named procedure, which is why it never showed up in a scan for
+	// uncalled phases) between the sanity-check merge and the untyped-value drain below.
+	//
+	// NOTE: this is inert until the attribute parser learns @(instrumentation_enter) and
+	// @(instrumentation_exit). check_decl.odin already consumes ac.instrumentation_enter /
+	// ac.instrumentation_exit and is what assigns info.instrumentation_*_entity, but
+	// check_decl_attributes never sets those two flags - along with no_instrumentation,
+	// no_sanitize_address and no_sanitize_memory, the names fall through to the
+	// silently-ignore branch. The phase is wired at its C++ position so it starts
+	// reporting the moment that producer gap is closed.
+	check_instrumentation_calls(c)
+
+	// Record the resolved type and value of every global untyped expression on its AST node.
+	// C++ Reference: check_parsed_files, TIME_SECTION("add untyped expression values") -
+	// the mpsc_dequeue loop over c->global_untyped_queue calling add_type_and_value. C++
+	// runs it after check_unique_package_names and the sanity-check merge, i.e. at the tail
+	// of the driver, which is the position below. This is the sole consumer of
+	// global_untyped_queue; without it no global untyped expression ever gets a TAV entry.
+	resolve_global_untyped_expressions(c)
+
 	// =========================================================================
 	// Return Result
 	// =========================================================================
@@ -255,7 +305,7 @@ register_packages_from_files :: proc(c: ^Checker, files: []^ast.File) {
 		}
 
 		// Register the package
-		c.info.packages[pkg.fullpath] = pkg
+		register_package(&c.info, pkg.fullpath, pkg)
 
 		// Check for special packages
 		// C++ line 7294-7303: Special package detection
@@ -277,7 +327,7 @@ register_packages_from_files :: proc(c: ^Checker, files: []^ast.File) {
 create_package_scopes :: proc(c: ^Checker) {
 	ctx := make_checker_context(c)
 	defer destroy_checker_context(&ctx)
-	for _, pkg in c.info.packages {
+	for pkg in sorted_packages(&c.info) {
 		// Skip if already has a scope
 		if get_package_scope(&c.info, pkg) != nil {
 			continue
@@ -351,7 +401,7 @@ check_package :: proc(c: ^Checker, pkg: ^ast.Package) -> bool {
 
 	// Collect files from package
 	files := make([dynamic]^ast.File, 0, len(pkg.files), context.temp_allocator)
-	for _, file in pkg.files {
+	for file in sorted_files(pkg.files) {
 		append(&files, file)
 	}
 
@@ -373,7 +423,7 @@ check_packages :: proc(c: ^Checker, packages: []^ast.Package) -> bool {
 		if pkg == nil {
 			continue
 		}
-		for _, file in pkg.files {
+		for file in sorted_files(pkg.files) {
 			append(&files, file)
 		}
 	}
@@ -472,7 +522,7 @@ check_entry_point :: proc(c: ^Checker) {
 
 		// Try to get a better position from the init package's first file
 		if c.info.init_package != nil {
-			for _, file in c.info.init_package.files {
+			for file in sorted_files(c.info.init_package.files) {
 				if file != nil {
 					// Use the package token as a reasonable error location
 					token = file.pkg_token
@@ -488,6 +538,24 @@ check_entry_point :: proc(c: ^Checker) {
 	}
 }
 
+// check_instrumentation_calls reports a lone @(instrumentation_enter) or
+// @(instrumentation_exit); the backend needs both or neither.
+//
+// C++ Reference: check_parsed_files, TIME_SECTION("check instrumentation calls")
+check_instrumentation_calls :: proc(c: ^Checker) {
+	enter := c.info.instrumentation_enter_entity
+	exit := c.info.instrumentation_exit_entity
+
+	// C++ uses `(enter != nullptr) ^ (exit != nullptr)` - exactly one of the two present.
+	if (enter != nil) != (exit != nil) {
+		e := enter
+		if e == nil {
+			e = exit
+		}
+		error(e.token, "Both @(instrumentation_enter) and @(instrumentation_exit) must be defined")
+	}
+}
+
 // check_unique_package_names validates that no two packages share the same name.
 // If multiple packages have the same name but different paths, this is an error
 // because it would cause ambiguous imports.
@@ -499,7 +567,7 @@ check_unique_package_names :: proc(c: ^Checker) {
 	seen: map[string]^ast.Package
 	defer delete(seen)
 
-	for _, pkg in c.info.packages {
+	for pkg in sorted_packages(&c.info) {
 		if pkg == nil || pkg.name == "" {
 			continue
 		}
@@ -509,7 +577,7 @@ check_unique_package_names :: proc(c: ^Checker) {
 			if existing.fullpath != pkg.fullpath {
 				// Get a token for the error from the package
 				token: tokenizer.Token
-				for _, file in pkg.files {
+				for file in sorted_files(pkg.files) {
 					if file != nil {
 						token = file.pkg_token
 						break

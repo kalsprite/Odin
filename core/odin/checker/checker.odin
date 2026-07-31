@@ -452,6 +452,7 @@ Type_Slice :: ast.Type_Slice
 
 // Type_Dynamic_Array is re-declared from ast.Type_Dynamic_Array
 Type_Dynamic_Array :: ast.Type_Dynamic_Array
+Type_Fixed_Capacity_Dynamic_Array :: ast.Type_Fixed_Capacity_Dynamic_Array
 
 // Type_Map is re-declared from ast.Type_Map
 Type_Map :: ast.Type_Map
@@ -927,6 +928,11 @@ Ast_Call_Expr :: ast.Call_Expr
 Foreign_Context :: struct {
 	curr_library:    ^ast.Expr, // C++ line 344
 	default_cc:      Calling_Convention, // C++ line 345
+	// C++ tests `default_cc > 0` to mean "explicitly set", which works there because
+	// ProcCC_Invalid is 0. This enum starts at .Odin = 0, so the zero value is
+	// indistinguishable from an explicit @(default_calling_convention="odin") and we
+	// need a separate flag to carry that distinction.
+	default_cc_set:  bool,
 	link_prefix:     string, // C++ line 346
 	link_suffix:     string, // C++ line 347
 	visibility_kind: Entity_Visibility_Kind, // C++ line 349
@@ -949,6 +955,11 @@ Checker_Info :: struct {
 	files:                                        map[string]^ast.File,
 	files_by_id:                                  map[i32]^ast.File, // File ID lookup for node.file_id -> file
 	packages:                                     map[string]^ast.Package,
+	// Registration (discovery) order of the above, mirroring C++'s `parser->packages` Array.
+	// C++ walks that array for the early passes (e.g. check_create_file_scopes, checker.cpp:6049);
+	// this port only had the map, whose iteration order is ASLR-dependent. Maintained by
+	// register_package - never insert into `packages` directly.
+	packages_ordered:                             [dynamic]^ast.Package,
 	builtin_package:                              ^ast.Package,
 	intrinsics_package:                           ^ast.Package, // C++: intrinsics_pkg
 	config_package:                               ^ast.Package, // C++: config_pkg (for #config lookup)
@@ -992,6 +1003,13 @@ Checker_Info :: struct {
 	foreigns:                                     map[string]^Entity,
 	foreign_mutex:                                sync.Mutex,
 	type_info_mutex:                              sync.Mutex,
+	// C++ Reference: checker.cpp:4791 - guards insertion into builtin_package.scope, which any
+	// file's @(builtin) declaration can write to concurrently.
+	builtin_mutex:                                sync.Mutex,
+	// C++ Reference: checker.hpp:743 - "Mutex required for lazy type checking of specific files".
+	// RECURSIVE because resolving one lazy entity can reference another lazy entity on the same
+	// thread, re-entering check_entity_decl while the lock is already held.
+	lazy_mutex:                                   sync.Recursive_Mutex,
 
 	// Parent entity tracking deleted - not needed in current implementation
 

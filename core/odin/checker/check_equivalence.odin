@@ -165,6 +165,17 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		y_da := y.variant.(Type_Dynamic_Array)
 		return are_types_identical(x_da.elem, y_da.elem)
 
+	case .Fixed_Capacity_Dynamic_Array:
+		// C++ Reference: types.cpp:3244-3246. Capacity is part of the identity, as in C++.
+		//
+		// NOTE: an earlier version of this comment claimed this arm fixed the 13-per-package
+		// "Overloaded procedure has the same type as another procedure in the procedure group"
+		// errors in base:runtime. It does not - that count was measured identical before and after
+		// this arm was added. Those come from proc-group overload comparison, not from here.
+		x_fc := x.variant.(Type_Fixed_Capacity_Dynamic_Array)
+		y_fc := y.variant.(Type_Fixed_Capacity_Dynamic_Array)
+		return x_fc.capacity == y_fc.capacity && are_types_identical(x_fc.elem, y_fc.elem)
+
 	case .Slice:
 		// C++ Reference: types.cpp:3004-3005
 		x_slice := x.variant.(Type_Slice)

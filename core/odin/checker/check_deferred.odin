@@ -328,7 +328,9 @@ check_objc_context_provider_procedures :: proc(c: ^Checker) {
 		// Get procedure type
 		// C++ Reference: checker.cpp:6978
 		proc_type := base_type(proc_entity.type)
-		if proc_type.kind != .Proc {
+		if proc_type == nil || proc_type.kind != .Proc {
+			// C++ dereferences proc_entity->type->Proc unguarded; an unresolved
+			// signature there is a crash, so skipping is a strict safety superset.
 			continue
 		}
 
@@ -369,9 +371,17 @@ check_objc_context_provider_procedures :: proc(c: ^Checker) {
 			error(proc_entity.token, self_param_err)
 		}
 
-		params_tuple, params_ok := proc_info.params.variant.(Type_Tuple)
+		// Only reach into the variant once params is known to be a non-nil tuple; C++
+		// dereferences proc.params->Tuple unguarded, which is a crash on a parameterless
+		// provider rather than a diagnostic.
+		params_tuple: Type_Tuple
+		params_ok := false
+		if params_valid {
+			params_tuple, params_ok = proc_info.params.variant.(Type_Tuple)
+		}
 		tuple_valid := params_ok && len(params_tuple.variables) > 0
-		if !tuple_valid {
+		if !tuple_valid && params_valid {
+			// !params_valid already reported the same message just above.
 			error(proc_entity.token, self_param_err)
 		}
 
@@ -396,7 +406,13 @@ check_objc_context_provider_procedures :: proc(c: ^Checker) {
 				self_type := base_named_type(self_param_pointer.elem)
 
 				// Check if self_type is assignable to the entity's type or objc_ivar
-				// C++ Reference: checker.cpp:6996-6999
+				// C++ Reference: checker.cpp:7358-7362
+				//
+				// base_named_type yields t_invalid when the pointee is not a named type.
+				// That is handed straight to internal_check_is_assignable_to, as C++ does:
+				// is_type_typed(t_invalid) is true, so the `c == nil` assert in
+				// check_distance_between_types passes, and the walk then falls out at -1,
+				// i.e. "not assignable".
 				valid := internal_check_is_assignable_to(self_type, e.type)
 
 				if !valid && type_name.objc_ivar != nil {

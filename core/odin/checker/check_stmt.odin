@@ -3287,6 +3287,7 @@ check_foreign_block_attributes :: proc(ctx: ^Checker_Context, attributes: [dynam
 						error_node(value_node, "Unknown procedure calling convention: '%s'", str)
 					} else {
 						ctx.foreign_context.default_cc = cc
+						ctx.foreign_context.default_cc_set = true
 					}
 				} else {
 					error_node(value_node, "Expected a string value for 'default_calling_convention'")

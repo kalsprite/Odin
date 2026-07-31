@@ -281,7 +281,14 @@ check_import_entities :: proc(c: ^Checker) {
 	ctx := make_checker_context(c)
 	defer destroy_checker_context(&ctx)
 
-	for pkg_index in 0 ..< len(package_order) {
+	// C++ Reference: checker.cpp:6214-6243. This is a FIXPOINT loop, not a simple walk.
+	//
+	// collect_file_decls returns true to mean "new declarations became visible". C++ responds by
+	// re-exporting that package and RESTARTING the package walk from min_pkg_index, so declarations
+	// revealed by one pass are in scope for the next. An earlier attempt called collect_file_decls
+	// but discarded its result, so only the FIRST `when` block in each file was ever collected.
+	min_pkg_index := 0
+	for pkg_index := 0; pkg_index < len(package_order); pkg_index += 1 {
 		node := package_order[pkg_index]
 		pkg := node.pkg
 		if pkg == nil {
@@ -292,10 +299,13 @@ check_import_entities :: proc(c: ^Checker) {
 		// C++: pkg->order = 1+pkg_index
 		pkg.order = 1 + pkg_index
 
+		restart := false
+
 		// Process each file in the package (C++ line 5885-5904)
-		for _, file in pkg.files {
+		for file in sorted_files(pkg.files) {
 			// Reset context for this file
 			reset_checker_context(&ctx, file)
+			ctx.collect_delayed_decls = true // C++ line 6224
 
 			// Process import declarations
 			// NOTE: In C++, imports are stored in f->delayed_decls_queues[AstDelayQueue_Import]
@@ -306,7 +316,25 @@ check_import_entities :: proc(c: ^Checker) {
 					check_add_import_decl(&ctx, import_decl)
 				}
 			}
+
+			// C++ Reference: checker.cpp:6232-6236. The second collection phase, and the only path
+			// that descends into a file-scope `when` block (collect_file_decl ->
+			// collect_when_stmt_from_file). Run after this file's imports so the condition can refer
+			// to imported names.
+			if collect_file_decls(&ctx, file.decls[:]) {
+				check_export_entities_in_pkg(c, pkg)
+				pkg_index = min_pkg_index - 1
+				restart = true
+				break
+			}
 		}
+
+		if restart {
+			continue
+		}
+
+		// C++ line 6243
+		min_pkg_index = pkg_index
 	}
 }
 
@@ -449,7 +477,7 @@ find_import_path_recursive :: proc(graph: ^Import_Graph, current: ^Import_Graph_
 	}
 
 	// Search through imports (C++ line 5188-5219)
-	for _, file in pkg.files {
+	for file in sorted_files(pkg.files) {
 		// NOTE: In C++, this uses f->imports array
 		// In our version, we scan decls for import statements
 		for decl in file.decls {
@@ -523,24 +551,32 @@ check_export_entities :: proc(c: ^Checker) {
 
 	// Process each package's exported entity queue
 	// C++ Reference: checker.cpp:5778-5814
-	for _, pkg in c.info.packages {
-		if pkg == nil || pkg.scope == nil {
-			continue
+	for pkg in sorted_packages(&c.info) {
+		check_export_entities_in_pkg(c, pkg)
+	}
+}
+
+// check_export_entities_in_pkg drains one package's exported entity queue into its scope.
+// C++ Reference: checker.cpp:5777-5815 (check_export_entities_in_pkg)
+//
+// Split out of check_export_entities because the collection fixpoint in check_import_entities has to
+// re-export a single package mid-loop, exactly as C++ does at checker.cpp:6233. Draining an already
+// empty queue is a no-op, so calling this repeatedly is safe.
+check_export_entities_in_pkg :: proc(c: ^Checker, pkg: ^ast.Package) {
+	if pkg == nil || pkg.scope == nil {
+		return
+	}
+
+	// C++ line 5785-5813: while (mpmc_dequeue(&pkg->exported_entity_queue, &ee))
+	for {
+		exported, ok := dequeue_exported_entity(&c.info, pkg)
+		if !ok {
+			break
 		}
 
-		// Drain the queue and add each entity to package scope
-		// C++ line 5785-5813: while (mpmc_dequeue(&pkg->exported_entity_queue, &ee))
-		for {
-			exported, ok := dequeue_exported_entity(&c.info, pkg)
-			if !ok {
-				break
-			}
-
-			// Add to package scope for cross-file visibility
-			// C++ line 5810: add_entity(c, pkg->scope, ee.identifier, ee.entity)
-			if exported.entity != nil {
-				scope_insert(pkg.scope, exported.entity)
-			}
+		// C++ line 5810: add_entity(c, pkg->scope, ee.identifier, ee.entity)
+		if exported.entity != nil {
+			scope_insert(pkg.scope, exported.entity)
 		}
 	}
 }
