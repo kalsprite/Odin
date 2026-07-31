@@ -204,6 +204,37 @@ are_proc_types_overload_safe :: proc(x, y: ^Type) -> Proc_Type_Overload_Kind {
 
 // proc_group_entities_cloned is defined in entity_helpers.odin
 
+// score_type_name_argument handles a polymorphic type parameter (`$T: typeid/...`),
+// whose argument is a TYPE rather than a value.
+//
+// C++ Reference: check_expr.cpp:6953-6968. The parameter loop in
+// check_call_arguments_internal has a dedicated `Entity_TypeName` arm that requires
+// an `Addressing_Type` operand, scores it, and `continue`s — it never reaches
+// `check_is_assignable_to_with_score`. Both of the port's scoring loops were missing
+// that arm, so the type operand was fed to the assignability check and every call
+// through a proc group whose members take a type parameter failed. `make`, `new`,
+// `resize` and friends are all such groups, which is why the failure was universal.
+// The single-candidate path (check_call_arguments_basic) already skips these, which
+// is why a direct call to the same procedure resolved fine.
+//
+// Returns (score, true) when the parameter was a type name and has been handled;
+// a negative score means the argument was rejected. Returns (0, false) otherwise.
+score_type_name_argument :: proc(ctx: ^Checker_Context, param: ^Entity, operand: ^Operand, call_node: ^ast.Node, show_error: bool) -> (i64, bool) {
+	if param.kind != .Type_Name {
+		return 0, false
+	}
+	if operand.mode != .Type {
+		if show_error {
+			error_node(call_node, "Expected a type for the argument '%s'", param.token.text)
+		}
+		return -1, true
+	}
+	if are_types_identical(entity_type(param), operand.type) {
+		return assign_score_function(1), true
+	}
+	return assign_score_function(MAXIMUM_TYPE_DISTANCE), true
+}
+
 // assign_score_function converts a type distance into a match quality score
 // Higher score = better match. Uses a quadratic formula to ensure distinct scores.
 // Reference: /mnt/c/odin/src/check_expr.cpp:992-1002
@@ -644,6 +675,7 @@ check_call_arguments_internal :: proc(
 			return false
 		}
 		data.result_type = pt.results
+		data.final_proc_type = specialized_proc_type
 		data.score = 0
 		return true
 	}
@@ -728,6 +760,14 @@ check_call_arguments_internal :: proc(
 				continue
 			}
 
+			if score, handled := score_type_name_argument(ctx, param, &operand, call_node, show_error); handled {
+				if score < 0 {
+					return false
+				}
+				total_score += score
+				continue
+			}
+
 			arg_score: i64 = 0
 			is_variadic_param := i == pt.variadic_index
 
@@ -746,6 +786,7 @@ check_call_arguments_internal :: proc(
 		}
 
 		data.result_type = pt.results
+		data.final_proc_type = specialized_proc_type
 		data.score = int(total_score)
 		return true
 	}
@@ -768,6 +809,14 @@ check_call_arguments_internal :: proc(
 		param_type := entity_type(param)
 
 		if param_type == nil {
+			continue
+		}
+
+		if score, handled := score_type_name_argument(ctx, param, &operand, call_node, show_error); handled {
+			if score < 0 {
+				return false
+			}
+			total_score += score
 			continue
 		}
 
@@ -797,6 +846,7 @@ check_call_arguments_internal :: proc(
 	}
 
 	data.result_type = pt.results
+		data.final_proc_type = specialized_proc_type
 	data.score = int(total_score)
 	return true
 }

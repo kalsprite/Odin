@@ -141,6 +141,27 @@ check_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^Type, n
 		// Matrix type
 		return check_matrix_type_expr(ctx, n, type, named_type)
 
+	// C++ Reference: check_type.cpp:3956-3974. Both ternary forms may appear in TYPE
+	// position and are resolved by checking the expression and taking its type if the
+	// result is itself a type:
+	//     x :: A if COND else B
+	//     x :: A when COND else B
+	// The port had neither, so such a declaration reported
+	// "Invalid type expression: ..." and left the name bound to an invalid type. That is
+	// how base/runtime/internal.odin:18
+	//     __float16 :: f16 when __ODIN_LLVM_F16_SUPPORTED else u16
+	// failed, and every later use of __float16 then produced
+	// "Cannot assign value of type '<invalid>' to '<invalid>'" — 465 of those in the sweep
+	// from this one declaration.
+	case ^ast.Ternary_If_Expr, ^ast.Ternary_When_Expr:
+		o: Operand
+		check_expr_or_type(ctx, &o, e)
+		if o.mode == .Type {
+			type^ = o.type
+			set_base_type(named_type, type^)
+			return true
+		}
+
 	case ^ast.Selector_Expr:
 		// Package.Type selector
 		o: Operand

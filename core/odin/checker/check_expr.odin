@@ -379,11 +379,11 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 			if entity.kind == .Variable {
 				variable := &entity.variant.(Entity_Variable)
 				if !variable.is_static {
-					error(node, "Nested procedures do not capture parent variables: %s", name)
+					error(node, "Nested procedures do not capture its parent's variables: %s", name)
 					return nil
 				}
 			} else if entity.kind == .Label {
-				error(node, "Nested procedures do not capture parent labels: %s", name)
+				error(node, "Nested procedures do not capture its parent's labels: %s", name)
 				return nil
 			}
 		}
@@ -1075,6 +1075,18 @@ check_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, type_
 // Reference: /mnt/c/odin/src/check_expr.cpp:1997-2104
 check_binary_op :: proc(ctx: ^Checker_Context, o: ^Operand, op: tokenizer.Token) -> bool {
 	type := base_type(o.type)
+	// C++ Reference: check_expr.cpp:2150, `Type *ct = core_type(type)`. The bitwise
+	// arms below test `ct`, not `type`: core_type strips an enum down to its backing
+	// integer, which is what makes the standard idiom of defining an enum member from
+	// earlier members legal —
+	//
+	//     E :: enum u32 { R = 1, W = 2, RW = R | W }
+	//
+	// Here `R` and `W` have the ENUM type, so `R | W` is `E | E`; only after core_type
+	// is it `u32 | u32`. Testing base_type rejected it as "not an integer, boolean or
+	// bit_set", and the enum member then failed as "Enumeration value must be a
+	// constant" — the second diagnostic being purely a consequence of the first.
+	ct := core_type(o.type)
 
 	#partial switch op.kind {
 	case .Sub:
@@ -1144,11 +1156,19 @@ check_binary_op :: proc(ctx: ^Checker_Context, o: ^Operand, op: tokenizer.Token)
 			return false
 		}
 
-	case .And, .Or, .Xor, .And_Not:
-		// C++ Reference: check_expr.cpp:2051-2054
-		// Bitwise operators also work on bit_sets
-		if !is_type_integer(type) && !is_type_boolean(type) && !is_type_bit_set(type) {
-			error(op.pos, "Operator '%s' is only allowed with integers, booleans, or bit_sets", op.text)
+	case .And, .Or, .Xor:
+		// C++ Reference: check_expr.cpp:2203-2212
+		if !is_type_integer(ct) && !is_type_boolean(ct) && !is_type_bit_set(ct) {
+			error(op.pos, "Operator '%s' is only allowed with integers, booleans, or bit sets", op.text)
+			return false
+		}
+
+	case .And_Not:
+		// C++ Reference: check_expr.cpp:2231-2237. `&~` is its own arm: unlike the
+		// other bitwise operators it does NOT accept booleans. The port had merged it
+		// into the arm above, so `bool &~ bool` was wrongly accepted.
+		if !is_type_integer(ct) && !is_type_bit_set(ct) {
+			error(op.pos, "Operator '%s' is only allowed with integers and bit sets", op.text)
 			return false
 		}
 
@@ -1579,14 +1599,17 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 		// nil == nil is always allowed
 		defined = true
 	} else if x_is_nil || y_is_nil {
-		// One side is nil - check if other side is nillable
+		// One side is nil. C++ (check_expr.cpp:3233-3235) asks `type_has_nil` about
+		// the other side rather than enumerating nillable kinds, and only for the
+		// equality operators. The hand-written list here was missing enum, bit_set,
+		// rawptr, typeid, #soa pointers and #soa slice/dynamic structs, so idioms
+		// like `err != nil` on an Allocator_Error were rejected outright.
 		other_type := x_is_nil ? y.type : x.type
-		if is_type_pointer(other_type) || is_type_multi_pointer(other_type) ||
-		   is_type_proc(other_type) || is_type_cstring(other_type) ||
-		   is_type_dynamic_array(other_type) || is_type_map(other_type) ||
-		   is_type_slice(other_type) || is_type_any(other_type) ||
-		   is_type_union(other_type) {
-			defined = true
+		#partial switch op {
+		case .Cmp_Eq, .Not_Eq:
+			defined = type_has_nil(other_type)
+		case .Lt, .Gt, .Lt_Eq, .Gt_Eq:
+			defined = is_type_ordered(x.type) && is_type_ordered(y.type)
 		}
 	} else {
 		#partial switch op {
@@ -1595,8 +1618,18 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 			defined = is_type_comparable(x.type) && is_type_comparable(y.type)
 
 		case .Lt, .Gt, .Lt_Eq, .Gt_Eq:
-			// Ordered comparison operators work on ordered types
-			defined = is_type_ordered(x.type) && is_type_ordered(y.type)
+			// C++ Reference: check_expr.cpp:3196-3201. Ordered comparison of two IDENTICAL
+			// bit_set types is always defined — in Odin these are the subset/superset
+			// operators, not an ordering on the underlying integer. The port tested only
+			// is_type_ordered, which is false for a bit_set, so `x >= y` on two bit_sets
+			// reported "Cannot compare 'S' and 'S'" — the same type on both sides, which
+			// cannot be a legitimate diagnostic. core/io's Stream_Mode_Set alone accounted
+			// for 830 instances.
+			if are_types_identical(x.type, y.type) && is_type_bit_set(x.type) {
+				defined = true
+			} else {
+				defined = is_type_ordered(x.type) && is_type_ordered(y.type)
+			}
 		}
 
 		// Additionally, types must be compatible for comparison
@@ -3550,6 +3583,20 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 
 	#partial switch t.kind {
 	case .Basic:
+		// `---` (explicit uninitialized) converts to ANY type. C++ Reference:
+		// check_expr.cpp:711-713, where check_distance_between_types returns distance 1 for
+		// an untyped-uninit source before any other test, and the default arm of
+		// convert_to_typed (check_expr.cpp:5306) accepts it too.
+		//
+		// The port had the distance guard (check_equivalence.odin:550) and the default arm,
+		// but NOT this one — so a target whose base type is Basic never reached either. `---`
+		// then fell into the untyped-nil branch below and was rejected by type_has_nil, which
+		// is false for int/u128/i64/complex128 and friends:
+		//     a: u128 = ---   ->  Cannot convert '---' to 'u128' from 'untyped uninitialized'
+		if is_type_untyped_uninit(operand.type) {
+			break
+		}
+
 		// Convert to basic typed type
 		// Handle untyped nil specially - it's a constant but needs nil-compatibility check
 		if is_type_untyped_nil(operand.type) {
@@ -8173,6 +8220,11 @@ is_type_slice :: proc(t: ^Type) -> bool {
 Call_Argument_Data :: struct {
 	gen_entity:  ^Entity, // Generated polymorphic entity (if applicable)
 	result_type: ^Type, // Procedure's return type (as tuple)
+	// The winning candidate's procedure type. C++ carries this as `final_proc_type`
+	// through check_call_arguments_internal. The port previously discarded it, so the
+	// proc-group path had no way to see per-procedure attributes such as #optional_ok
+	// (the group identifier's own recorded type is not a procedure type).
+	final_proc_type: ^Type,
 	score:       int, // For future overload resolution
 	error:       bool, // True if any errors occurred
 }
@@ -8467,6 +8519,14 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			add_entity_use(ctx, call.expr, arg_data.gen_entity)
 		}
 
+		// C++'s optional-ok block sits at the end of check_call_expr and so covers
+		// this proc-group path too, which returns before Step 11.
+		resolved_proc_type := arg_data.final_proc_type
+		if resolved_proc_type == nil && arg_data.gen_entity != nil {
+			resolved_proc_type = base_type(entity_type(arg_data.gen_entity))
+		}
+		apply_optional_ok_call_result(ctx, o, call, resolved_proc_type)
+
 		return .Expr
 	}
 
@@ -8575,6 +8635,8 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	// Step 11: Set result type based on procedure return type
 	// Reference: /mnt/c/odin/src/check_expr.cpp:8307-8325
 	set_call_result_type(o, arg_data.result_type, node)
+
+	apply_optional_ok_call_result(ctx, o, call, proc_type)
 
 	// Step 12: Track deferred procedure calls
 	// C++ Reference: check_expr.cpp:8292-8298
@@ -8980,6 +9042,17 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 						var_entity := &param_entity.variant.(Entity_Variable)
 						if var_entity.param_value.kind != .Invalid {
 							has_default = true
+							// C++ check_expr.cpp:6816-6821 synthesises an operand
+							// for the omitted argument from the parameter's default.
+							// Without this the slot stays zeroed, the type-check loop
+							// below reads it as Addressing_Invalid and sets data.error,
+							// and the whole call collapses to a single invalid value.
+							ordered_operands[i].mode = .Value
+							ordered_operands[i].type = entity_type(param_entity)
+							if var_entity.param_value.kind == .Nil {
+								ordered_operands[i].type = t_untyped_nil
+							}
+							ordered_operands[i].expr = var_entity.param_value.original_ast_expr
 						}
 					}
 				}
@@ -9087,6 +9160,45 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 	data.result_type = pt.results
 
 	return data
+}
+
+// apply_optional_ok_call_result narrows the result of a call to an
+// `#optional_ok` / `#optional_allocator_error` procedure.
+//
+// Such a call yields ONE value, not the full tuple: the operand carries the first
+// result and the `.Optional_Ok` addressing mode. Two-LHS uses are re-expanded by the
+// unpacking paths (check_decl_helpers.odin:226, check_stmt.odin:1045), which already
+// recognised this mode — they were simply never reached, because a call always
+// produced a plain tuple. That is why `a := make([]byte, n)`, dropping the allocator
+// error, failed as an assignment count mismatch, and `c := ok2(n)` as an extra initial
+// expression, while both two-value forms worked.
+//
+// C++ Reference: check_expr.cpp:8987-9003. It prefers the type recorded for the callee
+// expression and falls back to the procedure type in hand; `fallback` supplies the
+// latter. C++ additionally sets `CallExpr.optional_ok_one`, which is backend-only for
+// codegen and has no counterpart in core/odin/ast, so it is deliberately not mirrored.
+apply_optional_ok_call_result :: proc(ctx: ^Checker_Context, o: ^Operand, call: ^ast.Call_Expr, fallback: ^Type) {
+	// Prefer the type recorded for the callee expression, as C++ does. For a call
+	// through a proc group that expression names the GROUP, whose recorded type is
+	// not a procedure type at all, so fall back whenever it is not a Proc — not only
+	// when it is nil.
+	t := base_type(type_of_expr(call.expr, &ctx.checker.info))
+	if t == nil || t.kind != .Proc {
+		t = base_type(fallback)
+	}
+	if t == nil || t.kind != .Proc {
+		return
+	}
+	pt := &t.variant.(Type_Proc)
+	if !pt.optional_ok || pt.result_count <= 0 || pt.results == nil || pt.results.kind != .Tuple {
+		return
+	}
+	results := &pt.results.variant.(Type_Tuple)
+	if len(results.variables) == 0 {
+		return
+	}
+	o.mode = .Optional_Ok
+	o.type = entity_type(results.variables[0])
 }
 
 // set_call_result_type sets the operand mode and type based on procedure return type

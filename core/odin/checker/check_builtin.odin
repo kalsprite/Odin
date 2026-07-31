@@ -6294,34 +6294,44 @@ check_builtin_constant_log2 :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 		return false
 	}
 
-	if x.mode != .Constant {
-		error_node(x.expr, "Argument to '%s' must be a constant", builtin_name)
+	// C++ Reference: check_builtin.cpp:5119. The condition really is `&&`, so a
+	// constant of any numeric kind is accepted; mirrored verbatim rather than
+	// tightened, since tightening it here would reject code the real compiler builds.
+	if !is_type_integer(x.type) && x.mode != .Constant {
+		error_node(call.args[0], "Expected a constant integer for '%s'", builtin_name)
 		return false
 	}
 
-	if !is_type_float(x.type) && !is_type_integer(x.type) && !is_type_untyped(x.type) {
-		error_node(x.expr, "Argument to '%s' must be a numeric constant, got '%s'", builtin_name, type_to_string(x.type))
-		return false
+	// C++ Reference: check_builtin.cpp:5123-5127. This is an EXACT integer result —
+	// `big_int_log2` is `mp_count_bits(x) - 1`, i.e. the index of the highest set bit
+	// (floor of log2) — and the operand type is `t_untyped_integer`.
+	//
+	// The port previously computed `math.log2_f64` and returned `t_untyped_float`, so
+	// every use of the result in an integer context failed with
+	// "'untyped float' truncated to 'u32'". core/sys/linux/bits.odin defines
+	// `log2 :: intrinsics.constant_log2` and uses it for whole enum bodies.
+	log2_result: i64
+	#partial switch v in x.value {
+	case big.Int:
+		bi := v
+		bits, err := big.count_bits(&bi)
+		if err != nil {
+			error_node(call.args[0], "Expected a constant integer for '%s'", builtin_name)
+			return false
+		}
+		log2_result = i64(bits) - 1
+	case:
+		i := exact_value_to_i64(x.value)
+		bits := 0
+		for u := u64(i); u != 0; u >>= 1 {
+			bits += 1
+		}
+		log2_result = i64(bits) - 1
 	}
 
 	operand.mode = .Constant
-	operand.type = t_untyped_float
-
-	// Compute log2 at compile time
-	if f, ok := x.value.(f64); ok {
-		if f <= 0 {
-			error_node(x.expr, "Argument to '%s' must be positive", builtin_name)
-			return false
-		}
-		operand.value = math.log2_f64(f)
-	} else {
-		i := exact_value_to_i64(x.value)
-		if i <= 0 {
-			error_node(x.expr, "Argument to '%s' must be positive", builtin_name)
-			return false
-		}
-		operand.value = math.log2_f64(f64(i))
-	}
+	operand.value = exact_value_i64(log2_result)
+	operand.type = t_untyped_integer
 
 	return true
 }

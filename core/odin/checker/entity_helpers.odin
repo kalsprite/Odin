@@ -404,10 +404,13 @@ add_entity_with_name_ctx :: proc(ctx: ^Checker_Context, scope: ^Scope, identifie
 		return false
 	}
 
-	// Set parent procedure decl if we're in a procedure scope
-	if ctx.curr_proc_decl != nil && entity.parent_proc_decl == nil {
-		entity.parent_proc_decl = ctx.curr_proc_decl
-	}
+	// NOTE: C++'s add_entity_with_name (checker.cpp:2083) does NOT set
+	// parent_proc_decl. It is set only at the explicit sites that mirror
+	// check_stmt.cpp:752/2182 and check_decl.cpp:116/351/2031 — i.e. for
+	// entities *declared by a statement or declaration* inside a body.
+	// Setting it here caught procedure parameters and named results too,
+	// so every nested procedure's own results were reported as captures of
+	// its parent's variables.
 
 	// Try to insert into scope (if not blank identifier)
 	if !is_blank_ident(name) {

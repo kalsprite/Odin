@@ -1244,15 +1244,19 @@ check_unsafe_return :: proc(ctx: ^Checker_Context, o: ^Operand, type: ^Type, exp
 				unsafe_return_error(o, "the address of a compound literal")
 			} else if idx, is_index := x.derived.(^ast.Index_Expr); is_index {
 				f := entity_of_node(&ctx.checker.info, idx.expr)
-				if f != nil && (is_type_array_like(f.type) || is_type_matrix(f.type)) {
+				// entity_type, not `.type`: the base field is not always populated,
+				// only the variant's — the same accessor split as tasks 82 and 90.
+				ft := entity_type(f)
+				if f != nil && (is_type_array_like(ft) || is_type_matrix(ft)) {
 					if is_entity_local_variable(f) {
-						unsafe_return_error(o, "the address of an indexed variable", f.type)
+						unsafe_return_error(o, "the address of an indexed variable", ft)
 					}
 				}
 			} else if mat_idx, is_mat_idx := x.derived.(^ast.Matrix_Index_Expr); is_mat_idx {
 				f := entity_of_node(&ctx.checker.info, mat_idx.expr)
-				if f != nil && is_type_matrix(f.type) && is_entity_local_variable(f) {
-					unsafe_return_error(o, "the address of an indexed variable", f.type)
+				ft := entity_type(f)
+				if f != nil && is_type_matrix(ft) && is_entity_local_variable(f) {
+					unsafe_return_error(o, "the address of an indexed variable", ft)
 				}
 			}
 		}

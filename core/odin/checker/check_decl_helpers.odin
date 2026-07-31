@@ -12,6 +12,8 @@ import "core:odin/ast"
 import "core:odin/tokenizer"
 import "core:strings"
 import "core:sync"
+import "core:unicode"
+import "core:unicode/utf8"
 
 // ======================================================================================
 // HELPER FUNCTIONS FOR DECLARATION CHECKING
@@ -907,22 +909,45 @@ is_platform_darwin :: proc(ctx: ^Checker_Context) -> bool {
 // is_foreign_name_valid checks if a string is a valid foreign identifier
 // C++ Reference: Inferred from usage in checker.cpp:3440, 3452, 3742
 // Validates that a name is a valid C identifier (used for link names, sections, etc.)
+// is_foreign_name_valid reports whether a string may be used as a link name.
+//
+// C++ Reference: checker.cpp:3656-3701. A link name is a LINKER SYMBOL, not an Odin
+// identifier, and C++ is correspondingly permissive:
+//   - first rune: one of `- $ . _ :` or an alphabetic character
+//   - every later rune: anything PRINTABLE (utf8proc_charwidth > 0)
+// C++ carries a note that even these limits are more assumption than technical necessity.
+//
+// This port had an IDENTIFIER check instead — letter/underscore first, then alphanumeric or
+// underscore — which rejected every symbol containing `$`, `.`, `-` or `:`. base/runtime
+// alone declares `__$startup_runtime` and `__$cleanup_runtime`, and the sweep carried 5,183
+// "Invalid link name" diagnostics because of it.
+//
+// The class never surfaced in the top-N aggregation because the message embeds an UNQUOTED
+// symbol name, so normalisation left every distinct link name as its own singleton class.
 is_foreign_name_valid :: proc(name: string) -> bool {
 	if len(name) == 0 {
 		return false
 	}
 
-	// First character must be letter or underscore
-	first := name[0]
-	if !((first >= 'a' && first <= 'z') || (first >= 'A' && first <= 'Z') || first == '_') {
-		return false
-	}
-
-	// Remaining characters must be alphanumeric or underscore
-	for i in 1 ..< len(name) {
-		c := name[i]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') {
+	for r, i in name {
+		if r == utf8.RUNE_ERROR {
 			return false
+		}
+		if i == 0 {
+			// C++ lines 3675-3687
+			switch r {
+			case '-', '$', '.', '_', ':':
+				// explicitly permitted leaders
+			case:
+				if !unicode.is_alpha(r) {
+					return false
+				}
+			}
+		} else {
+			// C++ lines 3688-3694: any printable rune.
+			if !unicode.is_print(r) {
+				return false
+			}
 		}
 	}
 

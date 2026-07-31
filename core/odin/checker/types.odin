@@ -2053,16 +2053,35 @@ check_is_assignable_to_using_subtype :: proc(src_param: ^Type, dst: ^Type, level
 	// C++ Reference: types.cpp:4680-4706
 	struct_type := src.variant.(Type_Struct)
 	for field in struct_type.fields {
-		// C++ Reference: types.cpp:4682-4684
-		// Only check fields marked as subtype (using + subtype flags)
-		if field.kind != .Variable || (field.flags & Entity_Flags_Is_Subtype) != Entity_Flags_Is_Subtype {
+		// C++ Reference: types.cpp:4682-4684, and entity.cpp:92
+		//     EntityFlags_IsSubtype = EntityFlag_Using|EntityFlag_Subtype
+		// C++ tests `f->flags & EntityFlags_IsSubtype`, i.e. EITHER bit — it is a MASK,
+		// not a required pair. The port required BOTH flags to be present, so a plain
+		// `using d: D` field (which sets only .Using; .Subtype comes from the separate
+		// `#subtype` directive) was skipped and `using`-based subtyping was never accepted
+		// at a call site. Passing a DateTime where a Date is expected — core/time/datetime
+		// does this throughout — reported "Cannot pass argument of type 'DateTime' to
+		// parameter of type 'Date'".
+		//
+		// Field ACCESS through a `using` field went through a different lookup and worked,
+		// which is what made this look like a call-site problem.
+		if field.kind != .Variable || (field.flags & Entity_Flags_Is_Subtype) == {} {
 			continue
 		}
+
+		// Read the field's type via entity_type(), NOT field.type. For struct field
+		// entities in this port only the VARIANT carries the type; Entity.type is nil
+		// (see task 82, where the same split made every struct measure 0 bytes). With
+		// field.type nil, every are_types_identical below compared against nil and this
+		// walk always returned 0 — so `using`-based subtyping was never accepted at a call
+		// site. `x.y` through a `using` field worked (that is a different lookup), which is
+		// why it looked like a call-site problem rather than a field-type problem.
+		field_type := entity_type(field)
 
 		// C++ Reference: types.cpp:4685-4692
 		// Special handling for polymorphic types
 		if allow_polymorphic && dst_is_polymorphic {
-			fb := base_type(type_deref(field.type))
+			fb := base_type(type_deref(field_type))
 			if fb.kind == .Struct {
 				fb_struct := fb.variant.(Type_Struct)
 				if fb_struct.polymorphic_parent == dst {
@@ -2072,20 +2091,20 @@ check_is_assignable_to_using_subtype :: proc(src_param: ^Type, dst: ^Type, level
 		}
 
 		// C++ Reference: types.cpp:4694-4696
-		if are_types_identical(field.type, dst) {
+		if are_types_identical(field_type, dst) {
 			return level + 1
 		}
 
 		// C++ Reference: types.cpp:4697-4701
 		if src_is_ptr && is_type_pointer(dst) {
-			if are_types_identical(field.type, type_deref(dst)) {
+			if are_types_identical(field_type, type_deref(dst)) {
 				return level + 1
 			}
 		}
 
 		// C++ Reference: types.cpp:4702-4705
 		// Recursively check nested fields
-		nested_level := check_is_assignable_to_using_subtype(field.type, dst, level + 1, src_is_ptr, allow_polymorphic)
+		nested_level := check_is_assignable_to_using_subtype(field_type, dst, level + 1, src_is_ptr, allow_polymorphic)
 		if nested_level > 0 {
 			return nested_level
 		}
@@ -3953,16 +3972,27 @@ is_type_integer_like :: proc(t: ^Type) -> bool {
 	return false
 }
 
-// is_type_array_like checks if a type can be indexed like an array
-// C++ Reference: checker.cpp:2138-2157
+// is_type_array_like reports whether a type is a fixed-length array — either
+// `[N]T` or an enumerated array `[E]T`.
+//
+// C++ Reference: types.cpp:1918-1920, `is_type_array(t) || is_type_enumerated_array(t)`.
+// This deliberately does NOT include slices, dynamic arrays or strings: its two call
+// sites (check_stmt.cpp:2652 and check_builtin.cpp:3922) both rely on the operand
+// having a fixed count. The port previously accepted those three as well, which made
+// `check_unsafe_return` report taking the address of an element of a local slice —
+// something C++ permits, since the backing storage is not on the stack.
+//
+// Both C++ predicates nil-guard after `base_type` (types.cpp:1570); the port's version
+// dereferenced `bt.variant` unconditionally and segfaulted on an entity whose type had
+// not been resolved.
 is_type_array_like :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
+	if bt == nil {
+		return false
+	}
 	#partial switch _ in bt.variant {
-	case Type_Array, Type_Slice, Type_Dynamic_Array:
+	case Type_Array, Type_Enumerated_Array:
 		return true
-	case Type_Basic:
-		// String types are array-like
-		return is_type_string(bt)
 	}
 	return false
 }
