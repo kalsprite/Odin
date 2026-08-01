@@ -1211,8 +1211,27 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				}
 			}
 
-			// For non-sparse enumerated arrays, all enum cases must be provided
-			if !ea.is_sparse {
+			// Report enum cases the literal does not cover -- unless it is written
+			// `#partial [E]T{...}`, which explicitly opts out of completeness.
+			//
+			// C++ Reference: check_expr.cpp:11244, which guards this on `!is_partial`,
+			// where `is_partial = cl->tag && cl->tag->BasicDirective.name.string ==
+			// "partial"` (check_expr.cpp:11073). The port never consulted the tag, so
+			// `#partial` literals -- core/crypto/rsa's
+			// `PKCS1_HASH_OIDS := #partial [hash.Algorithm][]byte{...}` -- were rejected
+			// for exactly the cases they deliberately omit.
+			//
+			// NOTE: C++ additionally NAMES the unhandled cases and suggests `#partial`.
+			// The port's count-based wording is kept here on purpose; see LEDGER task 192
+			// for why replacing it needs the error-collector semantics sorted out first.
+			is_partial := false
+			if cl.tag != nil {
+				if bd, bd_ok := cl.tag.derived.(^ast.Basic_Directive); bd_ok {
+					is_partial = bd.name == "partial"
+				}
+			}
+
+			if !ea.is_sparse && !is_partial {
 				cases_provided := i64(len(indices_visited))
 				if cases_provided != elem_count {
 					error(node, "Enumerated array literal is missing %d case(s); expected %d, got %d",
