@@ -433,6 +433,105 @@ add_global_bool_constant :: proc(scope: ^Scope, name: string, value: bool, alloc
 // so that an implicit selector (`.Little`) has fields to resolve against. Callers that do want
 // the name visible (intrinsics.Atomic_Memory_Order) insert the returned entity themselves.
 @(private = "file")
+// add_global_type_name creates a named type entity and registers it in `scope`.
+// C++ Reference: /mnt/c/odin/src/checker.cpp `add_global_type_name`.
+add_global_type_name :: proc(scope: ^Scope, name: string, base: ^Type, alloc: mem.Allocator) -> ^Type {
+	entity := alloc_entity_type_name(scope, make_token_ident(name), nil, .Resolved, alloc)
+	named_type := alloc_type_named(name, base, entity)
+	set_base_type(named_type, base)
+	set_type_name_entity_type(entity, named_type)
+	entity.flags += {.Visited}
+	scope_insert(scope, entity)
+	return named_type
+}
+
+// init_objc_intrinsics_types synthesises the Objective-C opaque types and registers them.
+// C++ Reference: /mnt/c/odin/src/checker.cpp:1513-1525. Same reasoning as
+// init_c_va_list_type: base:intrinsics is never parsed, so these must be synthesised rather
+// than looked up. They are opaque — no field of them is ever named by user code — so an
+// empty struct is the whole definition, exactly as in C++.
+init_objc_intrinsics_types :: proc(intrinsics_scope: ^Scope, alloc: mem.Allocator) {
+	if intrinsics_scope == nil {
+		return
+	}
+
+	t_objc_object   = add_global_type_name(intrinsics_scope, "objc_object",   alloc_type_struct(nil), alloc)
+	t_objc_selector = add_global_type_name(intrinsics_scope, "objc_selector", alloc_type_struct(nil), alloc)
+	t_objc_class    = add_global_type_name(intrinsics_scope, "objc_class",    alloc_type_struct(nil), alloc)
+
+	t_objc_id    = alloc_type_pointer(t_objc_object)
+	t_objc_SEL   = alloc_type_pointer(t_objc_selector)
+	t_objc_Class = alloc_type_pointer(t_objc_class)
+}
+
+// init_c_va_list_type synthesises `intrinsics.c_va_list` and registers it.
+//
+// C++ Reference: /mnt/c/odin/src/checker.cpp:1528-1591. C++ builds this struct itself in
+// init_universal and registers it into the intrinsics package's scope, because
+// base:intrinsics is a RESERVED package whose source is never parsed.
+//
+// The port previously tried to SOURCE the type instead — init_c_va_list_types (type_info.odin)
+// called find_intrinsics_type("c_va_list"), looking it up in exactly that unparsed package —
+// so it was permanently nil and the name was never in scope at all. Every
+// `va_list :: intrinsics.c_va_list` (core/c/libc/stdarg.odin, and every libc declaration
+// taking a `^va_list`) therefore failed.
+//
+// The layout is platform-specific and must match the C ABI.
+init_c_va_list_type :: proc(intrinsics_scope: ^Scope, alloc: mem.Allocator) {
+	if intrinsics_scope == nil {
+		return
+	}
+
+	scope := create_scope(intrinsics_scope, alloc)
+	fields := make([dynamic]^Entity, 0, 5, alloc)
+
+	add_field :: proc(fields: ^[dynamic]^Entity, scope: ^Scope, type: ^Type, index: i32, name: string, alloc: mem.Allocator) {
+		e := alloc_entity_field(scope, make_token_ident(name), type, false, index, .Resolved, alloc)
+		append(fields, e)
+	}
+
+	bc := &build_context
+	switch bc.metrics.arch {
+	case .Amd64:
+		// C++ line 1541-1554
+		#partial switch bc.metrics.os {
+		case .Freestanding, .Linux, .Freebsd, .Netbsd, .Openbsd:
+			add_field(&fields, scope, t_u32,    0, "gp_offset", alloc)
+			add_field(&fields, scope, t_u32,    1, "fp_offset", alloc)
+			add_field(&fields, scope, t_rawptr, 2, "overflow_arg_area", alloc)
+			add_field(&fields, scope, t_rawptr, 3, "reg_save_area", alloc)
+		}
+	case .Arm64:
+		// C++ line 1556-1576
+		#partial switch bc.metrics.os {
+		case .Darwin:
+			// AARCH64 on darwin differs from other arm64 platforms
+			add_field(&fields, scope, t_rawptr, 0, "_", alloc)
+		case .Freestanding, .Linux, .Freebsd, .Netbsd, .Openbsd:
+			add_field(&fields, scope, t_rawptr, 0, "__stack", alloc)
+			add_field(&fields, scope, t_rawptr, 1, "__gr_top", alloc)
+			add_field(&fields, scope, t_rawptr, 2, "__vr_top", alloc)
+			add_field(&fields, scope, t_i32,    3, "__gr_offs", alloc)
+			add_field(&fields, scope, t_i32,    4, "__vr_offs", alloc)
+		}
+	case .Invalid, .I386, .Arm32, .Wasm32, .Wasm64p32, .Riscv64:
+		// C++ leaves these to the fallback below.
+	}
+
+	// C++ line 1580-1582: never leave it empty, or size_of would be 0.
+	if len(fields) == 0 {
+		add_field(&fields, scope, t_rawptr, 0, "_", alloc)
+	}
+
+	va_list_struct := alloc_type_struct(nil)
+	st := &va_list_struct.variant.(Type_Struct)
+	st.scope = scope
+	st.fields = fields
+
+	t_c_va_list = add_global_type_name(intrinsics_scope, "c_va_list", va_list_struct, alloc)
+	t_c_va_list_ptr = alloc_type_pointer(t_c_va_list)
+}
+
 add_global_enum_type :: proc(
 	builtin_scope: ^Scope,
 	type_name: string,
@@ -1123,6 +1222,11 @@ populate_builtin_package_scope :: proc(info: ^Checker_Info, allocator := context
 
 		scope_insert(intrinsics_scope, entity)
 	}
+
+	// intrinsics.c_va_list and the objc opaque types — synthesised, not sourced.
+	// See init_c_va_list_type for why.
+	init_c_va_list_type(intrinsics_scope, allocator)
+	init_objc_intrinsics_types(intrinsics_scope, allocator)
 
 	for id in Builtin_Proc_Id {
 		proc_info := builtin_proc_infos[id]
