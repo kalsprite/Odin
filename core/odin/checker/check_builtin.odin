@@ -3276,20 +3276,30 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
-		// Argument should be an identifier
-		arg := call_expr.args[0]
-		if _, is_ident := arg.derived.(^ast.Ident); !is_ident {
-			error(arg, "'#defined' argument must be an identifier")
+		// C++ Reference: check_builtin.cpp:2691-2706
+		//
+		// The argument may be an identifier OR a selector expression, and it must
+		// be looked up WITHOUT being checked - `#defined(X)` exists precisely to
+		// ask about names that may not be declared, so resolving it through
+		// check_ident would emit "Undeclared name" for every false answer.
+		arg := unparen_expr(call_expr.args[0])
+		is_ident: bool
+		is_sel: bool
+		_, is_ident = arg.derived.(^ast.Ident)
+		_, is_sel = arg.derived.(^ast.Selector_Expr)
+		if !is_ident && !is_sel {
+			error(arg, "'#defined' expects an identifier or selector expression")
 			return false
 		}
 
-		// Check if identifier exists
-		arg_op: Operand
-		entity := check_ident(ctx, &arg_op, arg, nil, nil, true)
+		if ctx.curr_proc_decl == nil {
+			error(call_expr, "'#defined' is only allowed within a procedure, prefer the replacement '#config(NAME, default_value)'")
+			return false
+		}
 
 		operand.type = t_untyped_bool
 		operand.mode = .Constant
-		operand.value = entity != nil
+		operand.value = check_identifier_exists(ctx.scope, arg)
 		return true
 	}
 

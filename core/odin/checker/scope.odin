@@ -130,6 +130,38 @@ scope_lookup :: proc(s: ^Scope, name: string) -> ^Entity {
 	return entity
 }
 
+// check_identifier_exists reports whether an identifier or selector expression
+// resolves, WITHOUT checking it and therefore without emitting any diagnostic.
+//
+// C++ Reference: /mnt/c/odin/src/check_expr.cpp:6304-6330
+//
+// This is what `#defined` must use. Resolving the argument with check_ident
+// instead makes the very case `#defined` exists to test - a name that is not
+// declared on this platform - emit "Undeclared name".
+check_identifier_exists :: proc(s: ^Scope, node: ^ast.Node, nested := false, out_scope: ^^Scope = nil) -> bool {
+	if node == nil {
+		return false
+	}
+
+	#partial switch n in node.derived {
+	case ^ast.Ident:
+		e := scope_lookup_current(s, n.name) if nested else scope_lookup(s, n.name)
+		if e != nil {
+			if out_scope != nil {
+				out_scope^ = e.scope
+			}
+			return true
+		}
+	case ^ast.Selector_Expr:
+		lhs_scope: ^Scope = nil
+		if check_identifier_exists(s, n.expr, nested, &lhs_scope) {
+			return check_identifier_exists(lhs_scope, n.field, true)
+		}
+	}
+
+	return false
+}
+
 // scope_lookup_parent_with_mutex searches up the scope chain with mutex protection
 // Ported from checker.cpp:385-434 (multi-threaded version)
 // This respects scope boundaries - labels and local variables cannot cross proc boundaries
