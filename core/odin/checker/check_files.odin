@@ -22,6 +22,7 @@ Usage:
 
 import "core:container/queue"
 import "core:odin/ast"
+import "core:odin/parser"
 import "core:odin/tokenizer"
 
 // =============================================================================
@@ -321,6 +322,37 @@ register_packages_from_files :: proc(c: ^Checker, files: []^ast.File) {
 		pkg := file.pkg
 		if pkg == nil {
 			continue
+		}
+
+		// Populate the FILE FLAGS from the file's `#+` tags.
+		//
+		// The whole file-flag layer was previously write-free: mark_file_private,
+		// mark_file_private_to_pkg, mark_file_lazy and disable_file_instrumentation all
+		// existed with ZERO callers, while readers were live --
+		// `is_file_private_to_pkg(info, e.file) || is_file_private(info, e.file)` in
+		// entity.odin:459 and `is_file_lazy` in entity_helpers.odin:385. Same
+		// declared-and-read-but-never-written family as tasks #74 / #104.
+		//
+		// The visible consequence was that `#+private` was NEVER ENFORCED: 178 files in
+		// the corpus carry it, and an entity in one of them stayed visible to other
+		// packages. C++ sets these in the parser (parser.cpp:6810 for lazy); the port's
+		// parser already produces the tags, so the connection is all that was missing.
+		{
+			tags := parser.parse_file_tags(file^, context.temp_allocator)
+			switch tags.private {
+			case .Package:
+				mark_file_private_to_pkg(&c.info, file)
+			case .File:
+				mark_file_private(&c.info, file)
+			case .Public:
+				// no flag
+			}
+			if tags.lazy {
+				mark_file_lazy(&c.info, file)
+			}
+			if tags.no_instrumentation {
+				disable_file_instrumentation(&c.info, file)
+			}
 		}
 
 		// Check if already registered by path
