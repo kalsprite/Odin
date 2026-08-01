@@ -1208,7 +1208,7 @@ check_assign_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 		// Check the binary operation
 		rhs: Operand
 		rhs.mode = .Invalid
-		check_binary_expr(ctx, &rhs, binary_expr, nil)
+		check_binary_expr(ctx, &rhs, binary_expr, nil, true)
 
 		if rhs.mode != .Invalid {
 			rhs.expr = binary_expr

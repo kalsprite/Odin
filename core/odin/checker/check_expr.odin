@@ -1444,24 +1444,41 @@ check_shift :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y: ^Ope
 		}
 	}
 
-	// Constant folding for shifts
+	// Constant folding for shifts.
+	//
+	// C++ Reference: check_expr.cpp:3480-3500 — a fully constant shift RETURNS
+	// here. An untyped constant result becomes `untyped integer`, NEVER the
+	// caller's type_hint; the type_hint branch below is reached only when the
+	// shifted value is not constant (C++ 3511-3527).
+	//
+	// The hint belongs to the enclosing expression, not the shift: in
+	// `i32((1<<31) - 1 - (1<<31)%u32(n))` (core/math/rand/rand.odin:273) typing
+	// `1<<31` as i32 collides with the u32 operand beside it, where leaving it
+	// untyped lets it unify with either.
 	if x.mode == .Constant && y.mode == .Constant {
 		shift_val := exact_value_to_i64(y.value)
 		if shift_val >= 0 {
 			x.value = exact_binary_operator_value(op.kind, x.value, y.value)
 		}
-	} else {
-		x.mode = .Value
+
+		if is_type_untyped(x_type) {
+			convert_to_typed(ctx, x, t_untyped_integer)
+			if x.mode == .Invalid {
+				return true
+			}
+		}
+
+		x.expr = node
+		check_is_expressible(ctx, x, x.type)
+		return true
 	}
 
-	// Result type handling
-	// C++ Reference: check_expr.cpp:3210-3232
-	// If LHS is untyped and we have a type hint, use the type hint
+	x.mode = .Value
+
+	// Result type handling for a non-constant shifted value.
+	// C++ Reference: check_expr.cpp:3511-3527
 	if is_type_untyped(x_type) && type_hint != nil && is_type_integer(type_hint) {
 		x.type = type_hint
-	} else {
-		// Result type is same as LHS
-		x.type = x.type
 	}
 	x.expr = node
 
@@ -1736,7 +1753,18 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 
 // check_binary_expr handles binary operator expressions
 // Reference: /mnt/c/odin/src/check_expr.cpp:4026-4464
-check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, type_hint: ^Type) {
+// token_is_comparison reports whether an operator yields a boolean regardless of
+// its operand types, so the surrounding type hint must not reach the operands.
+token_is_comparison :: proc(kind: tokenizer.Token_Kind) -> bool {
+	#partial switch kind {
+	case .Cmp_Eq, .Not_Eq, .Lt, .Gt, .Lt_Eq, .Gt_Eq:
+		return true
+	}
+	return false
+}
+
+// NOTE: can_use_other_type_as_type_hint lives in check_expr_helpers.odin.
+check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, type_hint: ^Type, use_lhs_as_type_hint := false) {
 	be, ok := node.derived.(^ast.Binary_Expr)
 	if !ok {
 		error(node, "Internal error: check_binary_expr called with non-binary expression")
@@ -1869,20 +1897,27 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 		return
 
 	case:
-		// C++ Reference: check_expr.cpp:4037-4044
-		// For implicit selector expressions (.X), evaluate right before left
-		// to get a type hint for resolving the implicit selector
+		// C++ Reference: check_expr.cpp:4510-4528. The enclosing type_hint must
+		// reach the operands: an untyped compound literal like
+		// `open(name, {.Read} + extra, perm)` has no other way to learn its type.
+		is_cmp := token_is_comparison(op.kind)
 		if is_ise_expr(be.left) {
-			// Evaluate right first to get type hint for left
-			check_expr_or_type(ctx, &y, be.right, nil)
-			check_expr_or_type(ctx, x, be.left, y.type)
+			check_expr_or_type(ctx, &y, be.right, nil if is_cmp else type_hint)
+			if can_use_other_type_as_type_hint(use_lhs_as_type_hint, y.type) {
+				check_expr_or_type(ctx, x, be.left, y.type)
+			} else {
+				check_expr_or_type(ctx, x, be.left, type_hint)
+			}
 		} else {
-			// Standard left-to-right evaluation
-			check_expr_or_type(ctx, x, be.left, nil)
+			check_expr_or_type(ctx, x, be.left, type_hint)
 			if x.mode == .Invalid {
 				return
 			}
-			check_expr_or_type(ctx, &y, be.right, x.type)
+			if can_use_other_type_as_type_hint(use_lhs_as_type_hint, x.type) {
+				check_expr_or_type(ctx, &y, be.right, x.type)
+			} else {
+				check_expr_or_type(ctx, &y, be.right, nil if is_cmp else type_hint)
+			}
 		}
 	}
 
@@ -2092,7 +2127,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 
 // check_unary_expr handles unary operator expressions
 // Reference: /mnt/c/odin/src/check_expr.cpp:2697-2851
-check_unary_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node) {
+check_unary_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, type_hint: ^Type = nil) {
 	ue, ok := node.derived.(^ast.Unary_Expr)
 	if !ok {
 		error(node, "Internal error: check_unary_expr called with non-unary expression")
@@ -2103,8 +2138,13 @@ check_unary_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node) {
 
 	op := ue.op
 
-	// Check operand first
-	check_expr(ctx, o, ue.expr)
+	// C++ Reference: check_expr.cpp:12486-12491 - the hint is passed down,
+	// dereferenced for '&' so `takes_ptr(&{})` gives the literal the pointee type.
+	operand_hint := type_hint
+	if op.kind == .And {
+		operand_hint = type_deref(operand_hint)
+	}
+	check_expr_base(ctx, o, ue.expr, operand_hint)
 	if o.mode == .Invalid {
 		return
 	}
@@ -6726,12 +6766,12 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Binary_Expr:
 		// Binary operator expression
-		check_binary_expr(ctx, o, node, type_hint)
+		check_binary_expr(ctx, o, node, type_hint, true)
 		return .Expr
 
 	case ^ast.Unary_Expr:
 		// Unary operator expression
-		check_unary_expr(ctx, o, node)
+		check_unary_expr(ctx, o, node, type_hint)
 		return .Expr
 
 	case ^ast.Type_Cast:
