@@ -1919,7 +1919,32 @@ type_align_of :: proc(t: ^Type) -> int {
 	#partial switch bt.kind {
 	case .Basic:
 		basic := bt.variant.(Type_Basic)
-		// Alignment is typically same as size for basic types, capped at 16
+		// C++ Reference: types.cpp, type_align_of_internal, `case Type_Basic`.
+		//
+		// "Alignment is same as size, capped at 16" -- what this used to do -- is an
+		// invented rule and wrong for every MULTI-WORD basic. A `string` is 16 bytes but
+		// aligns to 8, as do `any` and `complex128`. C++ enumerates these explicitly:
+		// string/string16 align to int_size, cstring/cstring16 and uintptr/rawptr to
+		// ptr_size, any and typeid to 8, complex to size/2 and quaternion to size/4.
+		//
+		// Over-aligning `string` propagated: any struct containing one got align 16, so
+		// a later field was pushed to the next 16-byte boundary and the struct grew.
+		// core/nbio's `Operation` measured 400 instead of 384 and failed its own
+		// `#assert(size_of(Operation) <= 384)`.
+		#partial switch basic.kind {
+		case .String, .String16, .Int, .Uint:
+			return 8 // int_size
+		case .Cstring, .Cstring16, .Uintptr, .Rawptr:
+			return 8 // ptr_size
+		case .Any, .Typeid:
+			return 8
+		case .Complex32, .Complex64, .Complex128:
+			return max(basic.size / 2, 1)
+		case .Quaternion64, .Quaternion128, .Quaternion256:
+			return max(basic.size / 4, 1)
+		}
+		// Every remaining basic (the plain integers, floats, booleans and runes) aligns
+		// to its own size.
 		return min(basic.size, 16) if basic.size > 0 else 1
 
 	case .Pointer, .Multi_Pointer, .Soa_Pointer:
