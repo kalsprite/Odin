@@ -1898,9 +1898,72 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 				b1 := rhs
 				check_comparison(ctx, case_expr, &a1, &b1, .Lt_Eq)
 
+				// An ENUM range covers every member between its bounds, not just the two
+				// endpoints. C++ splits on exactly this (check_expr.cpp:9582-9607,
+				// add_to_seen_map): for an enum operand it walks `vi` from the lower to the
+				// upper bound registering each value -- stopping before the upper bound for
+				// a half-open range -- and only for non-enums does it register the two
+				// bounds alone.
+				//
+				// The port had only the non-enum half, so `case .B ..= .E5:` credited B and
+				// E5 and left C and D "unhandled". core/image/bmp's
+				// `case .ABBR_16 ..= .V5:` reported seven spurious unhandled cases.
+				is_enum_range := is_type_enum(x.type) &&
+					lhs.mode == .Constant && lhs.value != nil &&
+					rhs.mode == .Constant && rhs.value != nil
+				if is_enum_range {
+					v0 := exact_value_to_i64(lhs.value)
+					v1 := exact_value_to_i64(rhs.value)
+					for vi := v0; vi <= v1; vi += 1 {
+						// Half-open (`..<`) excludes the upper bound.
+						if upper_op != .Lt_Eq && vi == v1 {
+							break
+						}
+						val := exact_value_i64(vi)
+						key := hash_exact_value(val)
+						if key == 0 {
+							continue
+						}
+						if existing_list, found := &seen_cases[key]; found {
+							dup := false
+							for entry in existing_list {
+								temp_operand := Operand {
+									mode = .Value,
+									type = entry.type,
+								}
+								if check_is_assignable_to(ctx, &temp_operand, x.type) {
+									dup = true
+									break
+								}
+							}
+							if dup {
+								// C++ reports against the SWITCH OPERAND expression
+								// (add_constant_switch_case uses operand.expr, and the
+								// enum-range path sets that to x.expr), and it keeps
+								// walking the range afterwards. Breaking out here left the
+								// remaining members unregistered, which then produced a
+								// second, spurious "Unhandled switch cases".
+								begin_error_block()
+								x_str := expr_to_string(x.expr)
+								error_node(x.expr, "Duplicate case '%s'", x_str)
+								delete(x_str)
+								end_error_block()
+							}
+						}
+						entry := Type_And_Token {
+							type  = x.type,
+							token = ast_token(case_expr),
+						}
+						if key not_in seen_cases {
+							seen_cases[key] = make([dynamic]Type_And_Token, context.temp_allocator)
+						}
+						append(&seen_cases[key], entry)
+					}
+				}
+
 				// Add both bounds to seen cases for duplicate detection
 				// Note: We add both lhs and rhs as separate entries
-				if lhs.mode == .Constant && lhs.value != nil {
+				if !is_enum_range && lhs.mode == .Constant && lhs.value != nil {
 					key := hash_exact_value(lhs.value)
 					if key != 0 {
 						if existing_list, found := &seen_cases[key]; found {
@@ -1947,7 +2010,7 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 				//
 				// Genuine overlaps are still caught: `0 ..= A` followed by `A ..= B` registers
 				// A from both cases and still errors, which the probe pins.
-				if rhs.mode == .Constant && rhs.value != nil && upper_op != .Lt {
+				if !is_enum_range && rhs.mode == .Constant && rhs.value != nil && upper_op != .Lt {
 					key := hash_exact_value(rhs.value)
 					if key != 0 {
 						if existing_list, found := &seen_cases[key]; found {
