@@ -9402,6 +9402,27 @@ apply_optional_ok_call_result :: proc(ctx: ^Checker_Context, o: ^Operand, call: 
 	}
 	o.mode = .Optional_Ok
 	o.type = entity_type(results.variables[0])
+
+	// Re-record the RESOLVED procedure type on the callee expression.
+	//
+	// check_promote_optional_ok (check_expr.odin:6035) re-derives the callee type with
+	// `type_of_expr(call.expr)` in order to read the SECOND result type - which is what
+	// distinguishes `#optional_ok` (second value is a bool) from `#optional_allocator_error`
+	// (second value is an Allocator_Error). Type_Proc carries a single `optional_ok` flag for
+	// both tags, so that second-result lookup is the only thing telling them apart.
+	//
+	// For a call through a proc GROUP the callee expression names the group, whose recorded
+	// type is not a procedure type at all. `is_type_proc` then fails, and the code falls
+	// through to `make_optional_ok_type`, which manufactures `(T, bool)` - so
+	// `bits, err := make(...)` gave `err` type `bool` and every `err == nil` reported
+	// "Cannot compare 'bool' and 'untyped nil'". Plain and polymorphic calls were unaffected
+	// because their callee expression does record a proc type.
+	//
+	// Recording it here is the same correction task 122 made for the result type: C++ puts the
+	// resolved entity's type on that expression and the port did not.
+	if call.expr != nil {
+		add_type_and_value(ctx, call.expr, .Value, t, Exact_Value{})
+	}
 }
 
 // set_call_result_type sets the operand mode and type based on procedure return type
