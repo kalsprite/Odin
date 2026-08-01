@@ -3593,6 +3593,28 @@ type_offset_of :: proc(t: ^Type, index: i64) -> i64 {
 			return 0
 		}
 
+		// C++ Reference: types.cpp:4544-4547. A #raw_union OVERLAYS its members, so
+		// every field sits at offset 0. The port had only the aligned arm below, so
+		// raw-union members were laid out sequentially: the first member's offset came
+		// out right by coincidence (it is 0 either way) and every later one was wrong.
+		// core/sys/linux/types.odin asserts these offsets directly — Sig_Info alone
+		// accounts for most of the file's failing assertions.
+		if struc.is_raw_union {
+			return 0
+		}
+
+		// C++ Reference: types.cpp:4548-4557. A #packed struct applies no alignment
+		// padding at all; fields are laid end to end.
+		if struc.is_packed {
+			curr_offset: i64 = 0
+			for i in 0 ..< index {
+				if field := struc.fields[i]; field.kind == .Variable {
+					curr_offset += i64(type_size_of(field.variant.(Entity_Variable).type))
+				}
+			}
+			return curr_offset
+		}
+
 		// Calculate aligned offsets for all fields up to and including target index
 		// This matches the logic in type_set_offsets_of from types.cpp
 		curr_offset: i64 = 0

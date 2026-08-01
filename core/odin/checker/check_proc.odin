@@ -1947,13 +1947,35 @@ type_align_of :: proc(t: ^Type) -> int {
 
 	case .Struct:
 		struc := bt.variant.(Type_Struct)
+
+		// C++ Reference: types.cpp type_align_of_internal, case Type_Struct.
+		// `#align(N)` wins outright, and `#packed` forces 1.
+		if struc.custom_align > 0 {
+			return max(int(struc.custom_align), 1)
+		}
+		if struc.is_packed {
+			return 1
+		}
+
 		// Struct alignment is the max alignment of its fields
 		max_align := 1
 		for field in struc.fields {
-			field_align := type_align_of(field.type)
+			// entity_type, not `.type`: the base field is not always populated.
+			field_align := type_align_of(entity_type(field))
 			if field_align > max_align {
 				max_align = field_align
 			}
+		}
+
+		// `#min_field_align(N)` raises the result and `#max_field_align(N)` caps it.
+		// Both were ignored, so `IO_Uring_Getevents_Arg` in core/sys/linux/types.odin —
+		// declared `struct #min_field_align(8)` — aligned to 8 only by accident of its
+		// field types, and any struct relying on the directive got the wrong alignment.
+		if struc.custom_min_field_align > 0 {
+			max_align = max(max_align, int(struc.custom_min_field_align))
+		}
+		if struc.custom_max_field_align != 0 && struc.custom_max_field_align > struc.custom_min_field_align {
+			max_align = min(max_align, int(struc.custom_max_field_align))
 		}
 		return max_align
 
