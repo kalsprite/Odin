@@ -350,6 +350,20 @@ create_package_scopes :: proc(c: ^Checker) {
 //
 // C++ Reference: checker.cpp:7104-7127 (check_merge_queues_into_arrays)
 check_merge_queues_into_arrays :: proc(c: ^Checker) {
+	// Complete any #soa types that were minted since the last merge.
+	//
+	// C++ Reference: checker.cpp:7444-7450. This is the FIRST thing
+	// check_merge_queues_into_arrays does, ahead of the entity and definition drains, because
+	// complete_soa_type can itself enqueue entities and definitions - draining them first
+	// would leave that work stranded until the next merge point.
+	//
+	// The port had this step only inside drain_all_queues (queue_drain.odin:893), which has no
+	// callers, so soa_types_to_complete was drained at exactly one place in the whole pipeline
+	// (check_global_init.odin:594) and any #soa type produced after it stayed incomplete -
+	// and, if the queue was still non-empty at teardown, tripped mpsc_destroy's
+	// "MPSC queue must be empty before destroy" assertion.
+	drain_and_complete_soa_types(c)
+
 	// Drain definition queue
 	for {
 		if entity, ok := queue.mpsc_dequeue(&c.info.definition_queue); ok {

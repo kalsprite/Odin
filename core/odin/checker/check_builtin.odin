@@ -194,7 +194,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 
 	// SOA operations
 	case .Soa_Zip:
-		result = check_builtin_soa_zip(ctx, operand, call)
+		result = check_builtin_soa_zip(ctx, operand, call, type_hint)
 
 	case .Soa_Unzip:
 		result = check_builtin_soa_unzip(ctx, operand, call)
@@ -3851,62 +3851,151 @@ check_builtin_compress_values :: proc(ctx: ^Checker_Context, operand: ^Operand, 
 }
 
 // check_builtin_soa_zip handles soa_zip() builtin
-// soa_zip(slices...) zips multiple slices into a SOA struct slice
-// C++ Reference: check_builtin.cpp:4100-4180
-check_builtin_soa_zip :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
+// soa_zip(slices...) zips slices into an #soa slice of a struct built from their element types
+// C++ Reference: check_builtin.cpp:4677-4820
+//
+// soa_zip is one of only two builtins that accept `field = value` arguments (the other is
+// quaternion; see check_builtin.cpp:2859 and the prologue at the top of this file). The names
+// given that way become the field names of the generated struct, which is the entire point of
+// the form - `soa_zip(name=..., type=...)` is what makes `for f in fields { f.name }` work in
+// core:reflect. The previous implementation checked each argument with plain check_expr, so a
+// Field_Value node reached check_expr's unsupported-node arm, and named the fields `_0`.._9`
+// unconditionally, so even a successful zip produced a struct with the wrong field names.
+check_builtin_soa_zip :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, type_hint: ^Type) -> bool {
 	if len(call.args) < 1 {
 		error_node(call, "'soa_zip' requires at least 1 argument")
 		return false
 	}
 
-	// Collect element types from all slice arguments
-	elem_types := make([dynamic]^Type, 0, len(call.args))
-	defer delete(elem_types)
-
-	for arg_expr in call.args {
-		arg: Operand
-		check_expr(ctx, &arg, arg_expr)
-		if arg.mode == .Invalid {
-			return false
-		}
-
-		if !is_type_slice(arg.type) {
-			error(arg_expr, "'soa_zip' requires slice arguments, got %s", type_to_string(arg.type))
-			return false
-		}
-
-		// Get element type of slice
-		bt := base_type(arg.type)
-		if slice_type, ok := bt.variant.(Type_Slice); ok {
-			append(&elem_types, slice_type.elem)
+	// C++ line 4682-4700: all arguments must agree on whether they are `field = value` or not.
+	_, first_is_field_value := call.args[0].derived.(^ast.Field_Value)
+	fail := false
+	for arg in call.args {
+		_, is_fv := arg.derived.(^ast.Field_Value)
+		if is_fv != first_is_field_value {
+			error(arg, "Mixture of 'field = value' and value elements in the procedure call 'soa_zip' is not allowed")
+			fail = true
+			break
 		}
 	}
 
-	// Create a struct type containing all element types as fields
-	// C++ Reference: check_builtin.cpp L4120-4150
-	struct_type := alloc_type_struct(ctx.checker)
-	ts := &struct_type.variant.(Type_Struct)
+	types := make([dynamic]^Type, 0, len(call.args), context.temp_allocator)
+	names := make([dynamic]string, 0, len(call.args), context.temp_allocator)
+	name_set := make(map[string]struct{}, 2 * len(call.args), context.temp_allocator)
 
-	// Create fields for each element type
-	// Use generated field names like the C++ implementation
-	ts.fields = make([dynamic]^Entity, len(elem_types))
-	ts.tags = make([dynamic]string, len(elem_types))
-	field_names := [10]string{"_0", "_1", "_2", "_3", "_4", "_5", "_6", "_7", "_8", "_9"}
-	for i := 0; i < len(elem_types); i += 1 {
-		// Create field with generated name
-		field_name := i < len(field_names) ? field_names[i] : "_"
-		token := make_token_ident(field_name)
-		field := alloc_entity_field(nil, token, elem_types[i], false, i32(i))
-		ts.fields[i] = field
-		ts.tags[i] = ""
+	// C++ line 4702-4742
+	for arg in call.args {
+		name := ""
+		value_expr := arg
+		if fv, is_fv := arg.derived.(^ast.Field_Value); is_fv {
+			if ident, is_ident := fv.field.derived.(^ast.Ident); is_ident {
+				name = ident.name
+			} else if !fail {
+				error(fv.field, "Expected an identifier for field argument")
+			}
+			value_expr = fv.value
+		}
+
+		op: Operand
+		check_expr(ctx, &op, value_expr)
+		if op.mode == .Invalid {
+			return false
+		}
+		arg_type := base_type(op.type)
+		if !is_type_slice(arg_type) {
+			error(op.expr, "Indices to 'soa_zip' must be slices, got %s", type_to_string(op.type))
+			return false
+		}
+
+		if name == "_" {
+			error(op.expr, "Field argument name '%s' is not allowed", name)
+			name = ""
+		}
+		if len(name) == 0 {
+			name = fmt.aprintf("_%d", len(types), allocator = ctx.checker.allocator)
+		}
+
+		if _, exists := name_set[name]; exists {
+			error(op.expr, "Field argument name '%s' already exists", name)
+		} else {
+			name_set[name] = {}
+			append(&types, arg_type.variant.(Type_Slice).elem)
+			append(&names, name)
+		}
 	}
 
-	// Create SOA slice of this struct
-	// C++ Reference: check_builtin.cpp L4160-4175
-	result_type := make_soa_struct_slice(ctx, call, call, struct_type)
+	// C++ line 4747-4761: the fields live in their own scope parented to the builtin package's,
+	// so that lookup_field on the generated struct resolves them.
+	parent_scope: ^Scope = nil
+	if ctx.checker.info.builtin_package != nil {
+		parent_scope = get_package_scope(&ctx.checker.info, ctx.checker.info.builtin_package)
+	}
+	s := create_scope(parent_scope, ctx.checker.allocator)
+
+	fields := make([dynamic]^Entity, 0, len(types), ctx.checker.allocator)
+	for type, i in types {
+		e := alloc_entity_field(s, make_token_ident(names[i]), type, false, i32(i), .Resolved)
+		append(&fields, e)
+		scope_insert(s, e)
+	}
+
+	// C++ line 4763-4799: if the call is in a position that already wants a particular #soa
+	// slice, and the generated fields match it exactly, reuse that element type rather than
+	// minting a structurally-equal but distinct one. Any mismatch simply falls through to the
+	// fresh struct below - this is a canonicalisation, not a constraint.
+	elem: ^Type = nil
+	if type_hint != nil && is_type_struct(type_hint) {
+		hint_matches: {
+			soa_type := base_type(type_hint)
+			soa_struct := soa_type.variant.(Type_Struct)
+			if soa_struct.soa_kind != .Slice {
+				break hint_matches
+			}
+			soa_elem_type := soa_struct.soa_elem
+			et := base_type(soa_elem_type)
+			if et == nil || et.kind != .Struct {
+				break hint_matches
+			}
+			ets := et.variant.(Type_Struct)
+			if len(ets.fields) != len(fields) {
+				break hint_matches
+			}
+			if !fail && first_is_field_value {
+				for name, i in names {
+					sel := lookup_field(et, name, false)
+					if sel.entity == nil || len(sel.index) != 1 {
+						break hint_matches
+					}
+					if !are_types_identical(entity_type(sel.entity), types[i]) {
+						break hint_matches
+					}
+				}
+			} else {
+				for f, i in ets.fields {
+					if !are_types_identical(entity_type(f), types[i]) {
+						break hint_matches
+					}
+				}
+			}
+			elem = soa_elem_type
+		}
+	}
+
+	if elem == nil {
+		elem = alloc_type_struct(ctx.checker)
+		ts := &elem.variant.(Type_Struct)
+		ts.scope = s
+		ts.fields = fields
+		ts.tags = make([dynamic]string, len(fields), ctx.checker.allocator)
+		ts.names = make(map[string]^Entity, len(fields), ctx.checker.allocator)
+		for f, i in fields {
+			ts.names[f.token.text] = f
+			ts.tags[i] = ""
+		}
+	}
 
 	operand.mode = .Value
-	operand.type = result_type
+	operand.type = make_soa_struct_slice(ctx, call, nil, elem)
 	return true
 }
 
