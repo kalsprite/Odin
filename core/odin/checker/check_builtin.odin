@@ -6967,34 +6967,22 @@ check_builtin_type_field_type :: proc(ctx: ^Checker_Context, operand: ^Operand, 
 	// Get the field name from the constant string value
 	field_name := exact_value_to_string(name_op.value)
 
-	// Look up the field in the struct/union type
-	bt := base_type(type_op.type)
-	field_type: ^Type = nil
-
-	#partial switch v in bt.variant {
-	case Type_Struct:
-		for field in v.fields {
-			if field.token.text == field_name {
-				field_type = field.type
-				break
-			}
-		}
-	case Type_Union:
-		for variant in v.variants {
-			// For unions, check if the variant name matches
-			if named, ok := variant.variant.(Type_Named); ok {
-				if named.name == field_name {
-					field_type = variant
-					break
-				}
-			}
-		}
-	}
-
-	if field_type == nil {
+	// C++ Reference: check_builtin.cpp, BuiltinProc_type_field_type:
+	//     Selection sel = lookup_field(type, field_name, false);
+	//     if (sel.index.count == 0) { error(...); }
+	//     operand->type = sel.entity->type;
+	//
+	// This previously hand-rolled a FLAT scan of `Type_Struct.fields`, which does not
+	// follow `using`/embedded fields the way lookup_field does. A field reached through
+	// an embedded struct -- core/sys/orca's `str8_elt`, whose `listElt` comes from an
+	// embedded member -- was reported as absent, so `container_of`'s `where` clause
+	// failed on a type that genuinely has the field.
+	sel := lookup_field(type_op.type, field_name, false)
+	if len(sel.index) == 0 || sel.entity == nil {
 		error_node(call, "Type '%s' has no field named '%s'", type_to_string(type_op.type), field_name)
 		return false
 	}
+	field_type := entity_type(sel.entity)
 
 	operand.mode = .Type
 	operand.type = field_type
@@ -7036,9 +7024,17 @@ check_builtin_type_has_field :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 		return false
 	}
 
-	// Use lookup_field to check if the field exists
-	sel := lookup_field(type_op.type, field_name, true)
-	result := sel.entity != nil
+	// C++ Reference: check_builtin.cpp, BuiltinProc_type_has_field:
+	//     Selection sel = lookup_field(type, field_name, false);
+	//     operand->value = exact_value_bool(sel.index.count != 0);
+	//
+	// Two things the port had wrong. `is_type` must be FALSE -- passing true asks for
+	// type-level members (enum constants and the like), not struct fields, so
+	// `type_has_field(S, "a")` never found `a` and the intrinsic answered false for
+	// EVERY struct field. And the result is the SELECTION PATH being non-empty, not
+	// `sel.entity != nil`.
+	sel := lookup_field(type_op.type, field_name, false)
+	result := len(sel.index) != 0
 
 	operand.mode = .Constant
 	operand.type = t_untyped_bool
