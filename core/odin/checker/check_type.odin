@@ -1329,13 +1329,17 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 						// Note: Don't call set_base_type here - the entity's type is already t
 						// and t already has its base set correctly
 					} else {
-						// C++ lines 500-515: Constant parameter
-						if !is_type_constant_type(t) {
-							error(operand.expr, "Expected a constant value for this polymorphic parameter, got %v", t)
-							continue
-						}
-						if !check_is_assignable_to(ctx, operand, type) {
-							continue
+						// C++ Reference: check_type.cpp:529-543 - constant parameter.
+						//
+						// C++ performs NO validation of the operand here. The declared
+						// parameter type was already vetted by
+						// check_constant_parameter_value (check_type.cpp:486); the operand
+						// itself may legitimately still be generic - `Array($T, $SHIFT)`
+						// written inside a `^$X/Array($T, $SHIFT)` constraint binds SHIFT to
+						// a Type_Generic, not to a constant - and that is signalled by
+						// setting is_polymorphic^, not by erroring.
+						if is_type_proc(type) {
+							t = determine_type_from_polymorphic(ctx, type, operand^)
 						}
 						if is_type_polymorphic(base_type(t)) {
 							is_polymorphic^ = true
