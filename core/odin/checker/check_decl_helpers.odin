@@ -8,6 +8,7 @@ for type checking, attribute processing, and entity management.
 */
 
 import "core:container/queue"
+import "core:math/big"
 import "core:odin/ast"
 import "core:odin/tokenizer"
 import "core:strings"
@@ -849,7 +850,102 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				continue
 			}
 
-			// Unrecognized attributes are silently ignored (may be handled elsewhere)
+			// ---- Attributes the port does not act on, but MUST still validate ----
+			//
+			// These are all backend/codegen directives: the checker's job is to accept the
+			// name and check the shape of its value, exactly as C++ does. Nothing here
+			// stores the value, because no consumer in the port reads it -- inventing
+			// fields nobody reads is the antipattern task #104 swept out. The VALIDATION
+			// is what C++ performs and the port did not.
+			//
+			// C++ Reference: checker.cpp, the `else if (name == ...)` chain.
+			switch name {
+			// No parameter, or an optional boolean.
+			case "cold", "force":
+				if value != nil {
+					ev := check_decl_attribute_value(ctx, value)
+					if _, ok := ev.(bool); !ok {
+						error(elem, "Expected a boolean value for '%s' or no value whatsoever", name)
+					}
+				}
+				continue
+
+			// No parameter at all.
+			case "no_instrumentation", "no_sanitize_address", "no_sanitize_memory",
+			     "no_sanitize_thread", "entry_point_only", "objc_implement":
+				if value != nil {
+					error(elem, "'%s' expects no parameter", name)
+				}
+				continue
+
+			// A boolean is required.
+			case "disabled":
+				ev := check_decl_attribute_value(ctx, value)
+				if _, ok := ev.(bool); !ok {
+					error(elem, "Expected a boolean value for '%s'", name)
+				}
+				continue
+
+			// A string is required.
+			case "require_target_feature", "enable_target_feature", "extra_linker_flags",
+			     "instrumentation_enter", "instrumentation_exit", "default_calling_convention":
+				ev := check_decl_attribute_value(ctx, value)
+				if _, ok := ev.(string); !ok {
+					error(elem, "Expected a string value for '%s'", name)
+				}
+				continue
+
+			// An integer is required.
+			case "priority_index":
+				ev := check_decl_attribute_value(ctx, value)
+				if _, ok := ev.(big.Int); !ok {
+					error(elem, "Expected an integer value for '%s'", name)
+				}
+				continue
+
+			// A string from a fixed set. C++ checker.cpp: "minimal" was removed and gets
+			// its own message pointing at "none".
+			case "optimization_mode":
+				ev := check_decl_attribute_value(ctx, value)
+				mode, ok := ev.(string)
+				if !ok {
+					error(elem, "Expected a string value for '%s'", name)
+				} else {
+					switch mode {
+					case "none", "favor_size", "speed", "size":
+						// ok
+					case "minimal":
+						error(elem, "Invalid optimization_mode 'minimal' for '%s', mode has been removed due to confusion, but 'none' has the same behaviour", name)
+					case:
+						error(elem, "Invalid optimization_mode '%s' for '%s'", mode, name)
+					}
+				}
+				continue
+
+			// A constant bit_set; the parameter is NOT optional.
+			case "fast_math":
+				if value == nil {
+					error(elem, "Expected a constant bit_set of type 'intrinsics.Fast_Math_Flags' for '%s'", name)
+				} else {
+					ev := check_decl_attribute_value(ctx, value)
+					if _, ok := ev.(big.Int); !ok {
+						error(elem, "Expected a constant bit_set of type 'intrinsics.Fast_Math_Flags' for '%s'", name)
+					}
+				}
+				continue
+			}
+
+			// NOT DONE: C++ ends this chain with
+			//     error(elem, "Unknown attribute element name '%s'", name)   // checker.cpp:4631
+			// so `@(totally_bogus_attribute)` is rejected there and silently accepted here.
+			//
+			// Adding that catch-all was ATTEMPTED and reverted: this chain is not the only
+			// place the port consumes attributes. `@(builtin)` is handled elsewhere (see
+			// task #64) and never reaches here, so the catch-all rejected every `@(builtin)`
+			// in base/runtime -- ~150 diagnostics on the first probe. Consolidating
+			// attribute handling into one authority has to come first; until then a
+			// catch-all here cannot distinguish "unknown" from "handled somewhere else".
+			// See LEDGER task 210.
 		}
 	}
 }
