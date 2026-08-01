@@ -8687,7 +8687,13 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	// Reference: /mnt/c/odin/src/check_expr.cpp:8307-8325
 	set_call_result_type(o, arg_data.result_type, node)
 
-	apply_optional_ok_call_result(ctx, o, call, proc_type)
+	{
+		specialized := arg_data.final_proc_type
+		if specialized == nil {
+			specialized = proc_type
+		}
+		apply_optional_ok_call_result(ctx, o, call, specialized)
+	}
 
 	// Step 12: Track deferred procedure calls
 	// C++ Reference: check_expr.cpp:8292-8298
@@ -9209,6 +9215,10 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 
 	// Set result type
 	data.result_type = pt.results
+	// `proc_type` here is the SPECIALIZED type when this was a polymorphic procedure —
+	// it is reassigned from the generated entity above. Callers need that, not the
+	// generic declaration, or `$T` is still unbound in the results.
+	data.final_proc_type = proc_type
 
 	return data
 }
@@ -9234,8 +9244,19 @@ apply_optional_ok_call_result :: proc(ctx: ^Checker_Context, o: ^Operand, call: 
 	// not a procedure type at all, so fall back whenever it is not a Proc — not only
 	// when it is nil.
 	t := base_type(type_of_expr(call.expr, &ctx.checker.info))
-	if t == nil || t.kind != .Proc {
-		t = base_type(fallback)
+	// Fall back when the recorded callee type is absent, is not a procedure (a proc
+	// GROUP identifier), or is still POLYMORPHIC.
+	//
+	// The polymorphic case matters: for `new(Tokenizer)` the callee expression still
+	// records the generic `proc($T: typeid) -> (^T, Allocator_Error)`, because the port
+	// does not re-record the generated entity's type on that expression the way C++ does.
+	// Narrowing from it yields `^typeid` instead of `^Tokenizer`, and every field access
+	// on the result then failed with "'a' of type '^typeid' has no field ...".
+	// `fallback` carries the specialized type from Call_Argument_Data.final_proc_type.
+	if t == nil || t.kind != .Proc || t.variant.(Type_Proc).is_polymorphic {
+		if fb := base_type(fallback); fb != nil && fb.kind == .Proc {
+			t = fb
+		}
 	}
 	if t == nil || t.kind != .Proc {
 		return
