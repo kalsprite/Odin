@@ -148,8 +148,6 @@ the dependency graph algorithm, not by queuing.
 import "base:intrinsics"
 import "core:container/queue"
 import "core:mem"
-import "core:odin/ast"
-import "core:slice"
 import "core:sync"
 import "core:thread"
 
@@ -609,153 +607,14 @@ thread_pool_wait :: proc() {
 	}
 }
 
-// =============================================================================
-// QUEUE DRAINING FUNCTIONS
-// =============================================================================
 
-// drain_definition_queue transfers all queued definitions to the definitions array
-// C++ Reference: checker.cpp:7068-7074 (check_add_definitions_from_queues)
-// Should be called after all entity definitions have been collected
-drain_definition_queue :: proc(info: ^Checker_Info) {
-	// C++ line 7069: Pre-allocate array capacity based on queue size
-	// isize cap = c->info.definitions.count + c->info.definition_queue.count.load(std::memory_order_relaxed);
-	// array_reserve(&c->info.definitions, cap);
 
-	// C++ line 7071-7073: Drain queue into array
-	// for (Entity *e; queue.mpsc_dequeue(&c->info.definition_queue, &e); /**/) {
-	//     array_add(&c->info.definitions, e);
-	// }
 
-	// Reserve capacity based on queue size to avoid reallocations
-	queue_count := queue.mpsc_count(&info.definition_queue)
-	reserve(&info.definitions, len(info.definitions) + queue_count)
 
-	for {
-		entity, ok := queue.mpsc_dequeue(&info.definition_queue)
-		if !ok do break
-		append(&info.definitions, entity)
-	}
 
-	// Sort by order_in_src for deterministic processing
-	// C++ Reference: C++ sorts definitions by order_in_src after collection
-	if len(info.definitions) > 1 {
-		slice.sort_by(info.definitions[:], proc(a, b: ^Entity) -> bool {
-			return a.order_in_src < b.order_in_src
-		})
-	}
-}
 
-// drain_entity_queue transfers all queued entities to the entities array
-// C++ Reference: checker.cpp:7060-7066 (check_add_entities_from_queues)
-// Should be called after all entities have been collected
-drain_entity_queue :: proc(info: ^Checker_Info) {
-	// C++ line 7061: Pre-allocate array capacity based on queue size
-	// isize cap = c->info.entities.count + c->info.entity_queue.count.load(std::memory_order_relaxed);
-	// array_reserve(&c->info.entities, cap);
 
-	// Reserve capacity based on queue size to avoid reallocations
-	queue_count := queue.mpsc_count(&info.entity_queue)
-	reserve(&info.entities, len(info.entities) + queue_count)
 
-	// C++ line 7063-7065: Drain queue into array
-	// for (Entity *e; queue.mpsc_dequeue(&c->info.entity_queue, &e); /**/) {
-	//     array_add(&c->info.entities, e);
-	// }
-	for {
-		entity, ok := queue.mpsc_dequeue(&info.entity_queue)
-		if !ok do break
-		append(&info.entities, entity)
-	}
-}
-
-// drain_procedures_queue transfers all queued procedures to the procedures array
-// C++ Reference: All procedures are collected for later checking
-// Should be called after all procedure entities have been created
-drain_procedures_queue :: proc(info: ^Checker_Info) {
-	for {
-		proc_info, ok := queue.mpsc_dequeue(&info.all_procedures_queue)
-		if !ok do break
-		append(&info.all_procedures, proc_info)
-	}
-}
-
-// drain_required_global_variable_queue processes @require tagged globals
-// C++ Reference: Required globals are validated to ensure dependencies exist
-// Should be called during global variable checking phase
-drain_required_global_variable_queue :: proc(info: ^Checker_Info) -> [dynamic]^Entity {
-	required := make([dynamic]^Entity)
-	for {
-		entity, ok := queue.mpsc_dequeue(&info.required_global_variable_queue)
-		if !ok do break
-		append(&required, entity)
-	}
-	return required
-}
-
-// drain_required_foreign_imports_through_force transfers foreign imports with @require attribute
-// C++ Reference: checker.cpp:2765-2768 - drained during generate_minimum_dependency_set
-// These entities are also added to the dependency set and used for linking validation
-// Should be called during minimum dependency set generation phase
-drain_required_foreign_imports_through_force :: proc(info: ^Checker_Info) {
-	for {
-		entity, ok := queue.mpsc_dequeue(&info.required_foreign_imports_through_force_queue)
-		if !ok do break
-		append(&info.required_foreign_imports_through_force, entity)
-		// Note: C++ also calls add_to_set(c, e) here, but that's done by the caller
-		// in the context of dependency graph generation
-	}
-}
-
-// drain_foreign_imports_to_check_fullpaths processes foreign imports needing path validation
-// C++ Reference: Foreign imports are checked for valid file paths
-// Should be called during foreign library validation
-drain_foreign_imports_to_check_fullpaths :: proc(info: ^Checker_Info) -> [dynamic]^Entity {
-	foreign_imports := make([dynamic]^Entity)
-	for {
-		entity, ok := queue.mpsc_dequeue(&info.foreign_imports_to_check_fullpaths)
-		if !ok do break
-		append(&foreign_imports, entity)
-	}
-	return foreign_imports
-}
-
-// drain_foreign_decls_to_check processes foreign declarations
-// C++ Reference: Foreign declarations are validated for consistency
-// Should be called during foreign declaration checking
-drain_foreign_decls_to_check :: proc(info: ^Checker_Info) -> [dynamic]^Entity {
-	foreign_decls := make([dynamic]^Entity)
-	for {
-		entity, ok := queue.mpsc_dequeue(&info.foreign_decls_to_check)
-		if !ok do break
-		append(&foreign_decls, entity)
-	}
-	return foreign_decls
-}
-
-// drain_raddbg_type_views_queue transfers RadDbg type views to final array
-// C++ Reference: RadDbg type views are collected during type checking for debug info
-// Enqueued at check_decl.cpp:610, drained for RadDbg output generation
-// NOTE(DEFERRED): @(raddbg_type_view) attribute processing is a debug info feature
-drain_raddbg_type_views_queue :: proc(info: ^Checker_Info) {
-	for {
-		view, ok := queue.mpsc_dequeue(&info.raddbg_type_views_queue)
-		if !ok do break
-		append(&info.raddbg_type_views, view)
-	}
-}
-
-// drain_intrinsics_entry_point_usage collects intrinsics entry point usages
-// C++ Reference: Intrinsics entry points are tracked for validation
-// Should be called during intrinsics validation phase
-drain_intrinsics_entry_point_usage :: proc(info: ^Checker_Info) -> [dynamic]^ast.Node {
-	usages := make([dynamic]^ast.Node)
-	for {
-		node, ok := queue.mpsc_dequeue(&info.intrinsics_entry_point_usage)
-		if !ok do break
-		append(&usages, node)
-	}
-	return usages
-}
 
 // check_intrinsics_entry_point_usage drains intrinsics_entry_point_usage and reports every
 // `intrinsics.__entry_point()` call in a program that has no entry point to run.
@@ -781,72 +640,10 @@ check_intrinsics_entry_point_usage :: proc(c: ^Checker) {
 	}
 }
 
-// drain_objc_class_implementations collects Objective-C class implementations
-// C++ Reference: ObjC classes are processed during ObjC validation
-// Should be called during Objective-C checking phase
-drain_objc_class_implementations :: proc(info: ^Checker_Info) -> [dynamic]^Entity {
-	implementations := make([dynamic]^Entity)
-	for {
-		entity, ok := queue.mpsc_dequeue(&info.objc_class_implementations)
-		if !ok do break
-		append(&implementations, entity)
-	}
-	return implementations
-}
 
-// drain_procs_with_deferred_to_check collects procedures with defer statements
-// C++ Reference: Procedures with defer need special validation
-// Should be called during procedure validation phase
-drain_procs_with_deferred_to_check :: proc(c: ^Checker) -> [dynamic]^Entity {
-	procs := make([dynamic]^Entity)
-	for {
-		entity, ok := queue.mpsc_dequeue(&c.procs_with_deferred_to_check)
-		if !ok do break
-		append(&procs, entity)
-	}
-	return procs
-}
 
-// drain_procs_with_objc_context_provider_to_check collects ObjC context provider procs
-// C++ Reference: ObjC context providers need special handling
-// Should be called during Objective-C procedure checking
-drain_procs_with_objc_context_provider_to_check :: proc(c: ^Checker) -> [dynamic]^Entity {
-	procs := make([dynamic]^Entity)
-	for {
-		entity, ok := queue.mpsc_dequeue(&c.procs_with_objc_context_provider_to_check)
-		if !ok do break
-		append(&procs, entity)
-	}
-	return procs
-}
 
-// drain_global_untyped_queue collects untyped expressions for later resolution
-// C++ Reference: Untyped expressions are resolved after type inference
-// Should be called during untyped expression resolution phase
-drain_global_untyped_queue :: proc(c: ^Checker) -> [dynamic]Untyped_Expr_Info {
-	untyped := make([dynamic]Untyped_Expr_Info)
-	for {
-		info, ok := queue.mpsc_dequeue(&c.global_untyped_queue)
-		if !ok do break
-		append(&untyped, info)
-	}
-	return untyped
-}
 
-// drain_soa_types_to_complete collects SOA types needing completion
-// C++ Reference: SOA types need field layout completion
-// Should be called during SOA type finalization
-// WARNING: This function only drains to an array without processing.
-// For inline processing matching C++ semantics, use drain_and_complete_soa_types instead.
-drain_soa_types_to_complete :: proc(c: ^Checker) -> [dynamic]^Type {
-	types := make([dynamic]^Type)
-	for {
-		type, ok := queue.mpsc_dequeue(&c.soa_types_to_complete)
-		if !ok do break
-		append(&types, type)
-	}
-	return types
-}
 
 // drain_and_complete_soa_types processes SOA types immediately during drain
 // C++ Reference: checker.cpp:7077-7079, 4985-4987 - SOA types are completed inline
@@ -866,52 +663,6 @@ drain_and_complete_soa_types :: proc(c: ^Checker) {
 	}
 }
 
-// =============================================================================
-// WORKER COORDINATION FUNCTIONS
-// =============================================================================
-
-// drain_all_queues replicates C++ check_merge_queues_into_arrays semantics
-// C++ Reference: checker.cpp:7076-7083
-//
-// This function performs a critical synchronization operation that ensures
-// all worker threads have completed their tasks and all queued work has been
-// transferred to final arrays before the next checking phase begins.
-//
-// Call sites in C++ checker (all must use this pattern):
-// - After entity collection (line 7324)
-// - After procedure bodies (line 7346)
-// - After basic type info (line 7361)
-// - After type definitions (line 7380)
-// - After #soa types check (line 7392)
-// - After test procedures (line 7402)
-// - Final sanity checks (line 7443)
-//
-// The ordering is critical:
-// 1. Complete SOA types first (they may enqueue entities/definitions)
-// 2. Drain entity and definition queues
-// 3. Wait for all worker threads to complete
-drain_all_queues :: proc(c: ^Checker) {
-	// C++ Reference: checker.cpp:7077-7079
-	// First, complete SOA types inline (C++ does this first)
-	// This must happen before draining entities because complete_soa_type
-	// may add new entities or definitions to the queues
-	drain_and_complete_soa_types(c)
-
-	// C++ Reference: checker.cpp:7080-7081
-	// Then drain entities and definitions to their arrays
-	// These are the primary work queues that worker threads populate
-	drain_entity_queue(&c.info)
-	drain_definition_queue(&c.info)
-
-	// C++ Reference: checker.cpp:7082
-	// CRITICAL: Wait for all worker threads to complete
-	// This barrier ensures:
-	// - All parallel tasks have finished execution
-	// - All memory writes from worker threads are visible
-	// - No worker is still modifying shared state
-	// - Safe to proceed to next sequential phase
-	thread_pool_wait()
-}
 
 // discard_abandoned_queue_work empties the queues whose consuming phase was skipped because
 // check_files unwound early on the error cap.

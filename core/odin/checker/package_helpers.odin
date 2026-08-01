@@ -111,22 +111,6 @@ dequeue_exported_entity :: proc(info: ^Checker_Info, pkg: ^ast.Package) -> (expo
 	return queue.mpmc_dequeue(&pkg.exported_entity_queue)
 }
 
-// drain_exported_entities processes all exported entities from a package's queue
-// C++ Reference: Similar to checker processing of exported_entity_queue
-// Calls the provided callback for each exported entity, then clears the queue
-// Returns the number of entities processed
-drain_exported_entities :: proc(info: ^Checker_Info, pkg: ^ast.Package, callback: proc(identifier: ^ast.Node, entity: ^Entity)) -> int {
-	count := 0
-	for {
-		exported, ok := dequeue_exported_entity(info, pkg)
-		if !ok {
-			break
-		}
-		callback(exported.identifier, exported.entity)
-		count += 1
-	}
-	return count
-}
 
 // has_exported_entities checks if a package has any exported entities in its queue
 // Useful for checking if processing is needed without dequeuing
