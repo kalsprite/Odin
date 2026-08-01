@@ -1942,8 +1942,25 @@ check_polymorphic_record_type :: proc(ctx: ^Checker_Context, original_type: ^Typ
 		// Set up the named type relationship
 		set_base_type(new_named_type, new_struct_type)
 
-		// Check struct with the provided operands
-		check_struct_type(ctx, new_struct_type, struct_node, operands, new_named_type, original_type)
+		// Check struct with the provided operands.
+		//
+		// C++ Reference: check_expr.cpp:8438-8441 —
+		//     CheckerContext ctx = *c;
+		//     // NOTE(bill): We need to make sure the lookup scope for the record is
+		//     // the same as where it was created
+		//     ctx.scope = polymorphic_record_parent_scope(original_type);
+		//
+		// Passing the caller's ctx straight through means the record's FIELD TYPES are
+		// looked up from the instantiation site. For a record instantiated from another
+		// package that put the importer's package scope on the chain instead of the
+		// defining one, so a field naming a sibling-file type - core/container/queue's
+		// `MPSC_Queue :: struct($T: typeid) { q: Queue(T) }` - failed as
+		// "Undeclared name".
+		inst_ctx := ctx^
+		if parent_scope := polymorphic_record_parent_scope(original_type); parent_scope != nil {
+			inst_ctx.scope = parent_scope
+		}
+		check_struct_type(&inst_ctx, new_struct_type, struct_node, operands, new_named_type, original_type)
 
 		return new_named_type
 

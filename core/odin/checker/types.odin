@@ -912,6 +912,29 @@ is_type_polymorphic_record :: proc(t: ^Type) -> bool {
 
 // is_type_polymorphic_record_specialized checks if polymorphic record has been specialized
 // C++ Reference: /mnt/c/odin/src/types.cpp:2292-2300
+// polymorphic_record_parent_scope returns the scope a polymorphic record was
+// DECLARED in, which is where its field types must be looked up.
+//
+// C++ Reference: /mnt/c/odin/src/types.cpp:2420-2430
+polymorphic_record_parent_scope :: proc(t: ^Type) -> ^Scope {
+	bt := base_type(t)
+	if bt != nil && is_type_polymorphic_record(bt) {
+		#partial switch bt.kind {
+		case .Struct:
+			st := &bt.variant.(Type_Struct)
+			if st.scope != nil {
+				return st.scope.parent
+			}
+		case .Union:
+			ut := &bt.variant.(Type_Union)
+			if ut.scope != nil {
+				return ut.scope.parent
+			}
+		}
+	}
+	return nil
+}
+
 is_type_polymorphic_record_specialized :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {
