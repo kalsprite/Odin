@@ -233,54 +233,73 @@ check_builtin_simd_shift :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		return false
 	}
 
-	// Check value operand
+	// C++ Reference: check_builtin.cpp:1018-1033
+	//
+	// NOTE: neither operand gets a type hint. Hinting the shift amount with
+	// x.type would default a literal like `63` straight to the SIGNED vector
+	// type and make the conditional conversion below a no-op, so the unsigned
+	// check at the end would then reject every constant shift.
 	x: Operand
+	y: Operand
 	check_expr(ctx, &x, call.args[0])
 	if x.mode == .Invalid {
 		return false
 	}
-
-	// Check shift amount operand
-	y: Operand
-	check_expr_with_type_hint(ctx, &y, call.args[1], x.type)
+	check_expr(ctx, &y, call.args[1])
 	if y.mode == .Invalid {
 		return false
 	}
 
-	convert_to_typed(ctx, &y, x.type)
-	if y.mode == .Invalid {
-		return false
-	}
-
-	// Validate SIMD vectors
 	if !is_type_simd_vector(x.type) {
 		error(call.args[0], "'%s' expected a simd vector type", builtin_name)
 		return false
 	}
 
+	// A scalar shift amount is splatted across the lanes. An untyped or already
+	// unsigned scalar splats to the UNSIGNED vector of the same shape, which is
+	// what the element check below requires.
 	if !is_type_simd_vector(y.type) {
-		error(call.args[1], "'%s' expected a simd vector type", builtin_name)
+		if is_type_untyped(y.type) || is_type_unsigned(y.type) {
+			rhs_type := type_unsigned_equivalent(x.type)
+			convert_to_typed(ctx, &y, rhs_type)
+		} else {
+			convert_to_typed(ctx, &y, x.type)
+		}
+		if y.mode == .Invalid {
+			return false
+		}
+	}
+
+	if !is_type_simd_vector(y.type) {
+		type_str := type_to_string(y.type)
+		defer delete(type_str)
+		error(call.args[1], "'%s' expected a simd vector type or unsigned integer, got %s", builtin_name, type_str)
 		return false
 	}
 
 	// Validate lane counts match
-	// C++ Reference: check_builtin.cpp:849-855
+	// C++ Reference: check_builtin.cpp:1046-1052
 	x_count := get_array_type_count(x.type)
 	y_count := get_array_type_count(y.type)
 
 	if x_count != y_count {
-		error(call, "'%s' mismatched simd vector lengths, got %d vs %d", builtin_name, x_count, y_count)
+		error(call.args[0], "'%s' mismatched simd vector lengths, got '%d' vs '%d'", builtin_name, x_count, y_count)
 		return false
 	}
 
 	// Validate element types
+	// C++ Reference: check_builtin.cpp:1053-1064
 	if !is_type_integer(base_array_type(x.type)) {
-		error(call.args[0], "'%s' expected a #simd type with an integer element", builtin_name)
+		xs := type_to_string(x.type)
+		defer delete(xs)
+		error(call.args[0], "'%s' expected a #simd type with an integer element, got '%s'", builtin_name, xs)
 		return false
 	}
 
 	if !is_type_unsigned(base_array_type(y.type)) {
-		error(call.args[1], "'%s' expected a #simd type with an unsigned integer element as the shifting operand", builtin_name)
+		ys := type_to_string(y.type)
+		defer delete(ys)
+		error(call.args[1], "'%s' expected a #simd type with an unsigned integer element as the shifting operand, got '%s'", builtin_name, ys)
 		return false
 	}
 

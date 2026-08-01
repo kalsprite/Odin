@@ -2820,6 +2820,39 @@ alloc_type_simd_vector :: proc(count: i64, elem: ^Type, generic_count: ^Type = n
 	return t
 }
 
+// type_unsigned_equivalent returns the unsigned integer type of the same size as
+// `t`, recursing through #simd vectors element-wise.
+//
+// C++ Reference: /mnt/c/odin/src/types.cpp:1755-1775
+type_unsigned_equivalent :: proc(t: ^Type) -> ^Type {
+	original_type := t
+	bt := base_type(t)
+	if is_type_simd_vector(bt) {
+		sv := &bt.variant.(Type_Simd_Vector)
+		if is_type_unsigned(sv.elem) {
+			return original_type
+		}
+		return alloc_type_simd_vector(sv.count, type_unsigned_equivalent(sv.elem))
+	}
+
+	switch type_size_of(bt) {
+	case 1:
+		return t_u8
+	case 2:
+		return t_u16
+	case 4:
+		return t_u32
+	case 8:
+		return t_u64
+	case 16:
+		return t_u128
+	}
+
+	// C++ panics here. The port is used as a library, so return the original
+	// type and let the caller's own validation produce the diagnostic.
+	return original_type
+}
+
 // determine_swizzle_array_type determines the result type for a swizzle operation
 // C++ Reference: /mnt/c/odin/src/check_expr.cpp:5331-5355
 //
