@@ -441,6 +441,23 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 	// Track entity usage
 	add_entity_use(ctx, node, entity)
 
+	// Resolve BEFORE dispatching on entity.kind.
+	//
+	// C++ Reference: check_expr.cpp:1956-1960 — add_entity_use, then
+	// `if (e->state == EntityState_Unresolved) check_entity_decl(...)`, and only
+	// THEN `switch (e->kind)`.
+	//
+	// The kind can CHANGE during resolution: `log2 :: intrinsics.constant_log2`
+	// starts as a Constant and check_const_decl rewrites it in place into an
+	// Entity_Builtin (check_decl.odin, mirroring check_decl.cpp:690-698). Testing
+	// `entity.kind == .Builtin` before resolving meant an alias that had not been
+	// resolved yet missed the builtin arm entirely, so `A :: log2(V)` under a
+	// file-scope `#assert` - which forces A to resolve early - never reached the
+	// builtin call dispatch and came back Invalid.
+	if entity.state == .Unresolved {
+		check_entity_decl(ctx, entity, nil, named_type)
+	}
+
 	// Handle builtin entities specially - they don't have types
 	// Must be handled before the type check below
 	if entity.kind == .Builtin {
@@ -462,11 +479,6 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 		return entity
 	}
 
-	// Ensure entity is resolved
-	if entity.state == .Unresolved {
-		// Trigger lazy resolution
-		check_entity_decl(ctx, entity, nil, named_type)
-	}
 
 	// C++ Reference: check_expr.cpp:1957-1968
 	// Report an illegal declaration cycle before the `type == nil` bail-out below: an
