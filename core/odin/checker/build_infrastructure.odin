@@ -24,7 +24,7 @@ import "core:slice"
 // This module provides helper functions for working with those flags
 
 // has_file_flag checks if a file has a specific flag set
-// C++ Reference: checker.cpp:1878 - (c->file->flags & AstFile_IsLazy)
+// C++ Reference: checker.cpp:2071 - (c->file->flags & AstFile_IsLazy)
 has_file_flag :: proc(info: ^Checker_Info, file: ^ast.File, flag: ast.File_Flag) -> bool {
 	if file == nil {
 		return false
@@ -69,19 +69,19 @@ set_file_flags :: proc(info: ^Checker_Info, file: ^ast.File, flags: ast.File_Fla
 }
 
 // is_file_private_to_pkg checks if file is private to package
-// C++ Reference: checker.cpp:4571 - (c->scope->file->flags & AstFile_IsPrivatePkg)
+// C++ Reference: checker.cpp:4908 - (c->scope->file->flags & AstFile_IsPrivatePkg)
 is_file_private_to_pkg :: proc(info: ^Checker_Info, file: ^ast.File) -> bool {
 	return has_file_flag(info, file, .Is_Private_Pkg)
 }
 
 // is_file_private checks if file is private (to file scope)
-// C++ Reference: checker.cpp:4569 - (c->scope->file->flags & AstFile_IsPrivateFile)
+// C++ Reference: checker.cpp:4906 - (c->scope->file->flags & AstFile_IsPrivateFile)
 is_file_private :: proc(info: ^Checker_Info, file: ^ast.File) -> bool {
 	return has_file_flag(info, file, .Is_Private_File)
 }
 
 // is_file_lazy checks if file uses lazy compilation
-// C++ Reference: checker.cpp:1878 - (c->file->flags & AstFile_IsLazy)
+// C++ Reference: checker.cpp:2071 - (c->file->flags & AstFile_IsLazy)
 is_file_lazy :: proc(info: ^Checker_Info, file: ^ast.File) -> bool {
 	return has_file_flag(info, file, .Is_Lazy)
 }
@@ -162,7 +162,7 @@ is_package_init :: proc(info: ^Checker_Info, pkg: ^ast.Package) -> bool {
 // Use is_package_init(info, pkg).
 
 // is_package_builtin checks if package is the builtin package
-// C++ Reference: checker.cpp:1003 - pkg->kind = Package_Builtin
+// C++ Reference: checker.cpp:1035 - pkg->kind = Package_Builtin
 // NOTE: Odin's ast.Package_Kind lacks a Builtin variant
 // Workaround: Check package name since builtin is always named "builtin"
 is_package_builtin :: proc(pkg: ^ast.Package) -> bool {
@@ -208,7 +208,7 @@ get_package_kind_name :: proc(pkg: ^ast.Package) -> string {
 // ======================================================================================
 
 // is_in_runtime_package checks if a file belongs to the runtime package
-// C++ Reference: checker.cpp:4243 - c->scope->file->pkg->kind == Package_Runtime
+// C++ Reference: checker.cpp:4578 - c->scope->file->pkg->kind == Package_Runtime
 is_in_runtime_package :: proc(file: ^ast.File) -> bool {
 	if file == nil || file.pkg == nil {
 		return false

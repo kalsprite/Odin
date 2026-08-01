@@ -211,7 +211,7 @@ check_add_import_decl :: proc(ctx: ^Checker_Context, import_decl: ^ast.Import_De
 
 	// Get import name (C++ line 5298-5301)
 	// In Odin, import names are derived from the package name or can be aliased
-	// C++ Reference: checker.cpp:5298 - path_to_entity_name(id->import_name.string, id->fullpath, false)
+	// C++ Reference: checker.cpp:5631 - path_to_entity_name(id->import_name.string, id->fullpath, false)
 	import_name := path_to_entity_name(import_decl.name.text, import_path, false)
 
 	// Check if this is a blank import (underscore) (C++ line 5299-5301)

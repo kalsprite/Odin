@@ -2573,7 +2573,7 @@ is_type_constant_type :: proc(t: ^Type) -> bool {
 			return true
 		}
 
-		// C++ Reference: types.cpp:1385 - (t->Basic.flags & BasicFlag_ConstantType) != 0
+		// C++ Reference: types.cpp:1465 - (t->Basic.flags & BasicFlag_ConstantType) != 0
 		// BasicFlag_ConstantType = Boolean | Numeric | String | Pointer | Rune
 		return (basic.flags & BASIC_FLAG_CONSTANT_TYPE) != {}
 

@@ -233,8 +233,8 @@ parent_proc_decl_of_entity :: proc(e: ^Entity) -> ^Decl_Info {
 
 // set_ast_entity stores entity for an AST node
 // Replaces C++ direct mutation: node->Ident.entity = e
-// C++ Reference: checker.cpp:1829 - identifier->Ident.entity = entity
-//                checker.cpp:2080 - clause->CaseClause.implicit_entity = e
+// C++ Reference: checker.cpp:2022 - identifier->Ident.entity = entity
+//                checker.cpp:2275 - clause->CaseClause.implicit_entity = e
 set_ast_entity :: proc(info: ^Checker_Info, node: ^ast.Node, entity: ^Entity) {
 	if node == nil || entity == nil {
 		return
@@ -253,7 +253,7 @@ set_ast_entity :: proc(info: ^Checker_Info, node: ^ast.Node, entity: ^Entity) {
 
 // get_ast_entity retrieves entity for an AST node
 // Replaces C++ direct access: node->Ident.entity
-// C++ Reference: check_expr.cpp:268 - return expr->Ident.entity
+// C++ Reference: check_expr.cpp:279 - return expr->Ident.entity
 get_ast_entity :: proc(info: ^Checker_Info, node: ^ast.Node) -> ^Entity {
 	if node == nil {
 		return nil

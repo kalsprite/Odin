@@ -19,7 +19,7 @@ get_file_scope :: proc(info: ^Checker_Info, file: ^ast.File) -> ^Scope {
 }
 
 // set_file_scope associates a scope with a file
-// C++ Reference: checker.cpp:5723 - f->scope = s
+// C++ Reference: checker.cpp:246 - f->scope = s
 set_file_scope :: proc(info: ^Checker_Info, file: ^ast.File, scope: ^Scope) {
 	info.file_scopes[file] = scope
 }

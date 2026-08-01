@@ -359,7 +359,7 @@ check_create_file_scopes :: proc(c: ^Checker) {
 		}
 
 		// C++ line 5729: Initialize export queue
-		// C++ Reference: checker.cpp:5729 - mpmc_init(&pkg->exported_entity_queue, total_pkg_decl_count);
+		// C++ Reference: checker.cpp:6063 - mpmc_init(&pkg->exported_entity_queue, total_pkg_decl_count);
 		// The exported_entity_queue is a multi-producer multi-consumer queue used in C++ for
 		// thread-safe entity collection (see checker.cpp:2044 enqueue, 5780 dequeue).
 		// In multi-threaded mode, entities are enqueued during parallel file collection,
@@ -1304,7 +1304,7 @@ check_add_foreign_import_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 	library_name := fl.name != nil ? fl.name.name : ""
 	if library_name == "" && len(fl.fullpaths) != 0 {
 		// Use first source path as basis for library name
-		// C++ Reference: checker.cpp:5502 - path_to_entity_name(fl->library_name.string, fullpath)
+		// C++ Reference: checker.cpp:5836 - path_to_entity_name(fl->library_name.string, fullpath)
 		// Extract library name from first fullpath
 		if basic_lit, fullpath_ok := fl.fullpaths[0].derived_expr.(^ast.Basic_Lit); fullpath_ok {
 			library_name = path_to_entity_name(library_name, basic_lit.tok.text)

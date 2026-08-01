@@ -924,7 +924,7 @@ base_complex_elem_type :: proc(t: ^Type) -> ^Type {
 			return t_untyped_float
 		}
 	}
-	// C++ Reference: types.cpp:1850 - GB_PANIC("Invalid complex type")
+	// C++ Reference: types.cpp:1985 - GB_PANIC("Invalid complex type")
 	assert(false, "Invalid complex type passed to base_complex_elem_type")
 	return t_invalid
 }
