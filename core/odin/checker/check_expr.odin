@@ -8973,13 +8973,33 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			return data
 		}
 
-		// Build operands from arguments WITHOUT type hints for type inference
-		// Operands must be in parameter order for check_get_params to work correctly
-		// C++ Reference: check_expr.cpp:428-445
+		// Build operands from arguments, in parameter order so check_get_params works.
+		//
+		// Each argument is checked with its DECLARED parameter type as the hint. C++ does
+		// this for polymorphic calls exactly as it does for ordinary ones: the `lhs` array
+		// handed to check_unpack_arguments is the parameter entity array (check_expr.cpp
+		// :7448-7479, :7502), and a polymorphic procedure is not special-cased there.
+		//
+		// The hint matters because a parameter can be non-polymorphic even when the
+		// procedure is -- `recvfrom :: proc(sock: Fd, buf: []u8, flags: Socket_Msg,
+		// addr: ^$T)` has a fully known `flags` type. Without the hint an untyped
+		// compound literal argument like `{.TRUNC}` has nothing to resolve against and
+		// failed with "Missing type in compound literal".
 		poly_param_count := pt.param_count
 		poly_operands := make([]Operand, poly_param_count, context.temp_allocator)
 		poly_visited := make([]bool, poly_param_count, context.temp_allocator)
 		positional_index := 0
+
+		poly_param_types := make([]^Type, poly_param_count, context.temp_allocator)
+		if pt.params != nil {
+			if params_tuple, is_tuple := pt.params.variant.(Type_Tuple); is_tuple {
+				for entity, i in params_tuple.variables {
+					if i < poly_param_count {
+						poly_param_types[i] = entity_type(entity)
+					}
+				}
+			}
+		}
 
 		for arg in call.args {
 			if fv, is_field := arg.derived.(^ast.Field_Value); is_field {
@@ -8989,7 +9009,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 					if param_idx >= 0 && param_idx < poly_param_count {
 						arg_op: Operand
 						// Use check_expr_or_type to allow type arguments like int in zero(int)
-						check_expr_or_type(ctx, &arg_op, fv.value, nil)
+						check_expr_or_type(ctx, &arg_op, fv.value, poly_param_types[param_idx])
 						poly_operands[param_idx] = arg_op
 						poly_visited[param_idx] = true
 					}
@@ -8999,7 +9019,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 				if positional_index < poly_param_count {
 					arg_op: Operand
 					// Use check_expr_or_type to allow type arguments like int in zero(int)
-					check_expr_or_type(ctx, &arg_op, arg, nil)
+					check_expr_or_type(ctx, &arg_op, arg, poly_param_types[positional_index])
 					poly_operands[positional_index] = arg_op
 					poly_visited[positional_index] = true
 					positional_index += 1
