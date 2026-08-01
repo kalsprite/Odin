@@ -3348,6 +3348,15 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			// procedure. Attempting that swallowed EVERY subsequent diagnostic in the package
 			// (see LEDGER task 230) -- the block/continuation interaction needs its own
 			// investigation before it is reproduced here.
+			// C++ Reference: check_builtin.cpp:2639 ERROR_BLOCK() -- keeps the continuation
+			// line attached to this error instead of being flushed ahead of it.
+			begin_error_block()
+			defer end_error_block()
+			defer if ctx.proc_name != "" {
+				// NOTE: deliberately NOT `delete`d -- see the #panic arm below.
+				sig := type_to_string(ctx.curr_proc_sig)
+				error_line("\tCalled within '%s' :: %s\n", ctx.proc_name, sig)
+			}
 			arg1 := expr_to_string(call_expr.args[0])
 			defer delete(arg1)
 			if len(call_expr.args) == 1 {
@@ -3366,7 +3375,12 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 	if name == "panic" {
 		// #panic(message?) - compile-time panic
-		// C++ Reference: check_builtin.cpp panic handling
+		// C++ Reference: check_builtin.cpp:2664-2686. ERROR_BLOCK() spans the WHOLE arm there,
+		// so the "Called within" continuation stays attached to the panic error. Without it the
+		// buffered `error` and the immediate `error_line` come out in the wrong order and the
+		// continuation prints BEFORE the diagnostic it belongs to.
+		begin_error_block()
+		defer end_error_block()
 		if len(call_expr.args) > 1 {
 			error(call_expr.close, "'#panic' expects 0 or 1 arguments, got %d", len(call_expr.args))
 			return false
@@ -3387,6 +3401,15 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			}
 		} else {
 			error(call_expr.expr, "Compile time panic")
+		}
+
+		// C++ Reference: check_builtin.cpp:2678-2682 -- same continuation as #assert.
+		// NOTE: no `delete` on the type_to_string result. type_to_string does not always
+		// return freshly-allocated storage, and freeing it aborts with
+		// "free(): invalid pointer" (LEDGER tasks 192 and 231).
+		if ctx.proc_name != "" {
+			sig := type_to_string(ctx.curr_proc_sig)
+			error_line("\tCalled within '%s' :: %s\n", ctx.proc_name, sig)
 		}
 
 		// #panic diverges (never returns)
