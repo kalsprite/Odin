@@ -3338,22 +3338,24 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 		cond_val := exact_value_to_bool(cond_op.value)
 		if !cond_val {
-			// Assertion failed
-			if len(call_expr.args) == 2 {
-				// Check message argument
-				msg_op: Operand
-				check_expr(ctx, &msg_op, call_expr.args[1])
-				if msg_op.mode == .Constant {
-					if str, is_str := msg_op.value.(string); is_str {
-						error(call_expr.expr, "Compile-time assertion failed: %s", str)
-					} else {
-						error(call_expr.expr, "Compile-time assertion failed")
-					}
-				} else {
-					error(call_expr.expr, "Compile-time assertion failed")
-				}
+			// C++ Reference: check_builtin.cpp:2638-2649. C++ prints the CONDITION EXPRESSION,
+			// not the word "failed", and in the two-argument form appends the second argument
+			// in parentheses. The port printed "Compile-time assertion failed" -- a hyphen C++
+			// does not use, and no condition at all.
+			//
+			// NOT reproduced: C++ wraps this in ERROR_BLOCK() and adds a
+			// "\tCalled within '<proc>' :: <sig>" continuation via error_line when inside a
+			// procedure. Attempting that swallowed EVERY subsequent diagnostic in the package
+			// (see LEDGER task 230) -- the block/continuation interaction needs its own
+			// investigation before it is reproduced here.
+			arg1 := expr_to_string(call_expr.args[0])
+			defer delete(arg1)
+			if len(call_expr.args) == 1 {
+				error(call_expr.expr, "Compile time assertion: %s", arg1)
 			} else {
-				error(call_expr.expr, "Compile-time assertion failed")
+				arg2 := expr_to_string(call_expr.args[1])
+				defer delete(arg2)
+				error(call_expr.expr, "Compile time assertion: %s (%s)", arg1, arg2)
 			}
 		}
 
