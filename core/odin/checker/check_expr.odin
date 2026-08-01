@@ -9332,6 +9332,16 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 	// Type check each argument
 	// Reference: /mnt/c/odin/src/check_expr.cpp:6480-6850 (simplified)
 	for i := 0; i < param_count; i += 1 {
+		// The variadic slot was already checked above: expanded arguments against the
+		// slice type, unexpanded ones element-by-element against the element type.
+		// `ordered_operands` never holds a packed operand for it, so checking it here
+		// would compare a single element against the slice type -- and in the
+		// unexpanded case the slot is still zero-valued, which read as an invalid
+		// argument and failed the call with no diagnostic at all.
+		if pt.variadic && i == variadic_index {
+			continue
+		}
+
 		// Skip polymorphic parameters that don't need runtime arguments:
 		// - Type_Name: polymorphic type parameters ($T: typeid) - resolved during instantiation
 		// - Constant: polymorphic constant parameters ($N: int) - resolved during instantiation
