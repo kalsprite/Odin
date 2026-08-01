@@ -3736,6 +3736,25 @@ determine_type_from_polymorphic :: proc(ctx: ^Checker_Context, poly_type: ^Type,
 		return t_invalid
 	}
 
+	// If the parameter type has no polymorphic variable left in it - because an EARLIER
+	// argument already bound it - then there is nothing to determine, and this is an ordinary
+	// assignability question about the real operand.
+	//
+	// This matters because `is_polymorphic_type_assignable` takes only `operand.type`, so the
+	// operand's constant VALUE is discarded before it can be judged. `divmod(delta.nanos, 1e9)`
+	// in core/time/datetime binds T = i64 from the first argument and then hands the second an
+	// untyped-float TYPE with no value; representability of 1e9 as an i64 cannot be decided from
+	// that, so it was rejected with "Cannot determine polymorphic type from parameter:
+	// 'untyped float' to 'i64'". C++ ends up in check_is_assignable_to on the real operand for
+	// this case (check_expr.cpp:1425-1427); doing it here reaches the same answer without
+	// changing the shared predicate's signature.
+	if !is_type_polymorphic(poly_type) {
+		o := operand
+		if check_is_assignable_to(ctx, &o, poly_type) {
+			return poly_type
+		}
+	}
+
 	// C++ line 1587-1589: Try to assign operand type to polymorphic type
 	// This performs the actual type parameter binding through is_polymorphic_type_assignable
 	if is_polymorphic_type_assignable(ctx, poly_type, operand.type, false, modify_type) {
