@@ -15,6 +15,33 @@ import "core:odin/ast"
 import "core:odin/tokenizer"
 import "core:unicode"
 
+// lookup_imported_package maps an import declaration's path to the package it names.
+//
+// C++ has it easier here: the parser stores the *resolved absolute* path in id->fullpath
+// (determine_path_from_string, src/parser.cpp:6236), so the info->packages key is globally
+// unique and the lookup is a single hit. The Odin parser leaves fullpath as the literal source
+// text (parser.odin:3936), so a relative import such as `import "../../_sha3"` only finds its
+// package if the loader happened to register that exact spelling - which it does not when the
+// directory was already reachable under another spelling (`core:crypto/_sha3`), because the
+// `already loaded` guard in load_package_with_dependencies skips registration entirely.
+//
+// Resolving the path against the importing package's directory and retrying under the resolved
+// key - which the loader always registers - restores the C++ property that a package is
+// identified by where it is, not by how it was spelled.
+lookup_imported_package :: proc(info: ^Checker_Info, import_path: string, importer: ^ast.Package) -> (^ast.Package, bool) {
+	if pkg, ok := info.packages[import_path]; ok {
+		return pkg, true
+	}
+	if importer != nil {
+		if resolved, res_ok := resolve_import_path(import_path, importer.fullpath, context.temp_allocator); res_ok {
+			if pkg, ok := info.packages[resolved]; ok {
+				return pkg, true
+			}
+		}
+	}
+	return nil, false
+}
+
 // Import_Graph_Node is defined in check_decl.odin
 // Import_Graph is the complete import dependency graph
 Import_Graph :: struct {
@@ -165,7 +192,7 @@ check_add_import_decl :: proc(ctx: ^Checker_Context, import_decl: ^ast.Import_De
 		}
 	} else {
 		// Look up package in package map (C++ line 5277-5288)
-		if pkg, ok := ctx.info.packages[import_path]; ok {
+		if pkg, ok := lookup_imported_package(ctx.info, import_path, ctx.pkg); ok {
 			scope = get_package_scope(ctx.info, pkg)
 		} else {
 			error_node(import_decl, "Unable to find package: %s", import_path)
@@ -486,7 +513,7 @@ find_import_path_recursive :: proc(graph: ^Import_Graph, current: ^Import_Graph_
 				import_path := import_decl.fullpath
 
 				// Find imported package node
-				imported_pkg, pkg_ok := graph.checker.info.packages[import_path]
+				imported_pkg, pkg_ok := lookup_imported_package(&graph.checker.info, import_path, pkg)
 				if !pkg_ok {
 					continue
 				}

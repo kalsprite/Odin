@@ -2272,7 +2272,7 @@ generate_import_dependency_graph :: proc(checker: ^Checker, allocator := context
 			for decl in file.decls {
 				if import_decl, ok := decl.derived.(^ast.Import_Decl); ok {
 					// Look up imported package
-					if imported_pkg, pkg_ok := checker.info.packages[import_decl.fullpath]; pkg_ok {
+					if imported_pkg, pkg_ok := lookup_imported_package(&checker.info, import_decl.fullpath, pkg); pkg_ok {
 						imported_node := get_or_create_node(&graph, imported_pkg)
 
 						// Add edge: parent imports imported

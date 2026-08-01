@@ -482,8 +482,18 @@ load_package_with_dependencies :: proc(
 		// Register in info.packages for the checker using the IMPORT path
 		// The checker looks up packages by their import path (like "core:fmt")
 		if info != nil {
-			// Register by import path if we have one
-			if len(import_path) > 0 {
+			// Register by import path if we have one.
+			//
+			// A relative spelling (`./x`, `../x`) is deliberately NOT registered: it is not a
+			// globally unique key, so two packages in different directories importing the
+			// same literal text would collide on whichever was loaded first and the second
+			// would silently resolve to the wrong package. Relative imports are found through
+			// the fullpath key below, via lookup_imported_package. C++ has no equivalent
+			// hazard because determine_path_from_string (src/parser.cpp:6236) resolves the
+			// path before it ever becomes a key.
+			if len(import_path) > 0 &&
+			   !strings.has_prefix(import_path, "./") &&
+			   !strings.has_prefix(import_path, "../") {
 				register_package(info, import_path, pkg)
 			}
 			// Also register by fullpath as a fallback
