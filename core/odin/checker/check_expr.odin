@@ -4836,6 +4836,15 @@ check_set_index_data :: proc(operand: ^Operand, t: ^Type, indirection: bool, max
 		}
 		return true
 
+	case .Fixed_Capacity_Dynamic_Array:
+		// C++ Reference: check_expr.cpp:9132-9133 — indexes exactly like [dynamic]T.
+		fc := t.variant.(Type_Fixed_Capacity_Dynamic_Array)
+		operand.type = fc.elem
+		if operand.mode != .Constant {
+			operand.mode = .Variable
+		}
+		return true
+
 	case .Struct:
 		strct := &t.variant.(Type_Struct)
 		// SOA (Structure-of-Arrays) indexing
@@ -5439,6 +5448,13 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 		valid = true
 		da_type := t.variant.(Type_Dynamic_Array)
 		operand.type = alloc_type_slice(da_type.elem)
+
+	case .Fixed_Capacity_Dynamic_Array:
+		// `[dynamic; N]T` slices to []T, as [dynamic]T does.
+		// C++ Reference: check_expr.cpp:12060-12070.
+		valid = true
+		fc_type := t.variant.(Type_Fixed_Capacity_Dynamic_Array)
+		operand.type = alloc_type_slice(fc_type.elem)
 
 	case .Struct:
 		// SOA struct slicing
@@ -7544,6 +7560,19 @@ write_type_to_string :: proc(b: ^strings.Builder, t: ^Type, shorthand := true) {
 		da := t.variant.(Type_Dynamic_Array)
 		strings.write_string(b, "[dynamic]")
 		write_type_to_string(b, da.elem, shorthand)
+
+	case .Fixed_Capacity_Dynamic_Array:
+		// C++ Reference: types.cpp:4691-4694. Without this arm every diagnostic
+		// mentioning the type read "<unknown type>".
+		fc := t.variant.(Type_Fixed_Capacity_Dynamic_Array)
+		strings.write_string(b, "[dynamic; ")
+		if fc.generic_capacity != nil {
+			write_type_to_string(b, fc.generic_capacity, shorthand)
+		} else {
+			strings.write_i64(b, fc.capacity)
+		}
+		strings.write_string(b, "]")
+		write_type_to_string(b, fc.elem, shorthand)
 
 	case .Map:
 		m := t.variant.(Type_Map)

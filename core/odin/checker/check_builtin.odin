@@ -675,6 +675,21 @@ check_builtin_len_cap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 		value = exact_value_i64(arr.count)
 		result_type = t_untyped_integer
 
+	} else if is_type_fixed_capacity_dynamic_array(op_type) {
+		// `[dynamic; N]T`: the CAPACITY is a compile-time constant (it is part of the
+		// type), while the length is a runtime value.
+		// C++ Reference: check_builtin.cpp:2970-2982.
+		ct := core_type(op_type)
+		fc := ct.variant.(Type_Fixed_Capacity_Dynamic_Array)
+		if id == .Cap {
+			mode = .Constant
+			value = exact_value_i64(fc.capacity)
+			result_type = t_untyped_integer
+		} else {
+			assert(id == .Len)
+			mode = .Value
+		}
+
 	} else if is_type_slice(op_type) {
 		// Slice len/cap - runtime value
 		// Both len and cap are valid for slices

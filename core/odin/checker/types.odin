@@ -742,6 +742,16 @@ is_type_matrix :: proc(t: ^Type) -> bool {
 
 // is_type_bit_set checks if a type is a bit_set type
 // Ported from types.cpp:1877-1881
+// is_type_fixed_capacity_dynamic_array reports whether a type is `[dynamic; N]T`.
+// C++ Reference: types.cpp:1731.
+is_type_fixed_capacity_dynamic_array :: proc(t: ^Type) -> bool {
+	bt := base_type(t)
+	if bt == nil {
+		return false
+	}
+	return bt.kind == .Fixed_Capacity_Dynamic_Array
+}
+
 is_type_bit_set :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {
