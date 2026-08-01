@@ -5184,8 +5184,16 @@ is_polymorphic_type_assignable :: proc(
 		return false
 	}
 
-	// === Type_Named === (C++ lines 1360-1368)
-	if poly_base.kind == .Named {
+	// === Type_Named === (C++ check_expr.cpp:1429-1436)
+	//
+	// C++ switches on `poly->kind`, NOT on base_type(poly)->kind. base_type of a Named type is
+	// never Named, so testing poly_base here made this arm UNREACHABLE and every `Box($T)`
+	// fell through to the Struct arm below. That was survivable for a bare polymorphic struct
+	// parameter but not for `^Box($T)`: the pointer arm recurses on the element, the element is
+	// a Named, and without this arm it never reached check_type_specialization_to - so
+	// `queue.mpsc_is_empty(&c.info.entity_queue)` reported the self-contradictory
+	// "Cannot determine polymorphic type from parameter: '^MPSC_Queue' to '^MPSC_Queue'".
+	if poly.kind == .Named {
 		// Try specialized type first
 		if check_type_specialization_to(ctx, poly, source, compound, modify_type) {
 			return true
@@ -5245,7 +5253,7 @@ is_polymorphic_type_assignable :: proc(
 		poly_ptr := poly_base.variant.(Type_Pointer)
 		source_ptr := source_base.variant.(Type_Pointer)
 		// Recursively check element types
-		return is_polymorphic_type_assignable(ctx, poly_ptr.elem, source_ptr.elem, compound, modify_type)
+		return is_polymorphic_type_assignable(ctx, poly_ptr.elem, source_ptr.elem, true, modify_type)
 	}
 
 	// Handle MultiPointer → Pointer conversion (C++ lines 1388-1393)
@@ -5253,21 +5261,21 @@ is_polymorphic_type_assignable :: proc(
 		poly_ptr := poly_base.variant.(Type_Pointer)
 		source_mp := source_base.variant.(Type_Multi_Pointer)
 		// Allow multi-pointer to pointer conversion with element subtype check
-		return is_polymorphic_type_assignable(ctx, poly_ptr.elem, source_mp.elem, compound, modify_type)
+		return is_polymorphic_type_assignable(ctx, poly_ptr.elem, source_mp.elem, true, modify_type)
 	}
 
 	// === Type_MultiPointer === (C++ lines 1399-1413)
 	if poly_base.kind == .Multi_Pointer && source_base.kind == .Multi_Pointer {
 		poly_mp := poly_base.variant.(Type_Multi_Pointer)
 		source_mp := source_base.variant.(Type_Multi_Pointer)
-		return is_polymorphic_type_assignable(ctx, poly_mp.elem, source_mp.elem, compound, modify_type)
+		return is_polymorphic_type_assignable(ctx, poly_mp.elem, source_mp.elem, true, modify_type)
 	}
 
 	// Handle Pointer → MultiPointer conversion
 	if poly_base.kind == .Multi_Pointer && source_base.kind == .Pointer {
 		poly_mp := poly_base.variant.(Type_Multi_Pointer)
 		source_ptr := source_base.variant.(Type_Pointer)
-		return is_polymorphic_type_assignable(ctx, poly_mp.elem, source_ptr.elem, compound, modify_type)
+		return is_polymorphic_type_assignable(ctx, poly_mp.elem, source_ptr.elem, true, modify_type)
 	}
 
 	// === Type_Array === (C++ lines 1409-1418)
