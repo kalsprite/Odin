@@ -1887,7 +1887,19 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 
 	// C++ line 1075-1087: String
 	case string:
-		// C++ line 1076: Quote the string using quote_to_ascii
+		// KNOWN DIVERGENCE, deliberately left in place. C++ exact_value.cpp:1102 quotes the
+		// string (its quote_to_ascii, string.cpp:851, always emits the surrounding quote), so
+		// C++ renders `"not an int"` where the port renders `not an int`.
+		//
+		// It cannot be fixed here: unlike C++, the port uses exact_value_to_string to READ
+		// attribute values, not merely to format diagnostics. Adding the quotes made every
+		// string-valued attribute compare against a quoted literal and fail --
+		//     Invalid link name: "__$startup_runtime"
+		//     Invalid linkage '"strong"'
+		//     Expected 'file' or 'package' for @(private), got '"file"'
+		// -- taking the sweep from 6 to 34,412 diagnostics. C++ reads `ev.value_string`
+		// directly at those sites. The real fix is to stop routing attribute reads through
+		// this formatter; see LEDGER task 232.
 		limit := max(string_limit, 36)
 		if len(val) <= limit {
 			quoted := quote_to_ascii(val, context.temp_allocator)
@@ -1922,17 +1934,22 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 			strings.write_string(buf, str)
 		}
 
-	// C++ line 1109-1110: Float
+	// C++ Reference: exact_value.cpp:1135-1141. The source writes "%.17g", but gb's own
+	// formatter renders that as SEVENTEEN DECIMAL PLACES, not 17 significant digits -- the
+	// oracle prints 1.5 as "1.50000000000000000" and 123.456 as "123.45600000000000304",
+	// the latter showing the f64 rounding artifact at the 17th place. Observable behaviour
+	// is what parity means here, so match the rendering rather than the format specifier.
+	// The port previously used plain "%f" (3 decimals), losing that precision entirely.
 	case f64:
-		fmt.sbprintf(buf, "%f", val)
+		fmt.sbprintf(buf, "%.17f", val)
 
-	// C++ line 1111-1112: Complex
+	// C++ line 1138
 	case complex128:
-		fmt.sbprintf(buf, "%f+%fi", real(val), imag(val))
+		fmt.sbprintf(buf, "%.17f+%.17fi", real(val), imag(val))
 
-	// C++ line 1113-1114: Quaternion
+	// C++ line 1140
 	case quaternion256:
-		fmt.sbprintf(buf, "%f+%fi+%fj+%fk", real(val), imag(val), jmag(val), kmag(val))
+		fmt.sbprintf(buf, "%.17f+%.17fi+%.17fj+%.17fk", real(val), imag(val), jmag(val), kmag(val))
 
 	// C++ line 1116-1117: Pointer
 	case Exact_Value_Pointer:

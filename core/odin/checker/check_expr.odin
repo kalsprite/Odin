@@ -2058,7 +2058,11 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 		// NOTE(bill): Allow any boolean types within `&&` and `||`
 	} else if !are_types_identical(x.type, y.type) {
 		if x.type != t_invalid && y.type != t_invalid {
-			error(op.pos, "Mismatched types in binary expression: '%s' vs '%s'", type_to_string(x.type), type_to_string(y.type))
+			// C++ Reference: check_expr.cpp:4649 -- the EXPRESSION text comes first:
+			//   "Mismatched types in binary expression '%s' : '%s' vs '%s'"
+			expr_str := expr_to_string(node)
+			defer delete(expr_str)
+			error(op.pos, "Mismatched types in binary expression '%s' : '%s' vs '%s'", expr_str, type_to_string(x.type), type_to_string(y.type))
 		}
 		x.mode = .Invalid
 		return
@@ -3587,6 +3591,17 @@ check_is_expressible :: proc(ctx: ^Checker_Context, operand: ^Operand, target_ty
 
 		// Error reporting for expressibility failures
 		// C++ Reference: check_expr.cpp:2545-2578
+		// C++ Reference: check_expr.cpp:2754-2757 binds FOUR strings, and every message in
+		// this family uses the EXPRESSION text, not the source type:
+		//     a = expr_to_string(o->expr)        the expression
+		//     b = type_to_string(type)           the TARGET type
+		//     c = type_to_string(o->type)        the SOURCE type
+		//     s = exact_value_to_string(o->value)
+		// The port bound only three and passed the source TYPE wherever C++ passes `a`, so
+		// every one of these four diagnostics named a type where C++ names the expression,
+		// and the general arm dropped the "from '<source>'" clause entirely.
+		expr_str := expr_to_string(operand.expr)
+		defer delete(expr_str)
 		src_type_str := type_to_string(operand.type)
 		dst_type_str := type_to_string(target_type)
 		value_str := exact_value_to_string(operand.value)
@@ -3594,14 +3609,18 @@ check_is_expressible :: proc(ctx: ^Checker_Context, operand: ^Operand, target_ty
 
 		if is_type_numeric(operand.type) && is_type_numeric(target_type) {
 			if !is_type_integer(operand.type) && is_type_integer(target_type) {
-				error(operand.expr, "'%s' truncated to '%s', got %s", src_type_str, dst_type_str, value_str)
+				// C++ check_expr.cpp:2771
+				error(operand.expr, "'%s' truncated to '%s', got %s", expr_str, dst_type_str, value_str)
 			} else if are_types_identical(operand.type, target_type) {
-				error(operand.expr, "Numeric value '%s' from '%s' cannot be represented by '%s'", value_str, src_type_str, dst_type_str)
+				// C++ check_expr.cpp:2779
+				error(operand.expr, "Numeric value '%s' from '%s' cannot be represented by '%s'", value_str, expr_str, dst_type_str)
 			} else {
-				error(operand.expr, "Cannot convert numeric value '%s' from '%s' to '%s'", value_str, src_type_str, dst_type_str)
+				// C++ check_expr.cpp:2781
+				error(operand.expr, "Cannot convert numeric value '%s' from '%s' to '%s' from '%s'", value_str, expr_str, dst_type_str, src_type_str)
 			}
 		} else {
-			error(operand.expr, "Cannot convert '%s' to '%s', got %s", src_type_str, dst_type_str, value_str)
+			// C++ check_expr.cpp:2787
+			error(operand.expr, "Cannot convert '%s' to '%s' from '%s', got %s", expr_str, dst_type_str, src_type_str, value_str)
 		}
 
 		operand.mode = .Invalid
