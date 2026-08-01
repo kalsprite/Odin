@@ -4139,13 +4139,47 @@ is_type_valid_bit_set_elem :: proc(t: ^Type) -> bool {
 
 // is_type_valid_vector_elem checks if a type can be a vector element
 // C++ Reference: checker.cpp:2291-2307
+// C++ Reference: /mnt/c/odin/src/types.cpp:2324-2347.
+//
+// The port previously hand-rolled this as a raw Basic_Kind RANGE test,
+// `(kind >= .I8 && kind <= .F64) || (kind >= .Complex32 && kind <= .Quaternion256)`,
+// which diverged from C++ in four ways at once:
+//   - REJECTED booleans        — C++ accepts them (core/simd declares b8/b16/b32/b64 vectors)
+//   - REJECTED rawptr          — C++ accepts it
+//   - ACCEPTED complex/quaternion — C++ does not list them, so they are invalid
+//   - ignored the endian flags and the 128-bit integer exclusion entirely
+//
+// Range tests over a Basic_Kind enum are inherently fragile here: they encode the
+// declaration order of the enum rather than the property being tested.
 is_type_valid_vector_elem :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
+	if bt == nil {
+		return false
+	}
 
 	if basic, ok := bt.variant.(Type_Basic); ok {
-		kind := basic.kind
-		// Numeric types only
-		return (kind >= .I8 && kind <= .F64) || (kind >= .Complex32 && kind <= .Quaternion256)
+		// C++ line 2327-2332: endian-specific types are not valid vector elements.
+		flags := basic_flags_table[basic.kind]
+		if .Endian_Little in flags || .Endian_Big in flags {
+			return false
+		}
+		// C++ line 2333-2335: integers, except the 128-bit ones.
+		if is_type_integer(bt) {
+			#partial switch basic.kind {
+			case .I128, .U128:
+				return false
+			}
+			return true
+		}
+		if is_type_float(bt) {
+			return true
+		}
+		if is_type_boolean(bt) {
+			return true
+		}
+		if basic.kind == .Rawptr {
+			return true
+		}
 	}
 
 	return false
