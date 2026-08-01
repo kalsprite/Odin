@@ -368,15 +368,40 @@ make_soa_struct_internal :: proc(ctx: ^Checker_Context, array_type_expr: ^ast.No
 	// C++ lines 3118-3120: Allocate mutex for thread-safe completion
 	ts.soa_mutex = new(sync.Mutex, ctx.checker.allocator)
 
-	// C++ Reference: check_type.cpp:3430-3440. C++ enqueues ONLY in the `else` branch, i.e. when the
-	// struct is not already complete. A polymorphic #soa struct is marked complete immediately (it
-	// has no fields to build until instantiation) and is never queued.
+	// C++ Reference: check_type.cpp:3320-3440. C++ builds the #soa fields EAGERLY whenever the
+	// element type's fields are already resolved (`old_struct->Struct.fields_wait_signal.futex.load()`,
+	// check_type.cpp:3371) and enqueues ONLY when they are not (the `is_complete` else-branch at
+	// 3428-3440). A polymorphic #soa struct is complete immediately - it has no fields to build
+	// until instantiation - and is never queued.
 	//
-	// The port queued unconditionally. That was harmless while polymorphic elements were rejected
-	// outright, but once they are accepted these structs get created during INSTANTIATION - after
-	// drain_and_complete_soa_types has already run - so the queue was still non-empty at teardown
-	// and tripped "MPSC queue must be empty before destroy" (core/mem/tlsf).
-	if !is_polymorphic {
+	// The port deferred unconditionally, which is not merely a scheduling difference: a freshly
+	// minted `#soa[]T` had ZERO fields until the next drain, so are_types_identical compared it
+	// against an already-completed `#soa[]T`, saw len(fields) 0 vs N, and reported two
+	// identically-spelled types as different - e.g.
+	//   Cannot assign value of type '#soa[]Struct_Field' to '#soa[]Struct_Field' in return statement
+	// on core:reflect's struct_fields_zipped. Anything that mints an #soa type and immediately
+	// compares or uses it hit this; soa_zip is just the loudest case.
+	//
+	// Readiness is `fields present AND no outstanding resolution`. That is deliberately the
+	// conservative direction: C++'s wait signal is set-when-complete, whereas sync.Wait_Group
+	// counts DOWN to zero and a struct that never began resolution also reads zero, so the
+	// counter alone would call an empty struct complete. Requiring fields to actually be there
+	// means an unresolved element defers exactly as it did before.
+	//
+	// Array elements stay on the queue: C++ spreads them into x/y/z/w fields inline here, which
+	// the port's complete_soa_type has no arm for (it asserts the element is a struct). That gap
+	// is pre-existing and out of scope for this change.
+	elem_fields_ready := false
+	if !is_polymorphic && (is_type_struct(bt) || is_type_raw_union(bt)) {
+		old_ts := &bt.variant.(Type_Struct)
+		elem_fields_ready = len(old_ts.fields) > 0 && sync.atomic_load(&old_ts.fields_wait_signal.counter) == 0
+	}
+
+	if is_polymorphic {
+		// Nothing to build, and nothing to queue.
+	} else if elem_fields_ready {
+		complete_soa_type(ctx.checker, t, false)
+	} else {
 		queue.mpsc_enqueue(&ctx.checker.soa_types_to_complete, t)
 	}
 
