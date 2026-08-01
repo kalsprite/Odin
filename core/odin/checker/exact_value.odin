@@ -552,8 +552,54 @@ big_int_not :: proc(dst, x: ^big.Int, bit_count: i32, is_signed: bool) {
 		}
 	}
 
-	// For larger values, use the library complement
-	// Note: This gives 2's complement semantics which may differ from fixed-width NOT
+	// Widths above 64 bits - i.e. i128/u128 - reach here.
+	//
+	// `int_bit_complement` alone is ARBITRARY-PRECISION two's complement: it turns 0 into -1 and
+	// never masks to the type's width. So `~u128(0)` evaluated to -1 instead of 2^128-1, and the
+	// caller's check_is_expressible then reported the self-contradictory
+	// "Numeric value '-1' from 'u128' cannot be represented by 'u128'". base/runtime's i128
+	// helpers are written with `~u128(0)` masks, so this reached every package that pulls the
+	// runtime in - 338 of the 353 diagnostics in this class.
+	//
+	// C++'s big_int_not (big_int.cpp:500-547) complements and then masks to the precision. Do the
+	// same arithmetically, which needs no bitwise ops on negative values:
+	//
+	//	mask   = 2^bit_count - 1
+	//	folded = x mod 2^bit_count        (int_mod is Euclidean, so this is in [0, 2^bit_count))
+	//	result = mask - folded            (== mask XOR folded for a value already inside the mask)
+	//	if signed and the sign bit is set: result -= 2^bit_count
+	if bit_count > 0 {
+		two_n, mask, folded, res, one: big.Int
+		defer big.destroy(&two_n, &mask, &folded, &res, &one)
+
+		ok := true
+		if err := big.internal_int_set_from_integer(&one, u64(1), false); err != nil { ok = false }
+		if err := big.internal_int_power_of_two(&two_n, int(bit_count)); err != nil { ok = false }
+		if ok {
+			if err := big.int_sub(&mask, &two_n, &one); err != nil { ok = false }
+		}
+		if ok {
+			if err := big.int_mod(&folded, x, &two_n); err != nil { ok = false }
+		}
+		if ok {
+			if err := big.int_sub(&res, &mask, &folded); err != nil { ok = false }
+		}
+		if ok && is_signed {
+			bit, bit_err := big.int_bitfield_extract_single(&res, int(bit_count) - 1)
+			if bit_err != nil {
+				ok = false
+			} else if bit == 1 {
+				if sub_err := big.int_sub(&res, &res, &two_n); sub_err != nil { ok = false }
+			}
+		}
+		if ok {
+			if err := big.int_copy(dst, &res); err == nil {
+				return
+			}
+		}
+	}
+
+	// Unknown/zero width: fall back to the unmasked complement, as before.
 	err := big.int_bit_complement(dst, x)
 	if err != nil {
 		panic("big_int_not: Bitwise NOT operation failed")
