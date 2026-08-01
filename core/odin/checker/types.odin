@@ -616,15 +616,33 @@ is_type_complex :: proc(t: ^Type) -> bool {
 
 // is_type_numeric checks if type is numeric
 // C++ Reference: /mnt/c/odin/src/types.cpp:2094-2098
+// C++ Reference: /mnt/c/odin/src/types.cpp:1373-1386
+//
+// The Enum and Array arms are not decoration: `+` and `-` test
+// is_type_numeric on the operand type directly (check_expr.cpp:2182, 2197), so
+// without the Enum arm an enum member defined from an earlier one -
+// `Custom_Begin = COUNT + 1` - is rejected as non-numeric.
 is_type_numeric :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
-	if bt == nil || bt.kind != .Basic {
+	if bt == nil {
 		return false
 	}
 
-	basic := bt.variant.(Type_Basic)
-	// Check if type has any numeric flag (Integer, Float, Complex, or Quaternion)
-	return (basic.flags & BASIC_FLAG_NUMERIC) != {}
+	#partial switch bt.kind {
+	case .Basic:
+		basic := bt.variant.(Type_Basic)
+		// Any numeric flag (Integer, Float, Complex, or Quaternion)
+		return (basic.flags & BASIC_FLAG_NUMERIC) != {}
+	case .Enum:
+		e := &bt.variant.(Type_Enum)
+		return is_type_numeric(e.base_type)
+	case .Array:
+		// NOTE(bill) in C++: "TODO(bill): Should this be here?" - kept for parity.
+		a := &bt.variant.(Type_Array)
+		return is_type_numeric(a.elem)
+	}
+
+	return false
 }
 
 // is_type_string checks if type is a string
