@@ -1180,9 +1180,18 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 					indices_visited[idx_val] = true
 				}
 
-				// Check value expression
+				// Check value expression WITH the element type as the hint.
+				//
+				// C++ Reference: check_expr.cpp:11145 -
+				// `check_expr_with_type_hint(c, &operand, fv->value, elem_type)`.
+				// The port hinted the INDEX (fv.field, just above) but not the value, so a
+				// nested braced literal had no type to resolve against and reported
+				// "Missing type in compound literal". Every `[Enum]Bit_Set{ .A = {.X} }` and
+				// `[Enum]Struct{ .A = {1, 2} }` failed - including the checker's own
+				// basic_flags_table and builtin_proc_infos. Plain `[N]T{...}` and `[]T{...}`
+				// were unaffected, which is why this looked narrower than it was.
 				value_operand := Operand{}
-				check_expr(ctx, &value_operand, fv.value)
+				check_expr_with_type_hint(ctx, &value_operand, fv.value, elem_type)
 
 				if value_operand.mode == .Invalid {
 					continue
@@ -1214,8 +1223,10 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			// Positional syntax: [Enum]T{val1, val2, val3}
 			// Reference: C++ lines 10300-10400
 			for elem in cl.elems {
+				// Same hint as the named path above - a positional enumerated-array element
+				// is still an element of `elem_type` and a nested braced literal needs it.
 				elem_operand := Operand{}
-				check_expr(ctx, &elem_operand, elem)
+				check_expr_with_type_hint(ctx, &elem_operand, elem, elem_type)
 
 				if elem_operand.mode == .Invalid {
 					continue
