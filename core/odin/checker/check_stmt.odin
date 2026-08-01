@@ -723,38 +723,21 @@ check_stmt_list :: proc(ctx: ^Checker_Context, stmts: []^ast.Stmt, flags: Stmt_F
 		}
 
 		if i + 1 < max_non_constant_declaration {
-			// Check if remaining statements are only unreachable/diverging calls
-			// If so, don't report an error since it's intentional unreachable marking
-			all_remaining_diverging := true
-			for j in (i + 1) ..< max_non_constant_declaration {
-				remaining := stmts[j]
-				if !is_diverging_stmt(ctx, remaining) {
-					// Also skip empty statements and constant declarations
-					#partial switch rs in remaining.derived {
-					case ^ast.Empty_Stmt:
-						continue
-					case ^ast.Value_Decl:
-						if !rs.is_mutable {
-							continue
-						}
-					}
-					all_remaining_diverging = false
-					break
-				}
-			}
+			// C++ Reference: check_stmt.cpp:112-127. The diagnostic is UNCONDITIONAL there:
+			// there is no "but the unreachable statements are themselves diverging" escape.
+			// The port used to compute an `all_remaining_diverging` guard and suppress on it,
+			// which silently dropped the error for `return 1; panic("x")` and for
+			// `break; panic("x")` inside a loop. No such guard exists in C++.
+			#partial switch s in stmt.derived {
+			case ^ast.Return_Stmt:
+				error_node(stmt, "Statements after this 'return' are never executed")
 
-			if !all_remaining_diverging {
-				#partial switch s in stmt.derived {
-				case ^ast.Return_Stmt:
-					error_node(stmt, "Statements after this 'return' are never executed")
+			case ^ast.Branch_Stmt:
+				error_node(stmt, "Statements after this '%s' are never executed", s.tok.text)
 
-				case ^ast.Branch_Stmt:
-					error_node(stmt, "Statements after this '%s' are never executed", s.tok.text)
-
-				case ^ast.Expr_Stmt:
-					if is_diverging_stmt(ctx, stmt) {
-						error_node(stmt, "Statements after a diverging procedure call are never executed")
-					}
+			case ^ast.Expr_Stmt:
+				if is_diverging_stmt(ctx, stmt) {
+					error_node(stmt, "Statements after a diverging procedure call are never executed")
 				}
 			}
 		} else if i + 1 == max_non_constant_declaration {
