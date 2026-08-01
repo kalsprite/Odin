@@ -14,6 +14,34 @@ import "core:odin/ast"
 import "core:slice"
 import "core:strings"
 
+// param_accepts_via_any_int implements C++'s `#any_int` fallback for a procedure argument.
+//
+// C++ Reference: check_expr.cpp:6853-6866. When the ordinary assignability check fails, a
+// parameter tagged `#any_int` gets a second chance: if the operand is not a type, the parameter
+// is an integer, and the operand is an integer OR an enum, then CASTABILITY is enough.
+//
+// The port set Entity_Flag.Any_Int at declaration time (check_type.odin:4201) but never read it
+// anywhere except the type printer and the docs writer, so the fallback did not exist. Plain
+// calls survived on the port's more permissive general assignability; proc-GROUP scoring uses
+// check_is_assignable_to_with_score and rejected them - which is why
+// `validate(date.year, date.month, date.day)` in core/time/datetime failed on argument 2 while
+// the same call to a non-group procedure was fine.
+param_accepts_via_any_int :: proc(ctx: ^Checker_Context, operand: ^Operand, param: ^Entity, param_type: ^Type) -> bool {
+	if param == nil || .Any_Int not_in param.flags {
+		return false
+	}
+	if operand.mode == .Type {
+		return false
+	}
+	if !is_type_integer(param_type) {
+		return false
+	}
+	if !is_type_integer(operand.type) && !is_type_enum(operand.type) {
+		return false
+	}
+	return check_is_castable_to(ctx, operand, param_type)
+}
+
 // MAXIMUM_TYPE_DISTANCE is defined in check_equivalence.odin (value: 10)
 // Reference: /mnt/c/odin/src/check_expr.cpp:665
 
@@ -772,10 +800,12 @@ check_call_arguments_internal :: proc(
 			is_variadic_param := i == pt.variadic_index
 
 			if !check_is_assignable_to_with_score(ctx, &operand, param_type, &arg_score, is_variadic_param) {
-				if show_error {
-					error_node(call_node, "Argument for parameter '%s' has incompatible type", param.token.text)
+				if !param_accepts_via_any_int(ctx, &operand, param, param_type) {
+					if show_error {
+						error_node(call_node, "Argument for parameter '%s' has incompatible type", param.token.text)
+					}
+					return false
 				}
-				return false
 			}
 
 			total_score += arg_score
@@ -851,10 +881,12 @@ check_call_arguments_internal :: proc(
 		}
 
 		if !check_is_assignable_to_with_score(ctx, &operand, effective_type, &arg_score, is_variadic_param) {
-			if show_error {
-				error_node(call_node, "Argument %d has incompatible type", i + 1)
+			if !param_accepts_via_any_int(ctx, &operand, param, effective_type) {
+				if show_error {
+					error_node(call_node, "Argument %d has incompatible type", i + 1)
+				}
+				return false
 			}
-			return false
 		}
 
 		total_score += arg_score
