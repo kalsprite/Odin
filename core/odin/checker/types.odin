@@ -4122,19 +4122,14 @@ is_type_valid_for_keys :: proc(t: ^Type) -> bool {
 // is_type_valid_bit_set_elem checks if a type can be a bit_set element
 // C++ Reference: checker.cpp:2271-2289
 is_type_valid_bit_set_elem :: proc(t: ^Type) -> bool {
-	bt := base_type(t)
-
-	#partial switch v in bt.variant {
-	case Type_Basic:
-		// Integer types and rune
-		kind := v.kind
-		return (kind >= .I8 && kind <= .Uint) || kind == .Rune
-	case Type_Enum:
-		// Enums with integer base types
-		return is_type_integer_like(v.base_type)
+	if is_type_enum(t) {
+		return true
 	}
-
-	return false
+	ct := core_type(t)
+	if ct == nil {
+		return false
+	}
+	return ct.kind == .Generic
 }
 
 // is_type_valid_vector_elem checks if a type can be a vector element

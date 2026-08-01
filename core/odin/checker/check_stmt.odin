@@ -1365,9 +1365,14 @@ check_return_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) -> Viral_State
 			// Ignore error message as it has most likely already been reported
 			if all_operands_valid(operands[:]) {
 				if len(operands) == 1 {
+					// NOTE: type_to_string's result is never caller-owned - it is either a
+					// static literal ("<no type>", "<invalid>") or a temp-allocator string
+					// (check_expr.odin:7305). Freeing it with the context allocator aborted the
+					// process with `free(): invalid pointer` the moment an invalid operand
+					// reached this diagnostic. check_expr.odin:4512 had already hit this and
+					// removed its delete; this was the last live one.
 					type_str := type_to_string(operands[0].type)
 					error_node(node, "Expected %d return values, got %d (%s)", result_count, len(operands), type_str)
-					delete(type_str)
 				} else {
 					error_node(node, "Expected %d return values, got %d", result_count, len(operands))
 				}
