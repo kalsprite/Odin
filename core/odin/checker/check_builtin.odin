@@ -3231,33 +3231,39 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		}
 
 		// First argument must be an identifier (config name) - gets used as string
-		// C++ Reference: check_builtin.cpp:2136-2140
+		// C++ Reference: check_builtin.cpp:2725-2729
 		config_name: string
-		if ident, is_ident := call_expr.args[0].derived.(^ast.Ident); is_ident {
+		if ident, is_ident := unparen_expr(call_expr.args[0]).derived.(^ast.Ident); is_ident {
 			config_name = ident.name
 		} else {
 			error(call_expr.args[0], "'#config' first argument must be an identifier (config name)")
 			return false
 		}
 
-		// Second argument is the default value (checked but type determines result)
+		// Second argument is the default value.
+		// C++ Reference: check_builtin.cpp:2731-2738
 		default_op: Operand
-		check_expr(ctx, &default_op, call_expr.args[1])
+		check_expr(ctx, &default_op, unparen_expr(call_expr.args[1]))
+		if default_op.mode != .Constant {
+			error(call_expr.args[1], "'#config' default value must be a constant")
+			return false
+		}
 
-		// Look up config value from build_context.defined_values
-		// C++ Reference: build_settings.cpp:599
+		// C++ Reference: check_builtin.cpp:2744-2757
+		//
+		// The default's type is carried through AS IS - notably NOT through
+		// default_type(). `FD_SETSIZE :: #config(POSIX_FD_SETSIZE, 1024)` has to
+		// stay `untyped integer` so it still compares against a distinct type
+		// like posix's `FD :: distinct c.int`; defaulting it to `int` makes
+		// every such comparison a type mismatch.
+		operand.type = default_op.type
+		operand.mode = default_op.mode
+		operand.value = default_op.value
+
+		// An explicitly defined value overrides the default, carrying its own type.
 		if defined_value, found := build_context.defined_values[config_name]; found {
-			// Use the defined value
-			operand.type = default_type(default_op.type)
 			operand.mode = .Constant
 			operand.value = defined_value
-		} else {
-			// Use the default value
-			operand.type = default_type(default_op.type)
-			operand.mode = default_op.mode == .Constant ? .Constant : .Value
-			if default_op.mode == .Constant {
-				operand.value = default_op.value
-			}
 		}
 		return true
 	}
