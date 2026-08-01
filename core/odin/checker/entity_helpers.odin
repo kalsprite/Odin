@@ -10,6 +10,7 @@ C++ Reference: /mnt/c/odin/src/checker.cpp (entity helper functions)
                /mnt/c/odin/src/entity.cpp (entity allocation and queries)
 */
 
+import "core:unicode"
 import "core:container/queue"
 import "core:fmt"
 import "core:odin/ast"
@@ -25,24 +26,43 @@ import "core:unicode/utf8"
 // is_string_an_identifier checks if a string is a valid Odin identifier
 // C++ Reference: checker.cpp:4998-5020
 // Valid identifiers:
-// - Start with a LETTER (not underscore!)
-// - Remaining characters can be letters or digits
+// - Start with a letter, where '_' COUNTS as a letter (C++ rune_is_letter, unicode.cpp:17)
+// - Remaining characters may be letters or digits
 is_string_an_identifier :: proc(s: string) -> bool {
 	if len(s) == 0 {
 		return false
 	}
 
-	// First character must be a letter (C++ uses rune_is_letter)
+	// C++ Reference: checker.cpp:5335-5356, which uses rune_is_letter / rune_is_digit.
+	//
+	// rune_is_letter (unicode.cpp:15-20) counts '_' AS A LETTER — and also accepts the
+	// Unicode letter categories above U+0080. The port had inlined an ASCII a-zA-Z test
+	// that dropped both. Underscore is legal anywhere in an Odin identifier, so this
+	// rejected `_aes`, and since path_to_entity_name derives an import's name through this
+	// predicate, `import "core:crypto/_aes"` was rejected outright and every `_aes.X` in
+	// core/crypto/aes and core/crypto/_aes/* became an undeclared name.
+	is_letter :: proc(r: rune) -> bool {
+		if r < 0x80 {
+			return r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		}
+		return unicode.is_letter(r)
+	}
+	is_digit :: proc(r: rune) -> bool {
+		if r < 0x80 {
+			return r >= '0' && r <= '9'
+		}
+		return unicode.is_digit(r)
+	}
+
 	first_rune, width := utf8.decode_rune_in_string(s)
-	if !((first_rune >= 'a' && first_rune <= 'z') || (first_rune >= 'A' && first_rune <= 'Z')) {
+	if !is_letter(first_rune) {
 		return false
 	}
 
-	// Remaining characters must be letters or digits
 	pos := width
 	for pos < len(s) {
 		r, w := utf8.decode_rune_in_string(s[pos:])
-		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+		if !is_letter(r) && !is_digit(r) {
 			return false
 		}
 		pos += w
