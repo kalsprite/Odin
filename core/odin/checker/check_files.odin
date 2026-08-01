@@ -108,6 +108,12 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// package scope. Running it earlier means a `#assert(size_of(T) == N)` cannot see
 	// types declared in other files of the same package, and any type it forces to be
 	// sized gets that wrong size cached permanently.
+	// Foreign blocks nested inside a file-scope `when` are only discovered by
+	// collect_file_decls, which runs during the import/export cycle above - i.e. after the
+	// collection-time drain has already emptied the queue. C++ drains this queue at
+	// checker.cpp:6276, immediately BEFORE the Expr drain below, so the order here matches.
+	check_delayed_foreign_blocks_all(c)
+
 	check_delayed_expressions_all(c)
 
 	// Drain queues into arrays

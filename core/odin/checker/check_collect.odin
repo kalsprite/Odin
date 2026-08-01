@@ -1602,6 +1602,42 @@ process_all_delayed_decls :: proc(ctx: ^Checker_Context, file: ^ast.File) {
 // check_delayed_expressions_all drains every file's queued directive expressions.
 // C++ Reference: checker.cpp:6290-6301 — a separate pass over the package's files, run
 // after imports and exports have been processed.
+// check_delayed_foreign_blocks_all drains every file's queued foreign blocks a SECOND time,
+// after the import/export cycle has run.
+//
+// C++ Reference: checker.cpp:6268-6288 - the drain sits inside check_import_entities, after
+// collect_file_decls, and immediately before the Expr drain that check_delayed_expressions_all
+// mirrors.
+//
+// Why a second pass is required: `collect_file_decls` (check_import_export.odin:351) is the ONLY
+// path that descends into a file-scope `when` block, and it runs during check_import_entities -
+// long after process_all_delayed_decls has already drained and CLEARED the foreign-block queue
+// during check_collect_entities_all. So a `foreign` block nested inside a file-scope `when` was
+// queued by nobody's reader: appended after the only drain, and never looked at again.
+//
+// core/c/libc declares stdin/stdout/stderr and the entire 7.27 time API exactly that way -
+// `foreign libc { ... }` inside `when ODIN_OS == ...` - which is why ~472 diagnostics read
+// `'mktime' is not declared by 'libc'` and so on. Same shape as task 111, where the file-scope
+// `#assert` queue was drained before exports; the Expr queue got its own late pass then, and the
+// foreign-block queue needs the matching one.
+//
+// Draining twice is safe: process_delayed_foreign_block_decls clears the queue, so the first
+// drain leaves nothing behind and this pass sees only what collect_file_decls added.
+check_delayed_foreign_blocks_all :: proc(c: ^Checker) {
+	for file in sorted_files(c.info.files) {
+		ctx := make_checker_context(c)
+		defer destroy_checker_context(&ctx)
+		ctx.file = file
+		ctx.pkg = file.pkg
+		ctx.collect_delayed_decls = true
+		if file_scope := c.info.file_scopes[file]; file_scope != nil {
+			ctx.scope = file_scope
+		}
+		process_delayed_foreign_block_decls(&ctx, file)
+		add_untyped_expressions(&c.info, ctx.untyped)
+	}
+}
+
 check_delayed_expressions_all :: proc(c: ^Checker) {
 	for file in sorted_files(c.info.files) {
 		ctx := make_checker_context(c)
