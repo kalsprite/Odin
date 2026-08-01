@@ -1959,7 +1959,16 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 		return
 	}
 
-	// For comparison operators, delegate to check_comparison
+	// For comparison operators, delegate to check_comparison.
+	//
+	// KNOWN DEVIATION. C++ dispatches comparisons AFTER unifying both operands
+	// (check_expr.cpp:4616, following the convert_to_typed pair at :4602-4610). Moving
+	// this dispatch there -- twice attempted, LEDGER tasks 167 and 195 -- matches C++ on
+	// the case it is supposed to fix (`[8]u8 != "odindoc\x00"` in core/odin/doc-format)
+	// and regresses the sweep catastrophically: 11 -> 1424 in task 195, 508 -> 1921 in
+	// task 167. Something downstream depends on comparison operands staying untyped, and
+	// that dependency has to be found first. Do not move this again without identifying
+	// it; measure before assuming the third attempt is different.
 	if is_comparison_operator(op.kind) {
 		check_comparison(ctx, node, x, &y, op.kind)
 		return
@@ -3728,29 +3737,44 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 		} else if operand.mode == .Constant && operand.value != nil {
 			// Handle string to array conversion
 			// C++ Reference: check_expr.cpp:4858-4878
+			// C++ Reference: check_expr.cpp:5110-5133. The COUNT must match, and which
+			// count depends on the element type: bytes for [N]u8, rune count for
+			// [N]rune, and UTF-16 code units for [N]u16. The port previously accepted
+			// any [N]u8 or [N]rune regardless of length -- it discarded the string value
+			// outright (`_ = str_val`) -- so `[4]u8 == "abc"` passed. It also had no
+			// plain-string -> [N]u16 path at all, only String16 -> [N]u16, so
+			// `[3]u16 == "abc"` was rejected.
 			if str_val, is_string := operand.value.(string); is_string {
 				arr := t.variant.(Type_Array)
-				// String can convert to [N]u8 or [N]rune
-				if is_type_u8(arr.elem) || is_type_rune(arr.elem) {
-					operand.mode = .Value
-				} else {
+				matched := false
+				if is_type_u8(arr.elem) {
+					matched = i64(len(str_val)) == arr.count
+				} else if is_type_rune(arr.elem) {
+					matched = i64(utf8.rune_count_in_string(str_val)) == arr.count
+				} else if is_type_u16(arr.elem) {
+					// C++ converts via string_to_string16 and compares its length; the
+					// UTF-16 length is one unit per rune below U+10000 and two above.
+					units := i64(0)
+					for r in str_val {
+						units += 1 if r < 0x1_0000 else 2
+					}
+					matched = units == arr.count
+				}
+				if !matched {
 					operand.mode = .Invalid
 					convert_untyped_error(ctx, operand, target_type)
 					return
 				}
-				_ = str_val
-			// C++ Reference: check_expr.cpp:4729-4731, 4759-4766
-			// String16 constant can convert to [N]u16
+				operand.mode = .Value
+			// String16 constant can convert to [N]u16 of the same length.
 			} else if s16_val, is_string16 := operand.value.(Exact_Value_String16); is_string16 {
 				arr := t.variant.(Type_Array)
-				if is_type_u16(arr.elem) {
-					operand.mode = .Value
-				} else {
+				if !is_type_u16(arr.elem) || i64(s16_val.len) != arr.count {
 					operand.mode = .Invalid
 					convert_untyped_error(ctx, operand, target_type)
 					return
 				}
-				_ = s16_val
+				operand.mode = .Value
 			} else {
 				operand.mode = .Invalid
 				convert_untyped_error(ctx, operand, target_type)
