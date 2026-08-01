@@ -100,6 +100,22 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// C++ line 7315-7320: export -> import -> export cycle
 	check_export_entities(c)
 	check_import_entities(c)
+
+	// Drain the foreign-block queue BEFORE the second export pass.
+	//
+	// collect_file_decls (inside check_import_entities) is the only path that descends into a
+	// file-scope `when`, so blocks nested there are queued during that call - after the
+	// collection-time drain has already emptied the queue. They must then be processed while
+	// there is still an export pass left to run, or their entities stay in the file scope and
+	// never reach the package scope: `core/c/libc` itself checked clean but every importer
+	// still reported `'stderr' is not declared by 'libc'`.
+	//
+	// C++ has the same coupling and expresses it differently - its drain lives INSIDE
+	// check_import_entities (checker.cpp:6268-6288) and, when a foreign block adds something,
+	// rewinds `pkg_index` to re-check and re-export the package (6277-6280). Draining here,
+	// between the import pass and the export that follows it, reaches the same state.
+	check_delayed_foreign_blocks_all(c)
+
 	check_export_entities(c) // Second pass for cross-package visibility
 
 	// File-scope directive expressions (`#assert`, `#config`) are evaluated HERE, not
@@ -108,12 +124,6 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// package scope. Running it earlier means a `#assert(size_of(T) == N)` cannot see
 	// types declared in other files of the same package, and any type it forces to be
 	// sized gets that wrong size cached permanently.
-	// Foreign blocks nested inside a file-scope `when` are only discovered by
-	// collect_file_decls, which runs during the import/export cycle above - i.e. after the
-	// collection-time drain has already emptied the queue. C++ drains this queue at
-	// checker.cpp:6276, immediately BEFORE the Expr drain below, so the order here matches.
-	check_delayed_foreign_blocks_all(c)
-
 	check_delayed_expressions_all(c)
 
 	// Drain queues into arrays
