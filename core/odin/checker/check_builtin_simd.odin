@@ -271,8 +271,11 @@ check_builtin_simd_shift :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 	}
 
 	if !is_type_simd_vector(y.type) {
+	// NOTE: type_to_string returns either a string LITERAL ("<no type>", "<invalid>")
+	// or a builder over context.temp_allocator -- never a context.allocator allocation.
+	// `delete` on it frees a non-heap pointer and aborts with "free(): invalid pointer".
+	// (expr_to_string is the opposite: it clones into context.allocator and MUST be freed.)
 		type_str := type_to_string(y.type)
-		defer delete(type_str)
 		error(call.args[1], "'%s' expected a simd vector type or unsigned integer, got %s", builtin_name, type_str)
 		return false
 	}
@@ -291,14 +294,12 @@ check_builtin_simd_shift :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 	// C++ Reference: check_builtin.cpp:1053-1064
 	if !is_type_integer(base_array_type(x.type)) {
 		xs := type_to_string(x.type)
-		defer delete(xs)
 		error(call.args[0], "'%s' expected a #simd type with an integer element, got '%s'", builtin_name, xs)
 		return false
 	}
 
 	if !is_type_unsigned(base_array_type(y.type)) {
 		ys := type_to_string(y.type)
-		defer delete(ys)
 		error(call.args[1], "'%s' expected a #simd type with an unsigned integer element as the shifting operand, got '%s'", builtin_name, ys)
 		return false
 	}

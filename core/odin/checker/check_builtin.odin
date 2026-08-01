@@ -5952,10 +5952,12 @@ check_builtin_expect :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^as
 	convert_to_typed(ctx, &x, y.type)
 
 	if !are_types_identical(x.type, y.type) {
+	// NOTE: type_to_string returns either a string LITERAL ("<no type>", "<invalid>")
+	// or a builder over context.temp_allocator -- never a context.allocator allocation.
+	// `delete` on it frees a non-heap pointer and aborts with "free(): invalid pointer".
+	// (expr_to_string is the opposite: it clones into context.allocator and MUST be freed.)
 		xts := type_to_string(x.type)
-		defer delete(xts)
 		yts := type_to_string(y.type)
-		defer delete(yts)
 		error_node(x.expr, "Mismatched types for '%s', %s vs %s", builtin_name, xts, yts)
 		operand^ = x // minimize error propagation
 		return true
@@ -5963,7 +5965,6 @@ check_builtin_expect :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^as
 
 	if !is_type_integer_like(x.type) {
 		xts := type_to_string(x.type)
-		defer delete(xts)
 		error_node(x.expr, "Values passed to '%s' must be an integer-like type (integer, boolean, enum, bit_set), got %s", builtin_name, xts)
 		operand^ = x
 		return true
@@ -7173,9 +7174,7 @@ check_builtin_type_is_superset_of :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 	if super == nil || sub == nil || super.kind != sub.kind {
 		a := type_to_string(type1_op.type)
-		defer delete(a)
 		b := type_to_string(type2_op.type)
-		defer delete(b)
 		error_node(call.args[0], "'%s' expects types of the same kind, got %s vs %s", builtin_name, a, b)
 		return false
 	}
@@ -7256,9 +7255,7 @@ check_builtin_type_is_superset_of :: proc(ctx: ^Checker_Context, operand: ^Opera
 	}
 
 	a := type_to_string(type1_op.type)
-	defer delete(a)
 	b := type_to_string(type2_op.type)
-	defer delete(b)
 	error_node(call.args[0], "'%s' expects types of the same kind and either an enum or union, got %s vs %s", builtin_name, a, b)
 	return false
 }

@@ -2854,8 +2854,11 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 			init_type = t_invalid
 		} else if is_type_polymorphic(base_type(init_type)) {
 			/* DISABLED: This error seems too aggressive for instantiated generic types.
+	// NOTE: type_to_string returns either a string LITERAL ("<no type>", "<invalid>")
+	// or a builder over context.temp_allocator -- never a context.allocator allocation.
+	// `delete` on it frees a non-heap pointer and aborts with "free(): invalid pointer".
+	// (expr_to_string is the opposite: it clones into context.allocator and MUST be freed.)
 			str := type_to_string(init_type)
-			defer delete(str)
 			error(vd.type, "Invalid use of a polymorphic type '%s' in variable declaration", str)
 			init_type = t_invalid
 			*/
