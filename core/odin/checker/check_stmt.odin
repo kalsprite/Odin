@@ -1241,9 +1241,23 @@ check_unsafe_return :: proc(ctx: ^Checker_Context, o: ^Operand, type: ^Type, exp
 	case ^ast.Unary_Expr:
 		if e.op.kind == .And {
 			x := unparen_expr(e.expr)
+
+			// Only a BARE identifier naming a local counts. `entity_of_node` resolves a
+			// selector to its BASE entity, so `&p.inner` reported the address of `p` -
+			// and when `p` is a pointer parameter, `&p.inner` is not stack memory at all.
+			// core/os/file_linux.odin's `return &impl.file`, where `impl: ^File_Impl`, is
+			// exactly that shape and accounted for 96 of the class.
+			//
+			// The real compiler's behaviour, measured with `$S/ra1`: it flags `&o` for a
+			// local `o`, and does NOT flag `&o.inner`, `&p.inner`, or `&q.inner`. Matching
+			// that means requiring the operand to be an identifier.
+			is_bare_ident: bool
+			if _, ok := x.derived.(^ast.Ident); ok {
+				is_bare_ident = true
+			}
 			entity := entity_of_node(&ctx.checker.info, x)
 
-			if is_entity_local_variable(entity) {
+			if is_bare_ident && is_entity_local_variable(entity) {
 				unsafe_return_error(o, "the address of a local variable")
 			} else if _, is_comp_lit := x.derived.(^ast.Comp_Lit); is_comp_lit {
 				unsafe_return_error(o, "the address of a compound literal")
