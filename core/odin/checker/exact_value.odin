@@ -957,12 +957,23 @@ exact_binary_operator_value :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value)
 			// C++ line 781
 			big.int_mul(&c, &a, &b)
 		case .Quo:
-			// C++ line 782: Float division for /
+			// Integer `/` never reaches here: check_binary_expr rewrites the token to
+			// `.Quo_Eq` first (C++ check_expr.cpp:4734), which is where integer division
+			// happens. C++'s own `.Quo` integer arm is `fmod` and is dead code for it.
+			//
+			// KNOWN DEVIATION, deliberate: this arm stays float DIVISION rather than
+			// C++'s fmod, because the port does reach it where C++ cannot. The port
+			// keeps a float-typed constant's exact value as a big.Int (`f64(7)` folds
+			// with Integer exact values, not Float), so `f64(7) / f64(2)` lands in this
+			// integer arm. C++ has converted the exact value to Float by then. Copying
+			// the fmod verbatim makes that fold 1.0 instead of 3.5 -- verified. The real
+			// fix is to convert exact values on float conversion; until then this arm
+			// compensates. See LEDGER task 186.
 			a_f, _ := big.int_get_float(&a)
 			b_f, _ := big.int_get_float(&b)
 			return exact_value_float(a_f / b_f)
 		case .Quo_Eq:
-			// C++ line 783: Integer division for /=
+			// C++ exact_value.cpp:797: integer (truncating) division
 			big.int_div(&c, &a, &b)
 		case .Mod:
 			// C++ line 784: Remainder

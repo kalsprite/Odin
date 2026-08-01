@@ -2103,8 +2103,30 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 			return
 		}
 
+		// Two operator rewrites C++ performs before folding (check_expr.cpp:4734-4743).
+		//
+		// `/` on integers is INTEGER division, but exact_binary_operator_value's `.Quo`
+		// arm is float division; C++ gets truncating division by rewriting the token to
+		// `.Quo_Eq` first ("Hack to get division of integers"). Without this the port
+		// folded `7 / 2` to 3.500 and `max(i64) / 1e9` to 9223372036.855, which then
+		// failed to be representable as the very type it came from.
+		//
+		// A bit_set's `+`/`-` are set union/difference, not arithmetic.
+		fold_op := op.kind
+		if fold_op == .Quo && is_type_integer(x.type) {
+			fold_op = .Quo_Eq
+		}
+		if is_type_bit_set(x.type) {
+			#partial switch fold_op {
+			case .Add:
+				fold_op = .Or
+			case .Sub:
+				fold_op = .And_Not
+			}
+		}
+
 		// Perform constant operation
-		x.value = exact_binary_operator_value(op.kind, x.value, y.value)
+		x.value = exact_binary_operator_value(fold_op, x.value, y.value)
 		x.expr = node
 
 		// Validate constant is expressible in its type
