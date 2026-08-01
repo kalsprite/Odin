@@ -1970,8 +1970,18 @@ check_polymorphic_record_type :: proc(ctx: ^Checker_Context, original_type: ^Typ
 			return nil
 		}
 
+		// Clone the record's AST for this instantiation, exactly as C++ does
+		// (check_expr.cpp:8456). Checking annotates nodes with their resolved types, so
+		// re-checking the ORIGINAL nodes for a second instantiation lets the first
+		// instantiation's cached type-and-value win: `Maybe(T6)` followed by
+		// `Maybe(Stamp)` produced a second union whose variant was still `[6]u8`.
+		cloned_node := clone_ast_node(ut.node)
+		if cloned_node == nil {
+			return nil
+		}
+
 		// Get the actual Union_Type node from the Node
-		union_node, union_node_ok := ut.node.derived.(^ast.Union_Type)
+		union_node, union_node_ok := cloned_node.derived.(^ast.Union_Type)
 		if !union_node_ok {
 			return nil
 		}
@@ -1982,13 +1992,27 @@ check_polymorphic_record_type :: proc(ctx: ^Checker_Context, original_type: ^Typ
 		// C++ Reference: check_expr.cpp:8461 — see the struct arm above.
 		if u, u_ok := &new_union_type.variant.(Type_Union); u_ok {
 			u.polymorphic_parent = original_type
+			u.node = cloned_node
 		}
 
 		// Set up the named type relationship
 		set_base_type(new_named_type, new_union_type)
 
-		// Check union with the provided operands
-		check_union_type(ctx, new_union_type, union_node, operands, new_named_type, original_type)
+		// `check_union_type` assigns `ut.scope = ctx.scope` and never opens one of its
+		// own -- C++'s does the same, because C++ opens the scope HERE
+		// (check_expr.cpp:8462-8464). The port's struct arm gets away without this only
+		// because `check_struct_type` happens to create its own scope internally. Without
+		// a fresh scope per instantiation every `Maybe($T)` binds `$T` into the SAME
+		// scope, so two instantiations reachable together -- two parameters of one
+		// procedure, or two fields of one struct -- collided and the second silently
+		// reused the first's binding.
+		inst_ctx := ctx^
+		if parent_scope := polymorphic_record_parent_scope(original_type); parent_scope != nil {
+			inst_ctx.scope = parent_scope
+		}
+		check_open_scope(&inst_ctx, cloned_node)
+		check_union_type(&inst_ctx, new_union_type, union_node, operands, new_named_type, original_type)
+		check_close_scope(&inst_ctx)
 
 		return new_named_type
 	}
