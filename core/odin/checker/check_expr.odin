@@ -9414,6 +9414,35 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 						var_entity := &param_entity.variant.(Entity_Variable)
 						if var_entity.param_value.kind != .Invalid {
 							has_default = true
+
+							// `#+vet explicit-allocators`: an omitted parameter whose
+							// default is literally `context.allocator` or
+							// `context.temp_allocator` must be passed explicitly.
+							// C++ Reference: check_expr.cpp:6798-6812 -- it matches the
+							// default's ORIGINAL expression syntactically, an implicit
+							// `context` selected with `allocator`/`temp_allocator`, and
+							// gates on the per-file vet flag.
+							//
+							// The flag reaches us because progress#79 populates
+							// file.vet_flags from the `#+vet` tag; before that this check
+							// could not have fired at all.
+							if ctx.file != nil && .Explicit_Allocators in ctx.file.vet_flags {
+								if sel, sel_ok := var_entity.param_value.original_ast_expr.derived.(^ast.Selector_Expr); sel_ok {
+									is_ctx := false
+									if _, imp_ok := sel.expr.derived.(^ast.Implicit); imp_ok {
+										is_ctx = true
+									} else if id, id_ok := sel.expr.derived.(^ast.Ident); id_ok {
+										is_ctx = id.name == "context"
+									}
+									if is_ctx && sel.field != nil {
+										if fid, fid_ok := sel.field.derived.(^ast.Ident); fid_ok {
+											if fid.name == "allocator" || fid.name == "temp_allocator" {
+												error_node(call, "Parameter '%s' of type '%s' must be explicitly provided in procedure call", param_entity.token.text, type_to_string(entity_type(param_entity)))
+											}
+										}
+									}
+								}
+							}
 							// C++ check_expr.cpp:6816-6821 synthesises an operand
 							// for the omitted argument from the parameter's default.
 							// Without this the slot stays zeroed, the type-check loop
