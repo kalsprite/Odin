@@ -5967,7 +5967,19 @@ check_builtin_syscall :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 	}
 
 	operand.mode = .Value
-	operand.type = t_uintptr
+
+	// C++ Reference: check_builtin.cpp:6716 vs 6765.
+	//
+	// `syscall` yields a bare uintptr, but `syscall_bsd` yields an OPTIONAL-OK
+	// tuple `(uintptr, bool)` - the BSD calling convention reports failure in the
+	// carry flag. The port returned a bare uintptr for both, so every
+	// `result, ok := intrinsics.syscall_bsd(...)` in core/sys/freebsd was an
+	// assignment count mismatch.
+	if id == .Syscall_Bsd {
+		operand.type = make_optional_ok_type(t_uintptr)
+	} else {
+		operand.type = t_uintptr
+	}
 
 	return true
 }
