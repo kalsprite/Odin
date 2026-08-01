@@ -1014,70 +1014,26 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 		// For non-file-scope variables, we still need to add them to the scope
 		// so that later declarations (like `T :: type_of(x)`) can reference them.
 		// However, their actual checking happens in check_stmt.
-		is_file_scope := .File in ctx.scope.flags
-		if !is_file_scope {
-			// Add variables to scope without full processing
-			// This allows later declarations like `T :: type_of(x)` to find them
-			for name, i in vd.names {
-				ident, name_ok := name.derived.(^ast.Ident)
-				if !name_ok || is_blank_ident(ident.name) {
-					continue
-				}
-
-				token := tokenizer.Token {
-					kind = .Ident,
-					text = ident.name,
-					pos  = ident.pos,
-				}
-
-				// Resolve the variable's type so that type_of() can find it
-				var_type: ^Type = nil
-				if vd.type != nil {
-					// Explicit type annotation
-					var_type = check_type(ctx, vd.type)
-				} else if len(vd.names) == 1 && i < len(vd.values) && vd.values[i] != nil {
-					// Only infer type for single-value declarations
-					// Multi-value declarations (like a, b := expand_values(p)) are handled in check_stmt
-					// This is a SPECULATIVE probe: the initialiser is evaluated only to
-					// learn its type early, so that a later `T :: type_of(x)` resolves.
-					// check_stmt checks this declaration properly afterwards.
-					//
-					// Its diagnostics must be discarded. The probe runs before the enclosing
-					// statement list has been checked, so any name introduced by a `when`
-					// block in that list is not in scope yet:
-					//
-					//     when ODIN_ENDIAN == .Little { s11_ := k[7] }
-					//     s11 := u32x4{s11_, s11_, s11_, s11_}   // probed too early
-					//
-					// which produced 5,376 spurious "Undeclared name" diagnostics tree-wide,
-					// every one of them from base/runtime/random_generator_chacha8_simd128.odin.
-					o: Operand
-					begin_suppress_errors()
-					check_multi_expr_or_type(ctx, &o, vd.values[i])
-					end_suppress_errors()
-					if o.mode != .Invalid && o.type != nil && o.type.kind != .Tuple {
-						inferred_type := default_type(o.type)
-						// Don't pre-set type for untyped nil/uninit - let check_init_variable detect the error
-						if !is_type_untyped_nil(inferred_type) && !is_type_untyped_uninit(inferred_type) {
-							var_type = inferred_type
-						}
-					}
-				}
-
-				e := alloc_entity_variable(ctx.scope, token, var_type, .Resolved, ctx.checker.allocator)
-				e.identifier = name
-				e.file = ctx.file
-				e.parent_proc_decl = ctx.curr_proc_decl
-
-				// Set the type on the variable entity variant
-				if var, var_ok := &e.variant.(Entity_Variable); var_ok {
-					var.type = var_type
-				}
-
-				// Insert into scope so lookups can find it
-				scope_insert(ctx.scope, e)
-				set_entity_for_node(&ctx.checker.info, name, e)
-			}
+		// C++ Reference: checker.cpp:4918-4922 -
+		//	if (vd->is_mutable) {
+		//		if (!(c->scope->flags&ScopeFlag_File)) {
+		//			// NOTE(bill): local scope -> handle later and in order
+		//			return;
+		//		}
+		//
+		// The port did the OPPOSITE: it declared local mutable variables into the scope during
+		// collection, as a speculative probe so that a later `T :: type_of(x)` could resolve.
+		// But check_scope_decls runs this collection over the WHOLE body before any statement is
+		// checked, so every local was in scope from the first line. A name used before a later
+		// shadow then bound to the shadow:
+		//
+		//	m := n          // resolved `n` to the uint below, not the int parameter
+		//	n := uint(n)
+		//
+		// which is base/runtime/internal.odin:451 and the whole `uint`-to-`int` return class,
+		// and the same mechanism behind `s, n := s, n` poisoning its own initialisers.
+		// Locals are declared in order by check_value_decl_stmt; that is the only correct time.
+		if .File not_in ctx.scope.flags {
 			return
 		}
 
