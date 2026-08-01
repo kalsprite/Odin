@@ -5938,18 +5938,50 @@ check_builtin_expect :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^as
 		return false
 	}
 
-	if !is_type_boolean(x.type) {
-		error_node(x.expr, "First argument to '%s' must be a boolean", builtin_name)
+	// `expect` is NOT boolean-only. C++ (check_builtin.cpp:6560-6604) unifies the two
+	// operands, requires them to be the SAME type, and then requires that type to be
+	// integer-LIKE -- integer, boolean, enum or bit_set. The port's version demanded a
+	// boolean first argument and a constant boolean second, which rejected the common
+	// enum form, e.g. core/encoding/xml's
+	//     likely :: intrinsics.expect
+	//     if likely(open.kind, Token_Kind.Ident) == .Ident { ... }
+	convert_to_typed(ctx, &y, x.type)
+	if y.mode == .Invalid {
 		return false
 	}
+	convert_to_typed(ctx, &x, y.type)
 
-	if y.mode != .Constant || !is_type_boolean(y.type) {
-		error_node(y.expr, "Second argument to '%s' must be a constant boolean", builtin_name)
-		return false
+	if !are_types_identical(x.type, y.type) {
+		xts := type_to_string(x.type)
+		defer delete(xts)
+		yts := type_to_string(y.type)
+		defer delete(yts)
+		error_node(x.expr, "Mismatched types for '%s', %s vs %s", builtin_name, xts, yts)
+		operand^ = x // minimize error propagation
+		return true
+	}
+
+	if !is_type_integer_like(x.type) {
+		xts := type_to_string(x.type)
+		defer delete(xts)
+		error_node(x.expr, "Values passed to '%s' must be an integer-like type (integer, boolean, enum, bit_set), got %s", builtin_name, xts)
+		operand^ = x
+		return true
+	}
+
+	// Not fatal in C++: it reports and carries on.
+	if y.mode != .Constant {
+		error_node(y.expr, "Second argument to '%s' must be constant as it is the expected value", builtin_name)
+	}
+
+	if x.mode == .Constant {
+		// C++: "just completely ignore this intrinsic entirely"
+		operand^ = x
+		return true
 	}
 
 	operand.mode = .Value
-	operand.type = t_bool
+	operand.type = x.type
 
 	return true
 }
