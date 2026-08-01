@@ -1959,20 +1959,6 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 		return
 	}
 
-	// For comparison operators, delegate to check_comparison.
-	//
-	// KNOWN DEVIATION. C++ dispatches comparisons AFTER unifying both operands
-	// (check_expr.cpp:4616, following the convert_to_typed pair at :4602-4610). Moving
-	// this dispatch there -- twice attempted, LEDGER tasks 167 and 195 -- matches C++ on
-	// the case it is supposed to fix (`[8]u8 != "odindoc\x00"` in core/odin/doc-format)
-	// and regresses the sweep catastrophically: 11 -> 1424 in task 195, 508 -> 1921 in
-	// task 167. Something downstream depends on comparison operands staying untyped, and
-	// that dependency has to be found first. Do not move this again without identifying
-	// it; measure before assuming the third attempt is different.
-	if is_comparison_operator(op.kind) {
-		check_comparison(ctx, node, x, &y, op.kind)
-		return
-	}
 
 	// Shifts are dispatched BEFORE EITHER operand-unification block below, and ALWAYS
 	// return. C++ Reference: check_expr.cpp:4574-4577
@@ -2005,6 +1991,13 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 	convert_to_typed(ctx, &y, x.type)
 	if y.mode == .Invalid {
 		x.mode = .Invalid
+		return
+	}
+
+	// Comparisons dispatch AFTER both operands are unified, as C++ does
+	// (check_expr.cpp:4616, following the convert_to_typed pair at :4602-4610).
+	if is_comparison_operator(op.kind) {
+		check_comparison(ctx, node, x, &y, op.kind)
 		return
 	}
 
@@ -3660,6 +3653,32 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 	// When in enum type context, use core_type to get the underlying type
 	// This allows enum values to convert to their base integer type
 	t := ctx.in_enum_type ? core_type(target_type) : base_type(target_type)
+
+	// An untyped `nil` keeps its type. This has to happen BEFORE the switch on the
+	// target's kind: the equivalent branch used to live inside `case .Basic:`, so it
+	// only ran for basic targets and a union target retyped the nil.
+	//
+	// `is_operand_nil` is `mode == Value && type == t_untyped_nil` (C++ checker.cpp:32),
+	// and check_comparison's equality arm relies on it because `is_type_comparable` is
+	// FALSE for `any` and for unions (types.cpp:2781). A retyped nil satisfies neither
+	// arm, so `x == nil` is rejected for exactly the types the nil arm exists to serve.
+	// C++ marks the intent with the commented-out `// target_type = t_untyped_nil;`.
+	// NOTE: `is_type_untyped_nil` answers true for `---` as well as `nil` (deliberately,
+	// "to improve the error handling"), so it must NOT be used here -- `---` has its own
+	// handling further down and hoisting it too breaks `a: u128 = ---`.
+	is_nil_operand := false
+	if ob := base_type(operand.type); ob != nil && ob.kind == .Basic {
+		is_nil_operand = ob.variant.(Type_Basic).kind == .Untyped_Nil
+	}
+	if is_nil_operand {
+		if !is_type_any(target_type) && !is_type_cstring(target_type) && !type_has_nil(target_type) {
+			operand.mode = .Invalid
+			convert_untyped_error(ctx, operand, target_type)
+			return
+		}
+		operand.mode = .Value
+		return
+	}
 
 	#partial switch t.kind {
 	case .Basic:
