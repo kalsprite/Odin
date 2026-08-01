@@ -7939,6 +7939,33 @@ check_is_castable_to :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^
 	if are_types_identical(src, t_rawptr) && is_type_cstring(dst) {
 		return true
 	}
+	// cstring16 casting rules — the UTF-16 counterparts of the block above.
+	// C++ Reference: check_expr.cpp:3759-3785. These six were simply absent, so every
+	// `([^]u16)(s)` / `(^u16)(s)` on a cstring16 was rejected. base:runtime's UTF-16
+	// string handling is built on exactly these casts (internal.odin:581/603/651,
+	// core_builtin.odin:483), and it is imported by everything.
+	//
+	// `is_type_u16_ptr` / `is_type_u16_multi_ptr` already existed in the port and were
+	// used by check_decl_helpers' signature comparison — only the cast rules were missing.
+	if are_types_identical(src, t_cstring16) && is_type_u16_ptr(dst) {
+		return true
+	}
+	if are_types_identical(src, t_cstring16) && is_type_u16_multi_ptr(dst) {
+		return true
+	}
+	if are_types_identical(src, t_cstring16) && are_types_identical(dst, t_rawptr) {
+		return true
+	}
+	if is_type_u16_ptr(src) && are_types_identical(dst, t_cstring16) {
+		return true
+	}
+	if is_type_u16_multi_ptr(src) && are_types_identical(dst, t_cstring16) {
+		return true
+	}
+	if are_types_identical(src, t_rawptr) && are_types_identical(dst, t_cstring16) {
+		return true
+	}
+
 	// cstring -> string (view conversion)
 	// Reference: spec/conversions.md line 171
 	if is_type_cstring(src) && is_type_string(dst) && !is_type_cstring(dst) {
