@@ -4601,6 +4601,66 @@ check_get_params :: proc(
 	return tuple
 }
 
+// ast_references_poly_params reports whether a type expression mentions any
+// polymorphic type parameter bound in `scope`.
+//
+// C++ Reference: check_type.cpp:2410-2456
+//
+// This is a purely syntactic walk - it deliberately does NOT check the
+// expression, because the whole point is to decide whether checking it is safe
+// yet. See its caller in check_get_results.
+ast_references_poly_params :: proc(scope: ^Scope, node: ^ast.Expr) -> bool {
+	if node == nil {
+		return false
+	}
+
+	#partial switch n in node.derived_expr {
+	case ^ast.Ident:
+		e := scope_lookup(scope, n.name)
+		if e != nil && e.kind == .Type_Name {
+			t := entity_type(e)
+			if t != nil && t.kind == .Generic {
+				return true
+			}
+		}
+		return false
+	case ^ast.Selector_Expr:
+		return ast_references_poly_params(scope, n.expr)
+	case ^ast.Index_Expr:
+		return ast_references_poly_params(scope, n.expr)
+	case ^ast.Call_Expr:
+		for arg in n.args {
+			if ast_references_poly_params(scope, arg) {
+				return true
+			}
+		}
+		return ast_references_poly_params(scope, n.expr)
+	case ^ast.Comp_Lit:
+		return ast_references_poly_params(scope, n.type)
+	case ^ast.Unary_Expr:
+		return ast_references_poly_params(scope, n.expr)
+	case ^ast.Paren_Expr:
+		return ast_references_poly_params(scope, n.expr)
+	case ^ast.Deref_Expr:
+		return ast_references_poly_params(scope, n.expr)
+	case ^ast.Pointer_Type:
+		return ast_references_poly_params(scope, n.elem)
+	case ^ast.Array_Type:
+		return ast_references_poly_params(scope, n.elem) ||
+		       ast_references_poly_params(scope, n.len)
+	case ^ast.Fixed_Capacity_Dynamic_Array_Type:
+		return ast_references_poly_params(scope, n.elem) ||
+		       ast_references_poly_params(scope, n.capacity)
+	case ^ast.Dynamic_Array_Type:
+		return ast_references_poly_params(scope, n.elem)
+	case ^ast.Map_Type:
+		return ast_references_poly_params(scope, n.key) ||
+		       ast_references_poly_params(scope, n.value)
+	}
+
+	return false
+}
+
 // check_get_results processes procedure return types and builds the results tuple type
 // Ported from check_get_results in check_type.cpp:2281-2389
 check_get_results :: proc(ctx: ^Checker_Context, scope: ^Scope, results_node: ^ast.Field_List) -> ^Type {
@@ -4638,9 +4698,23 @@ check_get_results :: proc(ctx: ^Checker_Context, scope: ^Scope, results_node: ^a
 		field_group_index += 1
 
 		// Check result type
+		//
+		// C++ Reference: check_type.cpp:2495-2501
+		//
+		// While the GENERIC signature is being built the polymorphic parameters
+		// are only bound to Type_Generic placeholders, so a result type that
+		// mentions one cannot be evaluated yet - `-> type_of(simd_to_bits(T{}))`
+		// would reach check_compound_lit with T still generic and be rejected.
+		// C++ substitutes a fresh Type_Generic named after the source text and
+		// resolves the expression at instantiation instead.
 		result_type: ^Type = nil
 		if field.type != nil {
-			result_type = check_type(ctx, field.type)
+			if ctx.allow_polymorphic_types && ast_references_poly_params(ctx.scope, field.type) {
+				name := expr_to_string(field.type)
+				result_type = alloc_type_generic(ctx.checker, ctx.scope, 0, name, nil)
+			} else {
+				result_type = check_type(ctx, field.type)
+			}
 		}
 
 		// Validate result type
