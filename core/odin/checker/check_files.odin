@@ -240,6 +240,25 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// dead end and no @(objc_context_provider) signature is ever validated.
 	check_objc_context_provider_procedures(c)
 
+	// C++ Reference: check_parsed_files, TIME_SECTION("add type info for type definitions")
+	// through TIME_SECTION("check #soa types") -- checker.cpp:7755-7768. THREE phases that the
+	// port implemented but never called.
+	//
+	// LEDGER task 222 claimed "all 28 phases present and called except one". That was wrong:
+	// I had enumerated the phase list through `head -40` and stopped reading before these.
+	add_type_info_for_type_definitions(c)
+	check_merge_queues_into_arrays(c)
+
+	check_update_dependency_tree_for_procedures(c)
+
+	// C++ runs generate_minimum_dependency_set(c, entry_point) HERE. The port does not have
+	// that pass (task #42), so `min_dep_count` is never raised above zero and the loop inside
+	// check_unchecked_bodies currently finds nothing to do. It is wired anyway: it is the
+	// correct position, and it stops being a no-op the moment #42 lands.
+	check_unchecked_bodies(c)
+
+	check_merge_queues_into_arrays(c)
+
 	// Sort init/fini procedures by priority
 	// C++ line 7377: check_sort_init_and_fini_procedures(c)
 	check_sort_init_and_fini_procedures(c)
