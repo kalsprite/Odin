@@ -767,8 +767,15 @@ hash_exact_value :: proc(v: Exact_Value) -> uintptr {
 	case Exact_Value_String16:
 		// C++ line 71-73: Hash UTF-16 string
 		if val.text != nil && val.len > 0 {
-			// Hash the UTF-16 data
-			data := transmute([]byte)val.text[:val.len * size_of(u16)]
+			// Hash the UTF-16 data. C++: gb_fnv32a(text, len * size_of(u16)).
+			//
+			// This arrived at the right BYTE count by accident and via a nominally
+			// out-of-bounds intermediate: `val.text[:val.len * size_of(u16)]` slices a
+			// [^]u16 to `len*2` ELEMENTS (twice the data that exists), and the slice
+			// transmute then reinterpreted those as `len*2` bytes. Only the first
+			// `len*2` bytes were ever read, so the result was correct — but state it
+			// directly rather than rely on two errors cancelling. See the big.Int arm.
+			data := (cast([^]byte)val.text)[:val.len * size_of(u16)]
 			res = uintptr(hash.fnv32a(data))
 		} else {
 			res = 0
@@ -780,8 +787,20 @@ hash_exact_value :: proc(v: Exact_Value) -> uintptr {
 		// C++: u8 last = (u8)v.value_integer.sign;
 		// C++: res = (key ^ last) * 0x01000193;
 		if val.used > 0 && val.digit != nil {
-			// Hash the used limbs
-			limb_bytes := transmute([]byte)val.digit[:val.used]
+			// Hash the used limbs.
+			//
+			// NOTE: `transmute([]byte)val.digit[:val.used]` is WRONG and was the bug here.
+			// Transmuting a slice reinterprets the element type but keeps the element
+			// COUNT, so a []DIGIT of length N became a []byte of length N — hashing one
+			// byte per limb instead of the whole limb. Every value whose low byte is zero
+			// therefore hashed identically, and switch-case duplicate detection (which
+			// relies on the hash alone, as C++ does) reported them all as duplicates of
+			// each other. core/os/stat_linux.odin switches on linux.S_IFBLK/S_IFCHR/
+			// S_IFDIR/... — all powers of two >= 4096, i.e. all with a zero low byte.
+			//
+			// C++ passes an explicit byte count:
+			//   gb_fnv32a(v.value_integer.dp, gb_size_of(*v.value_integer.dp) * used)
+			limb_bytes := (cast([^]byte)raw_data(val.digit))[:val.used * size_of(big.DIGIT)]
 			key := hash.fnv32a(limb_bytes)
 			last := u8(val.sign)
 			res = uintptr((key ~ u32(last)) * 0x01000193)

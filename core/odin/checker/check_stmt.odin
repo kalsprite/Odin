@@ -1866,7 +1866,9 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 									begin_error_block()
 									defer end_error_block()
 
-									error_node(be.left, "Duplicate case '%v'", lhs.value)
+									lhs_str := expr_to_string(be.left)
+									defer delete(lhs_str)
+									error_node(be.left, "Duplicate case '%s'", lhs_str)
 									error_line("\tprevious case at %s", token_pos_to_string(entry.token.pos))
 									break
 								}
@@ -1897,7 +1899,9 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 									begin_error_block()
 									defer end_error_block()
 
-									error_node(be.right, "Duplicate case '%v'", rhs.value)
+									rhs_str := expr_to_string(be.right)
+									defer delete(rhs_str)
+									error_node(be.right, "Duplicate case '%s'", rhs_str)
 									error_line("\tprevious case at %s", token_pos_to_string(entry.token.pos))
 									break
 								}
@@ -2003,7 +2007,12 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 								begin_error_block()
 								defer end_error_block()
 
-								error_node(case_expr, "Duplicate case '%v'", y.value)
+								// C++ Reference: check_expr.cpp:9564-9569 prints the case EXPRESSION,
+								// not the value. `%v` on an Exact_Value dumps big.Int's
+								// internals ("Int{used = 1, digit = [8192, 0, ...]}").
+								dup_str := expr_to_string(case_expr)
+								defer delete(dup_str)
+								error_node(case_expr, "Duplicate case '%s'", dup_str)
 								error_line("\tprevious case at %s", token_pos_to_string(entry.token.pos))
 								break
 							}
