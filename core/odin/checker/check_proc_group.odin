@@ -794,18 +794,27 @@ check_call_arguments_internal :: proc(
 	// Fall through to existing positional-only logic
 	// Match positional arguments
 	for &operand, i in positional_operands {
-		if i >= len(params.variables) {
-			if !pt.variadic {
-				if show_error {
-					error_node(call_node, "Too many arguments to procedure call")
-				}
-				return false
+		// Index of the parameter this argument binds to. Everything at or past the
+		// variadic index binds to the variadic parameter, so the index saturates there
+		// rather than running off the end.
+		//
+		// C++ Reference: check_expr.cpp:6970-6975 and the variadic_operands loop at
+		// :6992-6999 — arguments in the variadic slot are scored one by one against the
+		// slice's ELEMENT type, via eval_param_and_score(..., t = elem, ...).
+		param_index := i
+		if pt.variadic && pt.variadic_index >= 0 && i >= int(pt.variadic_index) {
+			param_index = int(pt.variadic_index)
+		} else if i >= len(params.variables) {
+			if show_error {
+				error_node(call_node, "Too many arguments to procedure call")
 			}
-			// Variadic parameter - all remaining args go here
-			break
+			return false
+		}
+		if param_index >= len(params.variables) {
+			continue
 		}
 
-		param := params.variables[i]
+		param := params.variables[param_index]
 		param_type := entity_type(param)
 
 		if param_type == nil {
@@ -822,9 +831,26 @@ check_call_arguments_internal :: proc(
 
 		// Check if this argument is assignable to this parameter
 		arg_score: i64 = 0
-		is_variadic_param := i == pt.variadic_index
+		is_variadic_param := pt.variadic && param_index == int(pt.variadic_index)
 
-		if !check_is_assignable_to_with_score(ctx, &operand, param_type, &arg_score, is_variadic_param) {
+		// For an argument bound to the variadic parameter, score it against the
+		// element type. The port previously scored against the SLICE type itself, so a
+		// group member declared `proc(items: ..^Int)` never matched `f(x)` for an `^Int`
+		// — which is how core/math/big calls `internal_destroy` throughout.
+		//
+		// `f(xs..)` passes the slice itself, so accept that spelling first.
+		effective_type := param_type
+		if is_variadic_param {
+			if check_is_assignable_to(ctx, &operand, param_type) {
+				total_score += assign_score_function(1, true)
+				continue
+			}
+			if slice_type := base_type(param_type); slice_type != nil && slice_type.kind == .Slice {
+				effective_type = slice_type.variant.(Type_Slice).elem
+			}
+		}
+
+		if !check_is_assignable_to_with_score(ctx, &operand, effective_type, &arg_score, is_variadic_param) {
 			if show_error {
 				error_node(call_node, "Argument %d has incompatible type", i + 1)
 			}
