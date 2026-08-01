@@ -1827,28 +1827,54 @@ find_polymorphic_record_entity :: proc(ctx: ^Checker_Context, original_type: ^Ty
 
 			param_type := entity_type(param_entity)
 
-			// For type parameters, compare the types
-			if operand.mode == .Type {
+			// C++ Reference: check_type.cpp:603-650, find_polymorphic_record_entity.
+			//
+			// Three things this used to get wrong:
+			//
+			//  1. It keyed on the OPERAND's mode; C++ keys on the PARAMETER ENTITY's kind
+			//     (`p->kind`). The parameter is what says whether this slot is a type or a
+			//     constant; the operand merely supplies a value for it.
+			//  2. It had no guard against a POLYMORPHIC operand. C++ refuses outright --
+			//     "NOTE(bill): Do not add polymorphic version to the gen_types" -- because
+			//     two distinct generic placeholders compare equal, so `Map_Cell($T)` and
+			//     `Map_Cell($K)` alias each other in the cache. (Instrumented in task 189:
+			//     `Map_Cell` instantiated with `$T`, then CACHE HIT for `$K` and `$V`.)
+			//  3. It had no `o.expr == nullptr` skip and no same-entity shortcut.
+			if operand.expr == nil {
+				continue
+			}
+			if ctx != nil && ctx.checker != nil {
+				if oe := entity_of_node(&ctx.checker.info, operand.expr); oe != nil && oe == param_entity {
+					// Same entity, so necessarily the same thing.
+					continue
+				}
+			}
+
+			#partial switch param_entity.kind {
+			case .Type_Name:
+				if is_type_polymorphic(operand.type) {
+					// Never treat a still-generic operand as a cached instantiation.
+					match = false
+					break
+				}
 				if !are_types_identical(operand.type, param_type) {
 					match = false
 					break
 				}
-			} else if operand.mode == .Constant {
-				// For constant parameters, compare types and values
+			case .Constant:
+				const_entity := param_entity.variant.(Entity_Constant)
+				if !compare_exact_values(.Cmp_Eq, operand.value, const_entity.value) {
+					match = false
+					break
+				}
 				if !are_types_identical(operand.type, param_type) {
 					match = false
 					break
 				}
-				// Also check constant value if applicable
-				if param_entity.kind == .Constant {
-					const_entity := param_entity.variant.(Entity_Constant)
-					if !compare_exact_values(.Cmp_Eq, operand.value, const_entity.value) {
-						match = false
-						break
-					}
-				}
-			} else {
+			case:
 				match = false
+			}
+			if !match {
 				break
 			}
 		}
