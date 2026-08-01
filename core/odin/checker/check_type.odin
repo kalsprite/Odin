@@ -1627,6 +1627,25 @@ is_type_polymorphic :: proc(t: ^Type, or_specialized := false) -> bool {
 			return is_type_polymorphic(da.elem, or_specialized)
 		}
 
+	case .Fixed_Capacity_Dynamic_Array:
+		// C++ types.cpp:2520-2524. The CAPACITY can itself be polymorphic --
+		// `[dynamic; $N]T` -- so a generic capacity makes the whole type polymorphic
+		// regardless of the element.
+		//
+		// Without this arm `[dynamic; $N]u8` was not recognised as polymorphic at all,
+		// so a call site never attempted unification and reported "Cannot pass argument
+		// of type '[dynamic; 8]u8' to parameter of type '[dynamic; $N]u8'". Everything
+		// downstream was already in place: the type-expression checker sets
+		// `generic_capacity` (check_type.odin:3381) and is_polymorphic_type_assignable
+		// already binds it via polymorphic_assign_index (:5583). Only the predicate that
+		// gates entry to that path was missing.
+		if fc, ok := t.variant.(Type_Fixed_Capacity_Dynamic_Array); ok {
+			if fc.generic_capacity != nil {
+				return true
+			}
+			return is_type_polymorphic(fc.elem, or_specialized)
+		}
+
 	case .Slice:
 		// C++ lines 2380-2381
 		if slice, ok := t.variant.(Type_Slice); ok {
