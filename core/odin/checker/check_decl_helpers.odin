@@ -935,17 +935,25 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				continue
 			}
 
-			// NOT DONE: C++ ends this chain with
-			//     error(elem, "Unknown attribute element name '%s'", name)   // checker.cpp:4631
-			// so `@(totally_bogus_attribute)` is rejected there and silently accepted here.
+			// Attributes this chain does not handle, but the port DOES consume elsewhere.
+			// They must be accepted here or the catch-all below rejects valid code:
+			//   builtin           -> consumed during collection (task #64); 24,167 uses
+			//                        across the corpus, all of base/runtime's @(builtin).
+			//   ignore_duplicates -> handled in check_decl.odin.
+			// Both are genuine C++ attributes, so accepting them is parity, not a hole.
+			switch name {
+			case "builtin", "ignore_duplicates":
+				continue
+			}
+
+			// C++ Reference: checker.cpp:4631. Anything still unmatched is an error.
 			//
-			// Adding that catch-all was ATTEMPTED and reverted: this chain is not the only
-			// place the port consumes attributes. `@(builtin)` is handled elsewhere (see
-			// task #64) and never reaches here, so the catch-all rejected every `@(builtin)`
-			// in base/runtime -- ~150 diagnostics on the first probe. Consolidating
-			// attribute handling into one authority has to come first; until then a
-			// catch-all here cannot distinguish "unknown" from "handled somewhere else".
-			// See LEDGER task 210.
+			// The accept-list above was derived EMPIRICALLY rather than guessed: a probe
+			// build with this catch-all made unconditional was run over all 169 packages,
+			// and `builtin` was the ONLY name it flagged. `./odin check` accepts the
+			// corpus, so every attribute name appearing in it is valid by construction --
+			// which makes that sweep a complete enumeration of what this chain misses.
+			error(elem, "Unknown attribute element name '%s'", name)
 		}
 	}
 }
