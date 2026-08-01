@@ -1780,6 +1780,15 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 		return
 	}
 
+	// Viral flags propagate upward out of BOTH operands, on every exit path.
+	// C++ Reference: check_expr.cpp:4375-4378 (a `defer` at the top of check_binary_expr).
+	// Without this a `x or_break` or a deferred-procedure call nested inside a binary
+	// expression is invisible to check_has_break_expr and contains_deferred_call.
+	defer {
+		node.viral_state_flags |= be.left.viral_state_flags
+		node.viral_state_flags |= be.right.viral_state_flags
+	}
+
 	y: Operand
 	op := be.op
 
@@ -2102,6 +2111,17 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 					// Result is all bits set - allow for runtime handling
 				}
 			}
+		}
+
+	case .Cmp_And, .Cmp_Or:
+		// '&&' and '||' short-circuit, so a deferred procedure attached to a call in
+		// either operand may or may not run. C++ rejects it outright.
+		// C++ Reference: check_expr.cpp:4711-4720
+		if .Contains_Deferred_Procedure in be.left.viral_state_flags {
+			error(be.left, "Procedure calls that have an associated deferred procedure are not allowed within logical binary expressions")
+		}
+		if .Contains_Deferred_Procedure in be.right.viral_state_flags {
+			error(be.right, "Procedure calls that have an associated deferred procedure are not allowed within logical binary expressions")
 		}
 	}
 
@@ -7060,7 +7080,9 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Or_Return_Expr:
 		// Or return expression: value or_return
-		// Reference: /mnt/c/odin/src/check_expr.cpp:9362-9442
+		// Reference: /mnt/c/odin/src/check_expr.cpp:12405-12407
+		// NOTE: C++ sets this flag here but never reads it anywhere; kept for parity.
+		node.viral_state_flags |= {.Contains_Or_Return}
 		return check_or_return_expr(ctx, o, node, type_hint)
 
 	case ^ast.Or_Branch_Expr:
