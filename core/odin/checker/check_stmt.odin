@@ -3153,24 +3153,14 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 			}
 		}
 
-		// C++: check_stmt.cpp:572-584 - Parameters are immutable
-		// Check if the entity being assigned to is a procedure parameter
-		// Note: Named return values have both .Param and .Result flags, but they ARE mutable
-		lhs_e := entity_of_node(&ctx.checker.info, lhs.expr)
-		if lhs_e != nil && .Param in lhs_e.flags && .Result not_in lhs_e.flags {
-			str := expr_to_string(lhs.expr)
-			defer delete(str)
-			if .Using in lhs_e.flags {
-				error_node(lhs.expr, "Cannot assign to '%s' which is from a 'using' procedure parameter", str)
-			} else {
-				error_node(lhs.expr, "Cannot assign to '%s' which is a procedure parameter", str)
-			}
-			if is_type_pointer(lhs_e.type) {
-				error_line("\tSuggestion: Did you mean to shadow it? '%s := %s'?\n", lhs_e.token.text, lhs_e.token.text)
-			} else {
-				error_line("\tSuggestion: Did you mean to pass '%s' by pointer?\n", lhs_e.token.text)
-			}
-		}
+		// NOTE: the parameter-immutability check does NOT belong in this arm. C++
+		// has it only in the DEFAULT arm of this switch (check_stmt.cpp:558-605),
+		// i.e. for modes that are not already `.Variable`. A field reached through a
+		// `using` on a POINTER parameter resolves as `.Variable` and is legitimately
+		// assignable — `defilter_8 :: proc(params: ^Filter_Params) { using params;
+		// src = src[1:] }` in core/image/png. The correct copy is in the `case:` arm
+		// below, and it now fires for the by-VALUE case because parameters finally
+		// carry `.Value` (see check_type.odin, alloc_entity_param).
 
 	case .Map_Index:
 		// C++: check_stmt.cpp:517-534

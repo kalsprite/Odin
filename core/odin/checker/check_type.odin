@@ -4471,7 +4471,13 @@ check_get_params :: proc(
 					}
 				} else {
 					// Regular parameter (C++ lines 2199-2202)
-					param_entity = alloc_entity_param(scope, tokenizer.Token{text = param_name, pos = actual_name_node.pos}, param_type, is_using)
+					// C++ Reference: check_type.cpp:2319 —
+					//     param->flags |= EntityFlag_Used|EntityFlag_Param|EntityFlag_Value;
+					// EntityFlag_Value is set on EVERY parameter, unconditionally. It is
+					// what makes check_ident give a parameter `.Value` rather than
+					// `.Variable` mode (check_expr.cpp:2017-2020), which in turn is what
+					// routes an assignment to it into the parameter-immutability check.
+					param_entity = alloc_entity_param(scope, tokenizer.Token{text = param_name, pos = actual_name_node.pos}, param_type, is_using, true)
 
 					// Store default parameter value (C++ line 2200)
 					if param_value.kind != .Invalid {
