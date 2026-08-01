@@ -4677,23 +4677,30 @@ check_set_index_data :: proc(operand: ^Operand, t: ^Type, indirection: bool, max
 			}
 			operand.type = t_u8
 			return true
+		} else if basic.kind == .String16 {
+			// C++ Reference: check_expr.cpp:9054-9063. `string16` indexes to u16.
+			//
+			// This arm EXISTED but was nested inside the `.Untyped_String` branch below,
+			// guarded by `basic.kind == .String16` — a condition that can never hold once
+			// `basic.kind == .Untyped_String` has already matched. It was dead code, so
+			// every `s[i]` on a string16 reported "Cannot index 's' of type 'string16'".
+			if operand.mode == .Constant {
+				if s16_val, ok := operand.value.(Exact_Value_String16); ok {
+					max_count^ = i64(s16_val.len)
+				}
+			}
+			if operand.mode != .Constant {
+				operand.mode = .Value
+			}
+			operand.type = t_u16
+			return true
 		} else if basic.kind == .Untyped_String {
+			// C++ Reference: check_expr.cpp:9064-9071 — indexable only when constant.
 			if operand.mode == .Constant {
 				if str, ok := operand.value.(string); ok {
 					max_count^ = i64(len(str))
 				}
 				operand.type = t_u8
-				return true
-			} else if basic.kind == .String16 {
-				// String16 indexing: string16 -> u16
-				// Reference: check_expr.cpp:5065-5080
-				if operand.mode == .Constant && operand.value != nil {
-					// Constant string16 - get length from value
-					if s16_val, ok := operand.value.(Exact_Value_String16); ok {
-						max_count^ = i64(s16_val.len)
-					}
-				}
-				operand.type = t_u16
 				return true
 			}
 			return false
