@@ -3590,37 +3590,28 @@ is_type_valid_atomic_type :: proc(elem: ^Type) -> bool {
 		return true
 	}
 
-	// Bit sets are atomic (backed by integers)
+	// A bit_set is atomic through its integer representation, so reduce it to that
+	// integer and let the flag test below decide -- C++ does exactly this rather than
+	// accepting every bit_set outright.
 	if ct.kind == .Bit_Set {
-		// Bit set converts to integer for atomic ops
-		return true
+		ct = core_type(bit_set_to_int(ct))
+		if ct == nil {
+			return false
+		}
 	}
 
-	// Basic types: integers, floats, booleans
 	if ct.kind != .Basic {
 		return false
 	}
 
 	basic := ct.variant.(Type_Basic)
 
-	// Check for numeric or boolean types
-	// C++ checks: (elem->Basic.flags & (BasicFlag_Boolean|BasicFlag_OrderedNumeric)) != 0
-	#partial switch basic.kind {
-	case .Bool, .Untyped_Bool:
-		return true
-	case .I8, .I16, .I32, .I64, .I128:
-		return true
-	case .U8, .U16, .U32, .U64, .U128:
-		return true
-	case .Int, .Uint, .Uintptr:
-		return true
-	case .F16, .F32, .F64:
-		return true
-	case .Untyped_Integer, .Untyped_Float:
-		return true
-	}
-
-	return false
+	// C++: (elem->Basic.flags & (BasicFlag_Boolean|BasicFlag_OrderedNumeric)) != 0.
+	// This must stay a flag test, not an enumeration of Basic_Kind values: the previous
+	// hand-written switch silently omitted every endian-specific integer (u32be, i64le,
+	// ...) and the sized booleans b8/b16/b32/b64, so atomics on them were rejected with
+	// the wrong diagnostic before the endianness check could ever run.
+	return basic.flags & (BASIC_FLAG_ORDERED_NUMERIC | {.Boolean}) != {}
 }
 
 // ============================================================================
@@ -4096,16 +4087,29 @@ is_type_generic :: proc(t: ^Type) -> bool {
 	return ok
 }
 
-// is_type_integer_like checks if a type behaves like an integer
-// C++ Reference: checker.cpp:2122-2136
-// C++ uses: (t->Basic.flags & (BasicFlag_Integer|BasicFlag_Boolean)) != 0
+// is_type_integer_like checks if a type behaves like an integer.
+//
+// C++ Reference: types.cpp:1320-1334.
+//
+// This mirrors C++ exactly, which matters in three ways the previous version got wrong:
+// it reduces with `core_type`, not `base_type`; it has a `Bit_Set` arm, so a bit_set
+// counts as integer-like (its underlying representation is an integer); and it
+// nil-guards after reduction. The old version also carried an explicit `Enum` arm,
+// which was compensating for the use of `base_type` -- `core_type` already unwraps an
+// enum to its backing integer, so the arm is redundant here and is dropped.
 is_type_integer_like :: proc(t: ^Type) -> bool {
-	bt := base_type(t)
-	#partial switch v in bt.variant {
+	ct := core_type(t)
+	if ct == nil {
+		return false
+	}
+	#partial switch v in ct.variant {
 	case Type_Basic:
 		// Integer-like includes both Integer and Boolean types
 		return (.Integer in v.flags) || (.Boolean in v.flags)
-	case Type_Enum:
+	case Type_Bit_Set:
+		if v.underlying != nil {
+			return is_type_integer_like(v.underlying)
+		}
 		return true
 	}
 	return false

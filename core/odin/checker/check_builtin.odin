@@ -1236,10 +1236,12 @@ check_builtin_atomic_rmw :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 	is_exchange := id == .Atomic_Exchange || id == .Atomic_Exchange_Explicit
 	if !is_exchange {
 		t := type_deref(operand.type)
-		if !is_type_integer(t) && !is_type_boolean(t) {
+		if !is_type_integer_like(t) {
 			type_str := type_to_string(t)
 			error_node(operand.expr, "Expected an integer type for '%s', got %s", builtin_name, type_str)
-			return false
+		} else if is_type_different_to_arch_endianness(t) {
+			type_str := type_to_string(t)
+			error_node(operand.expr, "Expected an integer type of the same platform endianness for '%s', got %s", builtin_name, type_str)
 		}
 	}
 
