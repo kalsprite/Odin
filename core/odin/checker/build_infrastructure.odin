@@ -154,14 +154,12 @@ is_package_init :: proc(info: ^Checker_Info, pkg: ^ast.Package) -> bool {
 	return pkg.fullpath == info.init_fullpath || pkg.kind == .Init
 }
 
-// is_package_init_simple is a simplified version without fullpath checking
-// Use is_package_init() with Checker_Info for complete checking
-is_package_init_simple :: proc(pkg: ^ast.Package) -> bool {
-	if pkg == nil {
-		return false
-	}
-	return pkg.kind == .Init
-}
+// NOTE: there is deliberately no `is_package_init_simple`. A kind-only variant
+// (`pkg.kind == .Init`, without the fullpath half of C++ checker.cpp:267) is
+// unconditionally FALSE in this port: nothing ever assigns `pkg.kind = .Init` --
+// the init package is identified solely by `info.init_fullpath`, set in
+// check_files.odin. Such a helper is a trap for a future caller, not a shortcut.
+// Use is_package_init(info, pkg).
 
 // is_package_builtin checks if package is the builtin package
 // C++ Reference: checker.cpp:1003 - pkg->kind = Package_Builtin
@@ -180,12 +178,6 @@ is_package_builtin :: proc(pkg: ^ast.Package) -> bool {
 // Convenience function for checking if special handling is needed
 is_package_special :: proc(info: ^Checker_Info, pkg: ^ast.Package) -> bool {
 	return is_package_runtime(pkg) || is_package_init(info, pkg) || is_package_builtin(pkg)
-}
-
-// is_package_special_simple is a simplified version without fullpath checking
-// Use is_package_special() with Checker_Info for complete checking
-is_package_special_simple :: proc(pkg: ^ast.Package) -> bool {
-	return is_package_runtime(pkg) || is_package_init_simple(pkg) || is_package_builtin(pkg)
 }
 
 // get_package_kind_name returns human-readable package kind name
@@ -233,15 +225,6 @@ is_in_init_package :: proc(info: ^Checker_Info, file: ^ast.File) -> bool {
 	pkg := file.pkg
 	// Check both fullpath match and Package_Init kind for complete detection
 	return pkg.fullpath == info.init_fullpath || pkg.kind == .Init
-}
-
-// is_in_init_package_simple is a simplified version without fullpath checking
-// Use is_in_init_package() with Checker_Info for complete checking
-is_in_init_package_simple :: proc(file: ^ast.File) -> bool {
-	if file == nil || file.pkg == nil {
-		return false
-	}
-	return is_package_init_simple(file.pkg)
 }
 
 // is_in_builtin_package checks if a file belongs to the builtin package

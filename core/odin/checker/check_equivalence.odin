@@ -299,7 +299,8 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 					return false
 				}
 			}
-			// C++ Reference: types.cpp:3106-3109
+			// C++ Reference: types.cpp:3352 (VERIFIED 2026-08-01; the old 3106-3109 citation
+			// was stale -- that range is lookup_subtype_polymorphic_selection, another function)
 			// ARCHITECTURAL NOTE: The C++ code has a commented-out check for polymorphic_params:
 			//   return are_types_identical(x->Struct.polymorphic_params, y->Struct.polymorphic_params)
 			// This check is intentionally skipped, following structural equality semantics:
