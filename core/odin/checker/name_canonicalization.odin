@@ -411,7 +411,10 @@ write_canonical_params :: proc(w: ^Type_Writer, params: ^Type) {
 		case .Constant:
 			const_ent := v.variant.(Entity_Constant)
 			type_writer_appendc(w, CANONICAL_PARAM_CONST)
-			s := exact_value_to_string(const_ent.value)
+			// C++ Reference: name_canonicalization.cpp:497 and :851 pass a string limit of
+			// 1<<16. With the default (36) a constant string longer than 36 chars is ELIDED in
+			// the canonical name, so two distinct constants can canonicalise identically.
+			s := exact_value_to_string(const_ent.value, 1 << 16)
 			defer delete(s)
 			type_writer_append(w, raw_data(s), len(s))
 
@@ -830,7 +833,10 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 			type_writer_append(w, raw_data(f.token.text), len(f.token.text))
 			type_writer_appendc(w, "=")
 
-			s := exact_value_to_string(const_ent.value)
+			// C++ Reference: name_canonicalization.cpp:497 and :851 pass a string limit of
+			// 1<<16. With the default (36) a constant string longer than 36 chars is ELIDED in
+			// the canonical name, so two distinct constants can canonicalise identically.
+			s := exact_value_to_string(const_ent.value, 1 << 16)
 			defer delete(s)
 			type_writer_append(w, raw_data(s), len(s))
 		}

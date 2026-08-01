@@ -429,9 +429,12 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			// @(deprecated="message") - C++ line 3774-3786
 			if name == "deprecated" {
 				ev := check_decl_attribute_value(ctx, value)
-				_, ok := ev.(string)
+				// C++ reads the RAW string here (`ev.value_string`, e.g. checker.cpp:4030), not a
+				// formatted one. Binding the type assertion is what makes it raw; going through
+				// exact_value_to_string couples attribute READS to the diagnostic formatter -- see
+				// LEDGER task 232, where quoting that formatter broke every one of these.
+				msg, ok := ev.(string)
 				if ok {
-					msg := exact_value_to_string(ev)
 					if len(msg) == 0 {
 						error(elem, "Deprecation message cannot be an empty string")
 					} else {
@@ -446,9 +449,8 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			// @(warning="message") - C++ line 3762-3773
 			if name == "warning" {
 				ev := check_decl_attribute_value(ctx, value)
-				_, ok := ev.(string)
+				msg, ok := ev.(string)   // raw, as C++ does
 				if ok {
-					msg := exact_value_to_string(ev)
 					if len(msg) == 0 {
 						error(elem, "Warning message cannot be an empty string")
 					} else {
@@ -503,9 +505,13 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			// @(link_name="symbol") - C++ line 3715-3726
 			if name == "link_name" {
 				ev := check_decl_attribute_value(ctx, value)
-				_, ok := ev.(string)
+				// C++ reads the RAW string here (`ev.value_string`, e.g. checker.cpp:4030), not a
+				// formatted one. Binding the type assertion is what makes it raw; going through
+				// exact_value_to_string couples attribute READS to the diagnostic formatter -- see
+				// LEDGER task 232, where quoting that formatter broke every one of these.
+				raw, ok := ev.(string)
 				if ok {
-					ac.link_name = exact_value_to_string(ev)
+					ac.link_name = raw
 					if !is_foreign_name_valid(ac.link_name) {
 						error(elem, "Invalid link name: %s", ac.link_name)
 					}
@@ -518,9 +524,13 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			// @(link_prefix="prefix") - C++ line 3727-3738
 			if name == "link_prefix" {
 				ev := check_decl_attribute_value(ctx, value)
-				_, ok := ev.(string)
+				// C++ reads the RAW string here (`ev.value_string`, e.g. checker.cpp:4030), not a
+				// formatted one. Binding the type assertion is what makes it raw; going through
+				// exact_value_to_string couples attribute READS to the diagnostic formatter -- see
+				// LEDGER task 232, where quoting that formatter broke every one of these.
+				raw, ok := ev.(string)
 				if ok {
-					ac.link_prefix = exact_value_to_string(ev)
+					ac.link_prefix = raw
 					if !is_foreign_name_valid(ac.link_prefix) {
 						error(elem, "Invalid link prefix: %s", ac.link_prefix)
 					}
@@ -533,9 +543,13 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			// @(link_suffix="suffix") - C++ line 3739-3750
 			if name == "link_suffix" {
 				ev := check_decl_attribute_value(ctx, value)
-				_, ok := ev.(string)
+				// C++ reads the RAW string here (`ev.value_string`, e.g. checker.cpp:4030), not a
+				// formatted one. Binding the type assertion is what makes it raw; going through
+				// exact_value_to_string couples attribute READS to the diagnostic formatter -- see
+				// LEDGER task 232, where quoting that formatter broke every one of these.
+				raw, ok := ev.(string)
 				if ok {
-					ac.link_suffix = exact_value_to_string(ev)
+					ac.link_suffix = raw
 					if !is_foreign_name_valid(ac.link_suffix) {
 						error(elem, "Invalid link suffix: %s", ac.link_suffix)
 					}
@@ -552,9 +566,8 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				// We just validate the syntax here
 				if value != nil {
 					ev := check_decl_attribute_value(ctx, value)
-					_, ok := ev.(string)
+					visibility, ok := ev.(string)
 					if ok {
-						visibility := exact_value_to_string(ev)
 						if visibility != "file" && visibility != "package" {
 							error(value, "Expected 'file' or 'package' for @(private), got '%s'", visibility)
 						}
@@ -596,7 +609,7 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 					error(value, "Expected a string for 'linkage'")
 					continue
 				}
-				linkage := exact_value_to_string(ev)
+				linkage, _ := ev.(string)   // raw, as C++ does
 				if linkage == "internal" || linkage == "strong" || linkage == "weak" || linkage == "link_once" {
 					ac.linkage = linkage
 				} else {

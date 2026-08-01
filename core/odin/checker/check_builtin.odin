@@ -5891,7 +5891,7 @@ check_builtin_is_package_imported :: proc(ctx: ^Checker_Context, operand: ^Opera
 	}
 
 	// Get the package path from the constant string
-	pkg_path := exact_value_to_string(x.value)
+	pkg_path, _ := x.value.(string)   // raw string, as C++ reads ev.value_string
 
 	// Check if the package is imported by looking up in the checker's packages map
 	// C++ Reference: check_builtin.cpp:3795-3820
@@ -6991,7 +6991,7 @@ check_builtin_type_field_type :: proc(ctx: ^Checker_Context, operand: ^Operand, 
 	}
 
 	// Get the field name from the constant string value
-	field_name := exact_value_to_string(name_op.value)
+	field_name, _ := name_op.value.(string)   // raw string, as C++ reads ev.value_string
 
 	// C++ Reference: check_builtin.cpp, BuiltinProc_type_field_type:
 	//     Selection sel = lookup_field(type, field_name, false);
