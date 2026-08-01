@@ -102,6 +102,14 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	check_import_entities(c)
 	check_export_entities(c) // Second pass for cross-package visibility
 
+	// File-scope directive expressions (`#assert`, `#config`) are evaluated HERE, not
+	// during collection: C++ drains this queue inside check_import_entities
+	// (checker.cpp:6295), after each package's entities have been exported into its
+	// package scope. Running it earlier means a `#assert(size_of(T) == N)` cannot see
+	// types declared in other files of the same package, and any type it forces to be
+	// sized gets that wrong size cached permanently.
+	check_delayed_expressions_all(c)
+
 	// Drain queues into arrays
 	// C++ line 7323: check_merge_queues_into_arrays(c)
 	check_merge_queues_into_arrays(c)

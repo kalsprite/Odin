@@ -1565,6 +1565,38 @@ process_all_delayed_decls :: proc(ctx: ^Checker_Context, file: ^ast.File) {
 	// Phase 2: Process foreign block declarations (C++ line 5939-5942)
 	process_delayed_foreign_block_decls(ctx, file)
 
-	// Phase 3: Process directive expressions (C++ line 5949-5953)
-	process_delayed_expr_decls(ctx, file)
+	// Phase 3 — directive expressions — is deliberately NOT run here.
+	//
+	// C++ drains the Expr queue inside check_import_entities (checker.cpp:6295), which
+	// is AFTER check_export_entities_in_pkg (checker.cpp:6114) has published each file's
+	// entities into the package scope. This function runs during
+	// check_collect_entities_all, i.e. before any export has happened, so a file-scope
+	// `#assert(size_of(T) == N)` evaluated here cannot see types declared in OTHER FILES
+	// of the same package.
+	//
+	// The consequence was severe and silent: sizing the asserted type forced a
+	// bit_set whose element enum lived in another file, that enum resolved to nothing,
+	// the bit_set degraded to 1 byte, and the WRONG SIZE WAS CACHED for the rest of the
+	// run. `core/sys/linux/types.odin` has `#assert(size_of(IO_Uring_SQE) == 64)`, which
+	// is why `linux.Mode` measured 1 instead of 4 and every dependent package saw
+	// `bit_set[0..=0]`.
+	//
+	// Drained by check_delayed_expressions_all instead — see check_files.odin.
+}
+
+// check_delayed_expressions_all drains every file's queued directive expressions.
+// C++ Reference: checker.cpp:6290-6301 — a separate pass over the package's files, run
+// after imports and exports have been processed.
+check_delayed_expressions_all :: proc(c: ^Checker) {
+	for file in sorted_files(c.info.files) {
+		ctx := make_checker_context(c)
+		defer destroy_checker_context(&ctx)
+		ctx.file = file
+		ctx.pkg = file.pkg
+		if file_scope := c.info.file_scopes[file]; file_scope != nil {
+			ctx.scope = file_scope
+		}
+		process_delayed_expr_decls(&ctx, file)
+		add_untyped_expressions(&c.info, ctx.untyped)
+	}
 }
