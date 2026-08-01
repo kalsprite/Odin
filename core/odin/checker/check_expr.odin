@@ -1074,7 +1074,10 @@ check_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, type_
 // check_binary_op validates that an operator is valid for the given operand type
 // Reference: /mnt/c/odin/src/check_expr.cpp:1997-2104
 check_binary_op :: proc(ctx: ^Checker_Context, o: ^Operand, op: tokenizer.Token) -> bool {
-	type := base_type(o.type)
+	// C++ Reference: check_expr.cpp:2149, `Type *type = base_type(core_array_type(main_type))`.
+	// The core_array_type step is what lets array programming through: `[4]int % n`
+	// must be judged on the ELEMENT type, not on the array.
+	type := base_type(core_array_type(o.type))
 	// C++ Reference: check_expr.cpp:2150, `Type *ct = core_type(type)`. The bitwise
 	// arms below test `ct`, not `type`: core_type strips an enum down to its backing
 	// integer, which is what makes the standard idiom of defining an enum member from
@@ -1329,68 +1332,40 @@ check_binary_matrix :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand,
 // Array operations are element-wise:
 // - Array + Array, Array - Array, Array * Array, Array / Array
 // - All require same array type (same length and element type)
-check_binary_array_expr :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y: ^Operand, op: tokenizer.Token) -> bool {
-	x_type := base_type(x.type)
-	y_type := base_type(y.type)
-
-	x_is_array := is_type_array(x_type)
-	y_is_array := is_type_array(y_type)
-
-	// Both must be arrays for element-wise operations
-	if !x_is_array || !y_is_array {
-		return false
-	}
-
-	x_arr := x_type.variant.(Type_Array)
-	y_arr := y_type.variant.(Type_Array)
-
-	// Arrays must have same count
-	if x_arr.count != y_arr.count {
-		error(op.pos, "Array lengths must match for '%s': [%d] vs [%d]",
-			op.text, x_arr.count, y_arr.count)
-		return false
-	}
-
-	// Element types must be identical
-	if !are_types_identical(x_arr.elem, y_arr.elem) {
-		error(op.pos, "Array element types must match: '%s' vs '%s'",
-			type_to_string(x_arr.elem), type_to_string(y_arr.elem))
-		return false
-	}
-
-	// Validate operator for element type
-	#partial switch op.kind {
-	case .Add, .Sub, .Mul, .Quo:
-		if !is_type_numeric(base_type(x_arr.elem)) {
-			error(op.pos, "Operator '%s' on arrays requires numeric element type, got '%s'",
-				op.text, type_to_string(x_arr.elem))
-			return false
+check_binary_array_expr :: proc(ctx: ^Checker_Context, x: ^Operand, y: ^Operand, op: tokenizer.Token) -> bool {
+	// C++ Reference: /mnt/c/odin/src/check_expr.cpp:4134-4155
+	//
+	// This is "array programming": an ARRAY combined with a NON-array, where the
+	// scalar is broadcast across the elements. The port previously required BOTH
+	// operands to be arrays - the opposite of this procedure's purpose - and its
+	// single call site was guarded the same way, so `v * s` never reached it and
+	// fell through to the identical-types check as a mismatch.
+	//
+	// The both-arrays case needs nothing here: identical array types pass the
+	// `are_types_identical` test at the caller and are validated by check_binary_op.
+	if is_type_array_like(x.type) || is_type_array_like(y.type) {
+		if op.kind == .Cmp_And || op.kind == .Cmp_Or {
+			error(op.pos, "Array programming is not allowed with the operator '%s'", op.text)
 		}
-
-	case .Mod, .Mod_Mod:
-		if !is_type_integer(base_type(x_arr.elem)) {
-			error(op.pos, "Operator '%s' on arrays requires integer element type, got '%s'",
-				op.text, type_to_string(x_arr.elem))
-			return false
-		}
-
-	case .And, .Or, .Xor, .And_Not:
-		elem := base_type(x_arr.elem)
-		if !is_type_integer(elem) && !is_type_boolean(elem) {
-			error(op.pos, "Operator '%s' on arrays requires integer or boolean element type, got '%s'",
-				op.text, type_to_string(x_arr.elem))
-			return false
-		}
-
-	case:
-		error(op.pos, "Operator '%s' is not valid for array types", op.text)
-		return false
 	}
 
-	// Result type is same as input
-	x.mode = .Value
-	x.expr = node
-	return true
+	if is_type_array(x.type) && !is_type_array(y.type) {
+		if check_is_assignable_to(ctx, y, x.type) {
+			if check_binary_op(ctx, x, op) {
+				return true
+			}
+		}
+	}
+
+	if is_type_simd_vector(x.type) && !is_type_simd_vector(y.type) {
+		if check_is_assignable_to(ctx, y, x.type) {
+			if check_binary_op(ctx, x, op) {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // check_shift handles shift operators (<< and >>)
@@ -1996,12 +1971,18 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 		// If check_binary_matrix returns false, fall through to report type mismatch
 	}
 
-	// Check for array binary operations
-	if is_type_array(base_type(x.type)) && is_type_array(base_type(y.type)) {
-		if check_binary_array_expr(ctx, node, x, &y, op) {
-			return
-		}
-		// If check_binary_array_expr returns false, fall through to report error
+	// Array programming, in BOTH operand orders.
+	// C++ Reference: check_expr.cpp:4620-4629
+	if check_binary_array_expr(ctx, x, &y, op) {
+		x.mode = .Value
+		x.expr = node
+		return
+	}
+	if check_binary_array_expr(ctx, &y, x, op) {
+		x.mode = .Value
+		x.type = y.type
+		x.expr = node
+		return
 	}
 
 
