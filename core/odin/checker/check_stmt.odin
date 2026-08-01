@@ -1111,9 +1111,14 @@ check_assign_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 				lhs_operands[i].expr = stmt.lhs[i]
 				lhs_operands[i].mode = .Value
 			} else {
+				// C++ Reference: check_stmt.cpp:2531. The LHS being checked is published
+				// so check_expr's Implicit arm can tell `context = ...` (which DEFINES the
+				// context) from a read of it.
+				ctx.assignment_lhs_hint = unparen_expr(stmt.lhs[i])
 				check_expr(ctx, &lhs_operands[i], stmt.lhs[i])
 			}
 		}
+		ctx.assignment_lhs_hint = nil // C++ Reference: check_stmt.cpp:2535
 
 		// Unpack RHS into operands (handles tuples, multi-return, etc.)
 		check_assignment_arguments(ctx, lhs_operands[:], &rhs_operands, stmt.rhs)

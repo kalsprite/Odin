@@ -1161,6 +1161,13 @@ Checker_Context :: struct {
 	in_defer:                          bool,
 	type_hint:                         ^Type,
 	type_hint_expr:                    ^ast.Expr, // C++ Reference: checker.hpp:530 - For [?]T{...} syntax
+	// The LHS currently being checked by an assignment statement, unparenthesised.
+	// C++ Reference: checker.hpp `assignment_lhs_hint`, set in check_stmt.cpp:2531.
+	// This is how `context = ...` is recognised as DEFINING the context rather than
+	// reading it: check_expr's Implicit arm compares the node it is checking against
+	// this hint (check_expr.cpp:12277) and sets Scope_Flag.Context_Defined when they
+	// match. Without it, a "c"/"contextless" procedure could never establish a context.
+	assignment_lhs_hint:               ^ast.Node,
 	proc_name:                         string,
 	curr_proc_decl:                    ^Decl_Info,
 	curr_proc_sig:                     ^Type,

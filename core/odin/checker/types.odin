@@ -1666,6 +1666,7 @@ type_size_of :: proc(t: ^Type) -> int {
 		if is_type_union_maybe_pointer(bt) {
 			// A #maybe-pointer union needs no tag: the pointer's nil state IS the tag.
 			size = max_variant
+			set_union_variant_block_size(bt, i64(size))
 		} else {
 			tag_size := union_tag_size(bt)
 			// Align the variant block to the tag, then append the tag.
@@ -1674,6 +1675,12 @@ type_size_of :: proc(t: ^Type) -> int {
 			} else {
 				size = max_variant
 			}
+			// C++ Reference: types.cpp:4773 — record the block size BEFORE the tag is
+			// appended and before the final alignment. This is the tag's offset within
+			// the union, and it was never stored: `type_offset_of` (index -1) and
+			// `intrinsics.type_union_tag_offset` read the field, so every tagged union
+			// reported a tag offset of 0, overlapping the variant block.
+			set_union_variant_block_size(bt, i64(size))
 			size += tag_size
 		}
 		if align > 0 {
@@ -3351,6 +3358,19 @@ is_type_rune_array :: proc(t: ^Type) -> bool {
 // 4. Platform max_align constraint (8 bytes)
 //
 // Returns 0 if union has no variants
+// set_union_variant_block_size caches the offset of a union's tag — i.e. the size of the
+// variant block, before the tag is appended and before final alignment.
+// C++ Reference: /mnt/c/odin/src/types.cpp:4766 and :4773.
+set_union_variant_block_size :: proc(u_param: ^Type, block_size: i64) {
+	u := base_type(u_param)
+	if u == nil || u.kind != .Union {
+		return
+	}
+	if union_type, ok := &u.variant.(Type_Union); ok {
+		union_type.variant_block_size = block_size
+	}
+}
+
 union_tag_size :: proc(u_param: ^Type) -> int {
 	// C++ Reference: types.cpp:3286 - Unwrap named types
 	u := base_type(u_param)
@@ -4021,31 +4041,29 @@ is_type_ordered_numeric :: proc(t: ^Type) -> bool {
 
 // is_type_union_maybe_pointer checks if a union can be used as a maybe pointer
 // C++ Reference: checker.cpp:2211-2240
+// is_type_union_maybe_pointer reports whether a union can use its single variant's own
+// nil representation as the tag, needing no separate tag at all — `union { ^int }` is
+// 8 bytes, not 16.
+//
+// C++ Reference: /mnt/c/odin/src/types.cpp:2031-2039 — exactly ONE variant, which must be
+// `is_type_internally_pointer_like` (pointer, multi-pointer, cstring, cstring16 or proc).
+//
+// The port previously required TWO variants and looked for an `untyped nil` among them.
+// A union's variant list never contains `untyped nil`, so this always returned false:
+// every maybe-pointer union was sized and laid out as though it carried a tag.
 is_type_union_maybe_pointer :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
+	if bt == nil {
+		return false
+	}
 	u, ok := bt.variant.(Type_Union)
 	if !ok {
 		return false
 	}
-
-	// Union must have exactly 2 variants
-	if len(u.variants) != 2 {
+	if len(u.variants) != 1 {
 		return false
 	}
-
-	// One variant must be a pointer, the other must be compatible with nil
-	has_pointer := false
-	has_nil_compatible := false
-
-	for variant in u.variants {
-		if is_type_pointer(variant) || is_type_multi_pointer(variant) {
-			has_pointer = true
-		} else if is_type_untyped_nil(variant) {
-			has_nil_compatible = true
-		}
-	}
-
-	return has_pointer && has_nil_compatible
+	return is_type_internally_pointer_like(u.variants[0])
 }
 
 // is_type_valid_for_keys checks if a type can be used as a map key

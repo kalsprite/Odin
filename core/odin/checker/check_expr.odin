@@ -6871,6 +6871,23 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 				return .Stmt
 			}
 
+			// C++ Reference: check_expr.cpp:12277-12279. Assigning TO `context` is what
+			// defines it for the rest of the scope — this is how a "c" or "contextless"
+			// procedure bootstraps one:
+			//
+			//     main :: proc "c" (argc: i32, argv: [^]cstring) -> i32 {
+			//         context = default_context()
+			//         ...                       // context is now available here
+			//     }
+			//
+			// The port had no `assignment_lhs_hint` at all, so the assignment was checked
+			// as a READ, reported "'context' has not been defined", and left the flag
+			// clear — making every subsequent context use and every Odin-convention call
+			// in the same body fail too. That is both halves of this pair of classes.
+			if ctx.assignment_lhs_hint != nil && unparen_expr(ctx.assignment_lhs_hint) == node {
+				ctx.scope.flags += {.Context_Defined}
+			}
+
 			// Check if context has been defined in scope
 			if .Context_Defined not_in ctx.scope.flags {
 				error(node, "'context' has not been defined within this scope")

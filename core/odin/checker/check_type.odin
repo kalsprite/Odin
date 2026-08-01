@@ -1901,6 +1901,15 @@ check_polymorphic_record_type :: proc(ctx: ^Checker_Context, original_type: ^Typ
 		// Create new struct type with initialized variant
 		new_struct_type := alloc_type_struct(ctx.checker)
 
+		// C++ Reference: check_expr.cpp:8451. `polymorphic_parent` links an instance
+		// back to the generic record it came from. The port declared and READ this field
+		// (types.odin:853, check_builtin.odin:6932, check_type_specialization_to) but
+		// never wrote it, so it was permanently nil and every reader silently took the
+		// "not polymorphic" path — including the `$Q/Queue` specialization test.
+		if s, s_ok := &new_struct_type.variant.(Type_Struct); s_ok {
+			s.polymorphic_parent = original_type
+		}
+
 		// Set up the named type relationship
 		set_base_type(new_named_type, new_struct_type)
 
@@ -1923,6 +1932,11 @@ check_polymorphic_record_type :: proc(ctx: ^Checker_Context, original_type: ^Typ
 
 		// Create new union type with initialized variant
 		new_union_type := alloc_type_union(ctx.checker)
+
+		// C++ Reference: check_expr.cpp:8461 — see the struct arm above.
+		if u, u_ok := &new_union_type.variant.(Type_Union); u_ok {
+			u.polymorphic_parent = original_type
+		}
 
 		// Set up the named type relationship
 		set_base_type(new_named_type, new_union_type)
@@ -4915,217 +4929,180 @@ polymorphic_assign_index :: proc(
 	return false
 }
 
-// check_type_specialization_to checks if specialization type matches concrete type
-// for polymorphic struct/union instances
-// C++ Reference: /mnt/c/odin/src/check_type.cpp:1438-1570
+// check_type_specialization_to_internal walks a polymorphic record's parameter list
+// against a concrete instance's, binding each parameter.
+// C++ Reference: /mnt/c/odin/src/check_type.cpp:1519-1563
+check_type_specialization_to_internal :: proc(
+	ctx: ^Checker_Context,
+	specialization: ^Type,
+	type: ^Type,
+	s_tuple: ^Type_Tuple,
+	t_tuple: ^Type_Tuple,
+	modify_type: bool,
+) -> bool {
+	// C++ GB_ASSERTs equal counts; return false instead so a malformed pair cannot
+	// take down the checker.
+	if s_tuple == nil || t_tuple == nil || len(s_tuple.variables) != len(t_tuple.variables) {
+		return false
+	}
+
+	for i in 0 ..< len(s_tuple.variables) {
+		s_e := s_tuple.variables[i]
+		t_e := t_tuple.variables[i]
+		st := entity_type(s_e)
+		tt := entity_type(t_e)
+		if st == nil || tt == nil {
+			return false
+		}
+
+		// C++ line 1529: override polymorphic named constants in types
+		if st.kind == .Generic && t_e.kind == .Constant {
+			generic := st.variant.(Type_Generic)
+			e := scope_lookup(generic.scope, generic.name)
+			if e != nil && modify_type {
+				e.kind = .Constant
+				type_const := t_e.variant.(Entity_Constant)
+				e.variant = Entity_Constant {
+					type              = type_const.type,
+					value             = type_const.value,
+					param_value       = type_const.param_value,
+					flags             = type_const.flags,
+					field_group_index = type_const.field_group_index,
+				}
+				e.type = type_const.type
+			}
+			continue
+		}
+
+		// C++ line 1538-1542: two constants of basic type must compare equal
+		if st.kind == .Basic && tt.kind == .Basic && s_e.kind == .Constant && t_e.kind == .Constant {
+			s_c := s_e.variant.(Entity_Constant)
+			t_c := t_e.variant.(Entity_Constant)
+			if !compare_exact_values(.Cmp_Eq, s_c.value, t_c.value) {
+				return false
+			}
+			continue
+		}
+
+		// C++ line 1545: `compound` is hard-coded true here
+		if !is_polymorphic_type_assignable(ctx, st, tt, true, modify_type) {
+			return false
+		}
+	}
+
+	if modify_type {
+		// C++ line 1560: gb_memmove(specialization, type, sizeof(Type)) — change the
+		// actual type while keeping the types defined within it.
+		specialization.kind = type.kind
+		specialization.variant = type.variant
+		specialization.flags = type.flags
+	}
+
+	return true
+}
+
+// check_type_specialization_to checks whether a concrete type satisfies a polymorphic
+// specialization, e.g. `Queue(string)` against the `$Q/Queue` of `proc(q: ^$Q/Queue)`.
+//
+// C++ Reference: /mnt/c/odin/src/check_type.cpp:1565-1631. The port previously carried a
+// reduced version of this that diverged in four ways, all restored here:
+//
+//  1. The head guard was inverted. C++ returns TRUE for a nil/invalid `type` (nothing to
+//     contradict); the port returned false.
+//  2. The kind-mismatch and untyped arms were absent entirely.
+//  3. The struct/union arms jumped straight to comparing `polymorphic_parent` on both
+//     sides, skipping C++'s two early accepts. The second of those,
+//     `t->Struct.polymorphic_parent == specialization`, is the case where the
+//     specialization names the generic RECORD ITSELF rather than an instantiation —
+//     exactly `^$Q/Queue`. Its absence made every such call fail to infer, reporting
+//     "Cannot determine polymorphic type from parameter: '^Queue' to '^$Q/Queue'".
+//  4. When no struct/union arm applied the port returned false; C++ falls through to the
+//     Named check and the general assignability test.
 check_type_specialization_to :: proc(
 	ctx: ^Checker_Context,
-	specialization: ^Type, // Polymorphic parent type (e.g., Array($T))
-	type: ^Type, // Concrete type (e.g., Array(i32))
+	specialization: ^Type, // Polymorphic parent type (e.g., Queue($T), or Queue itself)
+	type: ^Type, // Concrete type (e.g., Queue(string))
 	compound: bool,
 	modify_type: bool,
 ) -> bool {
-	if specialization == nil || type == nil {
+	// C++ line 1566-1569
+	if type == nil || type == t_invalid {
+		return true
+	}
+	if specialization == nil {
 		return false
 	}
 
-	// Get base types
-	spec_base := base_type(specialization)
-	type_base := base_type(type)
-
-	// C++ lines 1459-1511: Struct specialization
-	if spec_base.kind == .Struct && type_base.kind == .Struct {
-		spec_struct := spec_base.variant.(Type_Struct)
-		type_struct := type_base.variant.(Type_Struct)
-
-		// Check if they share the same polymorphic parent
-		// C++ Reference: check_type.cpp:1462-1465
-		if spec_struct.polymorphic_parent != type_struct.polymorphic_parent {
-			return false
-		}
-
-		// If no polymorphic parent, fall back to normal assignment checking
-		// C++ Reference: check_type.cpp:1466-1468
-		if spec_struct.polymorphic_parent == nil {
-			return is_polymorphic_type_assignable(ctx, specialization, type, compound, modify_type)
-		}
-
-		// Get polymorphic params for both types
-		// C++ Reference: check_type.cpp:1470-1472
-		spec_params := get_record_polymorphic_params(specialization)
-		type_params := get_record_polymorphic_params(type)
-
-		// Both must have params
-		// C++ Reference: check_type.cpp:1473-1475
-		if spec_params == nil || type_params == nil {
-			return false
-		}
-
-		// Must have same number of params
-		// C++ Reference: check_type.cpp:1476-1479
-		if len(spec_params.variables) != len(type_params.variables) {
-			return false
-		}
-
-		// Check each parameter pair
-		// C++ Reference: check_type.cpp:1481-1507
-		for i in 0 ..< len(spec_params.variables) {
-			spec_entity := spec_params.variables[i]
-			type_entity := type_params.variables[i]
-
-			spec_param_type := entity_type(spec_entity)
-			type_param_type := entity_type(type_entity)
-
-			// Special case: Generic + Constant pairing
-			// C++ Reference: check_type.cpp:1482-1489
-			if spec_param_type.kind == .Generic && type_entity.kind == .Constant {
-				// Look up the entity from the generic's scope
-				generic := spec_param_type.variant.(Type_Generic)
-				e := scope_lookup(generic.scope, generic.name)
-				assert(e != nil, "Generic entity must exist in scope")
-
-				// If modify_type, mutate the entity to bind the constant
-				if modify_type {
-					// Change entity kind to Constant
-					e.kind = .Constant
-
-					// Update the variant to Entity_Constant
-					type_const := type_entity.variant.(Entity_Constant)
-					e.variant = Entity_Constant {
-						type              = type_const.type,
-						value             = type_const.value,
-						param_value       = type_const.param_value,
-						flags             = type_const.flags,
-						field_group_index = type_const.field_group_index,
-					}
-
-					// Update the entity's type field
-					e.type = type_const.type
-				}
-				continue
-			}
-
-			// Normal case: check assignability
-			// C++ Reference: check_type.cpp:1499-1503
-			if !is_polymorphic_type_assignable(ctx, spec_param_type, type_param_type, compound, modify_type) {
-				return false
-			}
-		}
-
-		// If modify_type, copy the concrete type into specialization
-		// C++ Reference: check_type.cpp:1505-1509
-		// C++ does: gb_memmove(specialization, type, gb_size_of(Type))
-		if modify_type {
-			// Copy all Type fields from concrete type to specialization
-			// This binds the polymorphic struct to its concrete specialized form
-			// Note: In C++, size/align are cached fields at the end of Type struct
-			// In Odin, they're computed on-demand via type_size_of/type_align_of
-			specialization.kind = type.kind
-			specialization.variant = type.variant
-			specialization.flags = type.flags
-		}
-
-		return true
+	t := base_type(type)
+	s := base_type(specialization)
+	if t == nil || s == nil {
+		return false
 	}
 
-	// C++ lines 1512-1558: Union specialization (similar logic to struct)
-	if spec_base.kind == .Union && type_base.kind == .Union {
-		spec_union := spec_base.variant.(Type_Union)
-		type_union := type_base.variant.(Type_Union)
-
-		// Check if they share the same polymorphic parent
-		if spec_union.polymorphic_parent != type_union.polymorphic_parent {
+	// C++ line 1573-1580
+	if t.kind != s.kind {
+		if t.kind == .Enumerated_Array && s.kind == .Array {
+			// Might be okay, check later
+		} else {
 			return false
 		}
-
-		// If no polymorphic parent, fall back to normal assignment checking
-		if spec_union.polymorphic_parent == nil {
-			return is_polymorphic_type_assignable(ctx, specialization, type, compound, modify_type)
-		}
-
-		// Get polymorphic params for both types
-		spec_params := get_record_polymorphic_params(specialization)
-		type_params := get_record_polymorphic_params(type)
-
-		// Both must have params
-		if spec_params == nil || type_params == nil {
-			return false
-		}
-
-		// Must have same number of params
-		if len(spec_params.variables) != len(type_params.variables) {
-			return false
-		}
-
-		// Check each parameter pair
-		for i in 0 ..< len(spec_params.variables) {
-			spec_entity := spec_params.variables[i]
-			type_entity := type_params.variables[i]
-
-			spec_param_type := entity_type(spec_entity)
-			type_param_type := entity_type(type_entity)
-
-			// Special case: Generic + Constant pairing
-			// C++ Reference: check_type.cpp:1535-1542
-			if spec_param_type.kind == .Generic && type_entity.kind == .Constant {
-				// Look up the entity from the generic's scope
-				generic := spec_param_type.variant.(Type_Generic)
-				e := scope_lookup(generic.scope, generic.name)
-				assert(e != nil, "Generic entity must exist in scope")
-
-				// If modify_type, mutate the entity to bind the constant
-				if modify_type {
-					// Change entity kind to Constant
-					e.kind = .Constant
-
-					// Update the variant to Entity_Constant
-					type_const := type_entity.variant.(Entity_Constant)
-					e.variant = Entity_Constant {
-						type              = type_const.type,
-						value             = type_const.value,
-						param_value       = type_const.param_value,
-						flags             = type_const.flags,
-						field_group_index = type_const.field_group_index,
-					}
-
-					// Update the entity's type field
-					e.type = type_const.type
-				}
-				continue
-			}
-
-			// Normal case: check assignability
-			if !is_polymorphic_type_assignable(ctx, spec_param_type, type_param_type, compound, modify_type) {
-				return false
-			}
-		}
-
-		// If modify_type, copy the concrete type into specialization
-		// C++ Reference: check_type.cpp:1552-1555
-		// C++ does: gb_memmove(specialization, type, gb_size_of(Type))
-		if modify_type {
-			// Copy all Type fields from concrete type to specialization
-			// This binds the polymorphic union to its concrete specialized form
-			// Note: In C++, size/align are cached fields at the end of Type struct
-			// In Odin, they're computed on-demand via type_size_of/type_align_of
-			specialization.kind = type.kind
-			specialization.variant = type.variant
-			specialization.flags = type.flags
-		}
-
-		return true
 	}
 
-	// C++ lines 1561-1569: Fallback - check Named type mismatch
+	if is_type_untyped(t) {
+		// C++ line 1582-1587
+		o := Operand {
+			mode = .Value,
+			type = default_type(type),
+		}
+		return check_cast_internal(ctx, &o, specialization)
+	} else if t.kind == .Struct && s.kind == .Struct {
+		ts := t.variant.(Type_Struct)
+		ss := s.variant.(Type_Struct)
+
+		// C++ line 1589-1596
+		if ts.polymorphic_parent == nil && t == s {
+			return true
+		}
+		if ts.polymorphic_parent == specialization {
+			return true
+		}
+		if ts.polymorphic_parent == ss.polymorphic_parent &&
+		   ss.polymorphic_params != nil &&
+		   ts.polymorphic_params != nil {
+			return check_type_specialization_to_internal(
+				ctx, specialization, type,
+				get_record_polymorphic_params(s), get_record_polymorphic_params(t),
+				modify_type,
+			)
+		}
+	} else if t.kind == .Union && s.kind == .Union {
+		tu := t.variant.(Type_Union)
+		su := s.variant.(Type_Union)
+
+		// C++ line 1603-1619
+		if tu.polymorphic_parent == nil && t == s {
+			return true
+		}
+		if tu.polymorphic_parent == specialization {
+			return true
+		}
+		if tu.polymorphic_parent == su.polymorphic_parent &&
+		   su.polymorphic_params != nil &&
+		   tu.polymorphic_params != nil {
+			return check_type_specialization_to_internal(
+				ctx, specialization, type,
+				get_record_polymorphic_params(s), get_record_polymorphic_params(t),
+				modify_type,
+			)
+		}
+	}
+
+	// C++ line 1622-1625
 	if specialization.kind == .Named && type.kind != .Named {
 		return false
 	}
-	if specialization.kind != .Named && type.kind == .Named {
-		return false
-	}
 
-	// Fall back to polymorphic assignment checking
-	// C++ Reference: check_type.cpp:1566-1569
+	// C++ line 1626-1630
 	return is_polymorphic_type_assignable(ctx, base_type(specialization), base_type(type), compound, modify_type)
 }
 
