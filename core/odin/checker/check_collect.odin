@@ -1038,8 +1038,23 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 				} else if len(vd.names) == 1 && i < len(vd.values) && vd.values[i] != nil {
 					// Only infer type for single-value declarations
 					// Multi-value declarations (like a, b := expand_values(p)) are handled in check_stmt
+					// This is a SPECULATIVE probe: the initialiser is evaluated only to
+					// learn its type early, so that a later `T :: type_of(x)` resolves.
+					// check_stmt checks this declaration properly afterwards.
+					//
+					// Its diagnostics must be discarded. The probe runs before the enclosing
+					// statement list has been checked, so any name introduced by a `when`
+					// block in that list is not in scope yet:
+					//
+					//     when ODIN_ENDIAN == .Little { s11_ := k[7] }
+					//     s11 := u32x4{s11_, s11_, s11_, s11_}   // probed too early
+					//
+					// which produced 5,376 spurious "Undeclared name" diagnostics tree-wide,
+					// every one of them from base/runtime/random_generator_chacha8_simd128.odin.
 					o: Operand
+					begin_suppress_errors()
 					check_multi_expr_or_type(ctx, &o, vd.values[i])
+					end_suppress_errors()
 					if o.mode != .Invalid && o.type != nil && o.type.kind != .Tuple {
 						inferred_type := default_type(o.type)
 						// Don't pre-set type for untyped nil/uninit - let check_init_variable detect the error

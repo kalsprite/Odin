@@ -108,6 +108,22 @@ global_error_collector: Error_Collector
 // Thread-local state for error building
 // Each thread has its own current error being constructed
 // This prevents race conditions when multiple threads report errors simultaneously
+// tls_error_suppress_depth > 0 means diagnostics on this thread are being discarded.
+// Balance every begin_suppress_errors with end_suppress_errors, ideally via `defer`.
+@(thread_local) tls_error_suppress_depth: int
+
+// begin_suppress_errors starts a region whose diagnostics are discarded (not counted, not
+// collected). C++ achieves the same effect with dedicated no-error probe flags on the
+// CheckerContext; the port needs a general mechanism because `error()` here is global.
+begin_suppress_errors :: proc() {
+	tls_error_suppress_depth += 1
+}
+
+end_suppress_errors :: proc() {
+	assert(tls_error_suppress_depth > 0, "unbalanced end_suppress_errors")
+	tls_error_suppress_depth -= 1
+}
+
 @(thread_local) tls_curr_error_value: Error_Value
 @(thread_local) tls_curr_error_value_set: bool
 @(thread_local) tls_in_block: bool
@@ -805,6 +821,13 @@ error_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args: .
 	// Fast path once the limit has been latched: no atomics-with-writes, no allocation, no
 	// growth of error_values. The fact that the limit was hit is preserved in the flag.
 	if error_limit_reached() {
+		return
+	}
+
+	// Speculative probes (see begin_suppress_errors) discard diagnostics entirely: they
+	// neither count nor reach the collector. Used where the checker evaluates an
+	// expression purely to learn its type and will check it properly again later.
+	if tls_error_suppress_depth > 0 {
 		return
 	}
 
