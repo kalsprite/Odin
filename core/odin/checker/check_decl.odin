@@ -1766,6 +1766,17 @@ is_blank_ident :: proc(name: string) -> bool {
 	return name == "_"
 }
 
+// Node form of is_blank_ident, matching C++'s overload (parser.cpp:1750).
+is_blank_ident_node :: proc(node: ^ast.Node) -> bool {
+	if node == nil {
+		return false
+	}
+	if ident, ok := node.derived.(^ast.Ident); ok {
+		return is_blank_ident(ident.name)
+	}
+	return false
+}
+
 // Alias for compatibility
 is_blank_ident_string :: is_blank_ident
 

@@ -1042,7 +1042,9 @@ check_assignment_arguments :: proc(ctx: ^Checker_Context, lhs: []Operand, rhs_op
 		// Check if this is a tuple type or needs special unpacking
 		if o.type == nil || o.type.kind != .Tuple {
 			// Check for optional-ok patterns: x, ok := map[key]
-			if len(lhs) == 2 && len(rhs) == 1 && (o.mode == .Map_Index || o.mode == .Optional_Ok) {
+			if len(lhs) == 2 && len(rhs) == 1 && (o.mode == .Map_Index || o.mode == .Optional_Ok || o.mode == .Optional_Ok_Ptr) {
+				expr := unparen_expr(o.expr)
+
 				// Split into value and ok operands
 				val0 := o
 				val1 := o
@@ -1050,10 +1052,36 @@ check_assignment_arguments :: proc(ctx: ^Checker_Context, lhs: []Operand, rhs_op
 				val1.mode = .Value
 				val1.type = t_untyped_bool
 
+				// The second value is only `bool` by default; for an
+				// #optional_ok / #optional_allocator_error procedure it is the
+				// callee's declared second result.
+				check_promote_optional_ok(ctx, &o, nil, &val1.type)
+
+				if ta, is_ta := expr.derived.(^ast.Type_Assertion); is_ta &&
+				   (o.mode == .Optional_Ok || o.mode == .Optional_Ok_Ptr) {
+					// NOTE(bill): Used only for optimizations in the backend
+					if is_blank_ident_node(lhs[0].expr) {
+						ta.ignores[0] = true
+					}
+					if is_blank_ident_node(lhs[1].expr) {
+						ta.ignores[1] = true
+					}
+				}
+
 				append(rhs_operands, val0)
 				append(rhs_operands, val1)
 				optional_ok = true
 				tuple_index += 2
+			} else if o.mode == .Optional_Ok && is_type_tuple(o.type) {
+				// A single-valued use of an #optional_ok call: keep only the
+				// first result and consume both tuple slots.
+				tuple := &o.type.variant.(Type_Tuple)
+				assert(len(tuple.variables) == 2)
+				val := o
+				val.type = get_entity_type(tuple.variables[0])
+				val.mode = .Value
+				append(rhs_operands, val)
+				tuple_index += len(tuple.variables)
 			} else {
 				// Normal single value
 				append(rhs_operands, o)
