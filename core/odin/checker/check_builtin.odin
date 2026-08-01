@@ -60,6 +60,21 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		// both hit this.
 		break
 
+	case .Atomic_Thread_Fence, .Atomic_Signal_Fence:
+		// C++ Reference: check_builtin.cpp:2827-2830 — "first type will require a type hint".
+		//
+		// Their sole argument is an Atomic_Memory_Order, and it is almost always written as a
+		// bare implicit selector: `intrinsics.atomic_thread_fence(.Acquire)`. Pre-checking it
+		// here checks it with NO type hint, so `.Acquire` has nothing to resolve against and
+		// reports "Cannot determine type for implicit selector expression"; the handler's own
+		// hinted re-check then reuses the recorded (failed) result.
+		//
+		// The neighbouring atomics were unaffected because their memory order is the SECOND
+		// argument, which the prologue never touches — which is exactly the asymmetry that
+		// located this: `atomic_load_explicit(&x, .Seq_Cst)` worked while
+		// `atomic_thread_fence(.Acquire)` did not.
+		break
+
 	case:
 		// Default: check first arg as multi-expr
 		//
