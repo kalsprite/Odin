@@ -880,8 +880,16 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 
 			// A boolean is required.
 			case "disabled":
+				// C++ Reference: checker.cpp:4093-4102. The value is not merely validated,
+				// it is STORED. Task 44 added the validation here without the storage, so
+				// ac.disabled_proc stayed false forever and `.Disabled` was never set on any
+				// entity -- making check_decl.odin's `if ac.has_disabled_proc` arm and every
+				// `.Disabled in e.flags` reader dead.
 				ev := check_decl_attribute_value(ctx, value)
-				if _, ok := ev.(bool); !ok {
+				if b, ok := ev.(bool); ok {
+					ac.has_disabled_proc = true
+					ac.disabled_proc = b
+				} else {
 					error(elem, "Expected a boolean value for '%s'", name)
 				}
 				continue

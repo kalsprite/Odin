@@ -1114,20 +1114,23 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 	if ac.init && ac.fini {
 		error(e.token, "A procedure cannot be both declared as @(init) and @(fini)")
 	} else if ac.init {
-		// Validate @(init) procedure signature - must have no parameters and no results
-		// C++ Reference: checker.cpp validation for init procedures
+		// C++ Reference: checker.cpp:3001-3040, inside generate_minimum_dependency_set_internal.
+		// The port validates at declaration time instead (the pass in #42 does not exist here);
+		// every one of these is a property of the entity and its type, so the placement is
+		// equivalent. The port previously had ONLY the signature check of the five.
 		if pt.param_count != 0 || pt.result_count != 0 {
 			type_str := type_to_string(proc_type)
 			error(e.token, "@(init) procedures must have a signature type with no parameters nor results, got %s", type_str)
 		}
+		check_init_fini_common(ctx, e, d, pt, "init", ac.disabled_proc)
 		e.flags += {.Init}
 	} else if ac.fini {
-		// Validate @(fini) procedure signature - must have no parameters and no results
-		// C++ Reference: checker.cpp validation for fini procedures
+		// C++ Reference: checker.cpp:3042-3080 - the @(fini) arm, identical in shape.
 		if pt.param_count != 0 || pt.result_count != 0 {
 			type_str := type_to_string(proc_type)
 			error(e.token, "@(fini) procedures must have a signature type with no parameters nor results, got %s", type_str)
 		}
+		check_init_fini_common(ctx, e, d, pt, "fini", ac.disabled_proc)
 		e.flags += {.Fini}
 	}
 
@@ -1762,6 +1765,55 @@ clear_ast_state_flag :: proc(info: ^Checker_Info, node: ^ast.Node, flag: State_F
 // path_to_entity_name is defined in entity_helpers.odin
 
 // Helper: Check if identifier is blank (_)
+// check_init_fini_common applies the three validations C++ runs identically for @(init) and
+// @(fini) beyond the signature check: the contextless requirement, the file-scope requirement,
+// and the blank-identifier ban. The `disabled` warning is included too.
+//
+// C++ Reference: checker.cpp:3015-3038 (@(init)) and :3056-3080 (@(fini)). The two arms are
+// literal duplicates in C++ apart from the attribute name in each message, so they are
+// factored here and the name is passed in.
+check_init_fini_common :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, pt: ^Type_Proc, kind: string, is_disabled: bool) {
+	if e == nil || pt == nil {
+		return
+	}
+
+	// "contextless" is required unless the file opted into `#+feature global-context`.
+	// C++ Reference: checker.cpp:3015-3021
+	feature_flags: Opt_In_Feature_Flag
+	if d != nil {
+		feature_flags = check_feature_flags(ctx, d.decl_node)
+	}
+	if feature_flags & {.Global_Context} == {} {
+		if pt.calling_convention != .Contextless {
+			// begin/end_error_block is the port's ERROR_BLOCK(). Without it the buffered
+			// `error` and the immediate `error_line` come out in the WRONG ORDER -- the
+			// suggestion prints before the error it belongs to. Same asymmetry as task 192.
+			begin_error_block()
+			error(e.token, "@(%s) procedures must be declared as \"contextless\"", kind)
+			error_line("\tSuggestion: this can be bypassed, for the time being, with '#+feature global-context'")
+			end_error_block()
+		}
+	}
+
+	// C++ Reference: checker.cpp:3023-3026
+	if e.scope != nil && .File not_in e.scope.flags && .Pkg not_in e.scope.flags {
+		error(e.token, "@(%s) procedures must be declared at the file scope", kind)
+	}
+
+	// C++ Reference: checker.cpp:3028-3031.
+	// Read from the attribute context, NOT from e.flags: C++ runs this in a later pass where
+	// the flag is already set, but at declaration time `e.flags += {.Disabled}` has not
+	// happened yet (it is set further down this same procedure).
+	if is_disabled {
+		warning(e.token, "This @(%s) procedure is disabled; you must call it manually", kind)
+	}
+
+	// C++ Reference: checker.cpp:3033-3035
+	if is_blank_ident(e.token.text) {
+		error(e.token, "An @(%s) procedure must not use a blank identifier as its name", kind)
+	}
+}
+
 is_blank_ident :: proc(name: string) -> bool {
 	return name == "_"
 }
