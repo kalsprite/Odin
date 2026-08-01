@@ -275,6 +275,18 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// C++ Reference: checker.cpp:7441-7463
 	check_entry_point(c)
 
+	// Safety net: any procedure that is .Used but whose body was never checked gets checked
+	// here, and every Proc_Info is moved into info.all_procedures.
+	// C++ Reference: check_parsed_files, TIME_SECTION("check unchecked (safety measure)"),
+	// immediately after the entry-point block. NOTE the guard is `#define
+	// DEBUG_CHECK_ALL_PROCEDURES 1` (checker.cpp:1) -- it is ON, so C++ runs this in EVERY
+	// build, not only debug ones. The port had the procedure implemented but with zero call
+	// sites, so a body that slipped past the worker queue was never checked and its errors
+	// were never reported.
+	when DEBUG_CHECK_ALL_PROCEDURES {
+		check_safety_all_procedures_for_unchecked(c)
+	}
+
 	// @(instrumentation_enter) and @(instrumentation_exit) only make sense as a pair.
 	// C++ Reference: check_parsed_files, TIME_SECTION("check instrumentation calls") - an
 	// inline block (not a named procedure, which is why it never showed up in a scan for
@@ -469,14 +481,12 @@ check_merge_queues_into_arrays :: proc(c: ^Checker) {
 		}
 	}
 
-	// Drain all_procedures queue
-	for {
-		if proc_info, ok := queue.mpsc_dequeue(&c.info.all_procedures_queue); ok {
-			append(&c.info.all_procedures, proc_info)
-		} else {
-			break
-		}
-	}
+	// NOTE: all_procedures_queue is deliberately NOT drained here. In C++ that queue has
+	// exactly ONE consumer, checker.cpp:6677 inside check_safety_all_procedures_for_unchecked,
+	// and check_merge_queues_into_arrays (checker.cpp:7444-7451) does not touch it. Draining
+	// it here -- which the port used to do -- both populated info.all_procedures early
+	// (masking the omission) and left the queue empty, so the safety phase had nothing to
+	// examine even once it was called. The safety phase does the appending itself.
 
 	// Drain required_foreign_imports_through_force queue
 	for {
