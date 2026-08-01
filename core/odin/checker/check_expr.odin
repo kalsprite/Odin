@@ -1101,7 +1101,14 @@ check_binary_op :: proc(ctx: ^Checker_Context, o: ^Operand, op: tokenizer.Token)
 	// is it `u32 | u32`. Testing base_type rejected it as "not an integer, boolean or
 	// bit_set", and the enum member then failed as "Enumeration value must be a
 	// constant" — the second diagnostic being purely a consequence of the first.
-	ct := core_type(o.type)
+	//
+	// Note it is `core_type(type)`, NOT `core_type(o.type)`: `type` has already had
+	// core_array_type applied, so `ct` inherits the array unwrapping. Passing `o.type`
+	// here meant the bitwise arms saw the ARRAY rather than its element type, and every
+	// `&`, `|`, `~` and `&~` on an integer array was rejected -- core/math/noise's
+	// `[3]i64{...} & {PRIME_X, PRIME_Y, PRIME_Z}` -- even though `+` and `-` worked,
+	// because those arms test `type`.
+	ct := core_type(type)
 
 	#partial switch op.kind {
 	case .Sub:
