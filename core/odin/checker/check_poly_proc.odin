@@ -493,5 +493,12 @@ is_type_proc :: proc(t: ^Type) -> bool {
 		return false
 	}
 	bt := base_type(t)
+	// C++ nil-guards after reducing (types.cpp, e.g. is_type_enum:
+	//     t = base_type(t); if (t == nullptr) { return false; }
+	// base_type(nil) returns nil here, so the deref below would fault.
+	if bt == nil {
+		return false
+	}
+
 	return bt.kind == .Proc
 }

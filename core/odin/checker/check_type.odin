@@ -2118,11 +2118,25 @@ type_deref :: proc(t: ^Type) -> ^Type {
 
 is_type_soa_pointer :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
+	// C++ nil-guards after reducing (types.cpp, e.g. is_type_enum:
+	//     t = base_type(t); if (t == nullptr) { return false; }
+	// base_type(nil) returns nil here, so the deref below would fault.
+	if bt == nil {
+		return false
+	}
+
 	return bt.kind == .Soa_Pointer
 }
 
 is_type_struct :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
+	// C++ nil-guards after reducing (types.cpp, e.g. is_type_enum:
+	//     t = base_type(t); if (t == nullptr) { return false; }
+	// base_type(nil) returns nil here, so the deref below would fault.
+	if bt == nil {
+		return false
+	}
+
 	return bt.kind == .Struct
 }
 
@@ -4991,6 +5005,13 @@ is_type_empty_union :: proc(t: ^Type) -> bool {
 		return false
 	}
 	bt := base_type(t)
+	// C++ nil-guards after reducing (types.cpp, e.g. is_type_enum:
+	//     t = base_type(t); if (t == nullptr) { return false; }
+	// base_type(nil) returns nil here, so the deref below would fault.
+	if bt == nil {
+		return false
+	}
+
 	if t == nil {
 		return false
 	}
@@ -5005,6 +5026,13 @@ is_type_empty_union :: proc(t: ^Type) -> bool {
 // Ported from is_type_integer_128bit in types.cpp:1277-1284
 is_type_integer_128bit :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
+	// C++ nil-guards after reducing (types.cpp, e.g. is_type_enum:
+	//     t = base_type(t); if (t == nullptr) { return false; }
+	// base_type(nil) returns nil here, so the deref below would fault.
+	if bt == nil {
+		return false
+	}
+
 	if t == nil {
 		return false
 	}
@@ -5018,6 +5046,13 @@ is_type_integer_128bit :: proc(t: ^Type) -> bool {
 // is_type_enum checks if a type is an enum
 is_type_enum :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
+	// C++ nil-guards after reducing (types.cpp, e.g. is_type_enum:
+	//     t = base_type(t); if (t == nullptr) { return false; }
+	// base_type(nil) returns nil here, so the deref below would fault.
+	if bt == nil {
+		return false
+	}
+
 	return bt.kind == .Enum
 }
 
