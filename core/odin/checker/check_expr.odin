@@ -2939,13 +2939,22 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		// Check if untyped - untyped integers accept any value
 		if is_type_untyped(ct) {
 			if out_value != nil {
-				result: big.Int
-				if is_signed {
-					big.internal_int_set_from_integer(&result, value_i64, false)
+				// A value wider than 64 bits has no i64/u64 extraction: both
+				// big.int_get_i64 and big.int_get_u64 failed above, leaving
+				// value_i64/value_u64 at zero. Rebuilding from them silently
+				// replaced e.g. `1<<127` with 0. An untyped integer is arbitrary
+				// precision, so pass the BigInt straight through.
+				if use_bigint {
+					out_value^ = bigint_value
 				} else {
-					big.internal_int_set_from_integer(&result, value_u64, false)
+					result: big.Int
+					if is_signed {
+						big.internal_int_set_from_integer(&result, value_i64, false)
+					} else {
+						big.internal_int_set_from_integer(&result, value_u64, false)
+					}
+					out_value^ = result
 				}
-				out_value^ = result
 			}
 			return true
 		}
