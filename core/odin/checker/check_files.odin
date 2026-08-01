@@ -23,6 +23,7 @@ Usage:
 import "core:container/queue"
 import "core:odin/ast"
 import "core:odin/parser"
+import "core:strings"
 import "core:odin/tokenizer"
 
 // =============================================================================
@@ -352,6 +353,44 @@ register_packages_from_files :: proc(c: ^Checker, files: []^ast.File) {
 			}
 			if tags.no_instrumentation {
 				disable_file_instrumentation(&c.info, file)
+			}
+
+			// `#+feature ...` and `#+vet ...`. parse_file_tags does NOT carry these --
+			// File_Tags has no feature/vet field -- so read them straight off the raw
+			// tag tokens. get_feature_flag_from_name / get_vet_flag_from_name already
+			// existed with zero callers; this is their entry point.
+			//
+			// The two bit_set types (checker Opt_In_Feature_Flag_Bit and ast
+			// Feature_Flag_Bit) declare identical bits in identical order, so the
+			// transmute is a rename, not a reinterpretation.
+			for tag in file.tags {
+				t := tag.text
+				if len(t) < 3 || t[:2] != "#+" {
+					continue
+				}
+				rest := t[2:]
+				sp := strings.index_any(rest, " \t")
+				if sp < 0 {
+					continue
+				}
+				directive := rest[:sp]
+				payload, _ := strings.replace_all(rest[sp:], ",", " ", context.temp_allocator)
+				switch directive {
+				case "feature":
+					names, _ := strings.fields(payload, context.temp_allocator)
+					for nm in names {
+						f := get_feature_flag_from_name(nm)
+						file.feature_flags |= transmute(ast.Feature_Flags)(transmute(u64)f)
+						file.feature_flags_set = true
+					}
+				case "vet":
+					names, _ := strings.fields(payload, context.temp_allocator)
+					for nm in names {
+						v := get_vet_flag_from_name(nm)
+						file.vet_flags |= transmute(ast.Vet_Flags)(transmute(u64)v)
+						file.vet_flags_set = true
+					}
+				}
 			}
 		}
 

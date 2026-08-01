@@ -960,6 +960,15 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 	case Type_Map:
 		// Map literal: map[string]int{"a" = 1, "b" = 2}
 		// Reference: C++ lines 10535-10575
+		//
+		// Dynamic literals are opt-in: C++ gates them on a per-file
+		// `#+feature dynamic-literals` or the project-wide build setting
+		// (check_expr.cpp:11009 for [dynamic]T, :11409 for map). Only reported for a
+		// NON-EMPTY literal. `check_for_dynamic_literals` already existed with zero call
+		// sites; the feature flags it reads are populated in check_files.odin.
+		if len(cl.elems) > 0 {
+			check_for_dynamic_literals(ctx, node)
+		}
 		mp := variant
 		key_type := mp.key
 		value_type := mp.value
@@ -1274,6 +1283,15 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 	case Type_Dynamic_Array:
 		// Dynamic array literal: [dynamic]int{1, 2, 3}
 		// Reference: C++ lines 10172-10177
+		//
+		// Dynamic literals are opt-in: C++ gates them on a per-file
+		// `#+feature dynamic-literals` or the project-wide build setting
+		// (check_expr.cpp:11009 for [dynamic]T, :11409 for map). Only reported for a
+		// NON-EMPTY literal. `check_for_dynamic_literals` already existed with zero call
+		// sites; the feature flags it reads are populated in check_files.odin.
+		if len(cl.elems) > 0 {
+			check_for_dynamic_literals(ctx, node)
+		}
 		da := variant
 		elem_type := da.elem
 

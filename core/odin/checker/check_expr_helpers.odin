@@ -1291,11 +1291,11 @@ check_for_dynamic_literals :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> bo
 		return true
 	}
 
-	// Not enabled - report error with suggestion
-	error(node,
-		"Dynamic compound literals are disabled by default; " +
-		"if you want to enable them for this specific file, add '#+feature dynamic-literals' at the top of the file",
-	)
+	// Not enabled - C++'s first line verbatim (check_expr.cpp:10516). C++ follows it with
+	// error_line() suggestions, deliberately not reproduced: `error` is buffered by the
+	// collector while `error_line` writes immediately, so appending them prints the detail
+	// before its own header (LEDGER task 192).
+	error(node, "Compound literals of dynamic types are disabled by default")
 
 	return false
 }
