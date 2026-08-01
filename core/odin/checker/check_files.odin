@@ -489,9 +489,34 @@ check_merge_queues_into_arrays :: proc(c: ^Checker) {
 	// examine even once it was called. The safety phase does the appending itself.
 
 	// Drain required_foreign_imports_through_force queue
+	// C++ Reference: checker.cpp:2975-2978, inside generate_minimum_dependency_set_internal.
+	// C++ also calls add_to_set(c, e) here; that belongs to the dependency-set pass the port
+	// does not have yet (LEDGER task #42), so only the array_add half is reproduced.
 	for {
 		if entity, ok := queue.mpsc_dequeue(&c.info.required_foreign_imports_through_force_queue); ok {
 			append(&c.info.required_foreign_imports_through_force, entity)
+		} else {
+			break
+		}
+	}
+
+	// Drain required_global_variable queue, marking each entity Used.
+	// C++ Reference: checker.cpp:2980-2983 (same function):
+	//     for (Entity *e; mpsc_dequeue(&c->info.required_global_variable_queue, &e); ) {
+	//         e->flags |= EntityFlag_Used;
+	//         add_to_set(c, e);
+	//     }
+	// The port had NO live consumer for this queue at all -- its only dequeue was in the
+	// dead drain_required_global_variable_queue. A single `@(require)` global therefore left
+	// an item in the queue and tripped mpsc_destroy's "MPSC queue must be empty before
+	// destroy" assertion at teardown, killing the checker on a package C++ accepts silently.
+	// As above, add_to_set awaits task #42; the .Used marking is reproduced here because it
+	// is observable semantics, not bookkeeping.
+	for {
+		if entity, ok := queue.mpsc_dequeue(&c.info.required_global_variable_queue); ok {
+			if entity != nil {
+				entity.flags |= {.Used}
+			}
 		} else {
 			break
 		}
