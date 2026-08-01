@@ -26,12 +26,26 @@ set_file_scope :: proc(info: ^Checker_Info, file: ^ast.File, scope: ^Scope) {
 
 // get_file_from_node retrieves the file that contains a given AST node
 // C++ Reference: parser.hpp:868-871 - Ast::file() method using global_files[this->file_id]
-// Uses node.file_id to index into the files_by_id map
+//
+// This deliberately does NOT go through node.file_id / info.files_by_id. In C++ the parser
+// stamps every node with the id of the file it came from (Ast::file_id, set in alloc_ast_node),
+// so global_files[file_id] is a sound lookup. core:odin/parser assigns neither ast.File.id nor
+// ast.Node.file_id - both are left at their zero value - so files_by_id degenerates to a single
+// entry under key 0 holding whichever file was registered last, and every node in the program
+// resolves to that one arbitrary file. That is worse than failing: check_intrinsics_entry_point_usage
+// used it to ask "is this node in base:runtime?", got a foreign file back, and reported
+// `usage of intrinsics.__entry_point will be a no-op` against base/runtime/entry_unix.odin in
+// every package that transitively pulls the runtime in.
+//
+// The tokenizer does record the owning file on every position (parser.odin:150 initialises it
+// with file.fullpath), and info.files is keyed by exactly that string, so pos.file is an
+// equivalent and actually-populated identity. Resolving through it restores the C++ property
+// without needing to change the shared parser.
 get_file_from_node :: proc(info: ^Checker_Info, node: ^ast.Node) -> ^ast.File {
 	if node == nil {
 		return nil
 	}
-	if file, ok := info.files_by_id[node.file_id]; ok {
+	if file, ok := info.files[node.pos.file]; ok {
 		return file
 	}
 	return nil
