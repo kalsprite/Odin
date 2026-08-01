@@ -1947,14 +1947,27 @@ check_polymorphic_record_type :: proc(ctx: ^Checker_Context, original_type: ^Typ
 			return nil
 		}
 
+		// Clone the record's AST for this instantiation, as C++ does
+		// (check_expr.cpp:8446) and as the union arm below already does. Checking
+		// annotates nodes with their resolved type-and-value, so re-checking the
+		// ORIGINAL nodes for a second instantiation risks the first instantiation's
+		// cached types winning.
+		cloned_node := clone_ast_node(st.node)
+		if cloned_node == nil {
+			return nil
+		}
+
 		// Get the actual Struct_Type node from the Node
-		struct_node, struct_node_ok := st.node.derived.(^ast.Struct_Type)
+		struct_node, struct_node_ok := cloned_node.derived.(^ast.Struct_Type)
 		if !struct_node_ok {
 			return nil
 		}
 
 		// Create new struct type with initialized variant
 		new_struct_type := alloc_type_struct(ctx.checker)
+		if sv, sv_ok := &new_struct_type.variant.(Type_Struct); sv_ok {
+			sv.node = cloned_node
+		}
 
 		// C++ Reference: check_expr.cpp:8451. `polymorphic_parent` links an instance
 		// back to the generic record it came from. The port declared and READ this field
