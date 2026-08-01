@@ -7924,6 +7924,13 @@ check_is_castable_to :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^
 		return true
 	}
 
+	// []u16 <-> string16 (not cstring16)
+	// C++ Reference: check_expr.cpp:3713-3716 - the exact UTF-16 counterpart of the rule
+	// above, which the port had but its u16 twin was absent.
+	if is_type_u16_slice(src) && (is_type_string16(dst) && !is_type_cstring16(dst)) {
+		return true
+	}
+
 	// cstring casting rules
 	// cstring <-> ^u8
 	if is_type_cstring(src) && is_type_u8_ptr(dst) {
@@ -7977,6 +7984,41 @@ check_is_castable_to :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^
 	// Reference: spec/conversions.md line 171
 	if is_type_cstring(src) && is_type_string(dst) && !is_type_cstring(dst) {
 		return true
+	}
+
+	// cstring16 -> string16
+	// C++ Reference: check_expr.cpp:3725-3731. Task 114 ported the six cstring16 POINTER
+	// rules but not this one or the []u16 rule above, so `string16(v)` on a cstring16 was
+	// still rejected - which is what core/reflect's UTF-16 `any` handling and core/fmt do.
+	if are_types_identical(src, t_cstring16) && are_types_identical(dst, t_string16) {
+		return true
+	}
+
+	// #simd[N]T -> #simd[N]U, when the element types are themselves castable.
+	//
+	// C++ Reference: check_expr.cpp:3815-3836. BOTH of these arms were absent from the port,
+	// so no cast involving a #simd destination was ever allowed. core/simd/x86 is built on
+	// them - `x86.__m128i(K_1)` where K_1 is a #simd[2]u64 and __m128i is #simd[2]i64 is the
+	// shape that failed, and core/crypto/sha2's Intel SHA path does it in every round.
+	if is_type_simd_vector(src) && is_type_simd_vector(dst) {
+		src_sv := base_type(src).variant.(Type_Simd_Vector)
+		dst_sv := base_type(dst).variant.(Type_Simd_Vector)
+		if src_sv.count != dst_sv.count {
+			return false
+		}
+		elem_operand := Operand{
+			type = base_array_type(src),
+			mode = .Value,
+		}
+		return check_is_castable_to(ctx, &elem_operand, base_array_type(dst))
+	}
+
+	// A scalar may be cast to a #simd vector when it is castable to the element type
+	// (C++ check_expr.cpp:3827-3832 - the splat form).
+	if is_type_simd_vector(dst) {
+		if check_is_castable_to(ctx, operand, base_array_type(dst)) {
+			return true
+		}
 	}
 
 	// Procedure type casting
