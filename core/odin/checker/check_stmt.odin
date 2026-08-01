@@ -763,17 +763,23 @@ check_stmt_list :: proc(ctx: ^Checker_Context, stmts: []^ast.Stmt, flags: Stmt_F
 			if is_diverging_stmt(ctx, stmt) {
 				for j in 0 ..< i {
 					prev_stmt := stmts[j]
-					#partial switch ps in prev_stmt.derived {
-					case ^ast.Value_Decl:
-						if !ps.is_mutable {
-							// Constant declaration - okay
-						}
-					case ^ast.Defer_Stmt:
+					// C++ is an if/else-if CHAIN whose first arm is `ValueDecl && !is_mutable`.
+					// A `#partial switch` on the node type is not the same shape: a MUTABLE
+					// Value_Decl matches the `^ast.Value_Decl` case and falls out silently,
+					// where C++ falls through to the contains_deferred_call arm. That made
+					// `x := f()` before a diverging call an under-rejection. Keep the chain.
+					is_const_decl := false
+					if vd, vd_ok := prev_stmt.derived.(^ast.Value_Decl); vd_ok {
+						is_const_decl = !vd.is_mutable
+					}
+					_, is_defer := prev_stmt.derived.(^ast.Defer_Stmt)
+
+					if is_const_decl {
+						// Constant declaration - okay
+					} else if is_defer {
 						error_node(prev_stmt, "Unreachable defer statement due to diverging procedure call at the end of the current scope")
-					case:
-						if contains_deferred_call(ctx, prev_stmt) {
-							error_node(prev_stmt, "Unreachable deferred procedure call due to a diverging procedure call at the end of the current scope")
-						}
+					} else if contains_deferred_call(ctx, prev_stmt) {
+						error_node(prev_stmt, "Unreachable deferred procedure call due to a diverging procedure call at the end of the current scope")
 					}
 				}
 			}
