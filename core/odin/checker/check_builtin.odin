@@ -7090,24 +7090,120 @@ check_builtin_type_is_superset_of :: proc(ctx: ^Checker_Context, operand: ^Opera
 		return false
 	}
 
-	// Check if type1 is a superset of type2 (for bit sets)
-	// T is a superset of S if T's range includes all values in S's range
-	result := false
-	bt1 := base_type(type1_op.type)
-	bt2 := base_type(type2_op.type)
-
-	if bs1, ok1 := bt1.variant.(Type_Bit_Set); ok1 {
-		if bs2, ok2 := bt2.variant.(Type_Bit_Set); ok2 {
-			// T is superset of S if T.lower <= S.lower && T.upper >= S.upper
-			result = bs1.lower <= bs2.lower && bs1.upper >= bs2.upper
-		}
-	}
-
+	// C++ Reference: check_builtin.cpp:7939-8038
+	//
+	// NOTE: this applies to ENUMS and UNIONS, not bit_sets. The port previously
+	// had a bit_set-only range comparison with no C++ counterpart, so every
+	// enum query - such as core/os/file_stream.odin's
+	// `#assert(type_is_superset_of(File_Stream_Mode, io.Stream_Mode))` -
+	// silently answered false.
 	operand.mode = .Constant
 	operand.type = t_untyped_bool
-	operand.value = exact_value_bool(result)
 
-	return true
+	super := type1_op.type
+	sub := type2_op.type
+	if are_types_identical(super, sub) {
+		operand.value = exact_value_bool(true)
+		return true
+	}
+
+	super = base_type(super)
+	sub = base_type(sub)
+	if are_types_identical(super, sub) {
+		operand.value = exact_value_bool(true)
+		return true
+	}
+
+	if super == nil || sub == nil || super.kind != sub.kind {
+		a := type_to_string(type1_op.type)
+		defer delete(a)
+		b := type_to_string(type2_op.type)
+		defer delete(b)
+		error_node(call.args[0], "'%s' expects types of the same kind, got %s vs %s", builtin_name, a, b)
+		return false
+	}
+
+	#partial switch super.kind {
+	case .Enum:
+		super_enum := &super.variant.(Type_Enum)
+		sub_enum := &sub.variant.(Type_Enum)
+
+		if len(sub_enum.fields) > len(super_enum.fields) {
+			operand.value = exact_value_bool(false)
+			return true
+		}
+
+		base_super := base_enum_type(super)
+		base_sub := base_enum_type(sub)
+		if base_super == nil && base_sub == nil {
+			// okay
+		} else if !are_types_identical(base_type(base_super), base_type(base_sub)) {
+			operand.value = exact_value_bool(false)
+			return true
+		}
+
+		// Every member of the subset must appear in the superset with the same value.
+		for f_sub in sub_enum.fields {
+			if f_sub == nil || f_sub.kind != .Constant {
+				continue
+			}
+			sub_const := &f_sub.variant.(Entity_Constant)
+
+			found := false
+			for f_super in super_enum.fields {
+				if f_super == nil || f_super.kind != .Constant {
+					continue
+				}
+				if f_sub.token.text != f_super.token.text {
+					continue
+				}
+				super_const := &f_super.variant.(Entity_Constant)
+				if compare_exact_values(.Cmp_Eq, sub_const.value, super_const.value) {
+					found = true
+					break
+				}
+			}
+
+			if !found {
+				operand.value = exact_value_bool(false)
+				return true
+			}
+		}
+
+		operand.value = exact_value_bool(true)
+		return true
+
+	case .Union:
+		super_union := &super.variant.(Type_Union)
+		sub_union := &sub.variant.(Type_Union)
+
+		if len(sub_union.variants) > len(super_union.variants) {
+			operand.value = exact_value_bool(false)
+			return true
+		}
+		if sub_union.kind != super_union.kind {
+			operand.value = exact_value_bool(false)
+			return true
+		}
+
+		// Positional: the subset's variants must prefix the superset's.
+		for t_sub, i in sub_union.variants {
+			if !are_types_identical(t_sub, super_union.variants[i]) {
+				operand.value = exact_value_bool(false)
+				return true
+			}
+		}
+
+		operand.value = exact_value_bool(true)
+		return true
+	}
+
+	a := type_to_string(type1_op.type)
+	defer delete(a)
+	b := type_to_string(type2_op.type)
+	defer delete(b)
+	error_node(call.args[0], "'%s' expects types of the same kind and either an enum or union, got %s vs %s", builtin_name, a, b)
+	return false
 }
 
 // type_is_variant_of - check if T is a variant of union U

@@ -1227,6 +1227,19 @@ is_type_tuple :: proc(t: ^Type) -> bool {
 // core_type unwraps named types, enums, and bit fields to get the core type
 // Unlike base_type which only unwraps Named, this also unwraps Enum and Bit_Field
 // C++ Reference: /mnt/c/odin/src/types.cpp:931-954
+// base_enum_type returns an enum's backing type, or the type unchanged if it is
+// not an enum.
+//
+// C++ Reference: /mnt/c/odin/src/types.cpp:976-983
+base_enum_type :: proc(t: ^Type) -> ^Type {
+	bt := base_type(t)
+	if bt != nil && bt.kind == .Enum {
+		e := &bt.variant.(Type_Enum)
+		return e.base_type
+	}
+	return t
+}
+
 core_type :: proc(t: ^Type) -> ^Type {
 	if t == nil {
 		return nil
