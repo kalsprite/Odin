@@ -1256,7 +1256,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 			s := type_to_string(e.type)
 			error(e.token, "@(instrumentation_enter) procedures must have the type '%s', got %s", instrumentation_proc_type_str, s)
 		}
-		if (ctx.scope.flags & {.File, .Pkg}) == {} {
+		if e.scope != nil && (e.scope.flags & {.File, .Pkg}) == {} {
 			error(e.token, "@(instrumentation_enter) procedures must be declared at the file scope")
 		}
 		// C++ Reference: check_decl.cpp:1405 - MUTEX_GUARD(&ctx.info.instrumentation_mutex)
@@ -1275,7 +1275,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 			s := type_to_string(e.type)
 			error(e.token, "@(instrumentation_exit) procedures must have the type '%s', got %s", instrumentation_proc_type_str, s)
 		}
-		if (ctx.scope.flags & {.File, .Pkg}) == {} {
+		if e.scope != nil && (e.scope.flags & {.File, .Pkg}) == {} {
 			error(e.token, "@(instrumentation_exit) procedures must be declared at the file scope")
 		}
 		// C++ Reference: check_decl.cpp:1424 - MUTEX_GUARD(&ctx.info.instrumentation_mutex)

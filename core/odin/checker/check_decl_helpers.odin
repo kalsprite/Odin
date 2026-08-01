@@ -862,19 +862,58 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			switch name {
 			// No parameter, or an optional boolean.
 			case "cold", "force":
+				// C++ Reference: checker.cpp:4103-4114 ('cold' STORES into ac->set_cold).
+				b := true
 				if value != nil {
 					ev := check_decl_attribute_value(ctx, value)
-					if _, ok := ev.(bool); !ok {
+					if bv, ok := ev.(bool); ok {
+						b = bv
+					} else {
 						error(elem, "Expected a boolean value for '%s' or no value whatsoever", name)
+						continue
 					}
+				}
+				if name == "cold" {
+					ac.set_cold = b
 				}
 				continue
 
 			// No parameter at all.
-			case "no_instrumentation", "no_sanitize_address", "no_sanitize_memory",
-			     "no_sanitize_thread", "entry_point_only", "objc_implement":
+			// C++ Reference: checker.cpp:4218-4268. Each of these STORES a flag; the port
+			// used to validate and drop it, leaving every reader dead.
+			// NOTE: no_instrumentation is deliberately NOT in this group -- C++ gives it an
+			// OPTIONAL BOOLEAN (checker.cpp:4224-4238), so treating it as no-parameter made
+			// `@(no_instrumentation=false)` a spurious error.
+			case "no_sanitize_address", "no_sanitize_memory", "no_sanitize_thread",
+			     "entry_point_only", "objc_implement", "instrumentation_enter",
+			     "instrumentation_exit":
 				if value != nil {
 					error(elem, "'%s' expects no parameter", name)
+				}
+				switch name {
+				case "no_sanitize_address":   ac.no_sanitize_address = true
+				case "no_sanitize_memory":    ac.no_sanitize_memory = true
+				case "entry_point_only":      ac.entry_point_only = true
+				case "instrumentation_enter": ac.instrumentation_enter = true
+				case "instrumentation_exit":  ac.instrumentation_exit = true
+				// no_sanitize_thread: C++ has ac->no_sanitize_thread but Attribute_Context
+				// here has no such field, so there is nothing to store yet.
+				// objc_implement is handled by the objc path.
+				}
+				continue
+
+			// An optional boolean; absent means "disabled".
+			// C++ Reference: checker.cpp:4224-4238
+			case "no_instrumentation":
+				if value == nil {
+					ac.no_instrumentation = .Disabled
+				} else {
+					ev := check_decl_attribute_value(ctx, value)
+					if b, ok := ev.(bool); ok {
+						ac.no_instrumentation = .Disabled if b else .Enabled
+					} else {
+						error(value, "Expected either a boolean or no parameter for '%s'", name)
+					}
 				}
 				continue
 
@@ -896,7 +935,7 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 
 			// A string is required.
 			case "require_target_feature", "enable_target_feature", "extra_linker_flags",
-			     "instrumentation_enter", "instrumentation_exit", "default_calling_convention":
+			     "default_calling_convention":
 				ev := check_decl_attribute_value(ctx, value)
 				if _, ok := ev.(string); !ok {
 					error(elem, "Expected a string value for '%s'", name)
@@ -914,18 +953,31 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			// A string from a fixed set. C++ checker.cpp: "minimal" was removed and gets
 			// its own message pointing at "none".
 			case "optimization_mode":
+				// C++ Reference: checker.cpp:4115-4137. Only "none" and "favor_size" remain
+				// valid; "speed" and "size" were REMOVED and get their own messages. The port
+				// used to accept both silently, and stored nothing.
 				ev := check_decl_attribute_value(ctx, value)
 				mode, ok := ev.(string)
 				if !ok {
-					error(elem, "Expected a string value for '%s'", name)
+					error(elem, "Expected a string for '%s'", name)
 				} else {
 					switch mode {
-					case "none", "favor_size", "speed", "size":
-						// ok
+					case "none":
+						ac.optimization_mode = u32(Procedure_Optimization_Mode.None)
+					case "favor_size":
+						ac.optimization_mode = u32(Procedure_Optimization_Mode.Favor_Size)
 					case "minimal":
 						error(elem, "Invalid optimization_mode 'minimal' for '%s', mode has been removed due to confusion, but 'none' has the same behaviour", name)
+					case "size":
+						error(elem, "Invalid optimization_mode 'size' for '%s', mode has been removed due to confusion, but 'favor_size' has the same behaviour", name)
+					case "speed":
+						error(elem, "Invalid optimization_mode 'speed' for '%s', mode has been removed due to confusion, but 'favor_size' has the same behaviour", name)
 					case:
-						error(elem, "Invalid optimization_mode '%s' for '%s'", mode, name)
+						begin_error_block()
+						error(elem, "Invalid optimization_mode for '%s'. Valid modes:", name)
+						error_line("\tnone\n")
+						error_line("\tfavor_size\n")
+						end_error_block()
 					}
 				}
 				continue
