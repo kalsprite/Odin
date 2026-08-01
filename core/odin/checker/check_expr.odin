@@ -8361,12 +8361,26 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 }
 
 // Helper function to check if an operand is a value
+// C++ Reference: /mnt/c/odin/src/checker.cpp:16-31
+//
+// NOTE: `.Context` and `.Optional_Ok_Ptr` ARE values. The port previously
+// omitted both and listed `.Context` in the false arm, so `&x.(T)` - which
+// yields `.Optional_Ok_Ptr` - was rejected as "not a value" by
+// determine_type_from_polymorphic, and no polymorphic parameter could ever be
+// bound from the address of a type assertion.
 is_operand_value :: proc(o: Operand) -> bool {
 	#partial switch o.mode {
-	case .Value, .Constant, .Variable, .Map_Index, .Optional_Ok, .Soa_Variable, .Swizzle_Value, .Swizzle_Variable:
+	case .Value,
+	     .Context,
+	     .Variable,
+	     .Constant,
+	     .Map_Index,
+	     .Optional_Ok,
+	     .Optional_Ok_Ptr,
+	     .Soa_Variable,
+	     .Swizzle_Value,
+	     .Swizzle_Variable:
 		return true
-	case .Invalid, .No_Value, .Type, .Builtin, .Proc_Group, .Context:
-		return false
 	}
 	return false
 }
