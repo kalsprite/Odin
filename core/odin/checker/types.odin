@@ -1555,10 +1555,20 @@ type_size_of :: proc(t: ^Type) -> int {
 		return 16 // ptr + len
 
 	case .Dynamic_Array:
-		return 24 // ptr + len + cap
+		// C++ Reference: types.cpp type_size_of_internal, `3*int_size + 2*ptr_size`.
+		//   struct { data: rawptr, len: int, cap: int, allocator: runtime.Allocator }
+		// The allocator is TWO words (procedure + data); the port's hardcoded 24 counted
+		// only data/len/cap, so every `[dynamic]T` measured 24 where the matching
+		// runtime.Raw_Dynamic_Array measured 40 — and every transmute between the two
+		// (the standard idiom for reaching a dynamic array's internals) failed.
+		return 3 * int(build_context.int_size) + 2 * int(build_context.ptr_size)
 
 	case .Map:
-		return 8 // Internal map header pointer
+		// C++ Reference: types.cpp type_size_of_internal, `(1 + 1 + 2)*ptr_size`.
+		//   struct { data: uintptr, size: uintptr, allocator: runtime.Allocator }
+		// The port returned a single word, so `map[K]V` measured 8 against
+		// runtime.Raw_Map's 32.
+		return 4 * int(build_context.ptr_size)
 
 	case .Struct:
 		// C++ Reference: types.cpp:4436-4474
