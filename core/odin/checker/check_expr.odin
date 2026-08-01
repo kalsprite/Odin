@@ -6669,6 +6669,35 @@ check_expr_base :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	return kind
 }
 
+// make_deref_expr and make_address_expr build the two AST nodes the arrow-call desugaring
+// needs when the receiver does not directly match the callee's first parameter.
+//
+// C++ Reference: check_expr.cpp:11805 (ast_deref_expr) and 11815 (ast_unary_expr with
+// Token_And) - bill's own comment there calls it an "AST GENERATION HACK", but it is load
+// bearing: `v->method()` where method takes ^T and v is a variable only type-checks because
+// the receiver is rewritten to `&v`.
+make_deref_expr :: proc(x: ^ast.Expr) -> ^ast.Expr {
+	d := new(ast.Deref_Expr)
+	d.pos = x.pos
+	d.end = x.end
+	d.expr = x
+	d.op = tokenizer.Token{kind = .Pointer, text = "^", pos = x.pos}
+	d.derived = d
+	d.derived_expr = d
+	return d
+}
+
+make_address_expr :: proc(x: ^ast.Expr) -> ^ast.Expr {
+	u := new(ast.Unary_Expr)
+	u.pos = x.pos
+	u.end = x.end
+	u.expr = x
+	u.op = tokenizer.Token{kind = .And, text = "&", pos = x.pos}
+	u.derived = u
+	u.derived_expr = u
+	return u
+}
+
 check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, type_hint: ^Type) -> Expr_Kind {
 	// Initialize operand to invalid state
 	o.mode = .Invalid
@@ -6786,12 +6815,72 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 		return .Expr
 
 	case ^ast.Selector_Call_Expr:
-		// Selector call expression: x.method(args)
-		// This is syntactic sugar for method call syntax
-		// Reference: /mnt/c/odin/src/check_expr.cpp:11621-11622
+		// Arrow call: `x->y(123)` desugars to `x.y(x, 123)`.
+		//
+		// C++ Reference: check_expr.cpp:11714-11845. C++ REWRITES THE AST - it prepends the
+		// receiver to the call's argument list and latches se->modified_call so the rewrite
+		// happens exactly once. The port did neither: it checked sc.call verbatim, so the
+		// receiver was never passed and every arrow call was short one argument. `o->bare()`
+		// reported "Missing argument for parameter 'o'"; `o->setup(allocator)` put allocator
+		// in slot 0 and reported "Missing argument for parameter 'allocator'". core/time's
+		// Benchmark_Options and core/io's stream vtable are written entirely in this style.
 		sc := node.derived.(^ast.Selector_Call_Expr)
-		// The call field contains the desugared Call_Expr
-		// Check it as a regular call expression
+
+		// C++ 11729-11736: the modified_call latch. This matters more here than in C++
+		// because the port checks procedure bodies more than once (see task 127); without it
+		// the receiver would be prepended again on every pass.
+		if !sc.modified_call {
+			if sel, sel_ok := sc.expr.derived.(^ast.Selector_Expr); sel_ok && sel.expr != nil {
+				first_arg := sel.expr
+
+				// C++ 11797-11818: adjust the receiver to the first parameter's type -
+				// dereference a pointer, or take the address of an addressable value.
+				// Skipped when the callee is a proc GROUP, exactly as C++ does (11774),
+				// because the group has no single first parameter to adjust against.
+				// C++ 11738-11743 brackets this probe with
+				// allow_arrow_right_selector_expr = true; without it the Selector_Expr's own
+				// guard (check_expr.odin:4254) rejects the `->` as being outside a call.
+				callee: Operand
+				prev_allow_arrow := ctx.allow_arrow_right_selector_expr
+				ctx.allow_arrow_right_selector_expr = true
+				check_expr_base(ctx, &callee, sc.expr, nil)
+				ctx.allow_arrow_right_selector_expr = prev_allow_arrow
+				if callee.mode != .Proc_Group {
+					if pt := base_type(callee.type); pt != nil && pt.kind == .Proc {
+						proc_info := pt.variant.(Type_Proc)
+						if proc_info.params != nil && proc_info.params.kind == .Tuple {
+							vars := proc_info.params.variant.(Type_Tuple).variables
+							if len(vars) > 0 && vars[0] != nil {
+								first_type := entity_type(vars[0])
+								recv: Operand
+								check_expr_base(ctx, &recv, first_arg, nil)
+								if !check_is_assignable_to(ctx, &recv, first_type) {
+									deref := recv
+									deref.type = type_deref(recv.type)
+									if check_is_assignable_to(ctx, &deref, first_type) {
+										first_arg = make_deref_expr(first_arg)
+									} else if recv.mode == .Variable {
+										addr := recv
+										addr.type = alloc_type_pointer(recv.type)
+										if check_is_assignable_to(ctx, &addr, first_type) {
+											first_arg = make_address_expr(first_arg)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+
+				// C++ 11843-11846: prepend and latch.
+				new_args := make([]^ast.Expr, len(sc.call.args) + 1, ctx.checker.allocator)
+				new_args[0] = first_arg
+				copy(new_args[1:], sc.call.args)
+				sc.call.args = new_args
+			}
+			sc.modified_call = true
+		}
+
 		kind := check_call_expr(ctx, o, sc.call, type_hint)
 		node.viral_state_flags |= sc.call.viral_state_flags
 		o.expr = node
