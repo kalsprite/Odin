@@ -1891,7 +1891,21 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 					}
 				}
 
-				if rhs.mode == .Constant && rhs.value != nil {
+				// A HALF-OPEN range (`a ..< b`) does not include its upper bound, so `b` must
+				// not be registered as a value this case covers. The port registered both
+				// bounds unconditionally, so
+				//
+				//	case 0 ..< _surr_self:
+				//	case _surr_self ..= MAX_RUNE:
+				//
+				// reported `Duplicate case '_surr_self'` even though the two are disjoint.
+				// core/unicode/utf16 is written exactly that way and accounted for the whole
+				// 180-diagnostic class. `upper_op` is .Lt for `..<` and .Lt_Eq for `..=`/`..`,
+				// which is already computed above for the bounds comparison.
+				//
+				// Genuine overlaps are still caught: `0 ..= A` followed by `A ..= B` registers
+				// A from both cases and still errors, which the probe pins.
+				if rhs.mode == .Constant && rhs.value != nil && upper_op != .Lt {
 					key := hash_exact_value(rhs.value)
 					if key != 0 {
 						if existing_list, found := &seen_cases[key]; found {
