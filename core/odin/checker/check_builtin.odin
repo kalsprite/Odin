@@ -3376,15 +3376,15 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			check_expr(ctx, &msg_op, call_expr.args[0])
 			if msg_op.mode == .Constant {
 				if str, is_str := msg_op.value.(string); is_str {
-					error(call_expr.expr, "Compile-time panic: %s", str)
+					error(call_expr.expr, "Compile time panic: %s", str)  // C++ check_builtin.cpp:2677 -- no hyphen
 				} else {
-					error(call_expr.expr, "Compile-time panic")
+					error(call_expr.expr, "Compile time panic")
 				}
 			} else {
-				error(call_expr.expr, "Compile-time panic")
+				error(call_expr.expr, "Compile time panic")
 			}
 		} else {
-			error(call_expr.expr, "Compile-time panic")
+			error(call_expr.expr, "Compile time panic")
 		}
 
 		// #panic diverges (never returns)

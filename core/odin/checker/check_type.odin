@@ -237,10 +237,12 @@ check_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^Type, n
 		}
 	}
 
-	// Invalid type expression
-	err_str := expr_to_string(e)
-	defer delete(err_str)
-	error_node(e, "Invalid type expression: %s", err_str)
+	// C++ Reference: check_type.cpp:3569+ ends `*type = t_invalid; return false;` SILENTLY.
+	// The port used to emit an invented "Invalid type expression: %s" here. C++ has no such
+	// checker diagnostic -- the message belongs to the CALLER (check_type_expr), and for an
+	// undeclared name the real diagnostic ("Undeclared name: X") has already been reported by
+	// check_ident. Emitting here displaced it: both land on the same position and the merge
+	// pass keeps one, so the invented text won and "Undeclared name" was never seen.
 	type^ = t_invalid
 	return false
 }
@@ -249,7 +251,13 @@ check_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^Type, n
 check_type_expr :: proc(ctx: ^Checker_Context, e: ^ast.Node, named_type: ^Type) -> ^Type {
 	type: ^Type = t_invalid
 	ok := check_type_internal(ctx, e, &type, named_type)
-	_ = ok
+	if !ok {
+		// C++ Reference: check_type.cpp:4010-4021. The caller owns this diagnostic.
+		err_str := expr_to_string(e)
+		defer delete(err_str)
+		error_node(e, "'%s' is not a type", err_str)
+		type = t_invalid
+	}
 	return type
 }
 

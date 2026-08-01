@@ -1028,9 +1028,33 @@ error_pos :: proc(pos: tokenizer.Pos, format: string, args: ..any) {
 	error_va(pos, {}, format, ..args)
 }
 
+// ast_token_pos returns the position C++ reports a diagnostic at for a given node.
+//
+// C++ Reference: parser_pos.cpp:1-110 (`ast_token`). Nearly every arm either returns the
+// node's own first token or recurses leftward (BinaryExpr -> left, IndexExpr -> expr,
+// OrReturnExpr -> expr, ...), all of which resolve to `node.pos`. Exactly TWO kinds have a
+// representative token that is not the leftmost one, and for those `node.pos` is wrong:
+//
+//   Assign_Stmt  -> the operator      (parser_pos.cpp:64).  `y = f()` reports at the `=`.
+//   Deref_Expr   -> the trailing `^`  (parser_pos.cpp:50).  Odin's deref is postfix.
+//
+// Found because cmp.sh started diffing diagnostic TEXT rather than counting: probe ud2
+// matched on message and line but reported column 2 where the oracle reports column 4.
+ast_token_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
+	if node == nil {
+		return tokenizer.Pos{}
+	}
+	#partial switch n in node.derived {
+	case ^ast.Assign_Stmt:
+		return n.op.pos
+	case ^ast.Deref_Expr:
+		return n.op.pos
+	}
+	return node.pos
+}
+
 error_node :: proc(node: ^ast.Node, format: string, args: ..any) {
-	pos := node.pos if node != nil else tokenizer.Pos{}
-	error_va(pos, {}, format, ..args)
+	error_va(ast_token_pos(node), {}, format, ..args)
 }
 
 // error_line outputs a continuation line for a multi-line error
@@ -1271,8 +1295,13 @@ print_error_values :: proc(values: ^[dynamic]Error_Value) {
 		return
 	}
 
-	// Sort errors by position
-	slice.sort_by(values[:], error_value_cmp)
+	// Sort errors by position. STABLE, deliberately: the merge below keeps the FIRST
+	// diagnostic at a given position and folds later ones into it, so the relative order of
+	// diagnostics sharing a position decides which text survives. `slice.sort_by` is
+	// unstable, which let that pair swap -- an undeclared name in type position printed
+	// "'X' is not a type" (reported second) instead of "Undeclared name: X" (reported first),
+	// diverging from C++. Emission order must be preserved for equal positions.
+	slice.stable_sort_by(values[:], error_value_cmp)
 
 	// Merge neighboring errors at the same position
 	// C++ Reference: error.cpp:902-937
