@@ -997,6 +997,47 @@ check_call_arguments_single :: proc(
 		}
 	}
 
+	// C++ Reference: check_expr.cpp:7281-7308
+	//
+	// A polymorphic candidate that instantiated successfully is not yet a match:
+	// its `where` clauses are evaluated against the BOUND parameters, and a
+	// clause that comes out false rejects the candidate. This is the only thing
+	// separating two group members whose parameter lists are both structurally
+	// satisfied - `proc(v: $T/[$N]$E) where IS_FLOAT(E)` and `proc(q: $Q) where
+	// IS_QUATERNION(Q)` both accept a [3]f16 structurally, and without this the
+	// group call is reported as ambiguous.
+	//
+	// NOTE: unlike C++ this does not schedule the body; the port already calls
+	// check_procedure_later from inside
+	// find_or_generate_polymorphic_procedure_from_parameters.
+	if data.gen_entity != nil {
+		gen := data.gen_entity
+		decl := gen.decl_info
+		if decl != nil && decl.proc_lit != nil {
+			ctx_copy := ctx^
+			ctx_copy.scope = decl.scope
+			ctx_copy.decl = decl
+			ctx_copy.proc_name = gen.token.text
+			ctx_copy.curr_proc_decl = decl
+			ctx_copy.curr_proc_sig = gen.type
+
+			// Only used to attach an "at caller location" note.
+			caller: ^ast.Expr = nil
+			if ce, ce_ok := call_node.derived.(^ast.Call_Expr); ce_ok {
+				caller = ce
+			}
+
+			clauses_ok := evaluate_where_clauses(&ctx_copy, caller, decl.scope, decl.proc_lit.where_clauses, !return_on_failure)
+			if return_on_failure {
+				if !clauses_ok {
+					return false
+				}
+			} else {
+				decl.where_clauses_evaluated = true
+			}
+		}
+	}
+
 	return ok
 }
 
