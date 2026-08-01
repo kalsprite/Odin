@@ -607,12 +607,18 @@ add_entity_and_decl_info :: proc(ctx: ^Checker_Context, identifier: ^ast.Node, e
 			pkg := scope.file.pkg
 			assert(ctx.pkg == pkg, "Package mismatch in exported entity handling")
 
-			// Add to file scope
-			add_entity(ctx, scope, identifier, e)
-
-			// Queue for export to package scope (will be drained in check_export_entities)
-			// C++ Reference: checker.cpp:2041-2049 - mpmc_enqueue(&pkg->exported_entity_queue, ee)
-			// This allows parallel entity collection without scope contention
+			// C++ Reference: checker.cpp:2229-2245
+			//
+			// NOTE: an exported file-scope entity is ONLY enqueued - it is
+			// deliberately NOT added to the file scope. C++'s
+			// `add_entity(c, scope, identifier, e)` sits in the ELSE branch, and
+			// the `add_entity(c, pkg->scope, ...)` inside this branch is
+			// commented out there in favour of the queue.
+			//
+			// Adding it to the file scope as well made a package-level
+			// declaration collide with a same-file import of the same name -
+			// `import "core:compress"` beside `compress :: proc{...}` in
+			// core/compress/shoco/shoco.odin - which the real compiler accepts.
 			if pkg != nil {
 				enqueue_exported_entity(ctx.info, pkg, identifier, e)
 			}

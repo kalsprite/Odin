@@ -626,8 +626,8 @@ check_export_entities_in_pkg :: proc(c: ^Checker, pkg: ^ast.Package) {
 
 		// C++ Reference: checker.cpp:6119 — `add_entity(ctx, pkg->scope, ee.identifier, ee.entity)`.
 		//
-		// This must go through add_entity, not scope_insert. add_entity skips BLANK
-		// identifiers (entity_helpers.odin:443, mirroring checker.cpp:2089), reports
+		// This goes through add_entity, not scope_insert. add_entity skips BLANK
+		// identifiers (entity_helpers.odin, mirroring checker.cpp:2089), reports
 		// redeclarations, and records the entity definition. Calling scope_insert
 		// directly published `_` into the package scope for any file-scope
 		// `_ :: something` — of which base/runtime has two (`_ :: intrinsics` in
@@ -638,14 +638,19 @@ check_export_entities_in_pkg :: proc(c: ^Checker, pkg: ^ast.Package) {
 		// (check_decl_helpers.odin, mirroring check_decl.cpp:998) treats "found in scope
 		// but not a Library_Name" as an error. C++ never finds anything, because blanks
 		// are never inserted, and so takes its "link against nothing" path.
-		// NOTE: only the BLANK guard is taken from add_entity here, not its
-		// redeclaration reporting. Routing this call through add_entity wholesale is
-		// what C++ does, but the port reaches this drain along a different path and
-		// doing so produced a false "Redeclaration of 'compress'" for a package with a
-		// single `import "core:compress"`. Reconciling the enqueue paths is task 109.
-		if exported.entity != nil && !is_blank_ident(exported.entity.token.text) {
-			scope_insert(pkg.scope, exported.entity)
-		}
+		//
+		// TASK 109 RESOLVED: routing this through add_entity previously produced a false
+		// "Redeclaration of 'compress'" because add_entity_and_decl_info ALSO inserted
+		// the entity into the file scope. C++ only enqueues there (checker.cpp:2229-2245,
+		// where the add_entity call is in the ELSE branch). With that double insertion
+		// removed, this drain is the single point where a package-level entity is
+		// published, and it is the only place a package-level redeclaration can be
+		// reported.
+		ctx := make_checker_context(c)
+		defer destroy_checker_context(&ctx)
+		ctx.pkg = pkg
+		ctx.scope = pkg.scope
+		add_entity(&ctx, pkg.scope, exported.identifier, exported.entity)
 	}
 }
 
