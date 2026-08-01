@@ -3745,6 +3745,13 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 
 	check_label(ctx, stmt.label, node)
 
+	// `for <init>; <vals> in <expr>` carries an init statement, which must be checked
+	// inside the loop's scope so anything it declares is visible to the body.
+	// C++ Reference: check_stmt.cpp:1754-1757.
+	if stmt.init != nil {
+		viral_flags |= check_stmt(ctx, stmt.init, mod_flags)
+	}
+
 	// Track value types and entities
 	vals := make([dynamic]^Type, 0, 2, context.temp_allocator)
 	entities := make([dynamic]^Entity, 0, 2, context.temp_allocator)
