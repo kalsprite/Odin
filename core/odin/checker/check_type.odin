@@ -2926,7 +2926,7 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 	bf.bit_sizes = make([dynamic]int, 0, field_count)
 	bf.bit_offsets = make([dynamic]int, 0, field_count)
 
-	for ast_field in bft.fields {
+	for ast_field, bit_field_index in bft.fields {
 		if ast_field == nil {
 			continue
 		}
@@ -3052,8 +3052,17 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 		}
 
 		// Create entity for field
-		// C++ lines 1157-1175
-		field_entity := alloc_entity_variable(scope, field_token, field_type)
+		//
+		// C++ Reference: check_type.cpp:1149-1153 -
+		//	Entity *e = alloc_entity_field(ctx->scope, ..., type, false, field_src_index);
+		//	e->flags |= EntityFlag_BitFieldField;
+		//
+		// The port used alloc_entity_VARIABLE and added only .Bit_Field_Field, so the entity
+		// never carried .Field. lookup_field_with_selection's bit_field arm (types.odin:3160)
+		// skips any entity without it - `if .Field not_in field.flags { continue }`, which is
+		// C++'s own guard - so EVERY bit_field member lookup failed, by value and through a
+		// pointer alike. core/mem's Rollback_Stack_Header accounts for 294 of the class.
+		field_entity := alloc_entity_field(scope, field_token, field_type, false, i32(bit_field_index))
 		field_entity.flags += {.Bit_Field_Field}
 
 		// Add to scope
