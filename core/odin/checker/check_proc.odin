@@ -903,9 +903,24 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 				if scope != nil {
 					print_count := 0
 
-					// Iterate through scope elements and display TypeName and Constant entities
-					// C++ Reference: check_expr.cpp:6747-6777
+					// C++ (check_expr.cpp:7121) walks scope->elements in raw hash order.
+					// Iterating an Odin map here made this block nondeterministic: ten runs of
+					// the SAME binary on the SAME input produced SIX different orderings of
+					// the definition list. sweep_det.sh runs under `setarch -R`, so the sweep
+					// cannot see it. Sorted by name, as in check_did_you_mean_scope; C++'s own
+					// order is a property of its hash table and is not reproducible.
+					// LEDGER task 277.
+					ordered := make([dynamic]^Entity, 0, len(scope.elements), context.temp_allocator)
 					for _, e in scope.elements {
+						append(&ordered, e)
+					}
+					slice.sort_by(ordered[:], proc(a, b: ^Entity) -> bool {
+						return a.token.text < b.token.text
+					})
+
+					// Iterate through scope elements and display TypeName and Constant entities
+					// C++ Reference: check_expr.cpp:7121-7150
+					for e in ordered {
 						#partial switch e.kind {
 						case .Type_Name:
 							// Display type definitions: name :: type;
