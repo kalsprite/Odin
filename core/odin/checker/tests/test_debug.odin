@@ -84,7 +84,7 @@ test_debug_no_alias :: proc(t: ^testing.T) {
 
     // Parse #no_alias - test directive handling (simple)
     src := `package test
-copy :: proc(dst: #no_alias ^int, src: ^int) {
+copy :: proc(#no_alias dst: ^int, src: ^int) {
 }
 `
     file := new(ast.File)

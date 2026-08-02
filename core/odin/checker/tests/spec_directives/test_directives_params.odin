@@ -27,7 +27,7 @@ test_param_no_alias_pos :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_pass(t, `package test
-copy :: proc(dst: #no_alias ^int, src: ^int) {
+copy :: proc(#no_alias dst: ^int, src: ^int) {
     dst^ = src^
 }
 `, "DIR-PARAM-001: #no_alias parameter")
@@ -40,7 +40,7 @@ test_param_any_int_pos :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_pass(t, `package test
-shift :: proc(x: int, amount: #any_int int) -> int {
+shift :: proc(x: int, #any_int amount: int) -> int {
     return x << uint(amount)
 }
 test :: proc() {
@@ -87,7 +87,7 @@ test_param_const_pos :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_pass(t, `package test
-make_array :: proc($N: #const int) -> [N]int {
+make_array :: proc(#const $N: int) -> [N]int {
     return [N]int{}
 }
 test :: proc() {
@@ -178,7 +178,7 @@ test_param_no_alias_non_pointer_neg :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_fail(t, `package test
-bad :: proc(x: #no_alias int) {
+bad :: proc(#no_alias x: int) {
 }
 `, "DIR-PARAM-010: #no_alias on non-pointer")
 }
@@ -190,7 +190,7 @@ test_param_any_int_non_int_neg :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_fail(t, `package test
-bad :: proc(x: #any_int f32) {
+bad :: proc(#any_int x: f32) {
 }
 `, "DIR-PARAM-011: #any_int on non-integer")
 }
@@ -241,7 +241,7 @@ test_param_const_non_const_call_neg :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_fail(t, `package test
-make_array :: proc($N: #const int) -> [N]int {
+make_array :: proc(#const $N: int) -> [N]int {
     return [N]int{}
 }
 test :: proc() {

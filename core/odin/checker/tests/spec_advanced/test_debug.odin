@@ -133,7 +133,7 @@ test_debug_no_alias :: proc(t: ^testing.T) {
 
     // Test #no_alias parameter flag
     result := helpers.check_source_capture_errors(`package test
-copy :: proc(dst: #no_alias ^int, src: ^int) {
+copy :: proc(#no_alias dst: ^int, src: ^int) {
     dst^ = src^
 }
 `)
@@ -146,7 +146,7 @@ copy :: proc(dst: #no_alias ^int, src: ^int) {
 
     // Test #any_int parameter flag
     result2 := helpers.check_source_capture_errors(`package test
-shift :: proc(x: int, amount: #any_int int) -> int {
+shift :: proc(x: int, #any_int amount: int) -> int {
     return x << uint(amount)
 }
 `)
