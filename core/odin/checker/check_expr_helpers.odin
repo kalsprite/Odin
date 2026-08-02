@@ -381,6 +381,85 @@ write_expr_to_string :: proc(builder: ^strings.Builder, node: ^ast.Node, shortha
 		strings.write_string(builder, " = ")
 		write_expr_to_string(builder, derived.value, shorthand)
 
+	// ===== Nodes C++'s printer handles that the port did not (#250) =====
+	//
+	// C++ Reference: src/check_expr.cpp write_expr_to_string. Each of these fell to the
+	// `<unprintable %T>` fallback below, so any diagnostic naming one printed a type dump
+	// instead of the expression. NOTE C++ writes these arms with the case_ast_node() MACRO,
+	// not `case Ast_X:` -- grepping for the literal form finds nothing and reads as proof
+	// they are unhandled, which is exactly the false negative that derailed #243's audit.
+
+	case ^ast.Bit_Field_Field:
+		write_expr_to_string(builder, derived.name, shorthand)
+		strings.write_string(builder, ": ")
+		write_expr_to_string(builder, derived.type, shorthand)
+		strings.write_string(builder, " | ")
+		write_expr_to_string(builder, derived.bit_size, shorthand)
+
+	case ^ast.Bit_Field_Type:
+		strings.write_string(builder, "bit_field ")
+		if !shorthand {
+			write_expr_to_string(builder, derived.backing_type, shorthand)
+		}
+		strings.write_string(builder, " {")
+		if shorthand {
+			strings.write_string(builder, "...")
+		} else {
+			for f, i in derived.fields {
+				if i > 0 {
+					strings.write_string(builder, ", ")
+				}
+				write_expr_to_string(builder, f, false)
+			}
+		}
+		strings.write_string(builder, "}")
+
+	case ^ast.Helper_Type:
+		strings.write_string(builder, "#type ")
+		write_expr_to_string(builder, derived.type, shorthand)
+
+	case ^ast.Inline_Asm_Expr:
+		strings.write_string(builder, "asm(")
+		for pt, i in derived.param_types {
+			if i > 0 {
+				strings.write_string(builder, ", ")
+			}
+			write_expr_to_string(builder, pt, shorthand)
+		}
+		strings.write_string(builder, ")")
+		if derived.return_type != nil {
+			strings.write_string(builder, " -> ")
+			write_expr_to_string(builder, derived.return_type, shorthand)
+		}
+		if derived.has_side_effects {
+			strings.write_string(builder, " #side_effects")
+		}
+		if derived.is_align_stack {
+			strings.write_string(builder, " #stack_align")
+		}
+		// C++ guards this with `if (ia->dialect)`, and InlineAsmDialect_Default is 0 --
+		// FALSY -- so nothing is emitted for the default dialect. Only ATT and Intel print.
+		// (My first draft emitted a bare " #" for Default, from reading the table
+		// inline_asm_dialect_strings = {"", "att", "intel"} without the enclosing guard.)
+		#partial switch derived.dialect {
+		case .ATT:   strings.write_string(builder, " #att")
+		case .Intel: strings.write_string(builder, " #intel")
+		}
+		strings.write_string(builder, " {")
+		if shorthand {
+			strings.write_string(builder, "...")
+		} else {
+			write_expr_to_string(builder, derived.asm_string, shorthand)
+			strings.write_string(builder, ", ")
+			write_expr_to_string(builder, derived.constraints_string, shorthand)
+		}
+		strings.write_string(builder, "}")
+
+	case ^ast.Relative_Type:
+		// C++ appends an empty string between the two -- no separator.
+		write_expr_to_string(builder, derived.tag, shorthand)
+		write_expr_to_string(builder, derived.type, shorthand)
+
 	// ===== Procedure Literals =====
 	case ^ast.Proc_Lit:
 		write_expr_to_string(builder, derived.type, shorthand)
