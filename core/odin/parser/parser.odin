@@ -1013,16 +1013,24 @@ parse_if_stmt :: proc(p: ^Parser) -> ^ast.If_Stmt {
 	return if_stmt
 }
 
+// C++ Reference: src/parser.cpp:4727-4739.
+//
+// #213: the port had C++'s control flow but not its diagnostic. When the separator position
+// holds a newline-INSERTED semicolon (kind Semicolon, text "\n") rather than a written one,
+// C++ reports it; the port silently accepted. Shared by all three control statements --
+// `if`, `for` and `switch` -- via the call sites below. Probe do3.
 parse_control_statement_semicolon_separator :: proc(p: ^Parser) -> bool {
 	tok := peek_token(p)
 	if tok.kind != .Open_Brace {
+		if p.curr_tok.kind == .Semicolon && p.curr_tok.text != ";" {
+			error(p, end_of_line_pos(p, p.prev_tok), "Expected ';', got newline")
+		}
 		return allow_token(p, .Semicolon)
 	}
 	if p.curr_tok.text == ";" {
 		return allow_token(p, .Semicolon)
 	}
 	return false
-
 }
 
 parse_for_stmt :: proc(p: ^Parser) -> ^ast.Stmt {

@@ -610,6 +610,18 @@ scan :: proc(t: ^Tokenizer) -> Token {
 		advance_rune(t)
 		switch ch {
 		case -1:
+			// #200: C++ derives a token's column from Tokenizer::column_minus_one, and
+			// advance_to_next_rune (src/tokenizer.cpp:374) increments that counter ONLY while
+			// read_curr < end. Reaching EOF therefore never advances the column, so the token
+			// produced at EOF sits one column earlier than a positional formula would put it:
+			// column_minus_one + 1, where column_minus_one is still -1 on a file ending in a
+			// newline. This port computes offset - line_offset + 1, which is always >= 1.
+			//
+			// The offset is one-past-the-end either way; only the printed column differs, and
+			// it differs uniformly by one (verified on both a file ending in a newline and one
+			// ending mid-line). Applies to the inserted-semicolon form below too, because C++
+			// sets that token's position before it decides the kind.
+			pos.column -= 1
 			kind = .EOF
 			if t.insert_semicolon {
 				t.insert_semicolon = false
