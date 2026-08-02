@@ -421,10 +421,25 @@ scan_escape :: proc(t: ^Tokenizer) -> bool {
 		n -= 1
 	}
 
-	if x > max || 0xd800 <= x && x <= 0xdfff {
-		error(t, offset, "escape sequence is an invalid Unicode code point")
-		return false
-	}
+	// C++ Reference: scan_escape (src/tokenizer.cpp:585-648). It computes `x` and assigns
+	// `max`, and then NEVER READS EITHER -- the function ends at the digit loop with a bare
+	// `return true`. The tokenizer does not range-check an escape at all.
+	//
+	// The range check lives one phase later, in unquote_char (src/string.cpp:1121):
+	//
+	//     if (r > GB_RUNE_MAX) { return false; }
+	//
+	// whose failure becomes the parser's "Invalid string literal" / "Invalid rune literal".
+	// Two differences follow, and the port had both wrong:
+	//
+	//   - SURROGATES ARE ACCEPTED. unquote_char tests only the upper bound, so `"\ud800"`
+	//     compiles. The port rejected it -- a pure over-rejection with no counterpart.
+	//   - `\x` NEVER RANGE-CHECKS: unquote_char breaks out before the test for it.
+	//
+	// so the check is gone from here and lives in check_basic_literal_value, at the phase
+	// and with the wording C++ uses. LEDGER #370.
+	_ = max
+	_ = x
 	return true
 }
 
@@ -694,7 +709,17 @@ scan :: proc(t: ^Tokenizer) -> Token {
 			}
 			token := scan(t)
 			if token.pos.line == pos.line {
-				error(t, token.pos.offset, "expected a newline after \\")
+				// C++ Reference: src/tokenizer.cpp:749-755.
+				//
+				//     tokenizer_err(t, token_pos_add_column(current_pos), "Expected a newline after \\");
+				//
+				// The anchor is the BACKSLASH's own position plus one column
+				// (token_pos_add_column, src/tokenizer.cpp:231-235), not the position of the
+				// token that followed it. The port reported at the following token, which is
+				// one or more columns further right whenever there is whitespace between
+				// them -- `x := 1; \ y := 2` gave 3:11 where the oracle gives 3:10.
+				// LEDGER #370.
+				error(t, pos.offset + 1, "Expected a newline after \\")
 			}
 			return token
 

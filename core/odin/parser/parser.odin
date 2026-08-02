@@ -2774,7 +2774,90 @@ check_basic_literal_value :: proc(p: ^Parser, tok: tokenizer.Token) {
 		} else if !float_value_is_valid(tok.text) {
 			error(p, tok.pos, "Invalid float literal")
 		}
+
+	case .Rune:
+		if !escapes_are_valid(tok.text) {
+			error(p, tok.pos, "Invalid rune literal")
+		}
+
+	case .String:
+		if !escapes_are_valid(tok.text) {
+			error(p, tok.pos, "Invalid string literal")
+		}
 	}
+}
+
+// escapes_are_valid is the part of unquote_char (src/string.cpp:1024-1128) that the TOKENIZER
+// does not already cover.
+//
+// C++ splits the work: the tokenizer accepts any well-formed `\u`/`\U` escape without looking
+// at its value (scan_escape assigns `max` and never reads it), and unquote_char -- called from
+// exact_value_from_token, i.e. at PARSE time -- applies the one bound that exists:
+//
+//     if (r > GB_RUNE_MAX) { return false; }
+//
+// Two things follow that the port had wrong, in opposite directions:
+//
+//   - There is NO SURROGATE CHECK. `"\ud800"` compiles. The port rejected it from the
+//     tokenizer with an invented message.
+//   - `\x` is exempt: unquote_char breaks out of the switch before the test, so `"\xFF"` is
+//     always fine regardless of the byte value.
+//
+// A raw (backtick) string has no escapes at all. LEDGER #370.
+@(private)
+escapes_are_valid :: proc(text: string) -> bool {
+	MAX_RUNE :: 0x0010ffff
+
+	if len(text) > 0 && text[0] == '`' {
+		return true
+	}
+	i := 0
+	for i < len(text) {
+		if text[i] != '\\' {
+			i += 1
+			continue
+		}
+		i += 1
+		if i >= len(text) {
+			return true // the tokenizer has already reported this
+		}
+		count := 0
+		switch text[i] {
+		case 'u':
+			count = 4
+		case 'U':
+			count = 8
+		case:
+			// Everything else is either a single-character escape, an octal run, or `\x`,
+			// none of which unquote_char range-checks.
+			i += 1
+			continue
+		}
+		i += 1
+		r := 0
+		digits := 0
+		for digits < count && i < len(text) {
+			d := -1
+			switch c := text[i]; c {
+			case '0' ..= '9':
+				d = int(c - '0')
+			case 'a' ..= 'f':
+				d = int(c - 'a') + 10
+			case 'A' ..= 'F':
+				d = int(c - 'A') + 10
+			}
+			if d < 0 {
+				break
+			}
+			r = r << 4 | d
+			digits += 1
+			i += 1
+		}
+		if digits == count && r > MAX_RUNE {
+			return false
+		}
+	}
+	return true
 }
 
 parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
