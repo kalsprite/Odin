@@ -45,6 +45,7 @@ Parser :: struct {
 	// C++ Reference: src/parser.cpp:42 file_allow_newline
 	strict_style:     bool,           // build_context.strict_style
 	vet_flags:        ast.Vet_Flags,  // build_context.vet_flags -- the fallback when a file sets none
+	disallow_do:      bool,           // build_context.disallow_do (#211) -- read by parse_do_body
 
 	lead_comment: ^ast.Comment_Group,
 	line_comment: ^ast.Comment_Group,
@@ -888,10 +889,8 @@ parse_when_stmt :: proc(p: ^Parser) -> ^ast.When_Stmt {
 		error(p, p.curr_tok.pos, "expected a condition for when statement")
 	}
 	if allow_token(p, .Do) {
-		body = convert_stmt_to_body(p, parse_stmt(p))
-		if cond.pos.line != body.pos.line {
-			error(p, body.pos, "the body of a 'do' must be on the same line as when statement")
-		}
+		// C++ Reference: src/parser.cpp:4856
+		body = parse_do_body(p, do_body_token(cond, tok), "then when statement")
 	} else {
 		body = parse_block_stmt(p, true)
 	}
@@ -906,10 +905,8 @@ parse_when_stmt :: proc(p: ^Parser) -> ^ast.When_Stmt {
 			else_stmt = parse_block_stmt(p, true)
 		case .Do:
 			expect_token(p, .Do)
-			else_stmt = convert_stmt_to_body(p, parse_stmt(p))
-			if else_tok.pos.line != else_stmt.pos.line {
-				error(p, else_stmt.pos, "the body of a 'do' must be on the same line as 'else'")
-			}
+			// C++ Reference: src/parser.cpp:4877
+			else_stmt = parse_do_body(p, else_tok, "'else'")
 		case:
 			error(p, p.curr_tok.pos, "Expected when statement block statement")
 			else_stmt = ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
@@ -971,10 +968,8 @@ parse_if_stmt :: proc(p: ^Parser) -> ^ast.If_Stmt {
 
 	}
 	if allow_token(p, .Do) {
-		body = convert_stmt_to_body(p, parse_stmt(p))
-		if cond.pos.line != body.pos.line {
-			error(p, body.pos, "the body of a 'do' must be on the same line as the if condition")
-		}
+		// C++ Reference: src/parser.cpp:4786
+		body = parse_do_body(p, do_body_token(cond, tok), "the if statement")
 	} else {
 		body = parse_block_stmt(p, false)
 	}
@@ -991,10 +986,10 @@ parse_if_stmt :: proc(p: ^Parser) -> ^ast.If_Stmt {
 			else_stmt = parse_block_stmt(p, false)
 		case .Do:
 			expect_token(p, .Do)
-			else_stmt = convert_stmt_to_body(p, parse_stmt(p))
-			if else_tok.pos.line != else_stmt.pos.line {
-				error(p, body.pos, "the body of a 'do' must be on the same line as 'else'")
-			}
+			// C++ Reference: src/parser.cpp:4819. The port reported at body.pos here -- the
+			// position of the IF body, not the else body. Copy-paste slip; C++ reports at the
+			// body parse_do_body just built.
+			else_stmt = parse_do_body(p, else_tok, "'else'")
 		case:
 			error(p, p.curr_tok.pos, "Expected if statement block statement")
 			else_stmt = ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
@@ -1058,11 +1053,8 @@ parse_for_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 			p.allow_range = prev_allow_range
 
 			if allow_token(p, .Do) {
-				body = convert_stmt_to_body(p, parse_stmt(p))
-				if tok.pos.line != body.pos.line {
-					error(p, body.pos, "the body of a 'do' must be on the same line as 'for'")
-				}
-
+				// C++ Reference: src/parser.cpp:4950
+				body = parse_do_body(p, tok, "the for statement")
 			} else {
 				body = parse_body(p)
 			}
@@ -1120,10 +1112,8 @@ parse_for_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 	}
 
 	if allow_token(p, .Do) {
-		body = convert_stmt_to_body(p, parse_stmt(p))
-		if tok.pos.line != body.pos.line {
-			error(p, body.pos, "the body of a 'do' must be on the same line as the 'for' token")
-		}
+		// C++ Reference: src/parser.cpp:5005
+		body = parse_do_body(p, tok, "the for statement")
 	} else {
 		allow_token(p, .Semicolon)
 		body = parse_body(p)
@@ -1511,10 +1501,8 @@ parse_unrolled_for_loop :: proc(p: ^Parser, inline_tok: tokenizer.Token) -> ^ast
 	p.allow_range = prev_allow_range
 
 	if allow_token(p, .Do) {
-		body = convert_stmt_to_body(p, parse_stmt(p))
-		if for_tok.pos.line != body.pos.line {
-			error(p, body.pos, "the body of a 'do' must be on the same line as the 'for' token")
-		}
+		// C++ Reference: src/parser.cpp:5388
+		body = parse_do_body(p, for_tok, "the for statement")
 	} else {
 		body = parse_block_stmt(p, false)
 	}
@@ -1760,8 +1748,15 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 		case .Open_Brace:
 			return parse_block_stmt(p, true)
 		case .Do:
+			// C++ Reference: src/parser.cpp:5631-5637. The zero Token opts out of the
+			// same-line check. C++ then tests disallow_do a SECOND time here, after
+			// parse_do_body has already reported it -- reproduced, see #213.
 			expect_token(p, .Do)
-			return convert_stmt_to_body(p, parse_stmt(p))
+			stmt := parse_do_body(p, {}, "the for statement")
+			if p.disallow_do {
+				error(p, stmt.pos, "'do' has been disallowed")
+			}
+			return stmt
 		case:
 			fix_advance_to_next_stmt(p)
 			return ast.new(ast.Bad_Stmt, token.pos, end_pos(p.curr_tok))
@@ -1847,6 +1842,52 @@ parse_body :: proc(p: ^Parser) -> ^ast.Block_Stmt {
 	bs.stmts = stmts
 	bs.close = close.pos
 	return bs
+}
+
+// C++ Reference: src/parser.cpp:4707-4725 parse_do_body.
+//
+// #211: this function did not exist. Its body was inlined at all 8 call sites, and every copy
+// had drifted:
+//   * none reset expr_level to 0 -- C++ notes "the body may be within an expression", and a
+//     negative expr_level (a control clause) otherwise leaks into the body.
+//   * none set allow_newline = false, so the do-body inherited the enclosing list's newline
+//     rule. This is the 5th of C++'s 6 allow_newline save/restore sites (see #209).
+//   * none checked disallow_do.
+//   * each carried its own hand-written message; C++ has one, parameterised by `msg`.
+//
+// `token` may be the zero Token, which is how the bare `do` statement at C++ 5633 opts out of
+// the same-line check. C++ spells that test as `token.pos.file_id != 0`; this port's Pos
+// carries a file NAME rather than an id, so the equivalent emptiness test is used.
+// C++ passes `cond ? ast_token(cond) : token` at the if/when sites. This port has no
+// ast_token; for the node kinds that reach here ast_token's position is the node's own pos,
+// which is what the old inlined copies already compared against.
+do_body_token :: proc(cond: ^ast.Expr, fallback: tokenizer.Token) -> tokenizer.Token {
+	if cond == nil {
+		return fallback
+	}
+	tok := fallback
+	tok.pos = cond.pos
+	return tok
+}
+
+parse_do_body :: proc(p: ^Parser, token: tokenizer.Token, msg: string) -> ^ast.Stmt {
+	prev_expr_level := p.expr_level
+	prev_allow_newline := p.allow_newline
+
+	// NOTE(bill): The body may be within an expression so reset to zero
+	p.expr_level = 0
+	p.allow_newline = false
+
+	body := convert_stmt_to_body(p, parse_stmt(p))
+	if p.disallow_do {
+		error(p, body.pos, "'do' has been disallowed")
+	} else if token.pos.file != "" && token.pos.line != body.pos.line {
+		error(p, body.pos, "The body of a 'do' must be on the same line as %s", msg)
+	}
+	p.expr_level = prev_expr_level
+	p.allow_newline = prev_allow_newline
+
+	return body
 }
 
 convert_stmt_to_body :: proc(p: ^Parser, stmt: ^ast.Stmt) -> ^ast.Stmt {
@@ -2834,9 +2875,13 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			p.curr_proc = type
 			body = convert_stmt_to_body(p, parse_stmt(p))
 			p.curr_proc = prev_proc
-			if type.pos.line != body.pos.line {
-				error(p, body.pos, "the body of a 'do' must be on the same line as the signature")
-			}
+			// C++ Reference: src/parser.cpp:2620-2628. C++ does NOT route procedure bodies
+			// through parse_do_body -- it rejects `do` outright, regardless of line. The port
+			// accepted it silently on the same line and invented a same-line message
+			// otherwise, so `f :: proc() do x := 1` was a plain under-rejection (probe do1).
+			// `{}` is a format verb in Odin's fmt, so the literal braces must be escaped as
+			// `{{}}`. Left unescaped this printed "prefer %!(MISSING ARGUMENT)".
+			error(p, body.pos, "'do' for procedure bodies is not allowed, prefer {{}}")
 		} else {
 			return type
 		}

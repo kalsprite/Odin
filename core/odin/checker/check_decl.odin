@@ -298,7 +298,10 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		}
 		init_entity_foreign_library(ctx, e)
 		if is_arch_wasm() && e_var.foreign_library != nil {
-			error(e.token, "A foreign variable declaration can not be scoped to a module and must be declared in a 'foreign {' (without a library) block")
+			// LEDGER 346: `{` is a format verb in Odin's fmt; C++'s printf passes it through.
+			// Unescaped this printed "'foreign %!(MISSING ARGUMENT)%!(MISSING CLOSE BRACE)".
+			// C++ Reference: src/check_decl.cpp:1753
+			error(e.token, "A foreign variable declaration can not be scoped to a module and must be declared in a 'foreign {{' (without a library) block")
 		}
 	}
 	if len(ac.link_name) > 0 {

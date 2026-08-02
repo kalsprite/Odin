@@ -6479,7 +6479,8 @@ check_implicit_selector_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^
 			bs_str := expr_to_string(node)
 			defer delete(bs_str)
 			error(node, "Cannot convert enum value to '%s'", bs_typ)
-			error_line("\tSuggestion: Did you mean '{ %s }'?\n", bs_str)
+			// LEDGER 346: braces escaped for Odin's fmt. C++ Reference: src/check_expr.cpp:9402
+			error_line("\tSuggestion: Did you mean '{{ %s }}'?\n", bs_str)
 
 		} else {
 			// C++ Reference: check_expr.cpp:9404-9409 -- names the TYPE and the expression.

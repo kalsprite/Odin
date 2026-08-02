@@ -486,6 +486,8 @@ load_package_with_dependencies :: proc(
 		// them -- without this every file parses as if -strict-style were off.
 		syntax_parser.strict_style = build_context.strict_style
 		syntax_parser.vet_flags = transmute(ast.Vet_Flags)build_context.vet_flags
+		// #211: parse_do_body reads this; build_context.disallow_do was stored but never read.
+		syntax_parser.disallow_do = build_context.disallow_do
 		pkg, parse_ok := parse_package_for_target(pkg_path, pkg_to_load.kind, &syntax_parser)
 		if !parse_ok || pkg == nil {
 			result.parse_errors += 1

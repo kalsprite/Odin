@@ -4190,7 +4190,8 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 					val_str := expr_to_string(stmt.vals[0])
 					defer delete(val_str)
 					error_line("\tSuggestion: place parentheses around the expression\n")
-					error_line("\t            for (%s in %s) {\n", val_str, expr_str)
+					// LEDGER 346: braces escaped for Odin's fmt. C++ Reference: src/check_stmt.cpp:2026
+					error_line("\t            for (%s in %s) {{\n", val_str, expr_str)
 				}
 			}
 		}

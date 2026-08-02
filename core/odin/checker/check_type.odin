@@ -4070,7 +4070,8 @@ determine_type_from_polymorphic :: proc(ctx: ^Checker_Context, poly_type: ^Type,
 			expr := unparen_expr(operand.expr)
 			if _, is_cl := expr.derived.(^ast.Comp_Lit); is_cl {
 				es := type_to_string(base_any_array_type(operand.type))
-				error_line("\tSuggestion: Try using a slice compound literal instead '[]%s{...}'\n", es)
+				// LEDGER 346: braces escaped for Odin's fmt. C++ Reference: src/check_type.cpp:1675
+				error_line("\tSuggestion: Try using a slice compound literal instead '[]%s{{...}}'\n", es)
 			} else {
 				os := expr_to_string(operand.expr)
 				error_line("\tSuggestion: Try slicing the value with '%s[:]'\n", os)
