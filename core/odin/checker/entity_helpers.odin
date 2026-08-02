@@ -1396,7 +1396,7 @@ check_cycle :: proc(ctx: ^Checker_Context, curr: ^Entity, report: bool) -> bool 
 	for prev, i in type_path {
 		if prev == curr {
 			if report {
-				error_token(curr.token, "Illegal declaration cycle of '%s'", curr.token.text)
+				error_token(curr.token, "Illegal declaration cycle of `%s`", curr.token.text)
 				// Print the cycle chain
 				for j := i; j < len(type_path); j += 1 {
 					cycle_ent := type_path[j]

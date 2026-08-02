@@ -1999,7 +1999,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 					x.expr = node
 					return
 				} else {
-					error(x.expr, "Key '%d' out of range of bit set, %d..%d", key_int, lower, upper)
+					error(x.expr, "key '%d' out of range of bit set, %d..%d", key_int, lower, upper)
 					x.mode = .Invalid
 				}
 			}
@@ -5309,7 +5309,7 @@ check_index_value :: proc(ctx: ^Checker_Context, main_type: ^Type, open_range: b
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
 		type_str := type_to_string(operand.type)
-		error(operand.expr, "Index '%s' must be an integer, got '%s'", expr_str, type_str)
+		error(operand.expr, "Index '%s' must be an integer, got %s", expr_str, type_str)
 		if value != nil {
 			value^ = 0
 		}
@@ -6826,7 +6826,7 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 
 	case:
 		// Unknown directive
-		error(node, "Unknown directive '#%s'", name)
+		error(node, "Unknown directive: #%s", name)
 		o.mode = .Invalid
 		o.expr = node
 		return .Expr

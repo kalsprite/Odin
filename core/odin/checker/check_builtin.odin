@@ -1712,12 +1712,12 @@ check_builtin_objc_block :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 	case .Odin, .Contextless, .C:
 		// OK
 	case:
-		error_node(handler.expr, "'%s' invalid calling convention for block procedure", builtin_name)
+		error_node(handler.expr, "'%s' Invalid calling convention for block procedure.", builtin_name)
 		return false
 	}
 
 	if proc_info.is_polymorphic {
-		error_node(handler.expr, "'%s' unspecialized polymorphic procedures are not allowed", builtin_name)
+		error_node(handler.expr, "'%s' Unspecialized polymorphic procedures are not allowed.", builtin_name)
 		return false
 	}
 
@@ -7476,20 +7476,20 @@ check_builtin_type_merge :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 	// C++ Reference: check_builtin.cpp:6507-6560
 	// Validate both are non-polymorphic union types
 	if is_type_polymorphic(type1_op.type, false) {
-		error_node(call.args[0], "Expected a non-polymorphic type for '%s', got '%s'", builtin_name, type_to_string(type1_op.type))
+		error_node(call.args[0], "Expected a non-polymorphic type for '%s', got %s", builtin_name, type_to_string(type1_op.type))
 		return false
 	}
 	if is_type_polymorphic(type2_op.type, false) {
-		error_node(call.args[1], "Expected a non-polymorphic type for '%s', got '%s'", builtin_name, type_to_string(type2_op.type))
+		error_node(call.args[1], "Expected a non-polymorphic type for '%s', got %s", builtin_name, type_to_string(type2_op.type))
 		return false
 	}
 
 	if !is_type_union(type1_op.type) {
-		error_node(call.args[0], "Expected a union type for '%s', got '%s'", builtin_name, type_to_string(type1_op.type))
+		error_node(call.args[0], "Expected a union type for '%s', got %s", builtin_name, type_to_string(type1_op.type))
 		return false
 	}
 	if !is_type_union(type2_op.type) {
-		error_node(call.args[1], "Expected a union type for '%s', got '%s'", builtin_name, type_to_string(type2_op.type))
+		error_node(call.args[1], "Expected a union type for '%s', got %s", builtin_name, type_to_string(type2_op.type))
 		return false
 	}
 
@@ -7575,7 +7575,7 @@ check_builtin_type_convert_variants_to_pointers :: proc(ctx: ^Checker_Context, o
 
 	union_type := bt.variant.(Type_Union)
 	if union_type.is_polymorphic {
-		error_node(call.args[0], "Expected a non-polymorphic union type for '%s', got '%s'", builtin_name, type_to_string(type_op.type))
+		error_node(call.args[0], "Expected a non-polymorphic union type for '%s', got %s", builtin_name, type_to_string(type_op.type))
 		operand.mode = .Invalid
 		operand.type = t_invalid
 		return false

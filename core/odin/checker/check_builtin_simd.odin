@@ -650,7 +650,7 @@ check_builtin_simd_extract :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	}
 
 	if value < 0 {
-		error(call.args[1], "'%s' expected a constant integer index, got %d", builtin_name, value)
+		error(call.args[1], "'%s' expected a constant integer index, got '%d'", builtin_name, value)
 		return false
 	}
 
@@ -693,7 +693,7 @@ check_builtin_simd_replace :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	}
 
 	if value < 0 {
-		error(call.args[1], "'%s' expected a constant integer index, got %d", builtin_name, value)
+		error(call.args[1], "'%s' expected a constant integer index, got '%d'", builtin_name, value)
 		return false
 	}
 
@@ -1039,7 +1039,7 @@ check_builtin_simd_select :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 	x_count := get_array_type_count(x.type)
 
 	if cond_count != x_count {
-		error(call, "'%s' expected condition vector to match the length of the result lengths, got %d vs %d", builtin_name, cond_count, x_count)
+		error(call, "'%s' expected condition vector to match the length of the result lengths, got '%d' vs '%d'", builtin_name, cond_count, x_count)
 		return false
 	}
 

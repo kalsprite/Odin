@@ -655,7 +655,7 @@ check_array_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^T
 					if ctx.disallow_polymorphic_return_types && count == 0 {
 						return
 					}
-					error_node(at.len, "Invalid length for #simd, expected a power of two length, got %d", count)
+					error_node(at.len, "Invalid length for #simd, expected a power of two length, got '%d'", count)
 					return
 				}
 
