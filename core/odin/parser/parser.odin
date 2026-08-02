@@ -662,7 +662,16 @@ expect_semicolon :: proc(p: ^Parser, node: ^ast.Node) -> bool {
 		}
 	}
 
-	error(p, prev.pos, "Expected ';', got %s", tokenizer.token_to_string(p.curr_tok))
+	// C++ Reference: src/parser.cpp:1879-1880.
+	//
+	//     prev_token.pos = token_pos_end(prev_token);
+	//     syntax_error(prev_token, "Expected ';', got %.*s", LIT(p));
+	//
+	// C++ moves the position to the END of the previous token before reporting, so the caret
+	// lands just after `1` in `x := 1 y := 2` -- where the semicolon should have gone. The
+	// port reported at prev.pos, the START of that token, making every "Expected ';'" one
+	// column early. Probe semi1: oracle 2:24, port 2:23.
+	error(p, end_pos(prev), "Expected ';', got %s", tokenizer.token_to_string(p.curr_tok))
 	fix_advance_to_next_stmt(p)
 	return false
 }
