@@ -1041,6 +1041,279 @@ check_call_arguments_single :: proc(
 	return ok
 }
 
+// print_call_argument_types renders C++'s "Given argument types:" block.
+//
+// C++ Reference: check_expr.cpp:7651-7675 (the `print_argument_types` lambda inside
+// check_call_arguments_proc_group).
+//
+// NOTE(parity): C++ declares `isize i = 0` in that lambda and NEVER increments it, so
+// every named argument is labelled with the FIRST named field's name. That is a bug in
+// C++, but it is reproduced verbatim here: the objective is byte-identical diagnostics,
+// and silently "fixing" it in the port would be a divergence no test could justify.
+// Recorded as an upstream candidate instead.
+print_call_argument_types :: proc(positional_operands: []Operand, named_operands: []Operand, args_split: Split_Args) {
+	error_line("\tGiven argument types:\n")
+	for o in positional_operands {
+		error_line("\t • %s\n", type_to_string(o.type))
+	}
+	i := 0 // NOTE(parity): never incremented, mirroring C++ exactly. See above.
+	for o in named_operands {
+		type_str := type_to_string(o.type)
+		labelled := false
+		if i < len(args_split.named) {
+			if fv, ok := args_split.named[i].derived.(^ast.Field_Value); ok {
+				field := expr_to_string(fv.field)
+				error_line("\t • %s = %s\n", field, type_str)
+				delete(field)
+				labelled = true
+			}
+		}
+		if !labelled {
+			error_line("\t • %s\n", type_str)
+		}
+	}
+}
+
+// proc_display_type_string renders a procedure entity's type the way C++ does: from the
+// declaration's own AST when it has one, otherwise the canonical type string.
+// The second result reports whether the caller must free it - expr_to_string allocates,
+// type_to_string does not.
+// C++ Reference: check_expr.cpp:7770-7774, 7876-7880, 7949-7953.
+proc_display_type_string :: proc(t: ^Type) -> (string, bool) {
+	pt := &t.variant.(Type_Proc)
+	if pt.node != nil {
+		return expr_to_string(pt.node), true
+	}
+	return type_to_string(t), false
+}
+
+@(private = "file")
+overload_is_ignored :: proc(possibly_ignore: []bool, possibly_ignore_set: int, i: int) -> bool {
+	return possibly_ignore_set != 0 && possibly_ignore[i]
+}
+
+// print_procedure_group_overloads renders the padded "Did you mean one of the following
+// overloads?" table, preceded by C++'s address-of Suggestion block when one applies.
+//
+// C++ Reference: check_expr.cpp:7686-7906. The port previously emitted none of this: a
+// failed procedure-group call named no candidates at all, so the user was told the call
+// did not match without being shown what it could have matched.
+print_procedure_group_overloads :: proc(
+	ctx: ^Checker_Context,
+	procs: []^Entity,
+	positional_operands: []Operand,
+	named_operands: []Operand,
+	args_split: Split_Args,
+	expr_name: string,
+) {
+	if len(procs) == 0 {
+		return
+	}
+
+	// Try to reduce the list further for `$T: typeid` like parameters.
+	// NOTE(bill): This currently only checks for #soa types.
+	// C++ Reference: check_expr.cpp:7692-7747.
+	possibly_ignore := make([]bool, len(procs), context.temp_allocator)
+	possibly_ignore_set := 0
+	for p, i in procs {
+		t := base_type(entity_type(p))
+		if t == nil || t.kind != .Proc {
+			continue
+		}
+		pt := &t.variant.(Type_Proc)
+		if pt.param_count == 0 || pt.params == nil || pt.params.kind != .Tuple {
+			continue
+		}
+		for v, j in pt.params.variant.(Type_Tuple).variables {
+			if v == nil || v.kind != .Type_Name {
+				continue
+			}
+			dst_t := base_type(entity_type(v))
+			for dst_t != nil && dst_t.kind == .Generic {
+				spec := dst_t.variant.(Type_Generic).specialized
+				if spec == nil {
+					break
+				}
+				dst_t = spec
+			}
+			if j >= len(positional_operands) {
+				continue
+			}
+			o := positional_operands[j]
+			if o.mode != .Type {
+				continue
+			}
+			ot := base_type(o.type)
+			if ot != nil && dst_t != nil && ot.kind == dst_t.kind {
+				continue
+			}
+			st := base_type(type_deref(o.type))
+			dt := base_type(type_deref(dst_t))
+			if st != nil && dt != nil && st.kind == dt.kind {
+				continue
+			}
+			if is_type_soa_struct(st) {
+				possibly_ignore[i] = true
+				possibly_ignore_set += 1
+				continue
+			}
+		}
+	}
+	if possibly_ignore_set == len(procs) {
+		possibly_ignore_set = 0
+	}
+
+	// Column widths, so the `::` and `at` columns line up.
+	// C++ Reference: check_expr.cpp:7750-7785.
+	max_name_length := 0
+	max_type_length := 0
+	for p, i in procs {
+		if overload_is_ignored(possibly_ignore, possibly_ignore_set, i) {
+			continue
+		}
+		t := base_type(entity_type(p))
+		if t == nil || t == t_invalid || t.kind != .Proc {
+			continue
+		}
+		name_len := len(p.token.text)
+		if p.pkg != nil {
+			name_len += len(p.pkg.name) + 1
+		}
+		max_name_length = max(max_name_length, name_len)
+
+		pt, allocated := proc_display_type_string(t)
+		max_type_length = max(max_type_length, len(pt))
+		if allocated {
+			delete(pt)
+		}
+	}
+	max_spaces := max(max_name_length, max_type_length)
+	spaces := make([]u8, max_spaces, context.temp_allocator)
+	for &c in spaces {
+		c = ' '
+	}
+	spaces_str := string(spaces)
+
+	// C++ walks the candidates once looking for a parameter that would have matched had
+	// the argument been passed by pointer, and if so prints the whole call back with an
+	// `&` inserted. C++ Reference: check_expr.cpp:7788-7855.
+	try_addr := false
+	try_addr_idx := -1
+	for p, i in procs {
+		if overload_is_ignored(possibly_ignore, possibly_ignore_set, i) {
+			continue
+		}
+		t := base_type(entity_type(p))
+		if t == nil || t == t_invalid || t.kind != .Proc {
+			continue
+		}
+		pt := &t.variant.(Type_Proc)
+		if pt.params == nil || pt.params.kind != .Tuple {
+			continue
+		}
+		vars := pt.params.variant.(Type_Tuple).variables
+		n := min(len(vars), len(positional_operands))
+		for k in 0 ..< n {
+			dst := entity_type(vars[k])
+			src := positional_operands[k]
+			if check_is_assignable_to(ctx, &src, dst) {
+				// okay
+			} else if check_is_assignable_to(ctx, &src, type_deref(dst)) {
+				try_addr = true
+				if try_addr_idx < 0 {
+					try_addr_idx = k
+				}
+			}
+		}
+	}
+
+	if try_addr {
+		error_line("  \n")
+		error_line("\tSuggestion:\n")
+		error_line("\t\t%s(", expr_name)
+		i := 0
+		for o in positional_operands {
+			if i > 0 {
+				error_line(", ")
+			}
+			i += 1
+			expr := expr_to_string(o.expr)
+			if i - 1 == try_addr_idx {
+				error_line("&")
+			}
+			error_line("%s", expr)
+			delete(expr)
+		}
+		for o in named_operands {
+			if i > 0 {
+				error_line(", ")
+			}
+			i += 1
+			expr := expr_to_string(o.expr)
+			labelled := false
+			if i < len(args_split.named) {
+				if fv, ok := args_split.named[i].derived.(^ast.Field_Value); ok {
+					field := expr_to_string(fv.field)
+					error_line("%s = %s", field, expr)
+					delete(field)
+					labelled = true
+				}
+			}
+			if !labelled {
+				error_line("%s", expr)
+			}
+			delete(expr)
+		}
+		error_line(")\n")
+		// Extra spaces, to stop the error machinery consuming the newline.
+		error_line("  \n")
+	}
+
+	error_line("Did you mean one of the following overloads?\n")
+	for p, i in procs {
+		if overload_is_ignored(possibly_ignore, possibly_ignore_set, i) {
+			continue
+		}
+		t := base_type(entity_type(p))
+		if t == nil || t == t_invalid || t.kind != .Proc {
+			continue
+		}
+		pt, allocated := proc_display_type_string(t)
+		defer if allocated {
+			delete(pt)
+		}
+
+		prefix := ""
+		prefix_sep := ""
+		if p.pkg != nil {
+			prefix = p.pkg.name
+			prefix_sep = "."
+		}
+		name := p.token.text
+		name_len := len(prefix) + len(prefix_sep) + len(name)
+
+		name_padding := max(max_name_length - name_len, 0)
+		type_padding := max(max_type_length - len(pt), 0)
+
+		sep := "::"
+		if p.kind == .Variable {
+			sep = ":="
+		}
+		error_line(
+			"\t%s%s%s %s%s %s %sat %s\n",
+			prefix,
+			prefix_sep,
+			name,
+			spaces_str[:name_padding],
+			sep,
+			pt,
+			spaces_str[:type_padding],
+			token_pos_to_string(p.token.pos),
+		)
+	}
+	error_line("\n")
+}
+
 // check_procedure_group_call resolves overloaded procedure calls
 // This is the main entry point for procedure group resolution
 // Reference: /mnt/c/odin/src/check_expr.cpp:6933-7504
@@ -1395,25 +1668,18 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 
 	// Check results
 	if len(valid_candidates) == 0 {
-		// No valid candidates
-		// C++ Reference: check_expr.cpp:7676-7684. C++ NAMES THE GROUP and renders the
-		// argument list as a bulleted block; the port printed neither the group name nor
-		// C++'s format ("\t[0] T" instead of "\t • T"), and emitted the continuation
-		// outside an error block so it preceded the diagnostic.
+		// C++ Reference: check_expr.cpp:7677-7931.
 		begin_error_block()
 		defer end_error_block()
 		expr_name := expr_to_string(operand.expr)
 		defer delete(expr_name)
 		error_node(operand.expr, "No procedures or ambiguous call for procedure group '%s' that match with the given arguments", expr_name)
-		if len(positional_operands) == 0 {
+		if len(positional_operands) == 0 && len(named_operands) == 0 {
 			error_line("\tNo given arguments\n")
 		} else {
-			error_line("\tGiven argument types:\n")
-			for op in positional_operands {
-				type_str := type_to_string(op.type)
-				error_line("\t \u2022 %s\n", type_str)
-			}
+			print_call_argument_types(positional_operands, named_operands[:], args_split)
 		}
+		print_procedure_group_overloads(ctx, procs[:], positional_operands, named_operands[:], args_split, expr_name)
 		data.error = true
 		return data
 	}
@@ -1451,17 +1717,57 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	}
 
 	if num_best > 1 {
-		// Ambiguous call
-		error_node(operand.expr, "Ambiguous procedure group call - multiple procedures match equally")
+		// C++ Reference: check_expr.cpp:7932-7982. The port named neither the group nor
+		// the candidates' source positions, invented the "Candidate: " prefix and the
+		// "- multiple procedures match equally" tail, omitted the given-argument block,
+		// omitted each candidate's `where` clauses, and emitted its continuation lines
+		// outside an error block so they preceded the diagnostic.
+		begin_error_block()
+		defer end_error_block()
+		expr_name := expr_to_string(operand.expr)
+		defer delete(expr_name)
+		error_node(operand.expr, "Ambiguous procedure group call '%s' that match with the given arguments", expr_name)
+		if len(positional_operands) == 0 && len(named_operands) == 0 {
+			error_line("\tNo given arguments\n")
+		} else {
+			print_call_argument_types(positional_operands, named_operands[:], args_split)
+		}
+
 		for i := 0; i < num_best; i += 1 {
 			candidate := proc_entities[valid_candidates[i].index]
-			// Print full procedure signature with parameter types for better diagnostics
-			if candidate.type != nil {
-				type_str := type_to_string(candidate.type)
-				error_line("\tCandidate: %s :: %s", candidate.token.text, type_str)
-			} else {
-				error_line("\tCandidate: %s", candidate.token.text)
+			t := base_type(entity_type(candidate))
+			if t == nil || t.kind != .Proc {
+				continue
 			}
+			pt, allocated := proc_display_type_string(t)
+			defer if allocated {
+				delete(pt)
+			}
+			sep := "::"
+			if candidate.kind == .Variable {
+				sep = ":="
+			}
+			error_line("\t%s %s %s ", candidate.token.text, sep, pt)
+
+			if candidate.decl_info != nil && candidate.decl_info.proc_lit != nil {
+				pl := candidate.decl_info.proc_lit
+				if pl.where_token.kind != .Invalid {
+					error_line("\n\t\twhere ")
+					for clause, j in pl.where_clauses {
+						if j != 0 {
+							error_line("\t\t      ")
+						}
+						str := expr_to_string(clause)
+						error_line("%s", str)
+						delete(str)
+						if j != len(pl.where_clauses) - 1 {
+							error_line(",")
+						}
+					}
+					error_line("\n\t")
+				}
+			}
+			error_line("at %s\n", token_pos_to_string(candidate.token.pos))
 		}
 		data.error = true
 		return data
