@@ -9382,18 +9382,11 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			return .Stmt
 		}
 
-		// Check for field value syntax (not allowed in type conversion)
-		// C++ Reference: check_expr.cpp:8073-8081
-		if call.args[0] != nil {
-			if _, is_fv := call.args[0].derived.(^ast.Field_Value); is_fv {
-				type_str := type_to_string(target_type)
-				error(call.args[0], "Field values are not allowed in type conversion '%s'", type_str)
-				error_line("\tSuggestion: use '%s{{...}}' for compound literals", type_str)
-				o.mode = .Invalid
-				o.expr = node
-				return .Stmt
-			}
-		}
+		// C++ Reference: check_expr.cpp:8629-8633 handles `field = value` INSIDE the
+		// single-argument case: it reports, unwraps the argument to its value, and carries on
+		// with the conversion ("NOTE(bill): Carry on the cast regardless"). The port had it as
+		// a pre-guard that bailed out, under an invented message and an invented Suggestion
+		// line, neither of which appears in src/. Moved into the single-argument path below.
 
 
 		// Handle complex/quaternion constructors with multiple arguments
@@ -9467,37 +9460,45 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		// every expression: the hint made `m[k] = v` code reachable, and that construct aborted
 		// on check_stmt.odin's `has_tav` assertion. The crash was never caused by this line —
 		// any map assignment crashed the checker on its own. Fixed at check_expr_base.
-		check_expr_with_type_hint(ctx, &arg_op, arg, target_type)
-
-		if arg_op.mode == .Invalid {
-			o.mode = .Invalid
-			o.expr = node
-			return .Stmt
+		// C++ Reference: check_expr.cpp:8627-8652.
+		//
+		// C++ hands the whole decision to check_cast, which owns both the verdict and the
+		// diagnostic. The port instead re-decided inline with
+		// check_is_assignable_to / check_is_castable_to and only called check_cast on the
+		// success path, so the failure path emitted an invented "Cannot convert '%s' to '%s'"
+		// at the CALL node. Three consequences: the message is not C++'s
+		// ("Cannot cast '%s' as '%s' from '%s'"), the position is the call rather than the
+		// operand, and check_cast's whole error tail was unreachable - the
+		// check_cast_error_suggestion block ("the array expression may be sliced with x[:]",
+		// the pointer/uintptr advice) could never fire from a conversion call.
+		cast_arg := arg
+		if fv, is_fv := cast_arg.derived.(^ast.Field_Value); is_fv {
+			// C++ line 8630: report, unwrap, and carry the cast on regardless.
+			error_node(node, "'field = value' cannot be used in a type conversion")
+			cast_arg = fv.value
 		}
 
-		// Check if conversion is valid
-		// C++ Reference: check_expr.cpp:8115-8140
-		if check_is_assignable_to(ctx, &arg_op, target_type) {
-			// Direct assignment works
-			o.mode = arg_op.mode == .Constant ? .Constant : .Value
-			o.type = target_type
-			o.value = arg_op.value
-		} else if check_is_castable_to(ctx, &arg_op, target_type) {
-			// Explicit cast works
-			check_cast(ctx, &arg_op, target_type)
-			o.mode = arg_op.mode
-			o.type = target_type
-			o.value = arg_op.value
-		} else {
-			// Conversion not possible
-			arg_type_str := type_to_string(arg_op.type)
-			target_type_str := type_to_string(target_type)
-			error(node, "Cannot convert '%s' to '%s'", arg_type_str, target_type_str)
-			o.mode = .Invalid
-			o.expr = node
-			return .Stmt
+		check_expr_with_type_hint(ctx, &arg_op, cast_arg, target_type)
+
+		if arg_op.mode != .Invalid {
+			if is_type_polymorphic(target_type) {
+				// C++ line 8637. Absent from the port entirely.
+				error_node(node, "A polymorphic type cannot be used in a type conversion")
+			} else {
+				check_cast(ctx, &arg_op, target_type)
+			}
 		}
 
+		arg_op.type = target_type
+		arg_op.expr = node
+
+		if arg_op.mode != .Invalid {
+			// C++ lines 8648-8650
+			update_untyped_expr_type(ctx, cast_arg, target_type, false)
+			check_representable_as_constant(ctx, arg_op.value, target_type, &arg_op.value)
+		}
+
+		o^ = arg_op
 		o.expr = node
 		add_type_and_value(ctx, node, o.mode, o.type, o.value)
 		return .Expr
