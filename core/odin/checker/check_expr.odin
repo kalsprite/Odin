@@ -1677,6 +1677,7 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 	}
 
 	defined := false
+	mutually_assignable := true // C++'s outer gate; see the comment where it is computed
 
 	// Check for nil comparisons
 	// C++ Reference: check_expr.cpp:2920-2960
@@ -1720,38 +1721,49 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 			}
 		}
 
-		// Additionally, types must be compatible for comparison
-		// This catches cases like "hello" < 42 where both are individually ordered
-		// but incompatible with each other
-		if defined {
-			// Check if types are compatible - either identical or one assignable to the other
-			if !are_types_identical(x.type, y.type) {
-				// Try to see if one can be converted to the other
-				x_to_y := check_is_assignable_to(ctx, x, y.type)
-				y_to_x := check_is_assignable_to(ctx, y, x.type)
-				if !x_to_y && !y_to_x {
-					defined = false
-				}
-			}
+		// C++ Reference: check_expr.cpp:3221 -- mutual assignability is the OUTER gate that
+		// selects which FAMILY of message to emit, not an extra condition folded into
+		// `defined`:
+		//
+		//     if (check_is_assignable_to(c, x, y->type) || check_is_assignable_to(c, y, x->type)) {
+		//         ... "not simply comparable" / "operator not defined between"
+		//     } else {
+		//         ... "Mismatched types '%s' and '%s'"
+		//     }
+		//
+		// Folding it in meant two unrelated types reported "Operator '==' not defined
+		// between the types '[8]u8' and '[3]u8'" where C++ says "Mismatched types". The
+		// operator is perfectly well defined for those types; they simply are not the
+		// same type. LEDGER task 270.
+		if !are_types_identical(x.type, y.type) {
+			mutually_assignable = check_is_assignable_to(ctx, x, y.type) || check_is_assignable_to(ctx, y, x.type)
 		}
 	}
 
-	if !defined {
-		// C++ Reference: check_expr.cpp:3255-3267 and 3292. C++ distinguishes THREE cases and
-		// wraps each in "Cannot compare expression. %s."; the port collapsed all of them into
-		// one invented sentence that named the two types and nothing else -- so a comparison
-		// failing because a type is not simply comparable read the same as one failing because
-		// the operator is undefined between two perfectly comparable types.
-		xs := type_to_string(x.type)
-		ys := type_to_string(y.type)
+	if !mutually_assignable || !defined {
+		// C++ Reference: check_expr.cpp:3255-3267, 3277-3288 and 3292. FOUR messages, all
+		// wrapped as "Cannot compare expression. %s." -- three for types that ARE mutually
+		// assignable but whose comparison is undefined, and one for types that are not
+		// mutually assignable at all. The port collapsed everything into one invented
+		// sentence naming the two types.
 		op_str := tokenizer.to_string(op)
 		err_str: string
-		if !is_type_comparable(x.type) {
-			err_str = fmt.tprintf("Type '%s' is not simply comparable, so operator '%s' is not defined for it", xs, op_str)
-		} else if !is_type_comparable(y.type) {
-			err_str = fmt.tprintf("Type '%s' is not simply comparable, so operator '%s' is not defined for it", ys, op_str)
+		if !mutually_assignable {
+			// C++ names a procedure-group operand as "procedure group" rather than printing
+			// its type. C++ Reference: check_expr.cpp:3277-3286.
+			xt := x.mode == .Proc_Group ? "procedure group" : type_to_string(x.type)
+			yt := y.mode == .Proc_Group ? "procedure group" : type_to_string(y.type)
+			err_str = fmt.tprintf("Mismatched types '%s' and '%s'", xt, yt)
 		} else {
-			err_str = fmt.tprintf("Operator '%s' not defined between the types '%s' and '%s'", op_str, xs, ys)
+			xs := type_to_string(x.type)
+			ys := type_to_string(y.type)
+			if !is_type_comparable(x.type) {
+				err_str = fmt.tprintf("Type '%s' is not simply comparable, so operator '%s' is not defined for it", xs, op_str)
+			} else if !is_type_comparable(y.type) {
+				err_str = fmt.tprintf("Type '%s' is not simply comparable, so operator '%s' is not defined for it", ys, op_str)
+			} else {
+				err_str = fmt.tprintf("Operator '%s' not defined between the types '%s' and '%s'", op_str, xs, ys)
+			}
 		}
 		error(node, "Cannot compare expression. %s.", err_str)
 		x.type = t_untyped_bool
