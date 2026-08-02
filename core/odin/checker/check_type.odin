@@ -3753,18 +3753,19 @@ check_procedure_type :: proc(ctx: ^Checker_Context, proc_type: ^Type, proc_type_
 	// C++ lines 2542-2557
 	// Note: C++ checks entity flags after params are created, but we check here
 	// since we already have the c_vararg flag from check_get_params
-	// Validate and set c_vararg flag if applicable
-	// C++ Reference: check_type.cpp:2548-2556
+	// Set the c_vararg flag. The two DIAGNOSTICS that used to be emitted here are gone:
+	//
+	//   - "Calling convention does not support #c_vararg" duplicated the C++-faithful check
+	//     further down this same function (the parameter loop, matching check_type.cpp:2749-
+	//     2756), which reports against the PARAMETER's token. This one reported against the
+	//     whole proc type, so a rejected #c_vararg produced TWO errors at two positions where
+	//     C++ produces one.
+	//   - "#c_vararg can only be applied to variadic procedures" has no C++ counterpart at
+	//     all. C++'s only other #c_vararg message is "can only be applied to the last
+	//     parameter", which the parameter loop already emits.
+	//
+	// The flag assignment stays; only the reporting moves to the single faithful site.
 	if c_vararg {
-		// Validate calling convention supports c_vararg
-		if cc == .Odin || cc == .Contextless {
-			error_node(proc_type_node, "Calling convention does not support #c_vararg")
-		}
-		// Validate c_vararg is only on variadic procedures
-		if !variadic {
-			error_node(proc_type_node, "#c_vararg can only be applied to variadic procedures")
-		}
-		// Set flag if validations pass
 		if (cc != .Odin && cc != .Contextless) && variadic {
 			pt.c_vararg = true
 		}
