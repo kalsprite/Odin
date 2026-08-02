@@ -27,6 +27,16 @@ Tokenizer :: struct {
 	read_offset: int,
 	line_offset: int,
 	line_count:  int,
+	// column_minus_one is C++'s Tokenizer::column_minus_one (src/tokenizer.hpp:307): a count
+	// of RUNES consumed on the current line, starting at -1, bumped once per rune regardless
+	// of how many bytes that rune occupies, and reset to -1 when a '\n' is left behind.
+	//
+	// The port used to derive the column arithmetically, `offset - line_offset + 1`, which
+	// counts BYTES. Identical for ASCII and wrong for everything else: every diagnostic on a
+	// line with non-ASCII text to its left was off by (bytes - runes). A plain
+	// "Undeclared name" after `s := "h\u00e9llo w\u00f6rld"` printed column 40 where the
+	// oracle prints 38. LEDGER #371.
+	column_minus_one: int,
 	insert_semicolon: bool,
 
 	// Mutable data
@@ -103,6 +113,7 @@ init :: proc(t: ^Tokenizer, src: string, path: string, err: Error_Handler = defa
 	t.read_offset = 0
 	t.line_offset = 0
 	t.line_count = len(src) > 0 ? 1 : 0
+	t.column_minus_one = -1
 	t.insert_semicolon = false
 	t.error_count = 0
 	t.path = path
@@ -132,8 +143,35 @@ init :: proc(t: ^Tokenizer, src: string, path: string, err: Error_Handler = defa
 @(private)
 offset_to_pos :: proc(t: ^Tokenizer, offset: int) -> Pos {
 	line := t.line_count
-	column := offset - t.line_offset + 1
 
+	// The overwhelmingly common case is "where the tokenizer is standing right now" -- both
+	// the token position taken at the head of `scan` and every one-argument tokenizer_err
+	// equivalent. That is exactly what the running counter holds, so it costs nothing.
+	column := 0
+	if offset == t.offset {
+		column = t.column_minus_one + 1
+	} else {
+		// A saved offset from earlier on the SAME line (scan_rune's "Invalid rune literal"
+		// is the only such caller, and C++ passes token->pos there for the same reason).
+		// Recount runes from the start of the line rather than subtracting byte offsets.
+		column = 1
+		i := t.line_offset
+		for i < offset && i < len(t.src) {
+			_, w := utf8.decode_rune_in_string(t.src[i:])
+			i += max(w, 1)
+			column += 1
+		}
+	}
+
+	// NOTE: NO CLAMP HERE. C++ clamps in tokenizer_err (src/tokenizer.cpp:320-323) and
+	// NOWHERE ELSE -- a TOKEN's position is `t->column_minus_one+1` raw (lines 459, 694). At
+	// EOF in a file ending with a newline, column_minus_one has just been reset to -1 and is
+	// never incremented again, so the token's column is genuinely 0 and the parser prints
+	// "(6:0) Syntax Error: Expected '}', got 'EOF'". Clamping here turned that into 6:1 and
+	// broke six probes (do3, got5, clit5, clit6, clit7, rng7) that had been matching --
+	// which is also the direct confirmation that the rune counter reproduces C++'s counter,
+	// since the 0 can only arise from the counter, not from any offset arithmetic.
+	// The clamp lives in `error` below, where C++ has it.
 	return Pos {
 		file = t.path,
 		offset = offset,
@@ -150,6 +188,13 @@ default_error_handler :: proc(pos: Pos, msg: string, args: ..any) {
 
 error :: proc(t: ^Tokenizer, offset: int, msg: string, args: ..any) {
 	pos := offset_to_pos(t, offset)
+	// C++ Reference: tokenizer_err (src/tokenizer.cpp:320-323).
+	//     i32 column = t->column_minus_one+1;
+	//     if (column < 1) { column = 1; }
+	// The clamp is specific to the DIAGNOSTIC path; token positions keep the raw value.
+	if pos.column < 1 {
+		pos.column = 1
+	}
 	if t.err != nil {
 		t.err(pos, msg, ..args)
 	}
@@ -157,6 +202,12 @@ error :: proc(t: ^Tokenizer, offset: int, msg: string, args: ..any) {
 }
 
 advance_rune :: proc(t: ^Tokenizer) {
+	// C++ Reference: advance_to_next_rune (src/tokenizer.cpp:351-380). The newline reset
+	// happens FIRST and unconditionally -- before the read_curr < end test -- so it applies
+	// even when the newline is the last byte in the file.
+	if t.ch == '\n' {
+		t.column_minus_one = -1
+	}
 	if t.read_offset < len(t.src) {
 		t.offset = t.read_offset
 		if t.ch == '\n' {
@@ -177,6 +228,8 @@ advance_rune :: proc(t: ^Tokenizer) {
 		}
 		t.read_offset += w
 		t.ch = r
+		// One rune, one column -- `w` is deliberately NOT used here. This is the whole fix.
+		t.column_minus_one += 1
 	} else {
 		t.offset = len(t.src)
 		if t.ch == '\n' {
@@ -680,18 +733,16 @@ scan :: proc(t: ^Tokenizer) -> Token {
 		advance_rune(t)
 		switch ch {
 		case -1:
-			// #200: C++ derives a token's column from Tokenizer::column_minus_one, and
-			// advance_to_next_rune (src/tokenizer.cpp:374) increments that counter ONLY while
-			// read_curr < end. Reaching EOF therefore never advances the column, so the token
-			// produced at EOF sits one column earlier than a positional formula would put it:
-			// column_minus_one + 1, where column_minus_one is still -1 on a file ending in a
-			// newline. This port computes offset - line_offset + 1, which is always >= 1.
+			// #200 compensated for the EOF column by subtracting one here, because the column
+			// was computed positionally as `offset - line_offset + 1` and that formula keeps
+			// counting where C++'s counter stops: advance_to_next_rune increments
+			// column_minus_one ONLY while read_curr < end (src/tokenizer.cpp:374), so
+			// arriving at EOF never advances it.
 			//
-			// The offset is one-past-the-end either way; only the printed column differs, and
-			// it differs uniformly by one (verified on both a file ending in a newline and one
-			// ending mid-line). Applies to the inserted-semicolon form below too, because C++
-			// sets that token's position before it decides the kind.
-			pos.column -= 1
+			// LEDGER #371 replaced the formula with the counter itself, so the EOF stop is now
+			// structural rather than compensated -- advance_rune's else-branch simply does not
+			// increment. The subtraction is gone; #200's behaviour is unchanged and is still
+			// covered by its probes.
 			kind = .EOF
 			if t.insert_semicolon {
 				t.insert_semicolon = false
