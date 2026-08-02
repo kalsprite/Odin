@@ -3328,7 +3328,9 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		// #assert(condition, message?) - compile-time assertion
 		// C++ Reference: check_builtin.cpp assertion handling
 		if len(call_expr.args) < 1 || len(call_expr.args) > 2 {
-			error(call_expr.close, "'#assert' expects either 1 or 2 arguments, got %d", len(call_expr.args))
+			// C++ Reference: check_builtin.cpp:2616 reports at `call` -- the whole call
+			// expression -- not at its closing paren, so the position is the '#'.
+			error_node(call, "'#assert' expects either 1 or 2 arguments, got %d", len(call_expr.args))
 			return false
 		}
 

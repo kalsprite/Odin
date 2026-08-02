@@ -2675,11 +2675,14 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			}
 			return bd
 
-		case "location", "exists", "load", "load_directory", "load_hash", "hash", "assert", "panic", "defined", "config":
-			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
-			bd.tok  = tok
-			bd.name = name.text
-			return parse_call_expr(p, bd)
+		// REMOVED (#221): an arm here listed location/exists/load/load_directory/load_hash/
+		// hash/assert/panic/defined/config and called parse_call_expr UNCONDITIONALLY, so a
+		// bare `#assert` demanded a '(' and died with "Expected '(', got 'newline'".
+		//
+		// C++ has no case for any of these. They fall through to the catch-all
+		// `ast_basic_directive` (src/parser.cpp:2519) and the POSTFIX loop turns `#assert(...)`
+		// into a Call_Expr when a '(' actually follows -- so the bare form parses fine and the
+		// CHECKER reports "'#assert' must be used as a call". Probes bd1/bd2.
 
 		case "soa":
 			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
