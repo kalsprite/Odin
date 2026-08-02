@@ -2791,6 +2791,12 @@ check_enum_type :: proc(ctx: ^Checker_Context, enum_type: ^Type, named_type: ^Ty
 		entity.flags = {.Visited}
 		// C++ line 947: entity->state = EntityState_Resolved
 		entity.state = .Resolved
+		// Both type fields, as alloc_entity does -- the second instance of the same defect
+		// fixed for struct fields in progress#166. This entity is also built by hand, and
+		// setting only the variant left every enum member with a nil base `.type`.
+		// checker_lifecycle.odin:599 reads that field raw and would register a global
+		// constant with no type at all.
+		entity.type = constant_type
 		// C++ line 948-950: entity->Constant.flags |= entity_flags; entity->Constant.docs = docs; entity->Constant.comment = comment
 		entity.variant = Entity_Constant {
 			type    = constant_type,

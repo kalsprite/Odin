@@ -10331,9 +10331,16 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			}
 
 			if !ok {
-				arg_type_str := type_to_string(arg_op.type)
-				param_type_str := type_to_string(param_type)
-				error_node(arg_op.expr, "Cannot pass argument of type '%s' to parameter of type '%s'", arg_type_str, param_type_str)
+				// C++ Reference: check_expr.cpp:6870 (eval_param_and_score) routes the
+				// failure through check_assignment with the context name "procedure
+				// argument", producing "Cannot assign value 'b' of type 'X' to 'Y' in a
+				// procedure argument" plus the source line and caret.
+				//
+				// "Cannot pass argument of type '%s' to parameter of type '%s'" was
+				// INVENTED: it never names the offending value, and because it goes through
+				// error_node rather than check_assignment it emits no continuation lines at
+				// all. This is #149's pattern at a call site.
+				check_assignment(ctx, arg_op, param_type, "procedure argument")
 				data.error = true
 			}
 		}
