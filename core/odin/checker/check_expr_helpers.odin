@@ -684,23 +684,36 @@ write_expr_to_string :: proc(builder: ^strings.Builder, node: ^ast.Node, shortha
 		strings.write_rune(builder, '}')
 
 	case ^ast.Field_List:
-		// Helper to print field lists for procedure types
+		// Decide whether to print `name: type` or just `type` for every field.
+		//
+		// C++ Reference: check_expr.cpp:13257-13273.
+		//
+		// The test on the first name MUST be `!is_blank_ident_node(...)`, not "is an Ident
+		// whose name is not _". The two agree on every ordinary name and INVERT on names that
+		// are not Idents at all - which is exactly what a polymorphic parameter is, since `$E`
+		// parses to an ^ast.Poly_Type. C++'s is_blank_ident(Ast *) returns false for any
+		// non-Ident node (parser.cpp:1750-1756), so a poly name counts as a name; the earlier
+		// Ident-only form let it fall through, so a field list whose names were ALL polymorphic
+		// scored has_name = false and printed as bare types: `proc($E: typeid)` came out as
+		// `proc(typeid)`, and `struct($T: typeid)` as `struct (typeid)`. A list mixing poly and
+		// ordinary names was unaffected, because the ordinary name set the flag - which is why
+		// this only ever showed up on fully-polymorphic signatures.
 		has_name := false
 		for field_node in derived.list {
-			if field, ok := field_node.derived.(^ast.Field); ok {
-				if len(field.names) > 1 {
-					has_name = true
-					break
-				}
-				if len(field.names) == 1 {
-					// Check if not blank identifier
-					if ident, is_ident := field.names[0].derived.(^ast.Ident); is_ident {
-						if ident.name != "_" {
-							has_name = true
-							break
-						}
-					}
-				}
+			field, ok := field_node.derived.(^ast.Field)
+			if !ok {
+				continue
+			}
+			if len(field.names) > 1 {
+				has_name = true
+				break
+			}
+			if len(field.names) == 0 {
+				continue
+			}
+			if !is_blank_ident_node(field.names[0]) {
+				has_name = true
+				break
 			}
 		}
 
