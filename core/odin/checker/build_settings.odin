@@ -318,6 +318,11 @@ Opt_In_Feature_Flag_Bit :: enum {
 	Integer_Division_By_Zero_Zero     = 3,
 	Integer_Division_By_Zero_Self     = 4,
 	Integer_Division_By_Zero_All_Bits = 5,
+	// C++ build_settings.cpp:377-378. Both were MISSING from this enum, so neither guard
+	// could be expressed -- `using` as a statement was accepted unconditionally where C++
+	// rejects it unless the file opts in (LEDGER task 242).
+	Force_Type_Assert                 = 6,
+	Using_Stmt                        = 7,
 }
 
 Opt_In_Feature_Flag_Integer_Division_By_Zero_All :: Opt_In_Feature_Flag{.Integer_Division_By_Zero_Trap, .Integer_Division_By_Zero_Zero, .Integer_Division_By_Zero_Self, .Integer_Division_By_Zero_All_Bits}
@@ -337,6 +342,10 @@ get_feature_flag_from_name :: proc(name: string) -> Opt_In_Feature_Flag {
 		return {.Integer_Division_By_Zero_All_Bits}
 	case "global-context":
 		return {.Global_Context}
+	case "using-stmt":
+		return {.Using_Stmt}
+	case "force-type-assert":
+		return {.Force_Type_Assert}
 	}
 	return {}
 }

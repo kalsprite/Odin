@@ -3568,6 +3568,17 @@ check_using_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, flags: Stmt_Fla
 		return {}
 	}
 
+	// KNOWN GAP, deliberately NOT enforced yet. C++ check_stmt.cpp:3020-3025 rejects `using`
+	// as a STATEMENT outright unless the file opts in with `#+feature using-stmt`, so the port
+	// under-rejects here: `using s` on a struct is accepted where C++ errors.
+	//
+	// The guard itself is one line -- `if check_feature_flags(ctx, node) & {.Using_Stmt} == {}`
+	// -- and the feature flag has now been added to Opt_In_Feature_Flag_Bit (it was missing
+	// entirely, along with Force_Type_Assert). It is NOT enabled because check_feature_flags
+	// does not see a file's `#+feature` line from inside statement checking: enabling it made
+	// core/image/png fail, and png.odin opts in on line 1. Fixing the lookup is the real work;
+	// see LEDGER task 242.
+
 	// Check vet flags for using statement warnings
 	// C++ Reference: check_stmt.cpp lines 2942-2946
 	if .Using_Stmt in check_vet_flags(ctx) {
