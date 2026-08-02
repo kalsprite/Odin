@@ -6616,6 +6616,12 @@ check_or_return_split_types :: proc(ctx: ^Checker_Context, x: ^Operand, name: st
 // check_or_else_expr_no_value_error reports error when expression doesn't return optional value
 // Reference: /mnt/c/odin/src/check_builtin.cpp:103-129
 check_or_else_expr_no_value_error :: proc(ctx: ^Checker_Context, name: string, x: Operand, type_hint: ^Type) {
+	// C++ Reference: check_builtin.cpp:109-131. The port was missing the ERROR_BLOCK (so the
+	// suggestion escaped the collector), the leading tab, the trailing newline, and the
+	// type-hint variant below.
+	begin_error_block()
+	defer end_error_block()
+
 	t := type_to_string(x.type)
 	error(x.expr, "'%s' does not return a value, value is of type %s", name, t)
 
@@ -6623,7 +6629,31 @@ check_or_else_expr_no_value_error :: proc(ctx: ^Checker_Context, name: string, x
 	if is_type_union(type_deref(x.type)) {
 		expr_str := expr_to_string(x.expr)
 		defer delete(expr_str)
-		error_line("Suggestion: was a type assertion such as %s.(T) or %s.? wanted?", expr_str, expr_str)
+
+		// C++ lines 115-124: when the type hint names one of the union's own variants, the
+		// suggestion says `x.(That_Type)` rather than the placeholder `x.(T)`. The port only
+		// ever emitted the placeholder.
+		th: string
+		have_th := false
+		if type_hint != nil {
+			if bsrc := base_type(type_deref(x.type)); bsrc != nil {
+				if u, is_union := bsrc.variant.(Type_Union); is_union {
+					for vt in u.variants {
+						if are_types_identical(vt, type_hint) {
+							th = type_to_string(type_hint)
+							have_th = true
+							break
+						}
+					}
+				}
+			}
+		}
+
+		if have_th {
+			error_line("\tSuggestion: was a type assertion such as %s.(%s) or %s.? wanted?\n", expr_str, th, expr_str)
+		} else {
+			error_line("\tSuggestion: was a type assertion such as %s.(T) or %s.? wanted?\n", expr_str, expr_str)
+		}
 	}
 }
 
