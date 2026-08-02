@@ -2207,10 +2207,14 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 
 		expect_token_after(p, .Colon, "field list")
 
-		// Parse field flags that appear after the colon (e.g., dst: #no_alias ^int)
-		post_colon_flags := parse_field_prefixes(p)
-		post_colon_flags = check_field_flag_prefixes(p, len(names), allowed_flags, post_colon_flags)
-		flags += post_colon_flags
+		// C++ Reference: parser.cpp:4613-4614 goes straight from the colon to
+		// parse_var_type. There is NO post-colon parse_field_prefixes call, and the
+		// omission is deliberate: field directives belong BEFORE the name. The port had
+		// an invented call here, which ACCEPTED syntax the reference compiler rejects --
+		// `proc(dst: #no_alias ^int)` and `proc(x: #any_int int)` are both errors in C++
+		// ("Expected ')' after parameter list") and were silently accepted here.
+		// It also swallowed any unrecognised directive in a field's TYPE position, so
+		// `p: #relative(u16) ^int` never reached parse_var_type at all and cascaded.
 
 		if p.curr_tok.kind != .Eq {
 			type = parse_var_type(p, allowed_flags)
