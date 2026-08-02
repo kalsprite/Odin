@@ -3643,6 +3643,91 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp:2219-2330. #load_directory had NO handler, so the
+	// call form was silently accepted. Note the scaffolding for it already existed and had
+	// never been written to: Load_Directory_Cache / load_directory_cache /
+	// load_directory_mutex / load_directory_map in checker.odin, and
+	// t_load_directory_file{,_ptr,_slice} in types.odin (only ever assigned nil).
+	if name == "load_directory" {
+		if len(call_expr.args) != 1 {
+			// C++:2226 anchors at args[0] unconditionally, which indexes an EMPTY array when
+			// the call has no arguments -- undefined behaviour upstream. The port anchors at
+			// the closing paren in that case instead; the message is C++'s either way. This
+			// is the one place here we deliberately do NOT reproduce the reference.
+			if len(call_expr.args) == 0 {
+				error(call_expr.close, "'#%s' expects 1 argument, got 0", name)
+			} else {
+				error(call_expr.args[0], "'#%s' expects 1 argument, got %d", name, len(call_expr.args))
+			}
+			return false
+		}
+
+		arg := call_expr.args[0]
+		path_op: Operand
+		check_expr(ctx, &path_op, arg)
+		if path_op.mode != .Constant {
+			error(arg, "'#%s' expected a constant string argument", name)
+			return false
+		}
+		if !is_type_string(path_op.type) {
+			ts := type_to_string(path_op.type)
+			error(arg, "'#%s' expected a constant string, got %s", name, ts)
+			return false
+		}
+
+		original_string, str_ok := path_op.value.(string)
+		if !str_ok {
+			return false
+		}
+
+		// C++:2249-2250 sets the operand BEFORE reading the directory, so the type is in
+		// place even on the error paths. t_load_directory_file_slice is currently nil in the
+		// port (nothing runs C++'s init_core_load_directory_file), so guard it -- see #248.
+		if t_load_directory_file_slice != nil {
+			operand.type = t_load_directory_file_slice
+		}
+		operand.mode = .Value
+
+		// Same base-directory resolution the #load arm uses (this file, cache_load_file_directive).
+		path := original_string
+		if !filepath.is_abs(original_string) {
+			file := get_file_from_node(ctx.info, call)
+			if file == nil {
+				return false
+			}
+			joined, join_err := filepath.join({filepath.dir(file.fullpath), original_string})
+			if join_err != nil {
+				return false
+			}
+			path = joined
+		}
+
+		// C++:2306-2324 maps ReadDirectoryError to six messages, all prefixed with the BARE
+		// name (no '#'). Two of them differ only by a comma -- Permission ends
+		// "reading path, %s" and Unknown ends "reading path %s" -- which is an upstream
+		// inconsistency reproduced verbatim.
+		if !os.exists(path) {
+			error_node(call, "%s error - path does not exist: %s", name, original_string)
+			call.state_flags += {.Directive_Was_False}
+			return false
+		}
+		if !os.is_dir(path) {
+			error_node(call, "%s error - expected a directory, got a file: %s", name, original_string)
+			return false
+		}
+		entries, read_err := os.read_directory_by_path(path, -1, context.temp_allocator)
+		if read_err != nil {
+			error_node(call, "%s error - unknown error whilst reading path, %s", name, original_string)
+			return false
+		}
+		if len(entries) == 0 {
+			error_node(call, "%s error - empty directory: %s", name, original_string)
+			call.state_flags += {.Directive_Was_False}
+			return false
+		}
+		return true
+	}
+
 	return false
 }
 
