@@ -997,8 +997,8 @@ check_expr_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 					rhs_str := expr_to_string(bin.right)
 					defer delete(lhs_str)
 					defer delete(rhs_str)
-					error_line("\tSuggestion: Did you mean to do an assignment?")
-					error_line("\t            '%s = %s;'", lhs_str, rhs_str)
+					error_line("\tSuggestion: Did you mean to do an assignment?\n")
+					error_line("\t            '%s = %s;'\n", lhs_str, rhs_str)
 				}
 			}
 		}
@@ -2504,18 +2504,27 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 			begin_error_block()
 			defer end_error_block()
 
+			// C++ Reference: check_stmt.cpp:1634-1646. Both calls are error_no_newline, which
+			// prints the position and message with NO "Error: " label; the port used
+			// error_node and so labelled a diagnostic C++ leaves unlabelled.
 			if len(unhandled) == 1 {
 				type_str := type_to_string(unhandled[0])
-				error_node(node, "Unhandled switch case: %s", type_str)
+				error_no_newline(node, "Unhandled switch case: %s", type_str)
 			} else {
-				error_node(node, "Unhandled switch cases:")
+				error_no_newline(node, "Unhandled switch cases:\n")
 				for t in unhandled {
 					type_str := type_to_string(t)
-					error_line("\t%s", type_str)
+					error_line("\t%s\n", type_str)
 				}
 			}
-			error_line("")
-			error_line("\tSuggestion: Was '#partial switch' wanted?")
+			// C++ line 1645 emits a bare newline here, i.e. an EMPTY line. print_all_errors
+			// stops at the first empty line, so this truncates the suggestion below and C++
+			// never actually shows it - the same upstream quirk as the where-clause
+			// definitions header (LEDGER 301, task #174). The port emitted `error_line("")`,
+			// which writes nothing at all, so no empty line was produced, nothing truncated,
+			// and the port printed a suggestion the oracle does not.
+			error_line("\n")
+			error_line("\tSuggestion: Was '#partial switch' wanted?\n")
 		}
 	}
 
@@ -4667,7 +4676,7 @@ check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flag
 			// Single unroll
 			error_node(node, "'#unroll for' loop cannot be inlined as it exceeds the maximum '#unroll for' depth (%d levels >= %d maximum levels)", v, MAX_INLINE_FOR_DEPTH)
 		}
-		error_line("\tUse a normal 'for' loop instead by removing the 'inline' prefix")
+		error_line("\tUse a normal 'for' loop instead by removing the 'inline' prefix\n")
 		ctx.inline_for_depth = MAX_INLINE_FOR_DEPTH
 	}
 

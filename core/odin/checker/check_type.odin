@@ -595,14 +595,14 @@ check_array_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^T
 				// C++ line 3280: error(e, "Non-contiguous enumeration used as an index in an enumerated array");
 				begin_error_block()
 				error(e, "Non-contiguous enumeration used as an index in an enumerated array")
-				error_line("\tenumerated array length: %d", ea.count)
-				error_line("\tenum field count: %d", len(enum_info.fields))
-				error_line("\tSuggestion: prepend #sparse to the enumerated array to allow for non-contiguous elements")
+				error_line("\tenumerated array length: %d\n", ea.count)
+				error_line("\tenum field count: %d\n", len(enum_info.fields))
+				error_line("\tSuggestion: prepend #sparse to the enumerated array to allow for non-contiguous elements\n")
 
 				// C++ lines 3286-3289: Warning if too sparse
 				if 2 * len(enum_info.fields) < int(ea.count) {
-					error_line("\tWarning: the number of named elements is much smaller than the length of the array, are you sure this is what you want?")
-					error_line("\t         this warning will be removed if #sparse is applied")
+					error_line("\tWarning: the number of named elements is much smaller than the length of the array, are you sure this is what you want?\n")
+					error_line("\t         this warning will be removed if #sparse is applied\n")
 				}
 				end_error_block()
 			}
