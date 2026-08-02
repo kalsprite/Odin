@@ -5951,8 +5951,13 @@ check_builtin_read_cycle_counter :: proc(ctx: ^Checker_Context, operand: ^Operan
 		return false
 	}
 
+	// C++ check_builtin.cpp:5549-5551 returns t_i64, NOT t_u64. The port's u64 made
+	// `cast(u64)intrinsics.read_cycle_counter()` look like a cast to its own type, so -vet
+	// reported "Unneeded cast ... to identical type 'u64'" on core/testing/runner.odin:508
+	// where the real compiler reports nothing. This is a TYPE bug surfaced by a message:
+	// the expression's type was wrong, not just its diagnostic. LEDGER 292.
 	operand.mode = .Value
-	operand.type = t_u64
+	operand.type = t_i64
 
 	return true
 }

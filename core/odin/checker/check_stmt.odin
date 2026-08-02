@@ -3582,12 +3582,16 @@ check_using_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, flags: Stmt_Fla
 		end_error_block()
 	}
 
-	// Check vet flags for using statement warnings
-	// C++ Reference: check_stmt.cpp lines 2942-2946
-	if .Using_Stmt in check_vet_flags(ctx) {
-		error_node(node, "'using' as a statement is not allowed when '-vet' or '-vet-using' is applied")
-		error_line("\t'using' is considered bad practice to use as a statement outside of immediate refactoring\n")
-	}
+	// NO vet-using diagnostic here, deliberately. The citation that used to sit here
+	// (check_stmt.cpp:2942-2946) is stale: C++'s UsingStmt case (check_stmt.cpp:3014-3025)
+	// contains ONLY the feature-flag check above. VetFlag_UsingStmt is still DEFINED
+	// (build_settings.cpp:309) and can still be SET from the command line
+	// (main.cpp:1374), but it is never CONSULTED anywhere in the checker -- the opt-in
+	// feature flag replaced it, and the vet flag was left vestigial upstream.
+	//
+	// The port had invented both the check and its message, which appears nowhere in src/.
+	// core/image/png opts in with `#+feature using-stmt` on line 1 and was still reported
+	// four times under -vet. LEDGER 292.
 
 	// Process each using expression
 	for expr in stmt.list {
