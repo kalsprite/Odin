@@ -1469,11 +1469,21 @@ doc_write_docs :: proc(w: ^Doc_Writer) {
 		pkg_index := doc_write_item(w, &w.pkgs, &doc_pkg)
 		w.pkg_cache[pkg] = pkg_index
 
-		// Write files (pkg.files is map[string]^File)
+		// Write files.
+		//
+		// C++ Reference: docs_writer.cpp:1161. C++ iterates pkg->files, the array sorted by
+		// basename in check_create_file_scopes; doc writing runs after checking, so the sort has
+		// happened. Map order here would decide the Doc_File_Index numbering, i.e. the order
+		// entries land in the binary .odin-doc.
+		//
+		// NOTE: this writer is not currently reached -- generate_documentation always takes the
+		// plain-text path (see the DEFERRED note there), so this change cannot be observed by
+		// any instrument in the tree today. It is made because the C++ order is unambiguous, not
+		// because a measurement moved.
 		file_indices := make([dynamic]Doc_File_Index)
 		defer delete(file_indices)
 
-		for _, file in pkg.files {
+		for file in sorted_files(pkg.files) {
 			doc_file := Doc_File{
 				pkg = pkg_index,
 				name = doc_write_string(w, file.fullpath),

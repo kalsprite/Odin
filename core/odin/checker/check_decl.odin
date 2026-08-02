@@ -2357,12 +2357,22 @@ generate_import_dependency_graph :: proc(checker: ^Checker, allocator := context
 		get_or_create_node(&graph, pkg)
 	}
 
-	// Calculate edges from import declarations (C++ line 5143-5153)
+	// Calculate edges from import declarations.
+	//
+	// C++ Reference: checker.cpp:5477-5486, inside generate_import_dependency_graph. (The
+	// previous citation here, "C++ line 5143-5153", pointed at
+	// correct_type_alias_in_scope_backwards -- an unrelated function. Stale-citation drift, the
+	// same family LEDGER 134 measured at +193 to +334 in checker.cpp.)
+	//
+	// C++ iterates p->files, an ARRAY sorted by basename. The sort is safe to rely on here:
+	// generate_import_dependency_graph is reached from check_import_entities, called at
+	// checker.cpp:7686 -- AFTER check_create_file_scopes does the sorting at checker.cpp:7677.
+	// Established by call order, not by line numbers.
 	for _, pkg in checker.info.packages {
 		parent_node := get_or_create_node(&graph, pkg)
 
 		// Iterate all files in package
-		for _, file in pkg.files {
+		for file in sorted_files(pkg.files) {
 			// Process import declarations
 			for decl in file.decls {
 				if import_decl, ok := decl.derived.(^ast.Import_Decl); ok {
