@@ -1048,7 +1048,10 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 			// C++ line 4593-4596: Validate name is identifier
 			ident, name_ok := name.derived.(^ast.Ident)
 			if !name_ok {
-				error(name, "A declaration's name must be an identifier")
+				// C++ checker.cpp:4931 and 4977 both name the offending node kind via
+				// ast_strings[name->kind]. Confirmed against the oracle: `c.d: int` at file
+				// scope reports ", got selector expression".
+				error(name, "A declaration's name must be an identifier, got %s", ast_kind_string(name))
 				continue
 			}
 
@@ -1120,7 +1123,10 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 			// C++ line 4639-4642: Validate name is identifier
 			ident, name_ok := name.derived.(^ast.Ident)
 			if !name_ok {
-				error(name, "A declaration's name must be an identifier")
+				// C++ checker.cpp:4931 and 4977 both name the offending node kind via
+				// ast_strings[name->kind]. Confirmed against the oracle: `c.d: int` at file
+				// scope reports ", got selector expression".
+				error(name, "A declaration's name must be an identifier, got %s", ast_kind_string(name))
 				continue
 			}
 

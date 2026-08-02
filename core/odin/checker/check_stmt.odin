@@ -2736,9 +2736,9 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 	for name in vd.names {
 		entity: ^Entity = nil
 		if name.derived == nil {
-			error_node(name, "Expected an identifier for variable declaration")
+			error_var_decl_identifier(name)
 		} else if ident, is_ident := name.derived.(^ast.Ident); !is_ident {
-			error_node(name, "Expected an identifier for variable declaration")
+			error_var_decl_identifier(name)
 		} else {
 			token := tokenizer.Token {
 				text = ident.name,
@@ -4232,7 +4232,7 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 				entity = found
 			}
 		} else {
-			error_node(name, "Expected an identifier for loop variable")
+			error_var_decl_identifier(name)
 		}
 
 		if entity == nil {
@@ -4290,6 +4290,36 @@ is_ast_range :: proc(expr: ^ast.Expr) -> bool {
 
 // check_unroll_range_stmt validates #unroll for loops (compile-time loop unrolling)
 // C++ Reference: check_stmt.cpp lines 895-1113
+// error_var_decl_identifier reports a declaration name that is not an identifier.
+//
+// C++ Reference: check_stmt.cpp:896-913. C++ funnels THREE call sites through this one
+// helper -- check_unroll_range_stmt (1103), check_range_stmt (2098) and
+// check_value_decl_stmt (2150) -- so all three produce the same wording and the same
+// reserved-keyword note. The port had invented two different messages instead, "Expected an
+// identifier for loop variable" in the two range statements and "Expected an identifier for
+// variable declaration" in the value declaration, and neither carried the note. LEDGER 285.
+error_var_decl_identifier :: proc(name: ^ast.Expr) {
+	assert(name != nil)
+
+	begin_error_block()
+	defer end_error_block()
+
+	name_str := expr_to_string(name)
+	defer delete(name_str)
+
+	error(name, "A variable declaration must be an identifier, got '%s'", name_str)
+
+	// C++ lines 905-912: an implicit node is a reserved keyword used where a name was
+	// expected; 'context' gets a suggestion, everything else gets a bare note.
+	if imp, is_implicit := name.derived.(^ast.Implicit); is_implicit {
+		if imp.tok.text == "context" {
+			error_line("\tSuggestion: '%s' is a reserved keyword, would 'ctx' suffice?\n", imp.tok.text)
+		} else {
+			error_line("\tNote: '%s' is a reserved keyword\n", imp.tok.text)
+		}
+	}
+}
+
 check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt_Flag) -> Viral_State_Flags {
 	viral_flags: Viral_State_Flags = {}
 	stmt := node.derived.(^ast.Inline_Range_Stmt)
@@ -4537,7 +4567,7 @@ check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flag
 				entity = found
 			}
 		} else {
-			error_node(name, "Expected an identifier for loop variable")
+			error_var_decl_identifier(name)
 		}
 
 		if entity == nil {
