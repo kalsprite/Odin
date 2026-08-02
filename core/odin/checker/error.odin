@@ -1803,8 +1803,15 @@ check_did_you_mean_scope :: proc(name: string, scope: ^Scope, prefix := "") {
 		return
 	}
 
-	suggestions: [dynamic]Distance_And_Target
-	defer delete(suggestions)
+	// C++ (check_expr.cpp:264) walks scope->elements in raw hash order, then sorts by
+	// distance ALONE with an unstable quicksort, so its tie order is a property of its own
+	// hash table and is not reproducible here. What the port must not do is be
+	// nondeterministic: iterating an Odin map directly made the suggestion order flip
+	// between runs of the same binary on the same input, and the sweep never saw it because
+	// sweep_det.sh runs under `setarch -R`. Collect and sort by name first, so the unstable
+	// distance sort receives a fixed input. Same reasoning as LEDGER task 50.
+	targets: [dynamic]string
+	defer delete(targets)
 
 	for _, entity in scope.elements {
 		if entity == nil {
@@ -1814,6 +1821,14 @@ check_did_you_mean_scope :: proc(name: string, scope: ^Scope, prefix := "") {
 		if len(target) == 0 || target == "_" {
 			continue
 		}
+		append(&targets, target)
+	}
+	slice.sort(targets[:])
+
+	suggestions: [dynamic]Distance_And_Target
+	defer delete(suggestions)
+
+	for target in targets {
 		append(&suggestions, Distance_And_Target{levenshtein_distance(name, target), target})
 	}
 

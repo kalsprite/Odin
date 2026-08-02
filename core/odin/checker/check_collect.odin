@@ -1257,12 +1257,17 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 			// C++ line 4736-4746: Validate foreign block constraints
 			if e.kind != .Procedure {
 				if fl != nil {
-					// Check for common mistake: proc type instead of proc lit
+					// C++ checker.cpp:5073-5083. C++ does not choose between two messages:
+					// it always names the offending node kind, and ADDITIONALLY appends the
+					// hint when that kind is a procedure type. The port had split this into
+					// two mutually exclusive arms, so every non-proc-type kind -- basic
+					// literal, compound literal, type -- was reported anonymously.
+					begin_error_block()
+					defer end_error_block()
+
+					error(name, "Only procedures and variables are allowed to be in a foreign block, got %s", ast_kind_string(init))
 					if _, is_proc_type := init.derived.(^ast.Proc_Type); is_proc_type {
-						error(name, "Only procedures and variables are allowed to be in a foreign block, got procedure type")
-						error_line("\tDid you forget to append '---' to the procedure?")
-					} else {
-						error(name, "Only procedures and variables are allowed to be in a foreign block")
+						error_line("\tDid you forget to append '---' to the procedure?\n")
 					}
 				}
 			}

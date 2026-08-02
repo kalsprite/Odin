@@ -5173,7 +5173,7 @@ check_builtin_bit_count :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 			error_node(x.expr, "#simd values passed to '%s' must have an element of an integer-like type (integer, boolean, enum, bit_set), got %s", builtin_name, type_to_string(x.type))
 		}
 	} else if !is_type_integer_like(x.type) {
-		error_node(x.expr, "Values passed to '%s' must be an integer-like type (integer, boolean, enum, bit_set)", builtin_name)
+		error_node(x.expr, "Values passed to '%s' must be an integer-like type (integer, boolean, enum, bit_set), got %s", builtin_name, type_to_string(x.type))
 	}
 
 	type := default_type(x.type)
@@ -5201,7 +5201,7 @@ check_builtin_byte_swap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	}
 
 	if !is_type_integer_like(x.type) && !is_type_float(x.type) {
-		error_node(x.expr, "Values passed to 'byte_swap' must be an integer-like type (integer, boolean, enum, bit_set) or float")
+		error_node(x.expr, "Values passed to 'byte_swap' must be an integer-like type (integer, boolean, enum, bit_set) or float, got %s", type_to_string(x.type))
 	}
 
 	sz := type_size_of(x.type)

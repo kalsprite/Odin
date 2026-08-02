@@ -4741,9 +4741,18 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 				}
 
 				if entity == nil {
+					// C++ check_expr.cpp:5927-5935. check_did_you_mean_scope was ported
+					// (error.odin:1801) but never called from anywhere; C++ has exactly one
+					// call site and it is this one, so the suggestion block never appeared
+					// for a misspelled package member.
+					begin_error_block()
+					defer end_error_block()
+
 					error(node, "'%s' is not declared by '%s'", entity_name, import_name)
 					operand.mode = .Invalid
 					operand.expr = node
+
+					check_did_you_mean_scope(entity_name, import_scope)
 					return nil
 				}
 
@@ -6188,7 +6197,9 @@ check_type_assertion :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 		if unary, ok := ta.type.derived.(^ast.Unary_Expr); ok && unary.op.kind == .Question {
 			// This is a .? assertion (optional type assertion)
 			if !is_type_union(src) {
-				error(o.expr, "Type assertions with .? can only operate on unions")
+				// C++ check_expr.cpp:11607 names the type, and names o->type -- the
+				// UNDEREFERENCED one -- not the type_deref'd `src` it just tested.
+				error(o.expr, "Type assertions with .? can only operate on unions, got %s", type_to_string(o.type))
 				o.mode = .Invalid
 				o.expr = node
 				return kind
@@ -6219,7 +6230,7 @@ check_type_assertion :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 			}
 
 			if variant_count != 1 {
-				error(o.expr, "Type assertions with .? can only operate on unions with 1 variant")
+				error(o.expr, "Type assertions with .? can only operate on unions with 1 variant, got %d", variant_count)
 				o.mode = .Invalid
 				o.expr = node
 				return kind
