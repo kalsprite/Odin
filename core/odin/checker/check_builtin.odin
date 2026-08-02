@@ -3571,6 +3571,78 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp:2487-2534. #load_hash had NO handler at all, so the
+	// call form was silently accepted. It routes through the SAME cache_load_file_directive
+	// the #load arm uses, at the Contents tier with err_on_not_found = true.
+	if name == "load_hash" {
+		if len(call_expr.args) != 2 {
+			// C++ anchors at the CLOSING PAREN when there are no arguments (there is no
+			// args[0] to point at) and at args[0] otherwise. The "2 argument" singular is
+			// C++'s wording, reproduced verbatim.
+			if len(call_expr.args) == 0 {
+				error(call_expr.close, "'#load_hash' expects 2 argument, got 0")
+			} else {
+				error(call_expr.args[0], "'#load_hash' expects 2 argument, got %d", len(call_expr.args))
+			}
+			return false
+		}
+
+		arg0 := call_expr.args[0]
+		arg1 := call_expr.args[1]
+
+		path_op: Operand
+		check_expr(ctx, &path_op, arg0)
+		if path_op.mode != .Constant {
+			error(arg0, "'#load_hash' expected a constant string argument")
+			return false
+		}
+		if !is_type_string(path_op.type) {
+			ts := type_to_string(path_op.type)
+			error(arg0, "'#load_hash' expected a constant string, got %s", ts)
+			return false
+		}
+
+		hash_op: Operand
+		check_expr(ctx, &hash_op, arg1)
+		if hash_op.mode != .Constant {
+			error(arg1, "'#load_hash' expected a constant string argument")
+			return false
+		}
+		if !is_type_string(hash_op.type) {
+			// NOTE: C++ (check_builtin.cpp:2521) formats the FIRST operand's type here,
+			// not arg1's -- a copy-paste slip in the reference compiler. Reproduced
+			// deliberately; changing it would be a divergence.
+			ts := type_to_string(path_op.type)
+			error(arg1, "'#load_hash' expected a constant string, got %s", ts)
+			return false
+		}
+
+		original_path, path_ok := path_op.value.(string)
+		if !path_ok {
+			return false
+		}
+
+		cache, load_ok := cache_load_file_directive(ctx, call, original_path, true, .Contents)
+		if load_ok && cache != nil {
+			// C++ Reference: check_builtin.cpp:2552-2554 -- t_untyped_integer, Constant,
+			// exact_value_u64(hash_value). Type and mode match.
+			//
+			// INCOMPLETE, see #247: the VALUE is a placeholder. C++ computes a real digest
+			// (adler32/crc32/crc64/fnv32/fnv64/fnv32a/fnv64a/murmur32) and the port has none
+			// of those algorithms, nor the hash-kind validation at check_builtin.cpp:2358-2404
+			// ("Invalid hash kind passed to `#%s`, got: %s"). So a #load_hash on a file that
+			// EXISTS yields 0 here where C++ yields the digest -- a wrong constant, not just a
+			// missing one. The error paths above are faithful; the success path is not.
+			operand.type = t_untyped_integer
+			operand.mode = .Constant
+			operand.value = exact_value_i64(0)
+			return true
+		}
+
+		call.state_flags += {.Directive_Was_False}
+		return false
+	}
+
 	return false
 }
 
