@@ -642,7 +642,8 @@ check_array_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^T
 				// C++ lines 3309-3333
 				if !is_type_valid_vector_elem(elem) && !is_type_polymorphic(elem) {
 					elem_str := type_to_string(elem)
-					error(at.elem, "Invalid element type for #simd, expected an integer, float, boolean, or 'rawptr', got '%s'", elem_str)
+					error(at.elem, // C++ Reference: check_type.cpp:3523 -- the port dropped "with no specific endianness".
+					"Invalid element type for #simd, expected an integer, float, boolean, or 'rawptr' with no specific endianness, got '%s'", elem_str)
 					type^ = make_array_type(elem, count, generic_type)
 					return
 				}

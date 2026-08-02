@@ -10193,9 +10193,11 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 				if arg_op.mode != .Invalid {
 					// Verify it's assignable to the variadic slice type
 					if !check_is_assignable_to(ctx, &arg_op, expected_slice_type) {
-						arg_type_str := type_to_string(arg_op.type)
-						param_type_str := type_to_string(expected_slice_type)
-						error_node(arg, "Cannot expand argument of type '%s' as variadic '%s'", arg_type_str, param_type_str)
+						// C++ Reference: check_expr.cpp:7009. The variadic path calls the SAME
+						// eval_param_and_score lambda as every other argument, so it reports
+						// through check_assignment with the context name "procedure argument".
+						// "Cannot expand argument of type '%s' as variadic '%s'" was invented.
+						check_assignment(ctx, &arg_op, expected_slice_type, "procedure argument")
 						data.error = true
 					}
 				}
@@ -10214,9 +10216,10 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 					} else {
 						// Check assignability to variadic element type
 						if !check_is_assignable_to(ctx, &arg_op, variadic_elem_type) {
-							arg_type_str := type_to_string(arg_op.type)
-							elem_type_str := type_to_string(variadic_elem_type)
-							error_node(arg, "Cannot pass argument of type '%s' to variadic parameter of type '..%s'", arg_type_str, elem_type_str)
+							// C++ Reference: check_expr.cpp:7009, same lambda, same context
+							// name. "Cannot pass argument of type '%s' to variadic parameter
+							// of type '..%s'" was invented.
+							check_assignment(ctx, &arg_op, variadic_elem_type, "procedure argument")
 							data.error = true
 						}
 					}
