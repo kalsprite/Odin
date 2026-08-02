@@ -3568,16 +3568,18 @@ check_using_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, flags: Stmt_Fla
 		return {}
 	}
 
-	// KNOWN GAP, deliberately NOT enforced yet. C++ check_stmt.cpp:3020-3025 rejects `using`
-	// as a STATEMENT outright unless the file opts in with `#+feature using-stmt`, so the port
-	// under-rejects here: `using s` on a struct is accepted where C++ errors.
+	// C++ Reference: check_stmt.cpp:3020-3025. `using` as a STATEMENT is disallowed outright
+	// unless the file opts in with `#+feature using-stmt`.
 	//
-	// The guard itself is one line -- `if check_feature_flags(ctx, node) & {.Using_Stmt} == {}`
-	// -- and the feature flag has now been added to Opt_In_Feature_Flag_Bit (it was missing
-	// entirely, along with Force_Type_Assert). It is NOT enabled because check_feature_flags
-	// does not see a file's `#+feature` line from inside statement checking: enabling it made
-	// core/image/png fail, and png.odin opts in on line 1. Fixing the lookup is the real work;
-	// see LEDGER task 242.
+	// This was blocked in task 242 because check_feature_flags could not see a file's
+	// `#+feature` line during statement checking (core/image/png opts in on line 1 and broke).
+	// Task 243 added C++'s third fallback, `file = node->file()`, so the lookup now works.
+	if check_feature_flags(ctx, node) & {.Using_Stmt} == {} {
+		begin_error_block()
+		error_node(node, "'using' has been disallowed as it is considered bad practice to use as a statement outside of immediate refactoring")
+		error_line("\tIf you do require it for refactoring purposes or legacy code, it can be enabled on a per-file basis with '#+feature using-stmt'\n")
+		end_error_block()
+	}
 
 	// Check vet flags for using statement warnings
 	// C++ Reference: check_stmt.cpp lines 2942-2946

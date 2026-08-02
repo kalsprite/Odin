@@ -1703,13 +1703,18 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 check_feature_flags :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) -> Opt_In_Feature_Flag {
 	file: ^ast.File = ctx.file
 
-	// Fallback: try to get file from current procedure declaration
-	// C++ Reference: checker.cpp:561-564
+	// C++ Reference: checker.cpp:567-570 -- fall back to the current procedure literal's file.
 	if file == nil && ctx.curr_proc_decl != nil && ctx.curr_proc_decl.proc_lit != nil {
-		// Note: In C++, proc_lit->file() is available. In Odin AST, we don't have a direct
-		// back-pointer from nodes to their file. The ctx.file is typically set during checking.
-		// If we need the file from proc_lit, we'd need additional infrastructure.
-		_ = ctx.curr_proc_decl.proc_lit
+		file = get_file_from_node(&ctx.checker.info, ctx.curr_proc_decl.proc_lit)
+	}
+
+	// C++ Reference: checker.cpp:572-574 -- `file = node->file()`. The port was MISSING this
+	// third fallback, and a stale comment here claimed Odin's AST has no node->file mapping.
+	// It does: get_file_from_node resolves through `node.pos.file`, which the tokenizer stamps
+	// on every position. Without it, `#+feature` lines were invisible from inside statement
+	// checking, so every feature-gated check silently read as "not opted in" (LEDGER task 243).
+	if file == nil && node != nil {
+		file = get_file_from_node(&ctx.checker.info, node)
 	}
 
 	// Check if file has feature flags set
