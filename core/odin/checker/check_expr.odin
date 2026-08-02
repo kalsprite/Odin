@@ -654,30 +654,50 @@ parse_exact_value_from_token :: proc(tok: tokenizer.Token) -> Exact_Value {
 
 	#partial switch tok.kind {
 	case .Integer:
-		// Parse integer literal
-		// Handle different bases: 0b (binary), 0o (octal), 0d (decimal), 0x (hex), 0h (hex)
+		// C++ Reference: exact_value_integer_from_string -- C++ parses EVERY integer literal
+		// straight into arbitrary precision, and so does this now.
 		//
-		// Parse as UNSIGNED first. An integer literal token never carries a sign - `-x` is a
-		// unary operator applied to the literal - so the unsigned reading is always the correct
-		// one, and only the representation choice remains.
+		// It used to go through strconv. First parse_i64_maybe_prefixed, which reports ok=true
+		// for values above max(i64) and wraps them negative; that was replaced by
+		// parse_u64_maybe_prefixed, which has THE SAME FLAW one bit further out:
 		//
-		// This used to try parse_i64_maybe_prefixed first and fall back to unsigned only when
-		// that FAILED. It never failed: strconv.parse_i64_maybe_prefixed reports ok=true for
-		// values above max(i64), silently wrapping them negative - 0xaaefdd6dcd770416 came back
-		// as -6129437104159652842. So the fallback was dead code and every u64-range constant
-		// became a negative i64, after which check_representable_as_constant correctly refused
-		// to convert it to u64. core/hash/crc.odin alone produced 388 such errors.
-		uvalue, uok := strconv.parse_u64_maybe_prefixed(text)
-		if uok {
-			// Prefer the signed representation when it fits, matching how the rest of the
-			// checker treats untyped integer constants.
-			if uvalue <= u64(max(i64)) {
-				return exact_value_i64(i64(uvalue))
+		//     18446744073709551616  -> ok=true, value=0
+		//     100000000000000000000 -> ok=true, value=7766279631452241920
+		//
+		// So a literal wider than u64 was not merely accepted, it was silently replaced by a
+		// different number, and the range check downstream then honestly approved the
+		// substitute. `x: int = 100000000000000000000` compiled as 7766279631452241920.
+		// Fixing the i64 case by switching to the u64 helper repeated the bug at a larger
+		// bound; parsing into a BigInt removes the bound entirely. LEDGER #167.
+		{
+			body := text
+			radix := i8(10)
+			if len(body) > 2 && body[0] == '0' {
+				switch body[1] {
+				case 'b', 'B':
+					radix = 2
+					body = body[2:]
+				case 'o', 'O':
+					radix = 8
+					body = body[2:]
+				case 'd', 'D':
+					radix = 10
+					body = body[2:]
+				case 'x', 'X', 'h', 'H':
+					radix = 16
+					body = body[2:]
+				}
 			}
-			return exact_value_u64(uvalue)
+			// Odin permits digit separators in literals; big.int_atoi does not.
+			cleaned := body
+			if strings.contains(body, "_") {
+				cleaned, _ = strings.replace_all(body, "_", "", context.temp_allocator)
+			}
+			v: big.Int
+			if big.int_atoi(&v, cleaned, radix) == nil {
+				return v
+			}
 		}
-		// NOTE: literals wider than u64 land here and yield nil. C++ carries these in a BigInt
-		// (exact_value_integer_from_string); this port does not yet.
 		return nil
 
 	case .Float:
