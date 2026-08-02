@@ -486,6 +486,27 @@ end_of_line_pos :: proc(p: ^Parser, tok: tokenizer.Token) -> tokenizer.Pos {
 	return pos
 }
 
+// expect_closing mirrors C++ src/parser.cpp:1805-1817.
+//
+// C++ has THREE closing helpers that are NOT interchangeable, and the port had collapsed them:
+//   expect_closing_brace_of_field_list (1722) -- "Expected a comma, got a %s", then expect_token
+//   expect_closing                     (1805) -- "Missing ',' before newline in %s", then expect_token
+//   expect_token_after                 (1645) -- "Expected '%s' after %s, got '%s'"
+//
+// The distinction that matters: the first two end in a PLAIN expect_token, so their failure
+// message carries NO context. The port routed everything through expect_token_after, which
+// folds the context in -- so `f(1 ..< 2)` said "Expected ')' after argument list, got '..<'"
+// where C++ says "Expected ')', got '..<'". Probe rng7.
+//
+// NOT PORTED: C++'s missing-comma branch is guarded by f->allow_newline, a Parser field this
+// port does not have -- so that message is unreachable here and is not emitted at all. Filed
+// as #209 rather than approximated, because emitting it unconditionally would be a NEW
+// divergence in the opposite direction.
+expect_closing :: proc(p: ^Parser, kind: tokenizer.Token_Kind, context_name: string) -> tokenizer.Token {
+	_ = context_name
+	return expect_token(p, kind)
+}
+
 expect_closing_brace_of_field_list :: proc(p: ^Parser) -> tokenizer.Token {
 	return expect_closing_token_of_field_list(p, .Close_Brace, "field list")
 }
@@ -1181,7 +1202,8 @@ parse_attribute :: proc(p: ^Parser, tok: tokenizer.Token, open_kind, close_kind:
 			allow_token(p, .Comma) or_break
 		}
 		p.expr_level -= 1
-		close = expect_token_after(p, close_kind, "attribute")
+		// C++ Reference: src/parser.cpp:5289 uses expect_closing, not expect_token_after.
+		close = expect_closing(p, close_kind, "attribute")
 	}
 
 	attribute := ast.new(ast.Attribute, tok.pos, end_pos(close))
@@ -1371,7 +1393,8 @@ parse_unrolled_for_loop :: proc(p: ^Parser, inline_tok: tokenizer.Token) -> ^ast
 		}
 
 		p.expr_level -= 1
-		_ = expect_token_after(p, .Close_Paren, "#unroll")
+		// C++ Reference: src/parser.cpp:5347 uses expect_closing.
+		_ = expect_closing(p, .Close_Paren, "#unroll")
 	}
 
 	for_tok := expect_token(p, .For)
@@ -3394,7 +3417,8 @@ parse_call_expr :: proc(p: ^Parser, operand: ^ast.Expr) -> ^ast.Expr {
 	}
 
 	p.expr_level = prev_expr_level
-	close := expect_closing_token_of_field_list(p, .Close_Paren, "argument list")
+	// C++ Reference: src/parser.cpp:3244 uses expect_closing, not the field-list helper.
+	close := expect_closing(p, .Close_Paren, "argument list")
 
 	ce := ast.new(ast.Call_Expr, operand.pos, end_pos(close))
 	ce.expr     = operand
