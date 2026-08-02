@@ -2786,14 +2786,25 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 
 		case "force_inline", "force_no_inline":
 			return parse_inlining_or_tailing_operand(p, lhs, name)
+		// C++ Reference: src/parser.cpp:2519 -- the Token_Hash arm ends with a bare
+		// `return ast_basic_directive(f, token, name)`.
+		//
+		// #216: this port had a default that built an ast.Tag_Expr and PARSED A FOLLOWING
+		// EXPRESSION, so any directive not on the whitelist above needed an operand after it
+		// and otherwise died with "Expected an operand" -- a SYNTAX error where C++ produces a
+		// semantic one. `#branch_location` could not be parsed at all (probe cloc), which is
+		// why progress#196's checker arm for it was unreachable.
+		//
+		// C++ constructs a TagExpr in exactly one place, parse_proc_tags (parser.cpp:2067), for
+		// procedure tags like #optional_ok -- never from parse_operand. This port's
+		// parse_proc_tags accumulates a bit_set instead, so this arm was Tag_Expr's only
+		// producer anywhere and the node kind is now unreachable. It is left declared: it is
+		// part of the public core:odin/ast surface and C++ keeps its counterpart too.
 		case:
-			expr := parse_expr(p, lhs)
-			end := expr.pos if expr != nil else end_pos(tok)
-			te := ast.new(ast.Tag_Expr, tok.pos, end)
-			te.op   = tok
-			te.name = name.text
-			te.expr = expr
-			return te
+			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
+			bd.tok  = tok
+			bd.name = name.text
+			return bd
 		}
 
 	case .Inline, .No_Inline:
