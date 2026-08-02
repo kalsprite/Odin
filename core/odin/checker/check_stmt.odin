@@ -4486,60 +4486,41 @@ check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flag
 	// Check if expression is a range (e.g., 0..<10)
 	skip_expr := false
 	if is_ast_range(cast(^ast.Expr)expr) {
-		// Binary expression for range
-		expr_typed := cast(^ast.Expr)expr
-		binary_expr, is_binary := expr_typed.derived.(^ast.Binary_Expr)
-		if !is_binary {
-			error_node(expr, "Invalid range expression")
+		// C++ Reference: check_unroll_range_stmt (src/check_stmt.cpp:970-981):
+		//
+		//     if (is_ast_range(expr)) {
+		//         ast_node(ie, BinaryExpr, expr);
+		//         Operand x = {}; Operand y = {};
+		//         bool ok = check_range(ctx, expr, true, &x, &y, &inline_for_depth);
+		//         if (!ok) { goto skip_expr; }
+		//         val0 = x.type;
+		//         val1 = t_int;
+		//     }
+		//
+		// That is the WHOLE branch. It calls the SAME check_range an ordinary `for i in a..<b`
+		// uses, and imposes no unroll-specific restriction on the operand types at all -- the
+		// depth, the constant-ness requirement and the operator handling are all check_range's
+		// job, which is why C++ needs `true` for its is_for_loop argument and nothing else.
+		//
+		// The port reimplemented the branch inline: two bare check_expr calls, its own
+		// constant test, its own integer test, and its own `b - a (+1)` depth arithmetic. The
+		// port HAS check_range -- the ordinary `for` path calls it and matches the oracle
+		// exactly -- so this was a second implementation of a function already present, and it
+		// diverged. `#unroll for i in 0..<"x"` drew the invented "Only integer types are
+		// allowed in '#unroll for' range expressions" where the oracle reports the ordinary
+		// operand-unification failure, "Cannot convert untyped value '0' to 'untyped string'
+		// from 'untyped integer'" -- the same message the identical non-unroll loop produces.
+		//
+		// Third reimplementation-of-an-existing-function found in this stretch, after
+		// scan_number/big_int_from_string (#223). LEDGER #373.
+		x, y: Operand
+		x.mode = .Invalid
+		y.mode = .Invalid
+		if !check_range(ctx, expr, true, &x, &y, &inline_for_depth) {
 			skip_expr = true
-		}
-
-		if !skip_expr {
-			x, y: Operand
-			x.mode = .Invalid
-			y.mode = .Invalid
-
-			// Basic range checking inline
-			check_expr(ctx, &x, binary_expr.left)
-			if x.mode == .Invalid {
-				skip_expr = true
-			}
-
-			if !skip_expr {
-				check_expr(ctx, &y, binary_expr.right)
-				if y.mode == .Invalid {
-					skip_expr = true
-				}
-			}
-
-			if !skip_expr {
-				// Both sides must be constant for #unroll
-				if x.mode != .Constant || y.mode != .Constant {
-					error_node(expr, "An '#unroll for' range expression must be known at compile time")
-					skip_expr = true
-				} else if !is_type_integer(x.type) || !is_type_integer(y.type) {
-					// Both must be integers
-					error_node(expr, "Only integer types are allowed in '#unroll for' range expressions")
-					skip_expr = true
-				} else {
-					// Calculate unroll depth based on range operator
-					a := exact_value_to_integer(x.value)
-					b := exact_value_to_integer(y.value)
-
-					// Determine range operator: .. (inclusive), ..< (half-open), ..= (inclusive)
-					op_kind := binary_expr.op.kind
-
-					inline_for_depth = exact_value_sub(b, a)
-
-					// For inclusive ranges (.. and ..=), add 1
-					if op_kind != .Range_Half {
-						inline_for_depth = exact_value_increment_one(inline_for_depth)
-					}
-
-					val0 = x.type
-					val1 = t_int
-				}
-			}
+		} else {
+			val0 = x.type
+			val1 = t_int
 		}
 	} else if !skip_expr {
 		// Non-range expression: check for constant type or value
