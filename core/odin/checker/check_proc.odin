@@ -911,24 +911,41 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 				if scope != nil {
 					print_count := 0
 
-					// C++ (check_expr.cpp:7121) walks scope->elements in raw hash order.
-					// Iterating an Odin map here made this block nondeterministic: ten runs of
-					// the SAME binary on the SAME input produced SIX different orderings of
-					// the definition list. sweep_det.sh runs under `setarch -R`, so the sweep
-					// cannot see it. Sorted by name, as in check_did_you_mean_scope; C++'s own
-					// order is a property of its hash table and is not reproducible.
-					// LEDGER task 277.
+					// C++ (check_expr.cpp:7121) walks scope->elements in SLOT order.
+					//
+					// Iterating an Odin map directly made this block nondeterministic: ten runs
+					// of the SAME binary on the SAME input produced SIX different orderings.
+					// sweep_det.sh runs under `setarch -R`, so the sweep cannot see it.
+					// LEDGER 277 therefore sorted by name and recorded C++'s order as "a
+					// property of its hash table and not reproducible".
+					//
+					// #214a / LEDGER 353: that is wrong. Scope::elements is ScopeMap, whose hash
+					// is over the string CONTENTS, so its layout is a pure function of the names
+					// and their insertion order. scope_map_slot_order (scope.odin) reproduces it.
+					// This also fixes the block's PRESENCE, not just its order: the
+					// "With the following definitions:" header below fires only when slot 0
+					// holds a Constant, and that header truncates the block (see there).
+					//
+					// Insertion order for a polymorphic parameter scope is source order, so the
+					// entities are put back into declaration order before the table is simulated.
 					ordered := make([dynamic]^Entity, 0, len(scope.elements), context.temp_allocator)
 					for _, e in scope.elements {
 						append(&ordered, e)
 					}
 					slice.sort_by(ordered[:], proc(a, b: ^Entity) -> bool {
+						if a.token.pos.file != b.token.pos.file {
+							return a.token.pos.file < b.token.pos.file
+						}
+						if a.token.pos.offset != b.token.pos.offset {
+							return a.token.pos.offset < b.token.pos.offset
+						}
 						return a.token.text < b.token.text
 					})
+					ordered_slots := scope_map_slot_order(ordered[:], context.temp_allocator)
 
 					// Iterate through scope elements and display TypeName and Constant entities
 					// C++ Reference: check_expr.cpp:7121-7150
-					for e in ordered {
+					for e in ordered_slots {
 						#partial switch e.kind {
 						case .Type_Name:
 							// Display type definitions: name :: type;

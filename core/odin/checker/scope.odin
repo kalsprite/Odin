@@ -896,3 +896,98 @@ add_dependency_to_set :: proc(c: ^Checker, entity: ^Entity) {
 	}
 	sync.rw_mutex_shared_unlock(&decl.deps_mutex)
 }
+
+
+// C++ Reference: src/checker.hpp:282-395 (ScopeMap) and 468-515 (its iteration order).
+//
+// #214a. Diagnostics that walk a scope emit entities in C++'s SLOT order, and two earlier
+// ledger entries (277, 334) recorded that order as "a property of its hash table" and
+// therefore unreproducible. That was wrong, and it cost real parity:
+//
+//   * Scope::elements is NOT the StringMap used elsewhere in the compiler. It is a dedicated
+//     open-addressed Robin Hood table with a fixed inline capacity of 16.
+//   * InternedString::hash() hashes the string CONTENTS (src/string_interner.cpp:105), not an
+//     address. No pointer, no ASLR, no allocation order -- the layout is a pure function of
+//     the names and the order they were inserted.
+//
+// Verified by simulating this table against the oracle BEFORE porting it: it predicted the
+// binding order for 4 independent name sets (including freshly invented ones), and then
+// predicted 8/8 cases of whether the "With the following definitions:" header fires -- which
+// depends purely on whether slot 0 holds a Constant. See LEDGER 353.
+//
+// SCOPE: this exists to order DIAGNOSTIC OUTPUT only. Lookup still goes through the map, and
+// every other scope iteration stays name-sorted for determinism (task #50 / LEDGER 277).
+SCOPE_MAP_INLINE_CAP :: 16
+
+// C++ Reference: src/string_map.cpp:15. fnv32a masked to 31 bits, with 0 reserved as the
+// "empty slot" marker so a real hash of 0 is bumped to 1.
+scope_map_hash :: proc(s: string) -> u32 {
+	h: u32 = 2166136261
+	for i in 0..<len(s) {
+		h ~= u32(s[i])
+		h *= 16777619
+	}
+	r := h & 0x7fffffff
+	return r if r != 0 else 1
+}
+
+Scope_Map_Slot :: struct {
+	hash: u32,
+	e:    ^Entity,
+}
+
+// C++ Reference: src/checker.hpp:300 scope_map_insert_for_rehash -- Robin Hood insertion,
+// displacing whichever resident entry is closer to its ideal slot.
+scope_map_sim_insert :: proc(slots: []Scope_Map_Slot, mask: u32, hash_in: u32, e_in: ^Entity) {
+	hash, e := hash_in, e_in
+	pos := hash & mask
+	dist: u32 = 0
+	for {
+		s := &slots[pos]
+		if s.hash == 0 {
+			s.hash, s.e = hash, e
+			return
+		}
+		existing := (pos - s.hash) & mask
+		if dist > existing {
+			s.hash, hash = hash, s.hash
+			s.e, e = e, s.e
+			dist = existing
+		}
+		dist += 1
+		pos = (pos + 1) & mask
+	}
+}
+
+// entities must be given in INSERTION order (for a polymorphic parameter scope that is source
+// order). Returns them in the slot order C++ would iterate.
+scope_map_slot_order :: proc(entities: []^Entity, allocator := context.temp_allocator) -> []^Entity {
+	cap_ := u32(SCOPE_MAP_INLINE_CAP)
+	slots := make([]Scope_Map_Slot, cap_, context.temp_allocator)
+
+	count: u32 = 0
+	for e in entities {
+		// C++ Reference: src/checker.hpp:392 -- grow at 75% load BEFORE inserting, rehashing
+		// in old-slot order (not insertion order), which can permute the result.
+		if count >= cap_ - (cap_ >> 2) {
+			new_cap := cap_ << 1
+			new_slots := make([]Scope_Map_Slot, new_cap, context.temp_allocator)
+			for i in 0..<cap_ {
+				if slots[i].hash != 0 {
+					scope_map_sim_insert(new_slots, new_cap - 1, slots[i].hash, slots[i].e)
+				}
+			}
+			slots, cap_ = new_slots, new_cap
+		}
+		scope_map_sim_insert(slots, cap_ - 1, scope_map_hash(e.token.text), e)
+		count += 1
+	}
+
+	out := make([dynamic]^Entity, 0, len(entities), allocator)
+	for i in 0..<cap_ {
+		if slots[i].hash != 0 {
+			append(&out, slots[i].e)
+		}
+	}
+	return out[:]
+}
