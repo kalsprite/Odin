@@ -418,6 +418,15 @@ expect_token_after :: proc(p: ^Parser, kind: tokenizer.Token_Kind, msg: string) 
 	return prev
 }
 
+// is_token_range mirrors C++ src/parser.cpp:1672-1683.
+is_token_range :: proc(kind: tokenizer.Token_Kind) -> bool {
+	#partial switch kind {
+	case .Ellipsis, .Range_Full, .Range_Half:
+		return true
+	}
+	return false
+}
+
 expect_operator :: proc(p: ^Parser) -> tokenizer.Token {
 	prev := p.curr_tok
 	#partial switch prev.kind {
@@ -427,8 +436,32 @@ expect_operator :: proc(p: ^Parser) -> tokenizer.Token {
 		if !tokenizer.is_operator(prev.kind) {
 			g := tokenizer.token_to_string(prev)
 			error(p, prev.pos, "Expected an operator, got '%s'", g)
+		} else if !p.allow_range && is_token_range(prev.kind) {
+			// C++ Reference: src/parser.cpp:1699-1703. An ELSE-IF of the operator test, so a
+			// non-operator reports only the first message. The port had neither this nor the
+			// ellipsis check below.
+			//
+			// NOTE(parity): C++ writes "an non-range" -- reproduced verbatim, same treatment
+			// as #187/#189/#195.
+			g := tokenizer.token_to_string(prev)
+			error(p, prev.pos, "Expected an non-range operator, got '%s'", g)
 		}
 	}
+
+	// C++ Reference: src/parser.cpp:1704-1707. A SEPARATE `if`, not an else -- an ellipsis in
+	// a non-range position produces BOTH this and the message above.
+	//
+	// Odin retired the inclusive `..` in favour of `..=`, and C++ keeps this to guide anyone
+	// using the old spelling. The port had no such diagnostic at all, so `bit_set[5 .. 2]`
+	// reported the unhelpful "'bit_set[5 .. 2]' is not a type" instead. Probes iv1/iv2.
+	//
+	// NOT PORTED: C++ also sets TokenFlag_Replace on the token, consumed by its source-fixup
+	// tooling. The port's tokenizer has no such flag and the checker has no fixup pass, so
+	// there is nothing to set it for.
+	if prev.kind == .Ellipsis {
+		error(p, prev.pos, "'..' for ranges are not allowed, did you mean '..<' or '..='?")
+	}
+
 	advance_token(p)
 	return prev
 }
