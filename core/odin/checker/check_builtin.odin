@@ -4554,7 +4554,17 @@ check_builtin_type_bit_set_accessors :: proc(ctx: ^Checker_Context, operand: ^Op
 	bs := operand.type
 	if !is_type_bit_set(bs) {
 		builtin_name := builtin_proc_infos[id].name
-		error_node(call.args[0], "Expected a bit_set type for '%s'", builtin_name)
+		// C++ splits this across two handlers with DIFFERENT messages: elem_type
+		// (check_builtin.cpp:7463) and underlying_type (7489) name only the builtin, while
+		// backing_type (8125) also names the offending type. The port folds all three into
+		// one procedure, so the tail is gated on the id rather than added to all three.
+		// Confirmed against the oracle, which prints ", got int" for backing_type and
+		// nothing for the other two.
+		if id == .Type_Bit_Set_Backing_Type {
+			error_node(call.args[0], "Expected a bit_set type for '%s', got %s", builtin_name, type_to_string(operand.type))
+		} else {
+			error_node(call.args[0], "Expected a bit_set type for '%s'", builtin_name)
+		}
 		operand.mode = .Invalid
 		operand.type = t_invalid
 		return false
@@ -5466,7 +5476,12 @@ check_builtin_fixed_point :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 	}
 
 	if !are_types_identical(x.type, y.type) {
-		error_node(x.expr, "Mismatched types for '%s'", builtin_name)
+		// C++ check_builtin.cpp:6512. NOTE the format: this variant has NO "got". C++ has
+		// six spellings of "Mismatched types for" -- three carrying ", got %s vs %s" (the
+		// overflow_* family at 5770/5821 and a three-operand one at 5909) and three with a
+		// bare ", %s vs %s" (6108, this one, 6577). gotscan.py matched the wrong variant;
+		// the oracle settled it.
+		error_node(x.expr, "Mismatched types for '%s', %s vs %s", builtin_name, type_to_string(x.type), type_to_string(y.type))
 		return false
 	}
 
@@ -5653,7 +5668,11 @@ check_builtin_mem_copy :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^
 	if length.mode == .Constant {
 		n := exact_value_to_i64(length.value)
 		if n < 0 {
-			error_node(length.expr, "Expected a non-negative integer value for the number of bytes for '%s'", builtin_name)
+			// C++ check_builtin.cpp:5967 and 6009 pass expr_to_string(len.expr) -- the
+			// SOURCE TEXT of the length expression, not its type and not its value.
+			len_str := expr_to_string(length.expr)
+			defer delete(len_str)
+			error_node(length.expr, "Expected a non-negative integer value for the number of bytes for '%s', got %s", builtin_name, len_str)
 		}
 	}
 
@@ -5694,7 +5713,11 @@ check_builtin_mem_zero :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^
 	if length.mode == .Constant {
 		n := exact_value_to_i64(length.value)
 		if n < 0 {
-			error_node(length.expr, "Expected a non-negative integer value for the number of bytes for '%s'", builtin_name)
+			// C++ check_builtin.cpp:5967 and 6009 pass expr_to_string(len.expr) -- the
+			// SOURCE TEXT of the length expression, not its type and not its value.
+			len_str := expr_to_string(length.expr)
+			defer delete(len_str)
+			error_node(length.expr, "Expected a non-negative integer value for the number of bytes for '%s', got %s", builtin_name, len_str)
 		}
 	}
 
