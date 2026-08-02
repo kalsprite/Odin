@@ -1160,7 +1160,12 @@ check_assign_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 
 		// Check for count mismatch
 		if lhs_count != rhs_count {
-			error_node(stmt.lhs[0], "Assignment count mismatch: %d variables, %d values", lhs_count, rhs_count)
+			// C++ Reference: check_stmt.cpp:2550 -- "Assignment count mismatch '%td' = '%td'".
+				// The port's sibling at check_decl.odin:210 renders C++'s form correctly
+				// (matching check_decl.cpp:150); this one was written from scratch, and its
+				// "%d values" is ungrammatical for a count of 1. One of the two sites ported,
+				// the other invented.
+				error_node(stmt.lhs[0], "Assignment count mismatch '%d' = '%d'", lhs_count, rhs_count)
 		}
 
 	} else {
