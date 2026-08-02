@@ -3038,6 +3038,12 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		is_signed := false
 		use_bigint := false
 		bigint_value: big.Int
+		// Whether the magnitude is representable in 64 bits at all. Defaults TRUE and is
+		// cleared only by the big.Int branch below, because every other exact-value kind
+		// that reaches the range check (notably f64) already produced a 64-bit value.
+		// Defaulting it false instead made every float-derived constant fail the guard --
+		// `1e12` cast to i64 in base/runtime stopped checking.
+		fits_64 := true
 
 		#partial switch v in in_value {
 		case bool:
@@ -3059,6 +3065,18 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				value_u64 = temp_u64
 				is_signed = false
 			}
+			// C++ Reference: big_int.cpp:298 --
+			//     big_int_can_be_represented_in_64_bits(x) { return mp_count_bits(x) <= 64; }
+			// Ask the magnitude directly rather than inferring from a failed extraction:
+			// big.int_get_u64 TRUNCATES silently for values wider than 64 bits instead of
+			// erroring, so "extraction failed" is not the same question and answered it
+			// wrongly for everything >= 2^64.
+			if bits, bits_err := big.count_bits(&temp_v); bits_err == nil {
+				fits_64 = bits <= 64
+			}
+			// If NEITHER succeeded, fits_64 stays false and value_i64/value_u64 stay 0.
+			// That zero used to be treated as a real value by the signed range check below,
+			// so a constant too large for 64 bits was accepted AND silently rewritten to 0.
 			// Note: If neither fits, we still proceed with BigInt for i128/u128
 		case f64:
 			// Floats can convert if they're whole numbers
@@ -3205,23 +3223,42 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				min_val := SIGNED_INTEGER_MINS[byte_size]
 				max_val := SIGNED_INTEGER_MAXS[byte_size]
 
-				if is_signed {
-					if value_i64 < min_val || value_i64 > max_val {
-						return false
-					}
-					if out_value != nil {
+				// C++ Reference: check_expr.cpp:2389-2397:
+				//     if (!big_int_can_be_represented_in_64_bits(&i)) return false;
+				//     i64 val64 = big_int_to_i64(&i);
+				//     return imin_64 <= val64 && val64 <= imax_64;
+				//
+				// That conversion WRAPS, so C++ accepts anything in [2^63, 2^64-1] for a
+				// signed 64-bit type: it wraps to a negative i64 and lands back in range.
+				// `x: int = 18446744073709551615` compiles and becomes -1. That is an
+				// upstream bug (LEDGER 264, task #166), reproduced here because the port's
+				// job is to agree with the compiler, and diverging silently would be worse
+				// than agreeing visibly. If it is fixed upstream, fix it here in the same
+				// change.
+				//
+				// The port previously got this wrong in BOTH directions: it rejected
+				// 2^63..2^64-1 (which C++ accepts) because big.int_get_i64 fails there, and
+				// it accepted anything >= 2^64 (which C++ rejects) because both extractions
+				// fail and the leftover zero passed the range test.
+				if !fits_64 {
+					return false
+				}
+				val64 := value_i64
+				if !is_signed {
+					val64 = i64(value_u64) // wrapping, matching big_int_to_i64
+				}
+				if val64 < min_val || val64 > max_val {
+					return false
+				}
+				if out_value != nil {
+					// C++ assigns *out_value from the ORIGINAL exact value near the top of
+					// the function (check_expr.cpp:2312), before any range test, so the
+					// stored constant is the value as written, not the wrapped one.
+					if use_bigint {
+						out_value^ = bigint_value
+					} else {
 						result: big.Int
-						big.internal_int_set_from_integer(&result, value_i64, false)
-						out_value^ = result
-					}
-				} else {
-					// Check if unsigned value fits in signed range
-					if value_u64 > u64(max_val) {
-						return false
-					}
-					if out_value != nil {
-						result: big.Int
-						big.internal_int_set_from_integer(&result, i64(value_u64), false)
+						big.internal_int_set_from_integer(&result, val64, false)
 						out_value^ = result
 					}
 				}
