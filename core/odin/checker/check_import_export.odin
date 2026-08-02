@@ -181,6 +181,12 @@ check_add_import_decl :: proc(ctx: ^Checker_Context, import_decl: ^ast.Import_De
 			// Intrinsics package not available - allow import without error
 			return
 		}
+		// C++ checker.cpp:5606-5608 sets force_use for "intrinsics" exactly as it does for
+		// "builtin" two lines above. The port had it on the builtin branch only, so an
+		// `import "base:intrinsics"` that is never referenced by name was reported as an
+		// unused import -- which the real compiler never does, for either package. Found
+		// with the vet harness from LEDGER 289; the sweep could not see it. LEDGER 291.
+		force_use = true
 	} else if import_path == "runtime" || import_path == "base:runtime" {
 		// Runtime package - use extracted runtime types
 		if ctx.checker.info.runtime_package != nil {
