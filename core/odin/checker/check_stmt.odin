@@ -2180,10 +2180,14 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 			} else {
 				error_node(node, "Unhandled switch cases:")
 				for f in unhandled {
-					error_line("\t%s", f.token.text)
+					// C++ Reference: check_stmt.cpp:1367 -- "\t%.*s\n". The port omitted the
+					// newline, so every member and the Suggestion ran together on one line:
+					//     B	C	D	E5	Suggestion: Was '#partial switch' wanted?
+					// Same omission as the did-you-mean printer in task 249.
+					error_line("\t%s\n", f.token.text)
 				}
 			}
-			error_line("\tSuggestion: Was '#partial switch' wanted?")
+			error_line("\tSuggestion: Was '#partial switch' wanted?\n")
 		}
 	}
 
