@@ -6422,33 +6422,67 @@ check_implicit_selector_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^
 	if !ok {
 		name := ise.field.name
 
+		// C++ (check_expr.cpp:9395) reads `th->BitSet.elem` off `th` directly, which is only
+		// sound when `th` IS the bit_set rather than a named type wrapping one. Go through
+		// base_type here and return nil when it is not a bit_set at all, so the guard below
+		// is a test rather than an unchecked variant access.
+		bit_set_elem_of :: proc(t: ^Type) -> ^Type {
+			bt := base_type(t)
+			if bt == nil {
+				return nil
+			}
+			if bs, is_bs := bt.variant.(Type_Bit_Set); is_bs {
+				return bs.elem
+			}
+			return nil
+		}
+
 		if is_type_enum(th) {
-			// Error for undeclared enum value
-			error(node, "Undeclared name '%s' for enum type", name)
-			// C++ Reference: check_expr.cpp:8838 - suggest similar enum field names
+			// C++ Reference: check_expr.cpp:9384-9394.
+			//
+			// The ERROR_BLOCK is not decoration. check_did_you_mean_type emits its lines with
+			// error_line, which appends to the CURRENT error value; with no block open there
+			// is no current value, so error_line took its fallback path and wrote the whole
+			// suggestion list straight to stderr - ahead of the diagnostic it belongs to and
+			// outside the collector entirely. The block was being produced correctly and
+			// landing in the wrong place, which is why it read as "no suggestions at all".
+			begin_error_block()
+			defer end_error_block()
+
+			enum_typ := type_to_string(th)
+			error(node, "Undeclared name '%s' for type '%s'", name, enum_typ)
+
+			// C++ line 9394 passes NO prefix; the port passed "." and so offered ".Alpha"
+			// where C++ offers "Alpha".
 			suggest_bt := base_type(th)
 			if suggest_bt != nil && suggest_bt.kind == .Enum {
 				en := suggest_bt.variant.(Type_Enum)
-				check_did_you_mean_type(name, en.fields[:], ".")
+				check_did_you_mean_type(name, en.fields[:])
 			}
 
-		} else if is_type_bit_set(th) {
-			bt := base_type(th).variant.(Type_Bit_Set)
-			if is_type_enum(bt.elem) {
-				// Bit set with enum base - suggest using { .field } syntax
-				// C++ Reference: check_expr.cpp:8839-8841
-				error(node, "Cannot convert enum value to bit_set; did you mean '{ .%s }'?", name)
-			} else {
-				// C++ Reference: check_expr.cpp:9408 -- names the TYPE and the expression.
-				ise_typ := type_to_string(type_hint)
-				ise_str := expr_to_string(node)
-				defer delete(ise_str)
-				error(node, "Invalid type '%s' for implicit selector expression '%s'", ise_typ, ise_str)
-			}
+		} else if is_type_bit_set(th) && is_type_enum(bit_set_elem_of(th)) {
+			// C++ Reference: check_expr.cpp:9395-9403. Two lines, not one: the message names
+			// the TYPE, and the suggestion is a separate continuation naming the EXPRESSION.
+			// The port had a single invented message that named neither
+			// ("Cannot convert enum value to bit_set; did you mean '{ .%s }'?").
+			begin_error_block()
+			defer end_error_block()
+
+			bs_typ := type_to_string(th)
+			bs_str := expr_to_string(node)
+			defer delete(bs_str)
+			error(node, "Cannot convert enum value to '%s'", bs_typ)
+			error_line("\tSuggestion: Did you mean '{ %s }'?\n", bs_str)
 
 		} else {
-			// Generic error for unsupported type
-			error(node, "Invalid type for implicit selector expression")
+			// C++ Reference: check_expr.cpp:9404-9409 -- names the TYPE and the expression.
+			// The port's fallback named neither ("Invalid type for implicit selector
+			// expression"), and was only reachable for non-bit_set types because the
+			// bit_set-with-non-enum-element case was handled by a nested else above.
+			ise_typ := type_to_string(th)
+			ise_str := expr_to_string(node)
+			defer delete(ise_str)
+			error(node, "Invalid type '%s' for implicit selector expression '%s'", ise_typ, ise_str)
 		}
 	}
 
