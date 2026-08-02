@@ -334,6 +334,38 @@ file_header_selects_target :: proc(fullpath: string, src: string, target: parser
 	return false
 }
 
+// owned_file_pos clones a position's file string into the error collector's allocator.
+//
+// Needed wherever the diagnostic outlives the ^ast.File it came from -- which is exactly the
+// abandoned-file case below, since the fullpath is freed as soon as the file is dropped.
+// progress#195 shipped this bug once already (LEDGER #218: a Pos.file slice into a freed
+// buffer made the whole checker flaky ~20% of runs), so a clone is not optional here.
+@(private = "file")
+owned_file_pos :: proc(pos: tokenizer.Pos) -> tokenizer.Pos {
+	out := pos
+	out.file = strings.clone(pos.file, global_error_collector.allocator)
+	return out
+}
+
+// first_invalid_token walks the whole source and reports the position of the first
+// Token_Invalid, matching init_ast_file's loop. It is deliberately SILENT: it decides whether
+// a second, reporting pass is needed, and a clean file must not pay for two sets of
+// diagnostics.
+@(private = "file")
+first_invalid_token :: proc(src: string, path: string) -> (pos: tokenizer.Pos, found: bool) {
+	t: tokenizer.Tokenizer
+	tokenizer.init(&t, src, path, nil)
+	for {
+		tok := tokenizer.scan(&t)
+		if tok.kind == .Invalid {
+			return tok.pos, true
+		}
+		if tok.kind == .EOF {
+			return {}, false
+		}
+	}
+}
+
 // collect_package_for_target reads a package directory into an unparsed ^ast.Package, admitting
 // only the files that belong to the target being checked.
 //
@@ -415,7 +447,58 @@ collect_package_for_target :: proc(path: string, kind: ast.Package_Kind = .Norma
 		}
 
 		// (2) `#+build` tags - decided from the file header, still before the parse.
-		if !file_header_selects_target(fullpath, string(src), target, kind) {
+		selected := file_header_selects_target(fullpath, string(src), target, kind)
+
+		// (3) Tokenize. C++ Reference: init_ast_file (src/parser.cpp:5709-5787) runs the
+		// tokenizer over the WHOLE file into an array before the parser sees a single
+		// token, and process_imported_file (6945-6990) turns its result code into a
+		// diagnostic. Two consequences the port did not have:
+		//
+		//   a. A `#+build`-excluded file is still TOKENIZED. Only the filename-suffix
+		//      filter (1) short-circuits before the file is read; the `#+build` tag lives
+		//      in the token stream, so by the time it is known the tokenizer has already
+		//      run and reported. Verified against the oracle: a `#+build ignore` file
+		//      containing `0hff`, an unterminated "" string or an unterminated `` string
+		//      reports that error, while a PARSE error in the same file (`x := (`) and a
+		//      literal-value error (`1e309`) report nothing. The port reported none of
+		//      them, because it dropped excluded files before tokenizing.
+		//
+		//   b. A Token_Invalid ABANDONS the file:
+		//          if (token->kind == Token_Invalid) {
+		//              err_pos->line = token->pos.line; err_pos->column = token->pos.column;
+		//              return ParseFile_InvalidToken;
+		//          }
+		//      and the caller reports "Failed to parse file: %s; invalid token found in
+		//      file" AT THAT TOKEN. The file is never parsed, so no recovery diagnostics
+		//      follow it -- the port instead carried on and said "Expected an operand".
+		//
+		// The scan below is silent, so a clean included file pays only the extra walk; the
+		// diagnostics are re-emitted only when this pass is the ONLY one that will see the
+		// file (excluded, or abandoned). A file that is parsed normally reports its
+		// tokenizer diagnostics from parse_file as before, exactly once.
+		invalid_pos, has_invalid := first_invalid_token(string(src), fullpath)
+		if has_invalid || !selected {
+			t: tokenizer.Tokenizer
+			tokenizer.init(&t, string(src), fullpath, syntax_error_pos)
+			for {
+				tok := tokenizer.scan(&t)
+				if tok.kind == .EOF || tok.kind == .Invalid {
+					break
+				}
+			}
+		}
+		if has_invalid {
+			syntax_error_pos(
+				owned_file_pos(invalid_pos),
+				"Failed to parse file: %s; invalid token found in file",
+				filepath.base(fullpath),
+			)
+			delete(fullpath)
+			delete(src)
+			continue
+		}
+
+		if !selected {
 			delete(fullpath)
 			delete(src)
 			continue

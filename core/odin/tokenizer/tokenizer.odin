@@ -166,13 +166,13 @@ advance_rune :: proc(t: ^Tokenizer) {
 		r, w := rune(t.src[t.read_offset]), 1
 		switch {
 		case r == 0:
-			error(t, t.offset, "illegal character NUL")
+			error(t, t.offset, "Illegal character NUL")
 		case r >= utf8.RUNE_SELF:
 			r, w = utf8.decode_rune_in_string(t.src[t.read_offset:])
 			if r == utf8.RUNE_ERROR && w == 1 {
-				error(t, t.offset, "illegal UTF-8 encoding")
+				error(t, t.offset, "Illegal UTF-8 encoding")
 			} else if r == utf8.RUNE_BOM && t.offset > 0 {
-				error(t, t.offset, "illegal byte order mark")
+				error(t, t.offset, "Illegal byte order mark")
 			}
 		}
 		t.read_offset += w
@@ -272,7 +272,13 @@ scan_comment :: proc(t: ^Tokenizer) -> string {
 			}
 		}
 
-		error(t, offset, "comment not terminated")
+		// Current position, not the comment START. Reporting at the start produced a
+		// NEGATIVE column -- the offset belongs to an earlier line, so subtracting the
+		// final line's line_offset underflows, and an unterminated `/*` printed as
+		// "(4:-15)". C++'s one-argument tokenizer_err reports where the scan stopped, and
+		// clamps: `if (column < 1) { column = 1; }` (src/tokenizer.cpp:320-323).
+		// LEDGER #369.
+		error(t, t.offset, "Multi-line comment not terminated")
 	}
 
 	lit := t.src[offset : t.offset]
@@ -319,7 +325,10 @@ scan_string :: proc(t: ^Tokenizer) -> string {
 	for {
 		ch := t.ch
 		if ch == '\n' || ch < 0 {
-			error(t, offset, "string literal was not terminated")
+			// Current position, not the token start: the one-argument tokenizer_err
+			// (src/tokenizer.cpp:318-335) builds its TokenPos from t->line_count and
+			// t->column_minus_one, i.e. where the scan stopped. LEDGER #369.
+			error(t, t.offset, "String literal not terminated")
 			break
 		}
 		advance_rune(t)
@@ -340,7 +349,8 @@ scan_raw_string :: proc(t: ^Tokenizer) -> string {
 	for {
 		ch := t.ch
 		if ch == utf8.RUNE_EOF {
-			error(t, offset, "raw string literal was not terminated")
+			// Current position, as above.
+			error(t, t.offset, "String literal not terminated")
 			break
 		}
 		advance_rune(t)
@@ -387,9 +397,9 @@ scan_escape :: proc(t: ^Tokenizer) -> bool {
 		n, base, max = 8, 16, utf8.MAX_RUNE
 	case:
 		if t.ch < 0 {
-			error(t, offset, "escape sequence was not terminated")
+			error(t, offset, "Escape sequence was not terminated")
 		} else {
-			error(t, offset, "unknown escape sequence")
+			error(t, offset, "Unknown escape sequence")
 		}
 		return false
 	}
@@ -399,9 +409,9 @@ scan_escape :: proc(t: ^Tokenizer) -> bool {
 		d := u32(digit_val(t.ch))
 		for d >= base {
 			if t.ch < 0 {
-				error(t, t.offset, "escape sequence was not terminated")
+				error(t, t.offset, "Escape sequence was not terminated")
 			} else {
-				error(t, t.offset, "illegal character %d in escape sequence", t.ch)
+				error(t, t.offset, "Illegal character %d in escape sequence", t.ch)
 			}
 			return false
 		}
@@ -425,10 +435,14 @@ scan_rune :: proc(t: ^Tokenizer) -> string {
 	for {
 		ch := t.ch
 		if ch == '\n' || ch < 0 {
-			if valid {
-				error(t, offset, "rune literal not terminated")
-				valid = false
-			}
+			// C++ Reference: src/tokenizer.cpp:765-769. The report is UNCONDITIONAL and does
+			// NOT clear `valid`, so an unterminated rune literal draws BOTH this and the
+			// length complaint below. The port guarded it with `if valid` and then set
+			// valid = false, which suppressed the second diagnostic entirely -- `y := 'ab`
+			// gave one error where the oracle gives two. It also reported at the token
+			// START; the one-argument tokenizer_err (src/tokenizer.cpp:318-335) reports at
+			// the CURRENT position, which is the newline. LEDGER #369.
+			error(t, t.offset, "Rune literal not terminated")
 			break
 		}
 		advance_rune(t)
@@ -444,7 +458,9 @@ scan_rune :: proc(t: ^Tokenizer) -> string {
 	}
 
 	if valid && n != 1 {
-		error(t, offset, "illegal rune literal")
+		// This one DOES take the token start, via the two-argument tokenizer_err
+		// (src/tokenizer.cpp:337): `tokenizer_err(t, token->pos, "Invalid rune literal")`.
+		error(t, offset, "Invalid rune literal")
 	}
 
 	return string(t.src[offset : t.offset])
@@ -873,7 +889,7 @@ scan :: proc(t: ^Tokenizer) -> Token {
 			}
 		case:
 			if ch != utf8.RUNE_BOM {
-				error(t, t.offset, "illegal character '%r': %d", ch, ch)
+				error(t, t.offset, "Illegal character: %r (%d) ", ch, ch)
 			}
 			kind = .Invalid
 		}
