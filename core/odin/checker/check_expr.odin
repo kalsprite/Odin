@@ -4011,8 +4011,13 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 				return
 			}
 		} else if operand.mode == .Constant {
-			// Check if constant is representable in target type
-			check_is_expressible(ctx, operand, t)
+			// C++ Reference: check_expr.cpp:5051. C++ passes TARGET_TYPE here, not `t`.
+			// `t` exists only to switch on the type's KIND (base_type, or core_type inside
+			// an enum declaration); the representability check itself, and the message it
+			// prints, use the type as WRITTEN. Passing `t` named the underlying integer, so
+			// `E :: enum { A = "s" }` reported "Cannot convert ... to 'int'" where C++ says
+			// "to 'E'".
+			check_is_expressible(ctx, operand, target_type)
 			if operand.mode == .Invalid {
 				return
 			}
