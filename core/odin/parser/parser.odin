@@ -5,6 +5,7 @@ import "core:odin/ast"
 import "core:odin/tokenizer"
 
 import "core:fmt"
+import "core:strconv"
 
 Warning_Handler :: #type proc(pos: tokenizer.Pos, fmt: string, args: ..any)
 Error_Handler   :: #type proc(pos: tokenizer.Pos, fmt: string, args: ..any)
@@ -2612,78 +2613,166 @@ parse_inlining_or_tailing_operand :: proc(p: ^Parser, lhs: bool, tok: tokenizer.
 //         }
 //     }
 //
-// The tokenizer has already validated the digits, so the only way a literal that reached
-// here can fail to convert is the exponent bound inside big_int_from_string
-// (src/big_int.cpp:274-280):
+// The diagnostic belongs to the PARSER, not the checker. The port used to report an invalid
+// literal from check_basic_lit as "Error: Invalid integer literal: 0b12" -- wrong phase,
+// wrong severity label, and an extra ": %s" suffix C++ does not print. LEDGER #368.
 //
-//     // NOTE(Jeroen): A valid integer can never have an exponent larger than 308 (per
-//     //               `max(f64)`). As an integer, not even larger than `max(u128)` which
-//     //               has a base 10 exponent of 38. But we also use this path to parse
-//     //               float literals like those in `core:math.pow10_f64`, so we have to
-//     //               stick with 1e308.
-//     if (exp > 308) { *success = false; return; }
-//
-// and that path is only reached for text with NO '.' and NO '-', which
-// exact_value_float_from_string routes to the integer parser (src/exact_value.cpp:363-366).
-// So `1e309` and `1e400` are syntax errors -- reported as "Invalid INTEGER literal", because
-// the message is chosen by the text, not the token kind -- while `1.0e309` and `1.5e400` go
-// through strtod, overflow to an infinity, and are accepted silently.
-//
-// This bound is the ONLY thing that stops an out-of-range float constant: the checker's
-// check_representable_as_constant has no range check for float types at all. Without it the
-// port accepted `x: f64 = 1e309`. LEDGER #367.
+// literal_value_is_valid below is the SUCCESS predicate of big_int_from_string
+// (src/big_int.cpp:186-292) with the arithmetic removed, because whether a literal converts
+// depends only on how its characters classify. See the ported big_int_from_string in
+// core/odin/checker/exact_value.odin for the value side and for why the exponent's own
+// failure flag does not count.
 @(private)
 check_basic_literal_value :: proc(p: ^Parser, tok: tokenizer.Token) {
-	#partial switch tok.kind {
-	case .Integer, .Float:
-		// big_int_from_string reads the base prefix first and only reaches the exponent
-		// branch with `GB_ASSERT(base == 10)` -- in base 16 an 'e' is a DIGIT and is
-		// consumed as one, so `0x1e400` has no exponent at all. `0h` is the float
-		// bit-pattern form and never takes the integer path either
-		// (src/exact_value.cpp:335-360). Only the unprefixed and `0d` spellings are base 10.
-		body := tok.text
-		if len(body) > 2 && body[0] == '0' {
-			switch body[1] {
-			case 'd', 'D':
-				body = body[2:]
-			case 'b', 'B', 'o', 'O', 'x', 'X', 'h', 'H':
-				return
+	// The integer-conversion predicate: base from the prefix, then C++'s digit loop.
+	// Returns false exactly where big_int_from_string sets *success = false and that
+	// setting survives to the caller.
+	integer_value_is_valid :: proc(s: string) -> bool {
+		digit_value :: proc(r: u8) -> u64 {
+			switch r {
+			case '0' ..= '9':
+				return u64(r - '0')
+			case 'a' ..= 'f':
+				return u64(r - 'a') + 10
+			case 'A' ..= 'F':
+				return u64(r - 'A') + 10
+			}
+			return 16
+		}
+
+		base := u64(10)
+		has_prefix := false
+		if len(s) > 2 && s[0] == '0' {
+			switch s[1] {
+			case 'b':
+				base = 2
+				has_prefix = true
+			case 'o':
+				base = 8
+				has_prefix = true
+			case 'd':
+				base = 10
+				has_prefix = true
+			case 'z':
+				base = 12
+				has_prefix = true
+			case 'x', 'h':
+				base = 16
+				has_prefix = true
 			}
 		}
-		idx := -1
-		for i in 0 ..< len(body) {
-			switch body[i] {
-			case '.', '-':
-				return
-			case 'e', 'E':
-				if idx < 0 {
-					idx = i
+		text := s
+		if has_prefix {
+			text = text[2:]
+		}
+
+		is_negative := false
+		i := 0
+		broke_on_exponent := false
+		for ; i < len(text); i += 1 {
+			r := text[i]
+			if r == '-' {
+				if is_negative {
+					// NOTE(Jeroen): Can't have a doubly negative number.
+					return false
 				}
-			}
-		}
-		if idx < 0 {
-			return
-		}
-		exp_text := body[idx + 1:]
-		if len(exp_text) > 0 && exp_text[0] == '+' {
-			exp_text = exp_text[1:]
-		}
-		exp := 0
-		for i in 0 ..< len(exp_text) {
-			c := exp_text[i]
-			if c == '_' {
+				is_negative = true
 				continue
 			}
-			if c < '0' || c > '9' {
-				return
+			if r == '_' {
+				continue
 			}
-			exp = exp * 10 + int(c - '0')
-			if exp > 308 {
+			if digit_value(r) >= base {
+				// NOTE(Jeroen): Can still be a valid integer if the next character is an
+				// `e` or `E`.
+				if r != 'e' && r != 'E' {
+					return false
+				}
+				broke_on_exponent = true
 				break
 			}
 		}
-		if exp > 308 {
+		if !broke_on_exponent || i >= len(text) {
+			return true
+		}
+
+		// Inside the exponent, a non-digit sets *success = false and then
+		// big_int_exp_u64 immediately overwrites it with its own result, so the ONLY
+		// surviving failure is the 308 bound. `1e` and `1eff` are therefore valid.
+		i += 1
+		if i < len(text) && text[i] == '+' {
+			i += 1
+		}
+		exp := 0
+		for ; i < len(text); i += 1 {
+			r := text[i]
+			if r == '_' {
+				continue
+			}
+			if r < '0' || r > '9' {
+				break
+			}
+			exp = exp * 10 + int(r - '0')
+			if exp > 308 {
+				return false
+			}
+		}
+		return true
+	}
+
+	// The float-conversion predicate: strtod must consume the WHOLE string once
+	// underscores are removed (src/exact_value.cpp:228-232, `*success = *end_ptr == 0`).
+	float_value_is_valid :: proc(s: string) -> bool {
+		buf: [256]u8
+		n := 0
+		for i in 0 ..< len(s) {
+			c := s[i]
+			if c == '_' {
+				continue
+			}
+			if c == 'E' {
+				c = 'e'
+			}
+			if n >= len(buf) {
+				return true // longer than any real literal; leave it to the checker
+			}
+			buf[n] = c
+			n += 1
+		}
+		// strconv.parse_f64 reports ok=false on OVERFLOW, where strtod reports success and
+		// returns HUGE_VAL -- C++ only looks at end_ptr. Using ok directly rejected
+		// `1.0e309` and `1.5e400`, which the oracle accepts as infinities. Compare the
+		// consumed length instead: that is `*end_ptr == '\0'`.
+		_, nr, _ := strconv.parse_f64_prefix(string(buf[:n]))
+		return nr == n
+	}
+
+	#partial switch tok.kind {
+	case .Integer:
+		if !integer_value_is_valid(tok.text) {
 			error(p, tok.pos, "Invalid integer literal")
+		}
+
+	case .Float:
+		// The `0h` hexadecimal bit-pattern form is handled before either predicate and is
+		// never invalid (src/exact_value.cpp:335-360).
+		if len(tok.text) > 2 && tok.text[0] == '0' && (tok.text[1] == 'h' || tok.text[1] == 'H') {
+			return
+		}
+		has_point_or_minus := false
+		for i in 0 ..< len(tok.text) {
+			if tok.text[i] == '.' || tok.text[i] == '-' {
+				has_point_or_minus = true
+				break
+			}
+		}
+		if !has_point_or_minus {
+			// NOTE(Jeroen): Could be an integer, see `exact_value_float_from_string`.
+			if !integer_value_is_valid(tok.text) {
+				error(p, tok.pos, "Invalid integer literal")
+			}
+		} else if !float_value_is_valid(tok.text) {
+			error(p, tok.pos, "Invalid float literal")
 		}
 	}
 }

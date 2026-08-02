@@ -669,36 +669,12 @@ parse_exact_value_from_token :: proc(tok: tokenizer.Token) -> Exact_Value {
 		// substitute. `x: int = 100000000000000000000` compiled as 7766279631452241920.
 		// Fixing the i64 case by switching to the u64 helper repeated the bug at a larger
 		// bound; parsing into a BigInt removes the bound entirely. LEDGER #167.
-		{
-			body := text
-			radix := i8(10)
-			if len(body) > 2 && body[0] == '0' {
-				switch body[1] {
-				case 'b', 'B':
-					radix = 2
-					body = body[2:]
-				case 'o', 'O':
-					radix = 8
-					body = body[2:]
-				case 'd', 'D':
-					radix = 10
-					body = body[2:]
-				case 'x', 'X', 'h', 'H':
-					radix = 16
-					body = body[2:]
-				}
-			}
-			// Odin permits digit separators in literals; big.int_atoi does not.
-			cleaned := body
-			if strings.contains(body, "_") {
-				cleaned, _ = strings.replace_all(body, "_", "", context.temp_allocator)
-			}
-			v: big.Int
-			if big.int_atoi(&v, cleaned, radix) == nil {
-				return v
-			}
-		}
-		return nil
+		//
+		// LEDGER #368: the prefix/underscore/int_atoi sequence that used to live here was a
+		// REIMPLEMENTATION of big_int_from_string, and it disagreed with C++ about which
+		// literals are valid and what several of them are worth. It now calls the ported
+		// function, which is the single place that rule lives.
+		return exact_value_integer_from_string(text)
 
 	case .Float:
 		// C++ Reference: exact_value.cpp:363-365.
@@ -721,54 +697,44 @@ parse_exact_value_from_token :: proc(tok: tokenizer.Token) -> Exact_Value {
 		// for every such constant in core/strconv.
 		is_hex_float := len(text) > 2 && text[0] == '0' && (text[1] == 'h' || text[1] == 'H')
 		if !is_hex_float && !strings.contains(text, ".") && !strings.contains(text, "-") {
-			mantissa := text
-			exponent := 0
-			if idx := strings.index_any(text, "eE"); idx >= 0 {
-				mantissa = text[:idx]
-				exp_text := text[idx + 1:]
-				if len(exp_text) > 0 && exp_text[0] == '+' {
-					exp_text = exp_text[1:]
-				}
-				n, ok := strconv.parse_int(exp_text)
-				if !ok || n < 0 {
-					return nil
-				}
-				// C++ Reference: big_int.cpp:274-280 -- big_int_from_string refuses an
-				// exponent above 308 ("A valid integer can never have an exponent larger
-				// than 308 (per `max(f64)`)"), so `1e309` is an INVALID exact value, not a
-				// large one. The parser reports it (see check_basic_literal_value); this
-				// keeps the two in agreement about what the value is. LEDGER #367.
-				if n > 308 {
-					return nil
-				}
-				exponent = n
-			}
-			cleaned := mantissa
-			if strings.contains(mantissa, "_") {
-				cleaned, _ = strings.replace_all(mantissa, "_", "", context.temp_allocator)
-			}
-			v: big.Int
-			if big.int_atoi(&v, cleaned, 10) != nil {
-				return nil
-			}
-			if exponent > 0 {
-				ten: big.Int
-				scale: big.Int
-				if big.int_atoi(&ten, "10", 10) != nil {
-					return nil
-				}
-				if big.int_pow(&scale, &ten, exponent) != nil {
-					return nil
-				}
-				if big.int_mul(&v, &v, &scale) != nil {
-					return nil
-				}
-			}
-			return v
+			// LEDGER #368: this arm used to reimplement the exponent handling with a
+			// hardcoded base of 10 and its own error rules. It is the SAME C++ function as
+			// the integer arm above -- exact_value_float_from_string just calls
+			// exact_value_integer_from_string here -- so it goes through the same port.
+			// That is what makes `1e` and `1eff` (both 1) agree with the oracle, and it is
+			// where the exponent > 308 rule from #367 now lives.
+			return exact_value_integer_from_string(text)
 		}
 
-		value, ok := strconv.parse_f64(text)
-		if ok {
+		// C++ Reference: float_from_string (exact_value.cpp:214-245) normalises BEFORE
+		// calling strtod:
+		//
+		//     if (c == '_') { continue; }
+		//     if (c == 'E') { c = 'e'; }
+		//
+		// The port passed the raw token text to parse_f64, which does not skip digit
+		// separators, so every literal with an underscore in it -- `1.5e_3`, `1e-_4`, and
+		// the separator-formatted constants throughout core -- was reported as an invalid
+		// float. LEDGER #368.
+		buf := make([dynamic]u8, 0, len(text), context.temp_allocator)
+		for i in 0 ..< len(text) {
+			c := text[i]
+			if c == '_' {
+				continue
+			}
+			if c == 'E' {
+				c = 'e'
+			}
+			append(&buf, c)
+		}
+		// C++'s success criterion is `*end_ptr == '\0'` -- the WHOLE string was consumed --
+		// not that the result is finite. strtod returns HUGE_VAL for an overflowing literal
+		// and reports success, so `1.0e309` is a valid f64 constant holding +Inf.
+		// strconv.parse_f64 folds overflow into ok=false, which would have rejected it, so
+		// the prefix form is used and the consumed length is compared instead.
+		cleaned := string(buf[:])
+		value, nr, _ := strconv.parse_f64_prefix(cleaned)
+		if nr == len(cleaned) {
 			return value
 		}
 		// Invalid float

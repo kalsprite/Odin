@@ -450,12 +450,48 @@ scan_rune :: proc(t: ^Tokenizer) -> string {
 	return string(t.src[offset : t.offset])
 }
 
+// scan_number is a direct port of scan_number_to_token (src/tokenizer.cpp:454-582). Every
+// structural difference below was a divergence, verified one literal at a time against the
+// oracle before being changed. LEDGER #368.
 scan_number :: proc(t: ^Tokenizer, seen_decimal_point: bool) -> (Token_Kind, string) {
-	scan_mantissa :: proc(t: ^Tokenizer, base: int) {
-		for digit_val(t.ch) < base || t.ch == '_' {
+	// C++ Reference: src/tokenizer.cpp:437-443.
+	//
+	//     gb_internal gb_inline void scan_mantissa(Tokenizer *t, i32 base, bool force_base) {
+	//         if (!force_base) {
+	//             base = 16; // always check for any possible letter
+	//         }
+	//         while (digit_value(t->curr_rune) < base || t->curr_rune == '_') {
+	//             advance_to_next_rune(t);
+	//         }
+	//     }
+	//
+	// The force_base parameter did not exist in the port, so every unforced call scanned in
+	// its NOMINAL base and stopped at the first out-of-range digit. C++ deliberately widens
+	// to 16 so the whole run of letters and digits is swallowed into ONE token and the
+	// out-of-range digit is diagnosed later, by the value parser, as "Invalid integer
+	// literal". Without it `0d1a` tokenized as `0d1` followed by the identifier `a` and the
+	// port reported "Expected ';', got identifier" where C++ reports the literal error.
+	scan_mantissa :: proc(t: ^Tokenizer, base: int, force_base: bool) {
+		b := base
+		if !force_base {
+			b = 16 // always check for any possible letter
+		}
+		for digit_val(t.ch) < b || t.ch == '_' {
 			advance_rune(t)
 		}
 	}
+	// C++ Reference: src/tokenizer.cpp:562-577. The exponent body is exactly
+	//
+	//     advance_to_next_rune(t);
+	//     if (t->curr_rune == '-' || t->curr_rune == '+') { advance_to_next_rune(t); }
+	//     scan_mantissa(t, 10, false);
+	//
+	// with NO error arm at all -- and force_base is false, so underscores and letters are
+	// consumed. The port required a decimal digit immediately after the 'e' and otherwise
+	// emitted "illegal floating-point exponent", a message C++ does not have. That rejected
+	// `1e_4`, `1e+_4`, `1e-_4`, `1.5e_3`, `1e` and `1eff`, all of which the oracle accepts
+	// silently. An underscore is a digit SEPARATOR everywhere else in a literal; the
+	// exponent was the only place the port refused it.
 	scan_exponent :: proc(t: ^Tokenizer, kind: ^Token_Kind) {
 		if t.ch == 'e' || t.ch == 'E' {
 			kind^ = .Float
@@ -463,11 +499,7 @@ scan_number :: proc(t: ^Tokenizer, seen_decimal_point: bool) -> (Token_Kind, str
 			if t.ch == '-' || t.ch == '+' {
 				advance_rune(t)
 			}
-			if digit_val(t.ch) < 10 {
-				scan_mantissa(t, 10)
-			} else {
-				error(t, t.offset, "illegal floating-point exponent")
-			}
+			scan_mantissa(t, 10, false)
 		}
 
 		// NOTE(bill): This needs to be here for sanity's sake
@@ -477,90 +509,97 @@ scan_number :: proc(t: ^Tokenizer, seen_decimal_point: bool) -> (Token_Kind, str
 			advance_rune(t)
 		}
 	}
-	scan_fraction :: proc(t: ^Tokenizer, kind: ^Token_Kind) -> (early_exit: bool) {
-		if t.ch == '.' && peek_byte(t) == '.' {
-			return true
-		}
-		if t.ch == '.' {
-			kind^ = .Float
-			advance_rune(t)
-			scan_mantissa(t, 10)
-		}
-		return false
-	}
-
 
 	offset := t.offset
 	kind := Token_Kind.Integer
-	seen_point := seen_decimal_point
 
-	if seen_point {
+	if seen_decimal_point {
 		offset -= 1
 		kind = .Float
-		scan_mantissa(t, 10)
+		scan_mantissa(t, 10, true)
 		scan_exponent(t, &kind)
-	} else {
-		if t.ch == '0' {
-			int_base :: proc(t: ^Tokenizer, kind: ^Token_Kind, base: int, msg: string) {
-				prev := t.offset
-				advance_rune(t)
-				scan_mantissa(t, base)
-				if t.offset - prev <= 1 {
-					kind^ = .Invalid
-					error(t, t.offset, msg)
-				}
-			}
-
-			advance_rune(t)
-			switch t.ch {
-			case 'b': int_base(t, &kind,  2, "illegal binary integer")
-			case 'o': int_base(t, &kind,  8, "illegal octal integer")
-			case 'd': int_base(t, &kind, 10, "illegal decimal integer")
-			case 'z': int_base(t, &kind, 12, "illegal dozenal integer")
-			case 'x': int_base(t, &kind, 16, "illegal hexadecimal integer")
-			case 'h':
-				kind = .Float
-				prev := t.offset
-				advance_rune(t)
-				scan_mantissa(t, 16)
-				if t.offset - prev <= 1 {
-					kind = .Invalid
-					error(t, t.offset, "illegal hexadecimal floating-point number")
-				} else {
-					sub := t.src[prev+1 : t.offset]
-					digit_count := 0
-					for d in sub {
-						if d != '_' {
-							digit_count += 1
-						}
-					}
-
-					switch digit_count {
-					case 4, 8, 16: break
-					case:
-						error(t, t.offset, "invalid hexadecimal floating-point number, expected 4, 8, or 16 digits, got %d", digit_count)
-					}
-				}
-
-			case:
-				seen_point = false
-				scan_mantissa(t, 10)
-				if t.ch == '.' {
-					seen_point = true
-					if scan_fraction(t, &kind) {
-						return kind, string(t.src[offset : t.offset])
-					}
-				}
-				scan_exponent(t, &kind)
-				return kind, string(t.src[offset : t.offset])
-			}
-		}
+		return kind, string(t.src[offset : t.offset])
 	}
 
-	scan_mantissa(t, 10)
+	if t.ch == '0' {
+		// C++ takes `prev` at the '0' ITSELF, before advancing, and tests `curr - prev <= 2`
+		// -- i.e. nothing was consumed beyond the two prefix bytes. The port took prev at the
+		// base letter and tested `<= 1`, which is the same predicate; it is preserved here in
+		// C++'s spelling because the `0h` digit-count slice is measured from the same anchor.
+		prev := t.offset
+		advance_rune(t)
 
-	if scan_fraction(t, &kind) {
-		return kind, string(t.src[offset : t.offset])
+		// C++ Reference: src/tokenizer.cpp:475-508. Each prefixed base ends in `goto end`,
+		// so no fraction, no exponent and no imaginary suffix is scanned after one. The port
+		// fell through into scan_mantissa/scan_fraction/scan_exponent instead, so `0x1.5`
+		// became a SINGLE float token where C++ produces `0x1` and then `.5` (and reports
+		// "Expected ';', got float"), and `0b101e5` became a float where C++ stops at `0b101`.
+		int_base :: proc(t: ^Tokenizer, kind: ^Token_Kind, prev: int, base: int, msg: string) {
+			advance_rune(t)
+			scan_mantissa(t, base, false)
+			if t.offset - prev <= 2 {
+				kind^ = .Invalid
+				error(t, t.offset, msg)
+			}
+		}
+
+		switch t.ch {
+		case 'b':
+			int_base(t, &kind, prev, 2, "Invalid binary integer")
+			return kind, string(t.src[offset : t.offset])
+		case 'o':
+			int_base(t, &kind, prev, 8, "Invalid octal integer")
+			return kind, string(t.src[offset : t.offset])
+		case 'd':
+			int_base(t, &kind, prev, 10, "Invalid explicitly decimal integer")
+			return kind, string(t.src[offset : t.offset])
+		case 'z':
+			int_base(t, &kind, prev, 12, "Invalid dozenal integer")
+			return kind, string(t.src[offset : t.offset])
+		case 'x':
+			int_base(t, &kind, prev, 16, "Invalid hexadecimal integer")
+			return kind, string(t.src[offset : t.offset])
+		case 'h':
+			kind = .Float
+			advance_rune(t)
+			scan_mantissa(t, 16, false)
+			if t.offset - prev <= 2 {
+				kind = .Invalid
+				error(t, t.offset, "Invalid hexadecimal float")
+			} else {
+				sub := t.src[prev + 2 : t.offset]
+				digit_count := 0
+				for d in sub {
+					if d != '_' {
+						digit_count += 1
+					}
+				}
+
+				switch digit_count {
+				case 4, 8, 16:
+					// C++ has a bare `break` here; the count is valid.
+				case:
+					error(t, t.offset, "Invalid hexadecimal float, expected 4, 8, or 16 digits, got %d", digit_count)
+				}
+			}
+			return kind, string(t.src[offset : t.offset])
+
+		case:
+			scan_mantissa(t, 10, true)
+		}
+	} else {
+		scan_mantissa(t, 10, true)
+	}
+
+	// C++ Reference: src/tokenizer.cpp:545-560 (`fraction:`).
+	if t.ch == '.' {
+		if peek_byte(t) == '.' {
+			// NOTE(bill): this is kind of ellipsis
+			return kind, string(t.src[offset : t.offset])
+		}
+		advance_rune(t)
+		kind = .Float
+		scan_mantissa(t, 10, true)
 	}
 
 	scan_exponent(t, &kind)

@@ -1673,21 +1673,188 @@ exact_value_string16 :: proc(s: Exact_Value_String16) -> Exact_Value {
 // C++ Reference: exact_value.cpp:190-394
 // ======================================================================================
 
-// exact_value_integer_from_string parses a string to create an integer exact value
-// C++ Reference: exact_value.cpp:190-199
-exact_value_integer_from_string :: proc(str: string) -> Exact_Value {
-	// C++ line 191-192: Create result with zero-initialized BigInt
-	result: big.Int
+// u64_digit_value is C++'s u64_digit_value (src/common.cpp:172-195): the value of a single
+// base-16 digit, and 16 (i.e. "not a digit in any base we support") for anything else.
+@(private = "file")
+u64_digit_value :: proc(r: u8) -> u64 {
+	switch r {
+	case '0' ..= '9':
+		return u64(r - '0')
+	case 'a' ..= 'f':
+		return u64(r - 'a') + 10
+	case 'A' ..= 'F':
+		return u64(r - 'A') + 10
+	}
+	return 16
+}
 
-	// C++ line 193-194: Parse string to BigInt using int_atoi
-	// The Odin API is: int_atoi :: proc(res: ^Int, input: string, radix := i8(10), allocator := context.allocator) -> (err: Error)
-	err := big.int_atoi(&result, str, 10)
+// big_int_from_string is a direct port of big_int_from_string (src/big_int.cpp:186-292).
+//
+// The port previously hand-rolled this in two places (parse_exact_value_from_token's integer
+// arm and its float-token-as-integer arm) as "strip the prefix, strip the underscores, call
+// big.int_atoi, then multiply by 10^exponent". That reimplementation disagreed with C++ on
+// four separate points, each of which is a real literal the oracle and the port disagreed
+// about. LEDGER #368.
+//
+//  1. THE EXPONENT IS IN THE LITERAL'S OWN BASE, not base 10. C++ builds `b` from the
+//     detected base and calls big_int_exp_u64(&tmp, &b, exp), so the scale factor is
+//     base^exp. The port hardcoded 10. This is only reachable for base 10 in practice:
+//     C++ guards the exponent branch with GB_ASSERT(base == 10) and that assertion DOES
+//     fire -- `x := 0b101e5` and `x := 0o17e2` abort the oracle with
+//     "src/big_int.cpp(252): Assertion Failure: `base == 10`". So there is no oracle
+//     behaviour to match for those spellings; the port computes base^exp rather than
+//     dying, which is strictly more defined. Filed upstream as #225.
+//  2. A DIGIT OUT OF RANGE IS ONLY AN ERROR IF IT IS NOT 'e'/'E'. C++'s own comment:
+//         // NOTE(Jeroen): Can still be a valid integer if the next character is an `e` or `E`.
+//     That is what lets a prefixed literal carry an exponent at all.
+//  3. AN EMPTY OR MALFORMED EXPONENT IS NOT AN ERROR. If the digit loop breaks on a
+//     non-digit it sets success = false -- and then big_int_exp_u64 assigns
+//     `*success = err == MP_OKAY`, OVERWRITING it. So `1e` and `1eff` both parse as 1 and
+//     are accepted silently. This is an upstream bug (the failure flag is clobbered), but
+//     it is observable behaviour and the port must reproduce it to match; see the note at
+//     the assignment below.
+//  4. '-' IS ACCEPTED ANYWHERE and negates once; a second '-' fails.
+//
+// C++ has GB_ASSERT(base == 10) and GB_ASSERT(text[i] != '-') at the head of the exponent
+// branch. They are live in the shipped compiler (see point 1); reproducing them would mean
+// aborting the checker on valid-looking input, so they are deliberately not ported.
+@(private = "file")
+big_int_from_string :: proc(s: string) -> (dst: big.Int, success: bool) {
+	success = true
 
-	// C++ line 195-197: Return invalid on failure
-	if err != nil {
-		return nil
+	is_negative := false
+
+	base := u64(10)
+	has_prefix := false
+	if len(s) > 2 && s[0] == '0' {
+		switch s[1] {
+		case 'b':
+			base = 2
+			has_prefix = true
+		case 'o':
+			base = 8
+			has_prefix = true
+		case 'd':
+			base = 10
+			has_prefix = true
+		case 'z':
+			base = 12
+			has_prefix = true
+		case 'x':
+			base = 16
+			has_prefix = true
+		case 'h':
+			base = 16
+			has_prefix = true
+		}
 	}
 
+	text := s
+	if has_prefix {
+		text = text[2:]
+	}
+
+	b: big.Int
+	if big.int_set_from_integer(&b, base) != nil {
+		return dst, false
+	}
+	if big.int_set_from_integer(&dst, 0) != nil {
+		return dst, false
+	}
+
+	i := 0
+	for ; i < len(text); i += 1 {
+		r := text[i]
+
+		if r == '-' {
+			if is_negative {
+				// NOTE(Jeroen): Can't have a doubly negative number.
+				return dst, false
+			}
+			is_negative = true
+			continue
+		}
+
+		if r == '_' {
+			continue
+		}
+		v := u64_digit_value(r)
+		if v >= base {
+			// NOTE(Jeroen): Can still be a valid integer if the next character is an `e` or `E`.
+			if r != 'e' && r != 'E' {
+				success = false
+			}
+			break
+		}
+
+		digit: big.Int
+		if big.int_set_from_integer(&digit, v) != nil {
+			return dst, false
+		}
+		if big.int_mul(&dst, &dst, &b) != nil {
+			return dst, false
+		}
+		if big.int_add(&dst, &dst, &digit) != nil {
+			return dst, false
+		}
+	}
+	if i < len(text) && (text[i] == 'e' || text[i] == 'E') {
+		i += 1
+		if i < len(text) && text[i] == '+' {
+			i += 1
+		}
+
+		exp := u64(0)
+		for ; i < len(text); i += 1 {
+			r := text[i]
+			if r == '_' {
+				continue
+			}
+			if r >= '0' && r <= '9' {
+				exp = exp * 10 + u64(r - '0')
+			} else {
+				success = false
+				break
+			}
+		}
+
+		// NOTE(Jeroen): A valid integer can never have an exponent larger than 308 (per
+		//               `max(f64)`). As an integer, not even larger than `max(u128)` which
+		//               has a base 10 exponent of 38. But we also use this path to parse
+		//               float literals like those in `core:math.pow10_f64`, so we have to
+		//               stick with 1e308.
+		if exp > 308 {
+			return dst, false
+		}
+
+		tmp: big.Int
+		// C++ Reference: big_int_exp_u64 (src/big_int.cpp:374-385) ends with
+		//     *success = err == MP_OKAY;
+		// an UNCONDITIONAL assignment, so any failure recorded by the digit loop above is
+		// discarded here. Reproduced deliberately: it is why `1e` and `1eff` compile.
+		success = big.int_pow(&tmp, &b, int(exp)) == nil
+		if success {
+			if big.int_mul(&dst, &dst, &tmp) != nil {
+				return dst, false
+			}
+		}
+	}
+
+	if is_negative {
+		if big.int_neg(&dst, &dst) != nil {
+			return dst, false
+		}
+	}
+	return dst, success
+}
+
+// exact_value_integer_from_string parses a string to create an integer exact value
+// C++ Reference: exact_value.cpp:201-210
+exact_value_integer_from_string :: proc(str: string) -> Exact_Value {
+	result, ok := big_int_from_string(str)
+	if !ok {
+		return nil
+	}
 	return result
 }
 
