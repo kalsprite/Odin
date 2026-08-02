@@ -9174,7 +9174,43 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			add_type_and_value(ctx, node, o.mode, o.type, o.value)
 			return .Expr
 		}
-		// If directive not handled, continue to report error
+		// C++ reaches check_builtin_procedure_directive through check_builtin_procedure's
+		// `case BuiltinProc_DIRECTIVE:` (src/check_builtin.cpp:2917) -- that is, only once the
+		// callee has ALREADY been resolved to a builtin. A false return there means "this
+		// builtin call failed", and the caller never re-examines the callee.
+		//
+		// The port dispatches earlier, from check_call_expr, and used to fall through to
+		// `check_expr_or_type(ctx, o, call.expr)` on false. That re-evaluates the callee as a
+		// BARE directive and hits check_basic_directive_expr, which emits
+		// "'#assert' must be used as a call" -- for a call. The comment here said "If
+		// directive not handled, continue to report error", but the guard above has already
+		// established that the callee IS a Basic_Directive, so a false return cannot mean
+		// "not handled": it means handled-and-reported, or the deliberate
+		// `.Directive_Was_False` result. Falling through was wrong in both cases.
+		//
+		// Visible in probe poly, and the reason #190 counted errors=2 against C++'s 1 on
+		// `#assert(x == 1)` with a non-constant condition. LEDGER #375.
+		//
+		// One thing the fallthrough WAS providing: a diagnostic for a directive name nothing
+		// recognises. `#unknown_thing(1)` draws "Unknown directive: #unknown_thing" from the
+		// oracle, so that report is reproduced here rather than lost. The name set is C++'s
+		// directive-CALL set (check_builtin_procedure_directive, src/check_builtin.cpp:2415
+		// onward); a name inside it that still returned false is a handler that reported, or
+		// a known gap in the port -- see #229 for load_directory/load_hash/load_or, which the
+		// port's handler does not implement as calls at all.
+		if bd, bd_ok := call.expr.derived.(^ast.Basic_Directive); bd_ok {
+			switch bd.name {
+			case "assert", "caller_expression", "config", "defined", "exists", "hash",
+			     "load", "load_directory", "load_hash", "load_or", "location", "panic":
+				// Known to C++; the handler owns the diagnostic.
+			case:
+				error_node(node, "Unknown directive: #%s", bd.name)
+			}
+		}
+		o.mode = .Invalid
+		o.type = t_invalid
+		o.expr = node
+		return .Expr
 	}
 
 	// Step 1: Check the callee expression (the thing being called)

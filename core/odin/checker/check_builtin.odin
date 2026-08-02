@@ -3365,11 +3365,28 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
-		// First argument must be a constant boolean condition
+		// First argument must be a constant boolean condition.
+		//
+		// C++ Reference: check_builtin.cpp:2620-2625.
+		//
+		//     // operand->type can be nil if the condition is a procedure, for example:
+		//     // #assert(assert()) So let's check it before we use it, so we get the same
+		//     // error as if we wrote `#exists(assert())
+		//     if (operand->type == nullptr || !is_type_boolean(operand->type) ||
+		//         operand->mode != Addressing_Constant) {
+		//         gbString str = expr_to_string(ce->args[0]);
+		//         error(call, "'%s' is not a constant boolean", str);
+		//
+		// Three differences from what the port had. C++ also rejects a nil type and a
+		// NON-BOOLEAN constant, where the port tested the mode alone; it names the CONDITION
+		// EXPRESSION rather than describing the requirement; and it reports at `call`, so the
+		// position is the '#', not the argument. LEDGER #375.
 		cond_op: Operand
 		check_expr(ctx, &cond_op, call_expr.args[0])
-		if cond_op.mode != .Constant {
-			error(call_expr.args[0], "'#assert' condition must be a constant expression")
+		if cond_op.type == nil || !is_type_boolean(cond_op.type) || cond_op.mode != .Constant {
+			cond_str := expr_to_string(call_expr.args[0])
+			defer delete(cond_str)
+			error_node(call, "'%s' is not a constant boolean", cond_str)
 			return false
 		}
 
