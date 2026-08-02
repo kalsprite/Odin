@@ -10,7 +10,6 @@ following the logic in check_expr.cpp from the Odin compiler.
 import "core:fmt"
 import "core:math/big"
 import "core:odin/ast"
-import "core:reflect"
 import "core:odin/tokenizer"
 import "core:os"
 import "core:path/filepath"
@@ -7799,14 +7798,24 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 		return .Stmt
 
 	case:
-		// Unsupported expression type - report error
-		// NOTE: `derived` is an ast.Any_Node here (this is the default arm of the type switch),
-		// so "%T" printed the union's own name - every one of these read "Any_Node", which says
-		// nothing about what is actually unhandled. Report the variant instead.
-		error(node, "Expression type not yet supported: %v", reflect.union_variant_typeid(node.derived))
-		o.mode = .Invalid
-		o.type = t_invalid
-		return .Stmt
+		// C++ Reference: check_expr.cpp, the tail of check_expr_base_internal. C++ has NO
+		// erroring default. Its switch ends with a grouped case for the type-node kinds
+		// (DistinctType/TypeidType/PolyType/ProcType/Pointer/MultiPointer/Array/DynamicArray/
+		// FixedCapacityDynamicArray/Struct/Union/Enum/Map/BitSet/Matrix/RelativeType) and
+		// anything else simply falls out to `kind = Expr_Expr; o->expr = node; return kind;`
+		// -- silently, with the operand left as the caller initialised it.
+		//
+		// The port had an INVENTED diagnostic here, "Expression type not yet supported: %v".
+		// It was an OVER-REJECTION, not just a message-quality problem: for
+		// `y: int = #type proc(int) -> int` the reference compiler reports NOTHING and the
+		// port reported an error naming an internal Odin type (`^Helper_Type`). Verified
+		// against the oracle in probe helper.
+		//
+		// Losing the diagnostic does cost a useful internal signal about unhandled nodes.
+		// That signal is not C++'s behaviour, and LEDGER 405 is the standing lesson here:
+		// the port being more informative than the reference is still a divergence.
+		o.expr = node
+		return .Expr
 	}
 }
 
