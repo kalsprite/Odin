@@ -722,6 +722,21 @@ discard_abandoned_queue_work :: proc(c: ^Checker) {
 	// Consumed on the normal path by check_merge_queues_into_arrays (completed inline).
 	// C++ Reference: checker.cpp:7445-7447
 	discard_all(&c.soa_types_to_complete)
+
+	// Consumed on the normal path by the body-checking phase.
+	//
+	// This one was MISSING, and it is the queue that actually strands work: with the error
+	// cap fixed so that limit_reached can latch at all, a package of 40 undeclared names
+	// unwound with 298 items still in it and tripped
+	// "MPSC queue must be empty before destroy". Every other queue in this helper was
+	// already at zero -- measured by printing all ten counts immediately before the
+	// mpsc_destroy block:
+	//
+	//     QDBG definition=0 entity=0 req_glob=0 req_foreign=0 fi_paths=0
+	//          fd_check=0 raddbg=0 entry=0 objc=0 allprocs=298
+	//
+	// LEDGER #381.
+	discard_all(&c.info.all_procedures_queue)
 }
 
 // verify_queues_empty checks that all primary queues are empty after draining

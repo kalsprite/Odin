@@ -159,7 +159,26 @@ init_error_collector :: proc(max_errors := 100, warnings_as_errors := false, ign
 
 	build_context.warnings_as_errors = warnings_as_errors
 	build_context.ignore_warnings = ignore_warnings
-	build_context.max_error_count = max_errors
+	// NOTE: build_context.max_error_count is deliberately NOT written here.
+	//
+	// C++ has one cap and one source for it -- DEFAULT_MAX_ERROR_COLLECTOR_COUNT (36,
+	// src/build_settings.cpp:11), applied by init_build_context and overridable only by
+	// `-max-error-count`. error_va compares the collector's count against
+	// MAX_ERROR_COLLECTOR_COUNT() and stops accepting diagnostics past it.
+	//
+	// This line used to clobber that with init_error_collector's own `max_errors` argument,
+	// and the two callers disagree: check_files.odin:17 passes 20, package_resolver.odin:881
+	// passes 1000. The checker's real entry path therefore ran with a cap of 1000 and the
+	// guard never fired -- a package emitting 400 raw diagnostics printed all 200 of its
+	// merged ones with limit=false, where the oracle prints 18 (36 raw / 2, both compilers
+	// emitting two raw diagnostics per merged one).
+	//
+	// That is the whole of probe bis: `-max-error-count:200` makes the oracle print exactly
+	// the 38 the port printed, so there was never a checking difference between them, only
+	// two different truncation points. LEDGER #379/#380/#381.
+	//
+	// global_error_collector.max_error_count still records the argument, and nothing reads
+	// it; left in place because init_error_collector's signature is public.
 
 	errors_already_printed = false
 }
