@@ -7554,10 +7554,29 @@ check_assignment :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 	op_type_str := type_to_string(operand.type)
 	target_type_str := type_to_string(target_type)
 
-	// NOTE: Enhanced error reporting (package disambiguation) is a quality improvement
-	// NOTE: Helpful suggestions (slice->variadic, calling conventions) are quality improvements
-
-	error(operand.expr, "Cannot assign value of type '%s' to '%s' in %s%s", op_type_str, target_type_str, article, context_name)
+	// C++ Reference: check_expr.cpp:1300-1308. Two divergences fixed here:
+	//   - C++ names the EXPRESSION: "Cannot assign value 'arr' of type '[3]int' to '[]int'".
+	//     The port omitted it, the same shape as the Cannot-convert family (LEDGER task 232).
+	//   - C++ then calls check_assignment_error_suggestion, which the port implemented and
+	//     never called, so none of its suggestions were ever emitted:
+	//         Suggestion: The array expression may be sliced with arr[:]
+	//         Suggestion: Did you mean `&v`
+	//         Suggestion: A string may be transmuted to []u8
+	//     A previous note here dismissed these as "quality improvements". C++ emits them, so
+	//     they are parity, not polish.
+	//
+	// ERROR_BLOCK equivalent: the suggestion is an error_line continuation, and without the
+	// block the buffered error and the immediate continuation come out in the wrong order.
+	//
+	// STILL NOT reproduced: C++'s "(package X)" disambiguation when both type names render
+	// identically (check_expr.cpp:1286-1297), and the variadic/calling-convention hints below
+	// it. Recorded rather than silently skipped.
+	begin_error_block()
+	expr_str := expr_to_string(operand.expr)
+	defer delete(expr_str)
+	error(operand.expr, "Cannot assign value '%s' of type '%s' to '%s' in %s%s", expr_str, op_type_str, target_type_str, article, context_name)
+	check_assignment_error_suggestion(ctx, operand, target_type, operand.expr)
+	end_error_block()
 
 	return false
 }

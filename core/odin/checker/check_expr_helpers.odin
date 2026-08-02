@@ -1303,82 +1303,56 @@ check_for_dynamic_literals :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> bo
 // check_assignment_error_suggestion provides helpful hints after an assignment error
 // C++ Reference: check_expr.cpp:102, 2434
 check_assignment_error_suggestion :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: ^Type, node: ^ast.Node) {
-	if operand == nil || target_type == nil {
+	// C++ Reference: check_expr.cpp:2652-2702.
+	//
+	// The previous implementation was INVENTED, not ported: its wording differed from C++
+	// throughout ("Convert array to slice with 'value[:]'" vs "The array expression may be
+	// sliced with arr[:]"), it printed a literal `value` placeholder instead of the actual
+	// expression, and it used independent `if`s where C++ has a single else-if CHAIN, so it
+	// could emit several suggestions at once where C++ emits at most one.
+	if operand == nil || target_type == nil || operand.type == nil {
 		return
 	}
 
-	op_type := operand.type
-	if op_type == nil {
+	a := expr_to_string(operand.expr)
+	defer delete(a)
+	b := type_to_string(target_type)
+
+	src := base_type(operand.type)
+	dst := base_type(target_type)
+	if src == nil || dst == nil {
 		return
 	}
 
-	op_base := base_type(op_type)
-	target_base := base_type(target_type)
-
-	if op_base == nil || target_base == nil {
-		return
-	}
-
-	// Suggestion: slice to variadic parameter
-	// If trying to assign a slice to a variadic slice type, suggest using '..'
-	if target_base.kind == .Slice && op_base.kind == .Slice {
-		target_slice := target_base.variant.(Type_Slice)
-		op_slice := op_base.variant.(Type_Slice)
-		if are_types_identical(target_slice.elem, op_slice.elem) {
-			// Types are compatible, might be a variadic issue
-			error_line("\tSuggestion: If passing to a variadic parameter, use 'value..' to expand the slice")
+	if is_type_array(src) && is_type_slice(dst) {
+		if are_types_identical(src.variant.(Type_Array).elem, dst.variant.(Type_Slice).elem) {
+			error_line("\tSuggestion: The array expression may be sliced with %s[:]\n", a)
 		}
-	}
-
-	// Suggestion: pointer dereference
-	// If operand is a pointer and target is not, suggest dereferencing
-	if op_base.kind == .Pointer && target_base.kind != .Pointer {
-		ptr_type := op_base.variant.(Type_Pointer)
-		if are_types_identical(ptr_type.elem, target_base) {
-			error_line("\tSuggestion: Dereference the pointer with 'value^'")
+	} else if is_type_dynamic_array(src) && is_type_slice(dst) {
+		if are_types_identical(src.variant.(Type_Dynamic_Array).elem, dst.variant.(Type_Slice).elem) {
+			error_line("\tSuggestion: The dynamic array expression may be sliced with %s[:]\n", a)
 		}
-	}
-
-	// Suggestion: address-of
-	// If operand is not a pointer and target is, suggest taking address
-	if op_base.kind != .Pointer && target_base.kind == .Pointer {
-		ptr_type := target_base.variant.(Type_Pointer)
-		if are_types_identical(op_base, ptr_type.elem) {
-			if operand.mode == .Variable || operand.mode == .Value {
-				error_line("\tSuggestion: Take the address with '&value'")
-			}
+	} else if are_types_identical(src, dst) && !are_types_identical(operand.type, target_type) {
+		error_line("\tSuggestion: The expression may be directly casted to type %s\n", b)
+	} else if are_types_identical(src, t_string) && is_type_u8_slice(dst) {
+		error_line("\tSuggestion: A string may be transmuted to %s\n", b)
+		error_line("\t            This is an UNSAFE operation as string data is assumed to be immutable,\n")
+		error_line("\t            whereas slices in general are assumed to be mutable.\n")
+	} else if is_type_u8_slice(src) && are_types_identical(dst, t_string) && operand.mode != .Constant {
+		error_line("\tSuggestion: The expression may be casted to %s\n", b)
+	} else if is_expr_inferred_fixed_array(ctx.type_hint_expr) && is_type_array_like(target_type) && is_type_array_like(operand.type) {
+		hint := expr_to_string(ctx.type_hint_expr)
+		defer delete(hint)
+		error_line("\tSuggestion: Make sure that `%s` is attached to the compound literal directly\n", hint)
+	} else if is_type_pointer(target_type) && operand.mode == .Variable && are_types_identical(type_deref(target_type), operand.type) {
+		error_line("\tSuggestion: Did you mean `&%s`\n", a)
+	} else if is_type_pointer(operand.type) && are_types_identical(type_deref(operand.type), target_type) {
+		// C++ strips a leading '&' rather than producing `&x^`.
+		if len(a) > 0 && a[0] == '&' {
+			error_line("\tSuggestion: Did you mean `%s`\n", a[1:])
+		} else {
+			error_line("\tSuggestion: Did you mean `%s^`\n", a)
 		}
-	}
-
-	// Suggestion: procedure calling convention mismatch
-	if op_base.kind == .Proc && target_base.kind == .Proc {
-		op_proc := op_base.variant.(Type_Proc)
-		target_proc := target_base.variant.(Type_Proc)
-		if op_proc.calling_convention != target_proc.calling_convention {
-			error_line("\tNote: Calling conventions differ (%s vs %s)",
-				calling_convention_to_string(op_proc.calling_convention),
-				calling_convention_to_string(target_proc.calling_convention))
-		}
-	}
-
-	// Suggestion: array to slice
-	// If operand is an array and target is a slice of the same element type
-	if op_base.kind == .Array && target_base.kind == .Slice {
-		arr_type := op_base.variant.(Type_Array)
-		slice_type := target_base.variant.(Type_Slice)
-		if are_types_identical(arr_type.elem, slice_type.elem) {
-			error_line("\tSuggestion: Convert array to slice with 'value[:]'")
-		}
-	}
-
-	// Suggestion: string to cstring
-	if is_type_string(op_base) && is_type_cstring(target_base) {
-		error_line("\tSuggestion: Use 'strings.clone_to_cstring()' or a temporary conversion")
-	}
-
-	// Suggestion: cstring to string
-	if is_type_cstring(op_base) && is_type_string(target_base) {
-		error_line("\tSuggestion: Use 'string(value)' to convert cstring to string")
 	}
 }
 
