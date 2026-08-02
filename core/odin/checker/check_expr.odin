@@ -6800,53 +6800,23 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 		o.expr = node
 		return .Expr
 
-	case "defined":
-		// #defined - checks if an identifier is defined
-		// C++ Reference: check_expr.cpp:9119-9135
-		// This is handled as a call expression, not a bare directive
-		// C++ Reference: check_expr.cpp:9761-9769. An earlier note here claimed "C++ has no
-		// such message" and deleted the diagnostic. That premise was WRONG: C++ groups
-		// assert/defined/config/exists/load/load_hash/load_directory/load_or and emits
-		// "'#%s' must be used as a call" for every one of them. The message is restored, in
-		// C++'s generic form rather than the bespoke text the other arms used.
+	// C++ Reference: check_expr.cpp:9761-9769. C++ groups ALL EIGHT of these in a single
+	// branch and emits the same message for each. The port had five separate but identical
+	// arms (defined, config, load, load_directory, assert) and NO arm at all for exists,
+	// load_hash or load_or -- so those three fell through to "Unknown directive: #X" where
+	// C++ says "'#X' must be used as a call". Consolidated to match, which adds the three.
+	//
+	// C++ also sets o->type = t_invalid alongside the mode; the port set only the mode.
+	case "assert", "config", "defined", "exists", "load", "load_directory", "load_hash", "load_or":
 		error(node, "'#%s' must be used as a call", name)
+		o.type = t_invalid
 		o.mode = .Invalid
 		o.expr = node
 		return .Expr
 
-	case "config":
-		// #config - compile-time configuration values
-		// C++ Reference: check_expr.cpp:9136-9165
-		// This is handled as a call expression, not a bare directive
-		error(node, "'#%s' must be used as a call", name)
-		o.mode = .Invalid
-		o.expr = node
-		return .Expr
 
-	case "load":
-		// #load - loads a file at compile time
-		// C++ Reference: check_expr.cpp:9166-9188
-		// This is handled as a call expression, not a bare directive
-		error(node, "'#%s' must be used as a call", name)
-		o.mode = .Invalid
-		o.expr = node
-		return .Expr
 
-	case "load_directory":
-		// #load_directory - loads directory listing
-		// Must be called as a function
-		error(node, "'#%s' must be used as a call", name)
-		o.mode = .Invalid
-		o.expr = node
-		return .Expr
 
-	case "assert":
-		// #assert - compile-time assertion
-		// Must be called as a function
-		error(node, "'#%s' must be used as a call", name)
-		o.mode = .Invalid
-		o.expr = node
-		return .Expr
 
 	case "panic":
 		// #panic - compile-time panic
