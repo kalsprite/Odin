@@ -943,6 +943,28 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 						case .Constant:
 							// Display constant definitions
 							// C++ Reference: check_expr.cpp:6760-6774
+							// C++ Reference: check_expr.cpp:7134. KEEP THIS. It looks like a
+							// port-only artifact and is not.
+							//
+							// MECHANISM (LEDGER 334, which #185 measured but could not explain):
+							// this header begins with "\n", so it puts a BLANK LINE in the
+							// message. print_errors_standard breaks on the first empty line --
+							// faithfully, C++ error.cpp:1017 does exactly the same. So emitting
+							// the header TRUNCATES the rest of the block: the binding lines and
+							// "at caller location" are built and then discarded at print time.
+							//
+							// C++ has the identical line, identically guarded, but walks
+							// scope->elements in HASH order, so whether a Constant is printed
+							// first -- and therefore whether the header fires and the output
+							// truncates -- varies per program. Both behaviours occur in the
+							// oracle: s21/s22/wc/s20 print their bindings, s02/s11/s12/wc2/wc4/
+							// wvA/wvB truncate exactly like this.
+							//
+							// The port sorts by name for determinism (LEDGER 277) and so cannot
+							// track C++'s hash order. MEASURED both ways: keeping the header
+							// matches 8 probes and misses 4-5; removing it matches 4-5 and
+							// misses 8 (451 -> 443 MATCH). Keeping is the better approximation
+							// of an irreducibly hash-dependent behaviour.
 							if print_count == 0 {
 								error_line("\n\tWith the following definitions:\n")
 							}
