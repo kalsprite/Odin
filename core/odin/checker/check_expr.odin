@@ -2396,9 +2396,12 @@ check_unary_op :: proc(ctx: ^Checker_Context, o: ^Operand, op: tokenizer.Token) 
 
 	#partial switch op.kind {
 	case .Sub, .Add:
-		// Unary - and + work on numeric types
+		// C++ Reference: check_expr.cpp:2092-2098 -- names the EXPRESSION, not the category:
+		//   "Operator '-' is not allowed with 'p'"
 		if !is_type_numeric(type) {
-			error(op.pos, "Operator '%s' is only allowed with numeric expressions", op.text)
+			str := expr_to_string(o.expr)
+			defer delete(str)
+			error(op.pos, "Operator '%s' is not allowed with '%s'", op.text, str)
 			return false
 		}
 
@@ -7349,10 +7352,18 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 			o.mode = .Soa_Variable
 			o.type = type_deref(t)
 		} else {
-			error(o.expr, "Cannot dereference value of type '%s'", type_to_string(o.type))
+			// C++ Reference: check_expr.cpp:12576-12586. Names the expression, and the
+			// multi-pointer hint is C++'s wording inside an ERROR_BLOCK. The port's
+			// "Suggestion: Multi-pointer types cannot be dereferenced..." was invented, and
+			// being unblocked it printed BEFORE the error.
+			str := expr_to_string(o.expr)
+			defer delete(str)
+			begin_error_block()
+			error(o.expr, "Cannot dereference '%s' of type '%s'", str, type_to_string(o.type))
 			if is_type_multi_pointer(o.type) {
-				error_line("Suggestion: Multi-pointer types cannot be dereferenced; use '[0]' to index the first element")
+				error_line("\tDid you mean '%s[0]'?\n", str)
 			}
+			end_error_block()
 			o.mode = .Invalid
 			o.expr = node
 			return .Stmt
@@ -8745,7 +8756,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		if len(call.args) == 0 {
 			// No arguments - error
 			type_str := type_to_string(target_type)
-			error(node, "Missing argument in type conversion to '%s'", type_str)
+			error(node, "Missing argument in conversion to '%s'", type_str)   // C++ check_expr.cpp:8598
 			o.mode = .Invalid
 			o.expr = node
 			return .Stmt
