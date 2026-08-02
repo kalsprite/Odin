@@ -192,9 +192,9 @@ parse_file :: proc(p: ^Parser, file: ^ast.File) -> bool {
 	if pkg_name.kind == .Ident {
 		switch name := pkg_name.text; {
 		case is_blank_ident(name):
-			error(p, pkg_name.pos, "invalid package name '_'")
+			error(p, pkg_name.pos, "Invalid package name '_'")
 		case is_package_name_reserved(name), file.pkg != nil && file.pkg.kind != .Runtime && name == "runtime":
-			error(p, pkg_name.pos, "use of reserved package name '%s'", name)
+			error(p, pkg_name.pos, "Use of reserved package name '%s'", name)
 		}
 	}
 	p.file.pkg_name = pkg_name.text
@@ -222,7 +222,7 @@ parse_file :: proc(p: ^Parser, file: ^ast.File) -> bool {
 				append(&p.file.decls, stmt)
 				if es, es_ok := stmt.derived.(^ast.Expr_Stmt); es_ok && es.expr != nil {
 					if _, pl_ok := es.expr.derived.(^ast.Proc_Lit); pl_ok {
-						error(p, stmt.pos, "procedure literal evaluated but not used")
+						error(p, stmt.pos, "Procedure literal evaluated but not used")
 					}
 				}
 			}
@@ -298,7 +298,7 @@ skip_possible_newline_for_literal :: proc(p: ^Parser) -> bool {
 next_token0 :: proc(p: ^Parser) -> bool {
 	p.curr_tok = tokenizer.scan(&p.tok)
 	if p.curr_tok.kind == .EOF {
-		// error(p, p.curr_tok.pos, "token is EOF");
+		// error(p, p.curr_tok.pos, "Token is EOF");
 		return false
 	}
 	return true
@@ -409,7 +409,7 @@ expect_token_after :: proc(p: ^Parser, kind: tokenizer.Token_Kind, msg: string) 
 	if prev.kind != kind {
 		e := tokenizer.to_string(kind)
 		g := tokenizer.token_to_string(prev)
-		error(p, prev.pos, "expected '%s' after %s, got '%s'", e, msg, g)
+		error(p, prev.pos, "Expected '%s' after %s, got '%s'", e, msg, g)
 	}
 	advance_token(p)
 	return prev
@@ -423,7 +423,7 @@ expect_operator :: proc(p: ^Parser) -> tokenizer.Token {
 	case:
 		if !tokenizer.is_operator(prev.kind) {
 			g := tokenizer.token_to_string(prev)
-			error(p, prev.pos, "expected an operator, got '%s'", g)
+			error(p, prev.pos, "Expected an operator, got '%s'", g)
 		}
 	}
 	advance_token(p)
@@ -659,7 +659,7 @@ expect_semicolon :: proc(p: ^Parser, node: ^ast.Node) -> bool {
 		}
 	}
 
-	error(p, prev.pos, "expected ';', got %s", tokenizer.token_to_string(p.curr_tok))
+	error(p, prev.pos, "Expected ';', got %s", tokenizer.token_to_string(p.curr_tok))
 	fix_advance_to_next_stmt(p)
 	return false
 }
@@ -698,7 +698,7 @@ parse_stmt_list :: proc(p: ^Parser) -> []^ast.Stmt {
 				append(&list, stmt)
 				if es, es_ok := stmt.derived.(^ast.Expr_Stmt); es_ok && es.expr != nil {
 					if _, pl_ok := es.expr.derived.(^ast.Proc_Lit); pl_ok {
-						error(p, stmt.pos, "procedure literal evaluated but not used")
+						error(p, stmt.pos, "Procedure literal evaluated but not used")
 					}
 				}
 			}
@@ -710,7 +710,7 @@ parse_stmt_list :: proc(p: ^Parser) -> []^ast.Stmt {
 parse_block_stmt :: proc(p: ^Parser, is_when: bool) -> ^ast.Stmt {
 	skip_possible_newline_for_literal(p)
 	if !is_when && p.curr_proc == nil {
-		error(p, p.curr_tok.pos, "you cannot use a block statement in the file scope")
+		error(p, p.curr_tok.pos, "You cannot use a block statement in the file scope")
 	}
 	return parse_body(p)
 }
@@ -759,7 +759,7 @@ parse_when_stmt :: proc(p: ^Parser) -> ^ast.When_Stmt {
 				error(p, else_stmt.pos, "the body of a 'do' must be on the same line as 'else'")
 			}
 		case:
-			error(p, p.curr_tok.pos, "expected when statement block statement")
+			error(p, p.curr_tok.pos, "Expected when statement block statement")
 			else_stmt = ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
 		}
 	}
@@ -783,7 +783,7 @@ convert_stmt_to_expr :: proc(p: ^Parser, stmt: ^ast.Stmt, kind: string) -> ^ast.
 	if es, ok := stmt.derived.(^ast.Expr_Stmt); ok {
 		return es.expr
 	}
-	error(p, stmt.pos, "expected %s, found a simple statement", kind)
+	error(p, stmt.pos, "Expected '%s', found a simple statement.", kind)
 	return ast.new(ast.Bad_Expr, p.curr_tok.pos, end_pos(p.curr_tok))
 }
 
@@ -844,7 +844,7 @@ parse_if_stmt :: proc(p: ^Parser) -> ^ast.If_Stmt {
 				error(p, body.pos, "the body of a 'do' must be on the same line as 'else'")
 			}
 		case:
-			error(p, p.curr_tok.pos, "expected if statement block statement")
+			error(p, p.curr_tok.pos, "Expected if statement block statement")
 			else_stmt = ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
 		}
 	}
@@ -880,7 +880,7 @@ parse_control_statement_semicolon_separator :: proc(p: ^Parser) -> bool {
 
 parse_for_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 	if p.curr_proc == nil {
-		error(p, p.curr_tok.pos, "you cannot use a for statement in the file scope")
+		error(p, p.curr_tok.pos, "You cannot use a for statement in the file scope")
 	}
 
 	tok := expect_token(p, .For)
@@ -1178,7 +1178,7 @@ parse_foreign_block_decl :: proc(p: ^Parser) -> ^ast.Stmt {
 		return decl
 	}
 
-	error(p, decl.pos, "foreign blocks only allow procedure and variable declarations")
+	error(p, decl.pos, "Foreign blocks only allow procedure and variable declarations")
 
 	return nil
 
@@ -1243,7 +1243,7 @@ parse_foreign_decl :: proc(p: ^Parser) -> ^ast.Decl {
 		}
 
 		if name != nil && is_blank_ident(name) {
-			error(p, name.pos, "illegal foreign import name: '_'")
+			error(p, name.pos, "Illegal foreign import name: '_'")
 		}
 
 		fullpaths: [dynamic]^ast.Expr
@@ -1279,7 +1279,7 @@ parse_foreign_decl :: proc(p: ^Parser) -> ^ast.Decl {
 		return decl
 	}
 
-	error(p, tok.pos, "invalid foreign declaration")
+	error(p, tok.pos, "Invalid foreign declaration")
 	return ast.new(ast.Bad_Decl, tok.pos, end_pos(tok))
 }
 
@@ -1305,7 +1305,7 @@ parse_unrolled_for_loop :: proc(p: ^Parser, inline_tok: tokenizer.Token) -> ^ast
 					eq := expect_token(p, .Eq)
 					if arg != nil {
 						if _, ok := arg.derived.(^ast.Ident); !ok {
-							error(p, arg.pos, "expected an identifier for 'key=value'")
+							error(p, arg.pos, "Expected an identifier for 'key=value'")
 						}
 					}
 					value := parse_value(p)
@@ -1339,7 +1339,7 @@ parse_unrolled_for_loop :: proc(p: ^Parser, inline_tok: tokenizer.Token) -> ^ast
 		case 2:
 			val0, val1 = idents[0], idents[1]
 		case:
-			error(p, for_tok.pos, "expected either 1 or 2 identifiers")
+			error(p, for_tok.pos, "Expected either 1 or 2 identifiers")
 			bad_stmt = true
 		}
 	}
@@ -1419,12 +1419,12 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 		stmt := parse_stmt(p)
 		#partial switch s in stmt.derived_stmt {
 		case ^ast.Empty_Stmt:
-			error(p, s.pos, "empty statement after defer (e.g. ';')")
+			error(p, s.pos, "Empty statement after defer (e.g. ';')")
 		case ^ast.Defer_Stmt:
-			error(p, s.pos, "you cannot defer a defer statement")
+			error(p, s.pos, "You cannot defer a defer statement")
 			stmt = s.stmt
 		case ^ast.Return_Stmt:
-			error(p, s.pos, "you cannot defer a return statement")
+			error(p, s.pos, "You cannot defer a return statement")
 		}
 		ds := ast.new(ast.Defer_Stmt, tok.pos, stmt)
 		ds.stmt = stmt
@@ -1434,7 +1434,7 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 		tok := advance_token(p)
 
 		if p.expr_level > 0 {
-			error(p, tok.pos, "you cannot use a return statement within an expression")
+			error(p, tok.pos, "You cannot use a return statement within an expression")
 		}
 
 		results: [dynamic]^ast.Expr
@@ -1480,7 +1480,7 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 
 		list := parse_lhs_expr_list(p)
 		if len(list) == 0 {
-			error(p, tok.pos, "illegal use of 'using' statement")
+			error(p, tok.pos, "Illegal use of 'using' statement")
 			expect_semicolon(p, nil)
 			return ast.new(ast.Bad_Stmt, tok.pos, end_pos(p.prev_tok))
 		}
@@ -1502,7 +1502,7 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 			}
 		}
 
-		error(p, tok.pos, "illegal use of 'using' statement")
+		error(p, tok.pos, "Illegal use of 'using' statement")
 		return ast.new(ast.Bad_Stmt, tok.pos, end_pos(p.prev_tok))
 
 	case .At:
@@ -1616,7 +1616,7 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 
 
 	tok := advance_token(p)
-	error(p, tok.pos, "expected a statement, got %s", tokenizer.token_to_string(tok))
+	error(p, tok.pos, "Expected a statement, got '%s'", tokenizer.token_to_string(tok))
 	fix_advance_to_next_stmt(p)
 	s := ast.new(ast.Bad_Stmt, tok.pos, end_pos(tok))
 	return s
@@ -1698,10 +1698,10 @@ parse_body :: proc(p: ^Parser) -> ^ast.Block_Stmt {
 convert_stmt_to_body :: proc(p: ^Parser, stmt: ^ast.Stmt) -> ^ast.Stmt {
 	#partial switch s in stmt.derived_stmt {
 	case ^ast.Block_Stmt:
-		error(p, stmt.pos, "expected a normal statement rather than a block statement")
+		error(p, stmt.pos, "Expected a normal statement rather than a block statement")
 		return stmt
 	case ^ast.Empty_Stmt:
-		error(p, stmt.pos, "expected a non-empty statement")
+		error(p, stmt.pos, "Expected a non-empty statement")
 	}
 
 	bs := ast.new(ast.Block_Stmt, stmt.pos, stmt)
@@ -1757,7 +1757,7 @@ convert_to_ident_list :: proc(p: ^Parser, list: []Expr_And_Flags, ignore_flags, 
 	for ident, i in list {
 		if !ignore_flags {
 			if i != 0 {
-				error(p, ident.expr.pos, "illegal use of prefixes in parameter list")
+				error(p, ident.expr.pos, "Illegal use of prefixes in parameter list")
 			}
 		}
 
@@ -1774,10 +1774,10 @@ convert_to_ident_list :: proc(p: ^Parser, list: []Expr_And_Flags, ignore_flags, 
 					error(p, ident.expr.pos, "expected a polymorphic identifier without an specialization")
 				}
 			} else {
-				error(p, ident.expr.pos, "expected a non-polymorphic identifier")
+				error(p, ident.expr.pos, "Expected a non-polymorphic identifier")
 			}
 		case:
-			error(p, ident.expr.pos, "expected an identifier")
+			error(p, ident.expr.pos, "Expected an identifier")
 			id = ast.new(ast.Ident, ident.expr.pos, ident.expr.end)
 		}
 
@@ -1828,7 +1828,7 @@ parse_field_prefixes :: proc(p: ^Parser) -> (flags: ast.Field_Flags) {
 		}
 
 		if kind == .Unknown {
-			error(p, p.curr_tok.pos, "unknown prefix kind '#%s'", p.curr_tok.text)
+			error(p, p.curr_tok.pos, "Unknown prefix kind '#%s'", p.curr_tok.text)
 			continue
 		}
 
@@ -1851,7 +1851,7 @@ parse_field_prefixes :: proc(p: ^Parser) -> (flags: ast.Field_Flags) {
 check_field_flag_prefixes :: proc(p: ^Parser, name_count: int, allowed_flags, set_flags: ast.Field_Flags) -> (flags: ast.Field_Flags) {
 	flags = set_flags
 	if name_count > 1 && .Using in flags {
-		error(p, p.curr_tok.pos, "cannot apply 'using' to more than one of the same type")
+		error(p, p.curr_tok.pos, "Cannot apply 'using' to more than one of the same type")
 		flags -= {.Using}
 	}
 
@@ -1924,13 +1924,13 @@ check_procedure_name_list :: proc(p: ^Parser, names: []^ast.Expr) -> bool {
 			if _, ok := name.derived.(^ast.Poly_Type); ok {
 				any_polymorphic_names = true
 			} else {
-				error(p, name.pos, "mixture of polymorphic and non-polymorphic identifiers")
+				error(p, name.pos, "Mixture of polymorphic and non-polymorphic identifiers")
 				return any_polymorphic_names
 			}
 		} else {
 			if _, ok := name.derived.(^ast.Poly_Type); ok {
 				any_polymorphic_names = true
-				error(p, name.pos, "mixture of polymorphic and non-polymorphic identifiers")
+				error(p, name.pos, "Mixture of polymorphic and non-polymorphic identifiers")
 				return any_polymorphic_names
 			} else {
 				// Okay
@@ -1949,7 +1949,7 @@ parse_ident_list :: proc(p: ^Parser, allow_poly_names: bool) -> []^ast.Expr {
 			tok := expect_token(p, .Dollar)
 			ident := parse_ident(p)
 			if is_blank_ident(ident) {
-				error(p, ident.pos, "invalid polymorphic type definition with a blank identifier")
+				error(p, ident.pos, "Invalid polymorphic type definition with a blank identifier")
 			}
 			poly_name := ast.new(ast.Poly_Type, tok.pos, ident)
 			poly_name.type = ident
@@ -2020,7 +2020,7 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 			tt := ast.unparen_expr(type)
 			if is_signature && !any_polymorphic_names {
 				if ti, ok := tt.derived.(^ast.Typeid_Type); ok && ti.specialization != nil {
-					error(p, tt.pos, "specialization of typeid is not allowed without polymorphic names")
+					error(p, tt.pos, "Specialization of typeid is not allowed without polymorphic names")
 				}
 			}
 		}
@@ -2028,30 +2028,30 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 		if allow_token(p, .Eq) {
 			default_value = parse_expr(p, false)
 			if .Default_Parameters not_in allowed_flags {
-				error(p, p.curr_tok.pos, "default parameters are only allowed for procedures")
+				error(p, p.curr_tok.pos, "Default parameters are only allowed for procedures")
 				default_value = nil
 			}
 		}
 
 		if default_value != nil && len(names) > 1 {
-			error(p, p.curr_tok.pos, "default parameters can only be applied to single values")
+			error(p, p.curr_tok.pos, "Default parameters can only be applied to single values")
 		}
 
 		if allowed_flags == ast.Field_Flags_Struct && default_value != nil {
-			error(p, default_value.pos, "default parameters are not allowed for structs")
+			error(p, default_value.pos, "Default parameters are not allowed for structs")
 			default_value = nil
 		}
 
 		if is_type_ellipsis(type) {
 			if seen_ellipsis^ {
-				error(p, type.pos, "extra variadic parameter after ellipsis")
+				error(p, type.pos, "Extra variadic parameter after ellipsis")
 			}
 			seen_ellipsis^ = true
 			if len(names) != 1 {
-				error(p, type.pos, "variadic parameters can only have one field name")
+				error(p, type.pos, "Variadic parameters can only have one field name")
 			}
 		} else if seen_ellipsis^ && default_value == nil {
-			error(p, p.curr_tok.pos, "extra parameter after ellipsis without a default value")
+			error(p, p.curr_tok.pos, "Extra parameter after ellipsis without a default value")
 		}
 
 		if type != nil && default_value == nil {
@@ -2097,11 +2097,11 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 		param := parse_var_type(p, allowed_flags & {.Typeid_Token, .Ellipsis})
 		if _, ok := param.derived.(^ast.Ellipsis); ok {
 			if seen_ellipsis {
-				error(p, param.pos, "extra variadic parameter after ellipsis")
+				error(p, param.pos, "Extra variadic parameter after ellipsis")
 			}
 			seen_ellipsis = true
 		} else if seen_ellipsis {
-			error(p, param.pos, "extra parameter after ellipsis")
+			error(p, param.pos, "Extra parameter after ellipsis")
 		}
 
 		eaf := Expr_And_Flags{param, prefix_flags}
@@ -2138,7 +2138,7 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 	} else {
 		names := convert_to_ident_list(p, list[:], true, allow_poly_names)
 		if len(names) == 0 {
-			error(p, p.curr_tok.pos, "empty field declaration")
+			error(p, p.curr_tok.pos, "Empty field declaration")
 		}
 
 		set_flags: ast.Field_Flags
@@ -2503,7 +2503,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 				t.tag = tag
 				error(p, tok.pos, "#%s has been replaced with #sparse for non-contiguous enumerated array types", name.text)
 			case:
-				error(p, tok.pos, "expected a compound literal after #%s", name.text)
+				error(p, tok.pos, "Expected a compound literal after #%s", name.text)
 
 			}
 			return original_expr
@@ -2641,7 +2641,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		if allow_token(p, .Undef) {
 			body = nil
 			if where_token.kind != .Invalid {
-				error(p, where_token.pos, "'where' clauses are not allowed on procedure literals without a defined body (replaced with ---")
+				error(p, where_token.pos, "'where' clauses are not allowed on procedure literals without a defined body (replaced with ---)")
 			}
 		} else if p.curr_tok.kind == .Open_Brace {
 			prev_proc := p.curr_proc
@@ -2679,7 +2679,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			end = specialization.pos
 		}
 		if is_blank_ident(type) {
-			error(p, type.pos, "invalid polymorphic type definition with a blank identifier")
+			error(p, type.pos, "Invalid polymorphic type definition with a blank identifier")
 		}
 
 		pt := ast.new(ast.Poly_Type, tok.pos, end)
@@ -2795,7 +2795,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			param_count: int
 			poly_params, param_count = parse_field_list(p, .Close_Paren, ast.Field_Flags_Record_Poly_Params)
 			if param_count == 0 {
-				error(p, poly_params.pos, "expected at least 1 polymorphic parameter")
+				error(p, poly_params.pos, "Expected at least 1 polymorphic parameter")
 				poly_params = nil
 			}
 			expect_token_after(p, .Close_Paren, "parameter list")
@@ -2808,59 +2808,59 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			switch tag.text {
 			case "packed":
 				if is_packed {
-					error(p, tag.pos, "duplicate struct tag '#%s'", tag.text)
+					error(p, tag.pos, "Duplicate struct tag '#%s'", tag.text)
 				}
 				is_packed = true
 			case "all_or_none":
 				if is_all_or_none {
-					error(p, tag.pos, "duplicate struct tag '#%s'", tag.text)
+					error(p, tag.pos, "Duplicate struct tag '#%s'", tag.text)
 				}
 				is_all_or_none = true
 			case "simple":
 				if is_simple {
-					error(p, tag.pos, "duplicate struct tag '#%s'", tag.text)
+					error(p, tag.pos, "Duplicate struct tag '#%s'", tag.text)
 				}
 				is_simple = true
 			case "align":
 				if align != nil {
-					error(p, tag.pos, "duplicate struct tag '#%s'", tag.text)
+					error(p, tag.pos, "Duplicate struct tag '#%s'", tag.text)
 				}
 				align = parse_expr(p, true)
 			case "field_align":
 				if min_field_align != nil {
-					error(p, tag.pos, "duplicate struct tag '#%s'", tag.text)
+					error(p, tag.pos, "Duplicate struct tag '#%s'", tag.text)
 				}
 				warn(p, tag.pos, "#field_align has been deprecated in favour of #min_field_align")
 				min_field_align = parse_expr(p, true)
 			case "min_field_align":
 				if min_field_align != nil {
-					error(p, tag.pos, "duplicate struct tag '#%s'", tag.text)
+					error(p, tag.pos, "Duplicate struct tag '#%s'", tag.text)
 				}
 				min_field_align = parse_expr(p, true)
 			case "max_field_align":
 				if max_field_align != nil {
-					error(p, tag.pos, "duplicate struct tag '#%s'", tag.text)
+					error(p, tag.pos, "Duplicate struct tag '#%s'", tag.text)
 				}
 				max_field_align = parse_expr(p, true)
 			case "raw_union":
 				if is_raw_union {
-					error(p, tag.pos, "duplicate struct tag '#%s'", tag.text)
+					error(p, tag.pos, "Duplicate struct tag '#%s'", tag.text)
 				}
 				is_raw_union = true
 			case "no_copy":
 				if is_no_copy {
-					error(p, tag.pos, "duplicate struct tag '#%s'", tag.text)
+					error(p, tag.pos, "Duplicate struct tag '#%s'", tag.text)
 				}
 				is_no_copy = true
 			case:
-				error(p, tag.pos, "invalid struct tag '#%s", tag.text)
+				error(p, tag.pos, "Invalid struct tag '#%s'", tag.text)
 			}
 		}
 		p.expr_level = prev_level
 
 		if is_raw_union && is_all_or_none {
 			is_all_or_none = false
-			error(p, tok.pos, "'#raw_union' cannot also be '#all_or_none")
+			error(p, tok.pos, "'#raw_union' cannot also be '#all_or_none'")
 		}
 
 		where_token: tokenizer.Token
@@ -2908,7 +2908,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			param_count: int
 			poly_params, param_count = parse_field_list(p, .Close_Paren, ast.Field_Flags_Record_Poly_Params)
 			if param_count == 0 {
-				error(p, poly_params.pos, "expected at least 1 polymorphic parameter")
+				error(p, poly_params.pos, "Expected at least 1 polymorphic parameter")
 				poly_params = nil
 			}
 			expect_token_after(p, .Close_Paren, "parameter list")
@@ -2921,23 +2921,23 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			switch tag.text {
 			case "align":
 				if align != nil {
-					error(p, tag.pos, "duplicate union tag '#%s'", tag.text)
+					error(p, tag.pos, "Duplicate union tag '#%s'", tag.text)
 				}
 				align = parse_expr(p, true)
 			case "maybe":
 				error(p, tag.pos, "#%s functionality has now been merged with standard 'union' functionality", tag.text)
 			case "no_nil":
 				if is_no_nil {
-					error(p, tag.pos, "duplicate union tag '#%s'", tag.text)
+					error(p, tag.pos, "Duplicate union tag '#%s'", tag.text)
 				}
 				is_no_nil = true
 			case "shared_nil":
 				if is_shared_nil {
-					error(p, tag.pos, "duplicate union tag '#%s'", tag.text)
+					error(p, tag.pos, "Duplicate union tag '#%s'", tag.text)
 				}
 				is_shared_nil = true
 			case:
-				error(p, tag.pos, "invalid union tag '#%s", tag.text)
+				error(p, tag.pos, "Invalid union tag '#%s'", tag.text)
 			}
 		}
 		p.expr_level = prev_level
@@ -3138,34 +3138,34 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 				switch name.text {
 				case "side_effects":
 					if has_side_effects {
-						error(p, tok.pos, "duplicate directive on inline asm expression: '#side_effects'")
+						error(p, tok.pos, "Duplicate directive on inline asm expression: '#side_effects'")
 					}
 					has_side_effects = true
 				case "align_stack":
 					if is_align_stack {
-						error(p, tok.pos, "duplicate directive on inline asm expression: '#align_stack'")
+						error(p, tok.pos, "Duplicate directive on inline asm expression: '#align_stack'")
 					}
 					is_align_stack = true
 				case "att":
 					if dialect == .ATT {
-						error(p, tok.pos, "duplicate directive on inline asm expression: '#att'")
+						error(p, tok.pos, "Duplicate directive on inline asm expression: '#att'")
 					} else if dialect != .Default {
-						error(p, tok.pos, "conflicting asm dialects")
+						error(p, tok.pos, "Conflicting asm dialects")
 					} else {
 						dialect = .ATT
 					}
 				case "intel":
 					if dialect == .Intel {
-						error(p, tok.pos, "duplicate directive on inline asm expression: '#intel'")
+						error(p, tok.pos, "Duplicate directive on inline asm expression: '#intel'")
 					} else if dialect != .Default {
-						error(p, tok.pos, "conflicting asm dialects")
+						error(p, tok.pos, "Conflicting asm dialects")
 					} else {
 						dialect = .Intel
 					}
 				}
 
 			} else {
-				error(p, p.curr_tok.pos, "expected an identifier after hash")
+				error(p, p.curr_tok.pos, "Expected an identifier after hash")
 			}
 		}
 
@@ -3367,7 +3367,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 		if p.allow_type {
 			return nil
 		}
-		error(p, p.curr_tok.pos, "expected an operand")
+		error(p, p.curr_tok.pos, "Expected an operand")
 		fix_advance_to_next_stmt(p)
 		be := ast.new(ast.Bad_Expr, p.curr_tok.pos, end_pos(p.curr_tok))
 		operand = be
@@ -3405,7 +3405,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 
 			#partial switch p.curr_tok.kind {
 			case .Ellipsis, .Range_Half, .Range_Full:
-				error(p, p.curr_tok.pos, "expected a colon, not a range")
+				error(p, p.curr_tok.pos, "Expected a colon, not a range")
 				fallthrough
 			case .Colon, .Comma/*matrix index*/:
 				interval = advance_token(p)
@@ -3421,7 +3421,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 			if is_slice_op {
 				if interval.kind == .Comma {
 					if indices[0] == nil || indices[1] == nil {
-						error(p, p.curr_tok.pos, "matrix index expressions require both row and column indices")
+						error(p, p.curr_tok.pos, "Matrix index expressions require both row and column indices")
 					}
 					se := ast.new(ast.Matrix_Index_Expr, operand.pos, end_pos(close))
 					se.expr = operand
@@ -3492,7 +3492,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 				operand = ta
 
 			case:
-				error(p, p.curr_tok.pos, "expected a selector")
+				error(p, p.curr_tok.pos, "Expected a selector")
 				operand = empty_selector_expr(tok, operand)
 			}
 
@@ -3509,7 +3509,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 
 				operand = sel
 			case:
-				error(p, p.curr_tok.pos, "expected a selector")
+				error(p, p.curr_tok.pos, "Expected a selector")
 				operand = empty_selector_expr(tok, operand)
 			}
 
@@ -3556,7 +3556,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 		case .Increment, .Decrement:
 			if !lhs {
 				tok := advance_token(p)
-				error(p, tok.pos, "postfix '%s' operator is not supported", tok.text)
+				error(p, tok.pos, "Postfix '%s' operator is not supported", tok.text)
 			} else {
 				loop = false
 			}
@@ -3612,7 +3612,7 @@ parse_unary_expr :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 
 	case .Increment, .Decrement:
 		op := advance_token(p)
-		error(p, op.pos, "unary '%s' operator is not supported", op.text)
+		error(p, op.pos, "Unary '%s' operator is not supported", op.text)
 		expr := parse_unary_expr(p, lhs)
 
 		ue := ast.new(ast.Unary_Expr, op.pos, expr)
@@ -3764,7 +3764,7 @@ parse_simple_stmt :: proc(p: ^Parser, flags: Stmt_Allow_Flags) -> ^ast.Stmt {
 		advance_token(p)
 		rhs := parse_rhs_expr_list(p)
 		if len(rhs) == 0 {
-			error(p, p.curr_tok.pos, "no right-hand side in assignment statement")
+			error(p, p.curr_tok.pos, "No right-hand side in assignment statement.")
 			return ast.new(ast.Bad_Stmt, start_tok.pos, end_pos(p.curr_tok))
 		}
 		stmt := ast.new(ast.Assign_Stmt, lhs[0].pos, rhs[len(rhs)-1])
@@ -3832,7 +3832,7 @@ parse_simple_stmt :: proc(p: ^Parser, flags: Stmt_Allow_Flags) -> ^ast.Stmt {
 						case ^ast.Switch_Stmt:      n.partial = true
 						case ^ast.Type_Switch_Stmt: n.partial = true
 						case:
-							error(p, partial_token.pos, "incorrect use of directive, use '%s: #partial switch'", partial_token.text)
+							error(p, partial_token.pos, "Incorrect use of directive, use '%s: #partial switch'", partial_token.text)
 						}
 					}
 					if is_reverse {
@@ -3858,7 +3858,7 @@ parse_simple_stmt :: proc(p: ^Parser, flags: Stmt_Allow_Flags) -> ^ast.Stmt {
 	#partial switch op.kind {
 	case .Increment, .Decrement:
 		advance_token(p)
-		error(p, op.pos, "postfix '%s' statement is not supported", op.text)
+		error(p, op.pos, "Postfix '%s' statement is not supported", op.text)
 	}
 
 	es := ast.new(ast.Expr_Stmt, lhs[0].pos, lhs[0])
@@ -3881,20 +3881,20 @@ parse_value_decl :: proc(p: ^Parser, names: []^ast.Expr, docs: ^ast.Comment_Grou
 		if len(values) > len(names) {
 			error(p, p.curr_tok.pos, "too many values on the right-hand side of the declaration")
 		} else if len(values) < len(names) && !is_mutable {
-			error(p, p.curr_tok.pos, "all constant declarations must be defined")
+			error(p, p.curr_tok.pos, "All constant declarations must be defined")
 		} else if len(values) == 0 {
-			error(p, p.curr_tok.pos, "expected an expression for this declaration")
+			error(p, p.curr_tok.pos, "Expected an expression for this declaration")
 		}
 	}
 
 	if is_mutable {
 		if type == nil && len(values) == 0 {
-			error(p, p.curr_tok.pos, "missing variable type or initialization")
+			error(p, p.curr_tok.pos, "Missing variable type or initialization")
 			return ast.new(ast.Bad_Decl, names[0].pos, end_pos(p.curr_tok))
 		}
 	} else {
 		if type == nil && len(values) == 0 && len(names) > 0 {
-			error(p, p.curr_tok.pos, "missing constant value")
+			error(p, p.curr_tok.pos, "Missing constant value")
 			return ast.new(ast.Bad_Decl, names[0].pos, end_pos(p.curr_tok))
 		}
 	}
