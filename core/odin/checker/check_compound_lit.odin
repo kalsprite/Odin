@@ -1309,24 +1309,14 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			for elem in cl.elems {
 				// Same hint as the named path above - a positional enumerated-array element
 				// is still an element of `elem_type` and a nested braced literal needs it.
-				elem_operand := Operand{}
+								elem_operand := Operand{}
 				check_expr_with_type_hint(ctx, &elem_operand, elem, elem_type)
+				check_assignment(ctx, &elem_operand, elem_type, "enumerated array literal")
 
-				if elem_operand.mode == .Invalid {
-					continue
-				}
-
-				// Must be assignable to element type
-				if !check_is_assignable_to(ctx, &elem_operand, elem_type) {
-					elem_type_str := type_to_string(elem_type)
-					val_type_str := type_to_string(elem_operand.type)
-					error(elem, "Cannot assign '%s' to enumerated array element of type '%s'", val_type_str, elem_type_str)
-					continue
-				}
-
-				// Check constant-ness
-				if elem_operand.mode != .Constant {
-					is_constant = false
+				// C++ Reference: check_expr.cpp:11223-11225 -- guarded, and via
+				// check_is_operand_compound_lit_constant, not a bare mode comparison.
+				if is_constant {
+					is_constant = check_is_operand_compound_lit_constant(ctx, &elem_operand, elem_type)
 				}
 			}
 
@@ -1362,20 +1352,9 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			}
 
 			// Check element value
-			elem_operand := Operand{}
-			check_expr(ctx, &elem_operand, elem)
-
-			if elem_operand.mode == .Invalid {
-				continue
-			}
-
-			// Must be assignable to element type
-			if !check_is_assignable_to(ctx, &elem_operand, elem_type) {
-				elem_type_str := type_to_string(elem_type)
-				val_type_str := type_to_string(elem_operand.type)
-				error(elem, "Cannot use '%s' as element in dynamic array of '%s'", val_type_str, elem_type_str)
-				continue
-			}
+						elem_operand := Operand{}
+			check_expr_with_type_hint(ctx, &elem_operand, elem, elem_type)
+			check_assignment(ctx, &elem_operand, elem_type, "dynamic array literal")
 		}
 
 	case Type_Simd_Vector:
@@ -1394,24 +1373,14 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			}
 
 			// Check element value
-			elem_operand := Operand{}
-			check_expr(ctx, &elem_operand, elem)
+						elem_operand := Operand{}
+			check_expr_with_type_hint(ctx, &elem_operand, elem, elem_type)
+			check_assignment(ctx, &elem_operand, elem_type, "simd vector literal")
 
-			if elem_operand.mode == .Invalid {
-				continue
-			}
-
-			// Must be assignable to element type
-			if !check_is_assignable_to(ctx, &elem_operand, elem_type) {
-				elem_type_str := type_to_string(elem_type)
-				val_type_str := type_to_string(elem_operand.type)
-				error(elem, "Cannot use '%s' as element in SIMD vector of '%s'", val_type_str, elem_type_str)
-				continue
-			}
-
-			// Check constant-ness
-			if elem_operand.mode != .Constant {
-				is_constant = false
+			// C++ Reference: check_expr.cpp:11223-11225 -- guarded, and via
+			// check_is_operand_compound_lit_constant, not a bare mode comparison.
+			if is_constant {
+				is_constant = check_is_operand_compound_lit_constant(ctx, &elem_operand, elem_type)
 			}
 		}
 
@@ -1436,24 +1405,14 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			}
 
 			// Check element value
-			elem_operand := Operand{}
-			check_expr(ctx, &elem_operand, elem)
+						elem_operand := Operand{}
+			check_expr_with_type_hint(ctx, &elem_operand, elem, elem_type)
+			check_assignment(ctx, &elem_operand, elem_type, "matrix literal")
 
-			if elem_operand.mode == .Invalid {
-				continue
-			}
-
-			// Must be assignable to element type
-			if !check_is_assignable_to(ctx, &elem_operand, elem_type) {
-				elem_type_str := type_to_string(elem_type)
-				val_type_str := type_to_string(elem_operand.type)
-				error(elem, "Cannot use '%s' as element in matrix of '%s'", val_type_str, elem_type_str)
-				continue
-			}
-
-			// Check constant-ness
-			if elem_operand.mode != .Constant {
-				is_constant = false
+			// C++ Reference: check_expr.cpp:11223-11225 -- guarded, and via
+			// check_is_operand_compound_lit_constant, not a bare mode comparison.
+			if is_constant {
+				is_constant = check_is_operand_compound_lit_constant(ctx, &elem_operand, elem_type)
 			}
 		}
 
