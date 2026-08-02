@@ -233,8 +233,20 @@ odin_arch_from_target_arch :: proc(arch_kind: Target_Arch_Kind) -> runtime.Odin_
 // the real parse re-reports them for every file that survives the filter; reporting them from
 // the prescan as well would double them up, and reporting them for an excluded file would
 // reintroduce the noise.
+// #215: C++ evaluates the tags INSIDE parse_file, and the loop that bails on a mismatch
+// (src/parser.cpp:6894) sits BELOW the package-clause checks at 6874-6890. So a file the tags
+// exclude has already had its package clause validated, and C++ reports:
+//
+//	Expected only comments or lines starting with '#+' before the package declaration
+//	Invalid package name '_'
+//	Use of reserved package name 'X'
+//
+// and nothing else -- measured with probe tagord, where a body error (`x :: 1 +`) in an
+// excluded file is correctly silent on both sides. The port answered the tags before parsing
+// at all, so it emitted none of the three. Those checks are replayed here, on the excluded
+// path only; files that survive get them from the real parse as before.
 @(private = "file")
-file_header_selects_target :: proc(fullpath: string, src: string, target: parser.Build_Target) -> bool {
+file_header_selects_target :: proc(fullpath: string, src: string, target: parser.Build_Target, kind: ast.Package_Kind) -> bool {
 	t: tokenizer.Tokenizer
 	tokenizer.init(&t, src, fullpath, nil)
 	if t.ch <= 0 {
@@ -249,15 +261,30 @@ file_header_selects_target :: proc(fullpath: string, src: string, target: parser
 	// Mirrors parser.parse_file: collect the file tags that precede the package declaration,
 	// skipping comments and stepping over anything else (an invalid token before `package` is
 	// the real parse's business to complain about, not ours).
+	invalid_pre_package_token: Maybe(tokenizer.Token)
+	saw_package := false
 	scan_header: for {
 		tok := tokenizer.scan(&t)
 		// Comments and stray tokens fall through the switch and keep the scan going.
 		#partial switch tok.kind {
-		case .Package, .EOF:
+		case .Package:
+			saw_package = true
+			break scan_header
+		case .EOF:
 			break scan_header
 		case .File_Tag:
 			append(&stub.tags, tok)
+		case .Comment:
+		// #215: anything else before `package` is what C++ records as first_invalid_token.
+		case:
+			if invalid_pre_package_token == nil {
+				invalid_pre_package_token = tok
+			}
 		}
+	}
+	pkg_name_tok: tokenizer.Token
+	if saw_package {
+		pkg_name_tok = tokenizer.scan(&t)
 	}
 
 	// NOTE: stub.docs is left nil on purpose. parse_file_tags will also honour tags written as
@@ -269,7 +296,24 @@ file_header_selects_target :: proc(fullpath: string, src: string, target: parser
 		delete(tags.build_project_name)
 	}
 
-	return parser.match_build_tags(tags, target)
+	if parser.match_build_tags(tags, target) {
+		return true
+	}
+
+	// Excluded. Replay the package-clause diagnostics C++ has already emitted by this point.
+	// C++ Reference: src/parser.cpp:6872-6891 -- the invalid-token check RETURNS, so at most
+	// one of these fires per file.
+	if ippt, ok := invalid_pre_package_token.?; ok {
+		syntax_error_pos(ippt.pos, "Expected only comments or lines starting with '#+' before the package declaration")
+	} else if saw_package && pkg_name_tok.kind == .Ident {
+		switch name := pkg_name_tok.text; {
+		case name == "_":
+			syntax_error_pos(pkg_name_tok.pos, "Invalid package name '_'")
+		case parser.is_package_name_reserved(name), kind != .Runtime && name == "runtime":
+			syntax_error_pos(pkg_name_tok.pos, "Use of reserved package name '%s'", name)
+		}
+	}
+	return false
 }
 
 // collect_package_for_target reads a package directory into an unparsed ^ast.Package, admitting
@@ -353,7 +397,7 @@ collect_package_for_target :: proc(path: string, kind: ast.Package_Kind = .Norma
 		}
 
 		// (2) `#+build` tags - decided from the file header, still before the parse.
-		if !file_header_selects_target(fullpath, string(src), target) {
+		if !file_header_selects_target(fullpath, string(src), target, kind) {
 			delete(fullpath)
 			delete(src)
 			continue
