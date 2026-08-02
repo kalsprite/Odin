@@ -18,6 +18,7 @@ import "core:odin/ast"
 import "core:os"
 import "core:path/filepath"
 import "core:slice"
+import "core:strings"
 import "core:sync"
 
 // check_builtin_procedure is the central dispatcher for builtin checking
@@ -3757,15 +3758,17 @@ cache_load_file_directive :: proc(
 			}
 			return nil, false
 		}
+		// C++ Reference: parser.cpp:6684-6692 (dir_from_path) + determine_path_from_string.
+		// dir_from_path KEEPS the trailing separator -- it stops AT the '/' without
+		// dropping it -- and the join then adds another, so C++ genuinely produces
+		// `loaddir//file` and prints that in its diagnostics. filepath.join normalises the
+		// doubled separator away, so the port's message differed from the oracle's on every
+		// relative #load path. Concatenated manually to match.
 		base_dir := filepath.dir(file.fullpath)
-		joined, join_err := filepath.join({base_dir, original_path})
-		if join_err != nil {
-			if err_on_not_found {
-				error_node(call, "Failed to '#load' file: %s; could not resolve path", original_path)
-			}
-			return nil, false
+		if len(base_dir) > 0 && base_dir[len(base_dir)-1] != '/' && base_dir[len(base_dir)-1] != '\\' {
+			base_dir = strings.concatenate({base_dir, "/"}, context.temp_allocator)
 		}
-		path = joined
+		path = strings.concatenate({base_dir, "/", original_path}, context.temp_allocator)
 	}
 
 	// Lock the cache mutex
@@ -3817,7 +3820,14 @@ cache_load_file_directive :: proc(
 				cache.file_error = .None
 			} else {
 				cache.exists = false
-				cache.file_error = .Not_Exists if !os.exists(path) else .Permission
+				// C++ Reference: src/gb/gb.h:5159-5162. On POSIX, gb__posix_file_open returns
+				// gbFileError_Invalid for EVERY open failure -- the errno is discarded
+				// ("TODO(bill): More file errors"). Only the Windows branch distinguishes
+				// NotExists/Permission. The port's os.exists heuristic was a refinement the
+				// reference compiler does not have on this platform, and it made every
+				// missing-file message read "file cannot be found" where C++ says
+				// "invalid file or cannot be found".
+				cache.file_error = .Invalid
 			}
 		}
 	}
