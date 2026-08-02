@@ -1496,8 +1496,18 @@ clear_errors :: proc() {
 // C++ Reference: common.cpp:921-962, check_expr.cpp:155-264
 // ============================================================================
 
-// Maximum edit distance to consider as a suggestion
-MAX_DID_YOU_MEAN_DISTANCE :: 3
+// Maximum edit distance to consider as a suggestion.
+//
+// C++ Reference: common.cpp:891 -- `MAX_SMALLEST_DID_YOU_MEAN_DISTANCE = 3-USE_DAMERAU_LEVENSHTEIN`,
+// and USE_DAMERAU_LEVENSHTEIN is 1, so the real threshold is 2, not 3. The port used 3 to
+// compensate for a distance function that could not express C++'s transposition term (see
+// levenshtein_distance below); with that term restored, the constant must go back to 2 or the
+// port suggests names C++ rejects.
+MAX_DID_YOU_MEAN_DISTANCE :: 2
+
+// Maximum number of suggestions printed before eliding the rest.
+// C++ Reference: build_settings.cpp:12 DEFAULT_DID_YOU_MEAN_LIMIT, applied at main.cpp:1953.
+DID_YOU_MEAN_LIMIT :: 10
 
 // Distance_And_Target pairs a string distance with a target string
 Distance_And_Target :: struct {
@@ -1508,45 +1518,200 @@ Distance_And_Target :: struct {
 // levenshtein_distance computes the edit distance between two strings (case insensitive)
 // C++ Reference: common.cpp:859-918 (levenstein_distance_case_insensitive)
 levenshtein_distance :: proc(s1, s2: string) -> int {
-	// Convert to lowercase for case-insensitive comparison
-	s1_lower := strings.to_lower(s1, context.temp_allocator)
-	s2_lower := strings.to_lower(s2, context.temp_allocator)
-
-	len1 := len(s1_lower)
-	len2 := len(s2_lower)
-
-	if len1 == 0 {
-		return len2
-	}
-	if len2 == 0 {
-		return len1
-	}
-
-	// Use two rows instead of full matrix for space efficiency
-	prev_row := make([]int, len2 + 1, context.temp_allocator)
-	curr_row := make([]int, len2 + 1, context.temp_allocator)
-
-	// Initialize first row
-	for j in 0 ..= len2 {
-		prev_row[j] = j
+	// C++ keeps the FULL matrix because its transposition term reads matrix[i-2][j-2] -- two
+	// rows back. The port used a two-row rolling optimisation, which structurally cannot
+	// express that term, so the term was simply absent and MAX_DID_YOU_MEAN_DISTANCE was
+	// raised from 2 to 3 to compensate. The two are not equivalent: C++ scored "alph" against
+	// "beta" at 2 (suggested), the port at 4 (rejected). Full matrix restored.
+	//
+	// NOTE(parity): C++'s transposition branch does NOT check that the two characters are
+	// actually transposed -- it allows matrix[i-2][j-2]+1 whenever i > 1 && j > 1, which lets
+	// ANY two-character block be repaired for the price of one edit. That is much weaker than
+	// real Damerau-Levenshtein and is almost certainly a bug, but it is what decides which
+	// suggestions the compiler prints, so it is reproduced exactly. Flagged upstream.
+	//
+	// C++ lowercases with gb_char_to_lower, which is ASCII-only; strings.to_lower is
+	// Unicode-aware and can change the byte length, which would shift the matrix. Lowered
+	// per byte here to match.
+	lower :: proc(c: u8) -> u8 {
+		return c + 32 if c >= 'A' && c <= 'Z' else c
 	}
 
-	// Fill in the rest
-	for i in 1 ..= len1 {
-		curr_row[0] = i
-		for j in 1 ..= len2 {
-			cost := 0 if s1_lower[i - 1] == s2_lower[j - 1] else 1
-			curr_row[j] = min(
-				prev_row[j] + 1, // deletion
-				curr_row[j - 1] + 1, // insertion
-				prev_row[j - 1] + cost, // substitution
-			)
+	w := len(s2) + 1
+	h := len(s1) + 1
+	d := make([]int, w * h, context.temp_allocator)
+	for i in 0 ..= len(s1) {
+		d[i * w + 0] = i
+	}
+	for j in 0 ..= len(s2) {
+		d[0 * w + j] = j
+	}
+
+	for i in 1 ..= len(s1) {
+		a_c := lower(s1[i - 1])
+		for j in 1 ..= len(s2) {
+			b_c := lower(s2[j - 1])
+			if a_c == b_c {
+				d[i * w + j] = d[(i - 1) * w + j - 1]
+				continue
+			}
+			minimum := d[(i - 1) * w + j] + 1 // remove
+			minimum = min(minimum, d[i * w + j - 1] + 1) // insert
+			minimum = min(minimum, d[(i - 1) * w + j - 1] + 1) // substitute
+			if i > 1 && j > 1 {
+				// See NOTE(parity) above: deliberately unguarded, as in C++.
+				minimum = min(minimum, d[(i - 2) * w + j - 2] + 1)
+			}
+			d[i * w + j] = minimum
 		}
-		// Swap rows
-		prev_row, curr_row = curr_row, prev_row
 	}
 
-	return prev_row[len2]
+	return d[len(s1) * w + len(s2)]
+}
+
+// gb_sort_by is a faithful port of gb_sort (src/gb/gb.h:3403-3455), the sort C++ uses for
+// diagnostic candidate lists via array_sort.
+//
+// It matters because it is UNSTABLE: a median-of-3 quicksort down to runs of 8, then an
+// insertion sort. For candidates that tie on distance, the order it produces is not the
+// input order, and that order is what the compiler prints. Sorting the same list with a
+// stable sort gave a suggestion list in declaration order where C++ prints Aaa, Bbb, Kkk,
+// Jjj, Iii... -- same set, different first ten, and the first ten are all the user sees.
+//
+// The algorithm is deterministic, so this is reproducible; it just has to be the same
+// algorithm. cmp returns <0, 0 or >0, as gbCompareProc does.
+gb_sort_by :: proc(data: []$T, cmp: proc(a, b: T) -> int) {
+	SORT_STACK_SIZE :: 64
+	INSERT_SORT_THRESHOLD :: 8
+
+	if len(data) < 2 {
+		return
+	}
+
+	swap :: proc(data: []$E, a, b: int) {
+		data[a], data[b] = data[b], data[a]
+	}
+
+	stack: [SORT_STACK_SIZE]int
+	stack_ptr := 0
+
+	base := 0
+	limit := len(data) // exclusive, matching C++'s one-past-the-end `limit` pointer
+
+	for {
+		if limit - base > INSERT_SORT_THRESHOLD {
+			i := base + 1
+			j := limit - 1
+
+			swap(data, (limit - base) / 2 + base, base)
+			if cmp(data[i], data[j]) > 0 {
+				swap(data, i, j)
+			}
+			if cmp(data[base], data[j]) > 0 {
+				swap(data, base, j)
+			}
+			if cmp(data[i], data[base]) > 0 {
+				swap(data, i, base)
+			}
+
+			for {
+				for {
+					i += 1
+					if cmp(data[i], data[base]) >= 0 {
+						break
+					}
+				}
+				for {
+					j -= 1
+					if cmp(data[j], data[base]) <= 0 {
+						break
+					}
+				}
+				if i > j {
+					break
+				}
+				swap(data, i, j)
+			}
+
+			swap(data, base, j)
+
+			if j - base > limit - i {
+				stack[stack_ptr] = base
+				stack[stack_ptr + 1] = j
+				stack_ptr += 2
+				base = i
+			} else {
+				stack[stack_ptr] = i
+				stack[stack_ptr + 1] = limit
+				stack_ptr += 2
+				limit = j
+			}
+		} else {
+			j := base
+			i := j + 1
+			for i < limit {
+				for cmp(data[j], data[j + 1]) > 0 {
+					swap(data, j, j + 1)
+					if j == base {
+						break
+					}
+					j -= 1
+				}
+				j = i
+				i += 1
+			}
+
+			if stack_ptr == 0 {
+				break
+			}
+			stack_ptr -= 2
+			base = stack[stack_ptr]
+			limit = stack[stack_ptr + 1]
+		}
+	}
+}
+
+// did_you_mean_results sorts the candidates and keeps the prefix within the distance
+// threshold, as C++ does: it scores EVERY candidate, sorts the whole array, then truncates.
+// The port used to filter during collection instead, which is equivalent for the set but not
+// for the ordering C++ produces.
+// C++ Reference: common.cpp:912-925.
+did_you_mean_results :: proc(suggestions: ^[dynamic]Distance_And_Target) -> []Distance_And_Target {
+	// C++ Reference: common.cpp:913 -- array_sort, i.e. gb_sort, which is unstable.
+	gb_sort_by(suggestions[:], proc(a, b: Distance_And_Target) -> int {
+		return -1 if a.distance < b.distance else (1 if a.distance > b.distance else 0)
+	})
+	count := 0
+	for s in suggestions {
+		if s.distance > MAX_DID_YOU_MEAN_DISTANCE {
+			break
+		}
+		count += 1
+	}
+	return suggestions[:count]
+}
+
+// check_did_you_mean_print renders the suggestion block.
+// C++ Reference: check_expr.cpp:155-171.
+//
+// The port emitted every line WITHOUT a trailing newline, so the whole block rendered as one
+// run-together line ("\tSuggestion: Did you mean?\t\t.Alpha"), and it had no limit, so a wide
+// enum printed every candidate where C++ stops at ten and elides the rest.
+check_did_you_mean_print :: proc(results: []Distance_And_Target, prefix := "") {
+	if len(results) == 0 {
+		return
+	}
+	error_line("\tSuggestion: Did you mean?\n")
+	count := 0
+	for r in results {
+		error_line("\t\t%s%s\n", prefix, r.target)
+		count += 1
+		if DID_YOU_MEAN_LIMIT > 0 && count == DID_YOU_MEAN_LIMIT {
+			// NOTE: C++ omits the trailing newline on this line specifically.
+			error_line("\t\t... and %d more ...", len(results) - DID_YOU_MEAN_LIMIT)
+			break
+		}
+	}
 }
 
 // check_did_you_mean_type prints suggestions for field/member names
@@ -1559,7 +1724,6 @@ check_did_you_mean_type :: proc(name: string, fields: []^Entity, prefix := "") {
 	suggestions: [dynamic]Distance_And_Target
 	defer delete(suggestions)
 
-	// Calculate distances for all fields
 	for field in fields {
 		if field == nil {
 			continue
@@ -1568,26 +1732,10 @@ check_did_you_mean_type :: proc(name: string, fields: []^Entity, prefix := "") {
 		if len(target) == 0 || target == "_" {
 			continue
 		}
-		distance := levenshtein_distance(name, target)
-		if distance <= MAX_DID_YOU_MEAN_DISTANCE {
-			append(&suggestions, Distance_And_Target{distance, target})
-		}
+		append(&suggestions, Distance_And_Target{levenshtein_distance(name, target), target})
 	}
 
-	if len(suggestions) == 0 {
-		return
-	}
-
-	// Sort by distance
-	slice.sort_by(suggestions[:], proc(a, b: Distance_And_Target) -> bool {
-		return a.distance < b.distance
-	})
-
-	// Print suggestions
-	error_line("\tSuggestion: Did you mean?")
-	for s in suggestions {
-		error_line("\t\t%s%s", prefix, s.target)
-	}
+	check_did_you_mean_print(did_you_mean_results(&suggestions), prefix)
 }
 
 // check_did_you_mean_scope prints suggestions for names in a scope
@@ -1600,7 +1748,6 @@ check_did_you_mean_scope :: proc(name: string, scope: ^Scope, prefix := "") {
 	suggestions: [dynamic]Distance_And_Target
 	defer delete(suggestions)
 
-	// Calculate distances for all scope elements
 	for _, entity in scope.elements {
 		if entity == nil {
 			continue
@@ -1609,24 +1756,8 @@ check_did_you_mean_scope :: proc(name: string, scope: ^Scope, prefix := "") {
 		if len(target) == 0 || target == "_" {
 			continue
 		}
-		distance := levenshtein_distance(name, target)
-		if distance <= MAX_DID_YOU_MEAN_DISTANCE {
-			append(&suggestions, Distance_And_Target{distance, target})
-		}
+		append(&suggestions, Distance_And_Target{levenshtein_distance(name, target), target})
 	}
 
-	if len(suggestions) == 0 {
-		return
-	}
-
-	// Sort by distance
-	slice.sort_by(suggestions[:], proc(a, b: Distance_And_Target) -> bool {
-		return a.distance < b.distance
-	})
-
-	// Print suggestions
-	error_line("\tSuggestion: Did you mean?")
-	for s in suggestions {
-		error_line("\t\t%s%s", prefix, s.target)
-	}
+	check_did_you_mean_print(did_you_mean_results(&suggestions), prefix)
 }

@@ -3696,15 +3696,61 @@ check_is_expressible :: proc(ctx: ^Checker_Context, operand: ^Operand, target_ty
 //
 // check_is_assignable_to is defined in check_equivalence.odin
 
-convert_untyped_error :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: ^Type) {
-	// C++ Reference: check_expr.cpp:4611-4647
-	operand.mode = .Invalid
-
+// convert_untyped_error reports a failed untyped-constant conversion.
+//
+// C++ Reference: check_expr.cpp:4960-4997.
+//
+// The port previously emitted "Cannot convert '%s' to '%s' from '%s'" -- C++'s message is
+// "Cannot convert UNTYPED VALUE '%s' ...", which distinguishes it from the typed-conversion
+// error at check_expr.cpp:2787 that really does read "Cannot convert '%s' to ...". Two
+// distinct C++ messages had collapsed onto one string, so the diagnostic no longer said
+// which of the two checks had failed.
+//
+// The port also dropped the "Did you want 'nil'?" hint and the enum did-you-mean suggestion,
+// and set operand.mode = .Invalid on entry -- which is why the hint could not have worked
+// even if it had been written: it is guarded on mode == .Constant, and the guard ran after
+// the field it reads had already been cleared. C++ invalidates at the END. Same shape as
+// LEDGER #153: the check was ported, the state it reads was not.
+convert_untyped_error :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: ^Type, ignore_error_block := false) {
 	expr_str := expr_to_string(operand.expr)
 	defer delete(expr_str)
-	target_str := type_to_string(target_type)
-	from_str := type_to_string(operand.type)
-	error(operand.expr, "Cannot convert '%s' to '%s' from '%s'", expr_str, target_str, from_str)
+	type_str := type_to_string(target_type)
+	from_type_str := type_to_string(operand.type)
+
+	extra_text := ""
+	if operand.mode == .Constant {
+		// C++ tests big_int_is_zero(&operand->value.value_integer) whatever the value's
+		// actual kind is, deliberately reading the integer member of the union
+		// ("NOTE(bill): Doesn't matter what the type is as it's still zero in the union").
+		// Odin's Exact_Value is type-safe, so that reinterpretation is not expressible;
+		// is_exact_value_zero tests each kind on its own terms and agrees with C++ on the
+		// kinds that reach here (integer, float, and string, where C++ ends up reading the
+		// string's length field and so treats only "" as zero).
+		if is_exact_value_zero(operand.value) {
+			if expr_str != "nil" { 	// HACK NOTE(bill): Just in case
+				extra_text = " - Did you want 'nil'?"
+			}
+		}
+	}
+
+	if !ignore_error_block {
+		begin_error_block()
+	}
+	error(operand.expr, "Cannot convert untyped value '%s' to '%s' from '%s'%s", expr_str, type_str, from_type_str, extra_text)
+	if key, is_string := operand.value.(string); is_string {
+		if is_type_string(operand.type) && is_type_enum(target_type) {
+			et := base_type(target_type)
+			if et != nil {
+				if enum_variant, ok := &et.variant.(Type_Enum); ok {
+					check_did_you_mean_type(key, enum_variant.fields[:], ".")
+				}
+			}
+		}
+	}
+	operand.mode = .Invalid
+	if !ignore_error_block {
+		end_error_block()
+	}
 }
 
 // convert_to_typed converts an untyped constant/value to a typed value
