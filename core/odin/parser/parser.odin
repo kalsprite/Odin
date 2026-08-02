@@ -617,9 +617,43 @@ expect_semicolon_newline_error :: proc(p: ^Parser, token: tokenizer.Token, s: ^a
 
 
 expect_semicolon :: proc(p: ^Parser, node: ^ast.Node) -> bool {
+	// C++ Reference: src/parser.cpp:1849-1884 (expect_semicolon), reproduced structurally.
+	//
+	// C++ takes NO node argument and has no node-aware logic anywhere -- grep for
+	// "semicolon_optional" in src/ returns nothing. Its rule is only:
+	//
+	//     allow ';'                                        -> ok
+	//     curr is '}' or ')' on the SAME LINE as prev      -> ok
+	//     prev was ';'                                     -> ok
+	//     curr is EOF                                      -> ok
+	//     curr on the SAME LINE as prev                    -> ERROR
+	//     (curr on a later line                            -> ok, optional-semicolon rule)
+	//
+	// The newline case needs no special handling because the tokenizer emits a
+	// Semicolon("\n") token for it, which the first branch consumes.
+	//
+	// The port had an invented `is_semicolon_optional_for_node` layer whose FIRST line is
+	// `if .Optional_Semicolons in p.flags { return true }` -- and default_parser sets exactly
+	// that flag, so on every call with a non-nil node the semicolon was waived outright and
+	// the elaborate switch beneath it was dead code. Instrumentation (LEDGER 330) showed the
+	// split precisely: `x := 1 y := 2` passes node=nil and IS caught, while `S{a=1}` as a
+	// statement passes node=Any_Node and was let through, so the port accepted `S` as a
+	// complete statement and parsed `{a=1}` as a block.
+	//
+	// `node` is retained only so the ~40 call sites need not change; C++ ignores it and so
+	// do we.
+	_ = node
+
 	if allow_token(p, .Semicolon) {
 		expect_semicolon_newline_error(p, p.prev_tok, node)
 		return true
+	}
+
+	#partial switch p.curr_tok.kind {
+	case .Close_Brace, .Close_Paren:
+		if p.curr_tok.pos.line == p.prev_tok.pos.line {
+			return true
+		}
 	}
 
 	prev := p.prev_tok
@@ -632,48 +666,14 @@ expect_semicolon :: proc(p: ^Parser, node: ^ast.Node) -> bool {
 		return true
 	}
 
-	if node != nil {
-		if .Insert_Semicolon in p.tok.flags  {
-			#partial switch p.curr_tok.kind {
-			case .Close_Brace, .Close_Paren, .Else, .EOF:
-				return true
-			}
-
-			if is_semicolon_optional_for_node(p, node) {
-				return true
-			}
-		} else if prev.pos.line != p.curr_tok.pos.line {
-			if is_semicolon_optional_for_node(p, node) {
-				return true
-			}
-		} else {
-			#partial switch p.curr_tok.kind {
-			case .Close_Brace, .Close_Paren, .Else:
-				return true
-			case .EOF:
-				if is_semicolon_optional_for_node(p, node) {
-					return true
-				}
-			}
-		}
-	} else {
-		if p.curr_tok.kind == .EOF {
-			return true
-		}
+	if p.curr_tok.pos.line == prev.pos.line {
+		// C++ Reference: parser.cpp:1879 moves to the END of the previous token, so the
+		// caret lands where the semicolon belonged (progress#175).
+		error(p, end_pos(prev), "Expected ';', got %s", tokenizer.token_to_string(p.curr_tok))
+		fix_advance_to_next_stmt(p)
+		return false
 	}
-
-	// C++ Reference: src/parser.cpp:1879-1880.
-	//
-	//     prev_token.pos = token_pos_end(prev_token);
-	//     syntax_error(prev_token, "Expected ';', got %.*s", LIT(p));
-	//
-	// C++ moves the position to the END of the previous token before reporting, so the caret
-	// lands just after `1` in `x := 1 y := 2` -- where the semicolon should have gone. The
-	// port reported at prev.pos, the START of that token, making every "Expected ';'" one
-	// column early. Probe semi1: oracle 2:24, port 2:23.
-	error(p, end_pos(prev), "Expected ';', got %s", tokenizer.token_to_string(p.curr_tok))
-	fix_advance_to_next_stmt(p)
-	return false
+	return true
 }
 
 new_blank_ident :: proc(p: ^Parser, pos: tokenizer.Pos) -> ^ast.Ident {
