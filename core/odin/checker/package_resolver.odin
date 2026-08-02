@@ -303,14 +303,32 @@ file_header_selects_target :: proc(fullpath: string, src: string, target: parser
 	// Excluded. Replay the package-clause diagnostics C++ has already emitted by this point.
 	// C++ Reference: src/parser.cpp:6872-6891 -- the invalid-token check RETURNS, so at most
 	// one of these fires per file.
+	//
+	// #218, a use-after-free this function introduced in progress#195: an Error_Value stores its
+	// Pos BY VALUE, and Pos.file is a string header pointing INTO `fullpath`. The caller frees
+	// `fullpath` the moment this returns false (see collect_package_for_target). Every emitted
+	// diagnostic was therefore left pointing at freed memory, and print_all_errors sorts on
+	// pos.file -- so the order of two diagnostics sharing an offset/line/column depended on what
+	// the allocator had since done with those bytes. Probe rt flipped between two orderings
+	// roughly half the time; the 169-package sweep could not see it because it runs each package
+	// once, and the corpus runs each probe once.
+	//
+	// The diagnostic must own its path. Clone it into the error collector's allocator, which
+	// outlives collection, and only when something is actually going to be reported.
+	owned_pos :: proc(pos: tokenizer.Pos) -> tokenizer.Pos {
+		out := pos
+		out.file = strings.clone(pos.file, global_error_collector.allocator)
+		return out
+	}
+
 	if ippt, ok := invalid_pre_package_token.?; ok {
-		syntax_error_pos(ippt.pos, "Expected only comments or lines starting with '#+' before the package declaration")
+		syntax_error_pos(owned_pos(ippt.pos), "Expected only comments or lines starting with '#+' before the package declaration")
 	} else if saw_package && pkg_name_tok.kind == .Ident {
 		switch name := pkg_name_tok.text; {
 		case name == "_":
-			syntax_error_pos(pkg_name_tok.pos, "Invalid package name '_'")
+			syntax_error_pos(owned_pos(pkg_name_tok.pos), "Invalid package name '_'")
 		case parser.is_package_name_reserved(name), kind != .Runtime && name == "runtime":
-			syntax_error_pos(pkg_name_tok.pos, "Use of reserved package name '%s'", name)
+			syntax_error_pos(owned_pos(pkg_name_tok.pos), "Use of reserved package name '%s'", name)
 		}
 	}
 	return false
