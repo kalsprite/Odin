@@ -4552,7 +4552,26 @@ parse_value_decl :: proc(p: ^Parser, names: []^ast.Expr, docs: ^ast.Comment_Grou
 
 	if p.curr_proc == nil {
 		if len(values) > 0 && len(names) != len(values) {
-			error(p, values[0].pos, "expected %d expressions on the right-hand side, got %d", len(names), len(values))
+			// C++ Reference: src/parser.cpp:3822-3831. ONE diagnostic, whose format string
+			// carries the Note as an embedded continuation line:
+			//
+			//     syntax_error(values[0],
+			//         "Expected %td expressions on the right hand side, got %td\n"
+			//         "\tNote: Global declarations do not allow for multi-valued expressions",
+			//         names.count, values.count);
+			//
+			// The port had the wording lowercased and hyphenated ("expected ... right-hand
+			// side") and dropped the Note entirely, so `a, b := 1` at file scope lost the one
+			// line that explains WHY it is rejected there but allowed inside a procedure.
+			// Probe bp_arity. LEDGER #376.
+			error(
+				p,
+				values[0].pos,
+				"Expected %d expressions on the right hand side, got %d\n" +
+				"\tNote: Global declarations do not allow for multi-valued expressions",
+				len(names),
+				len(values),
+			)
 		}
 	}
 
