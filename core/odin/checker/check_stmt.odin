@@ -1894,6 +1894,7 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 						}
 						if existing_list, found := &seen_cases[key]; found {
 							dup := false
+							dup_pos: tokenizer.Pos
 							for entry in existing_list {
 								temp_operand := Operand {
 									mode = .Value,
@@ -1901,6 +1902,7 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 								}
 								if check_is_assignable_to(ctx, &temp_operand, x.type) {
 									dup = true
+									dup_pos = entry.token.pos
 									break
 								}
 							}
@@ -1911,11 +1913,15 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 								// walking the range afterwards. Breaking out here left the
 								// remaining members unregistered, which then produced a
 								// second, spurious "Unhandled switch cases".
-								begin_error_block()
+								// C++ Reference: check_expr.cpp:9564-9569. C++ puts the
+								// continuation INSIDE the format string with a literal \n,
+								// as one error() call -- no block, no error_line, so the
+								// ordering problem never arises. This site emitted no
+								// continuation at all; the two sibling sites below emitted
+								// one via an unblocked error_line without a newline.
 								x_str := expr_to_string(x.expr)
-								error_node(x.expr, "Duplicate case '%s'", x_str)
+								error_node(x.expr, "Duplicate case '%s'\n\tprevious case at %s", x_str, token_pos_to_string(dup_pos))
 								delete(x_str)
-								end_error_block()
 							}
 						}
 						entry := Type_And_Token {
@@ -1946,8 +1952,7 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 
 									lhs_str := expr_to_string(be.left)
 									defer delete(lhs_str)
-									error_node(be.left, "Duplicate case '%s'", lhs_str)
-									error_line("\tprevious case at %s", token_pos_to_string(entry.token.pos))
+									error_node(be.left, "Duplicate case '%s'\n\tprevious case at %s", lhs_str, token_pos_to_string(entry.token.pos))
 									break
 								}
 							}
@@ -1993,8 +1998,7 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 
 									rhs_str := expr_to_string(be.right)
 									defer delete(rhs_str)
-									error_node(be.right, "Duplicate case '%s'", rhs_str)
-									error_line("\tprevious case at %s", token_pos_to_string(entry.token.pos))
+									error_node(be.right, "Duplicate case '%s'\n\tprevious case at %s", rhs_str, token_pos_to_string(entry.token.pos))
 									break
 								}
 							}

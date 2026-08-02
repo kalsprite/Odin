@@ -2398,12 +2398,19 @@ ast_token :: proc(node: ^ast.Node) -> tokenizer.Token {
 		return {}
 	}
 
-	// All AST nodes inherit from Node which has a pos field
-	// Create a minimal token with the position information
-	// NOTE: Token kind is set to Invalid since we only need position info for error reporting
-	// C++ ast_token extracts the actual token from node-specific fields, but we use a synthetic token
+	// The position comes from ast_token_pos, NOT from node.pos directly.
+	//
+	// This used to return node.pos with a comment admitting the divergence ("C++ ast_token
+	// extracts the actual token from node-specific fields, but we use a synthetic token").
+	// Task 254 ported those node-specific arms -- Assign_Stmt to its operator, Deref_Expr to
+	// its operator, Implicit_Selector_Expr to its FIELD -- into ast_token_pos, and left this
+	// second helper computing the same thing the old way. Two helpers for one concept, one
+	// correct. `case .A:` recorded the dot's column where C++ records the field's, so
+	// "previous case at ..." pointed one column left. LEDGER task 274.
+	//
+	// Token kind stays Invalid: only the position is ever read from this.
 	return tokenizer.Token {
-		pos  = node.pos,
+		pos  = ast_token_pos(node),
 		kind = .Invalid,
 	}
 }
