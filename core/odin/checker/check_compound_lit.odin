@@ -1043,8 +1043,11 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		for elem in cl.elems {
 			// Bit_set literals cannot use named fields
 			// Reference: C++ lines 10579-10583
+			// C++ Reference: check_expr.cpp:11431-11435. C++ also clears is_constant here;
+			// the port errored and continued, leaving the literal constant.
 			if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
-				error(elem, "Bit_set literals cannot contain 'field = value' entries")
+				error(elem, "'field = value' in a bit_set literal is not allowed")
+				is_constant = false
 				continue
 			}
 
@@ -1082,11 +1085,13 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				// check_implicit_selector_expr with a nil hint and fails.
 				check_expr_with_type_hint(ctx, &elem_operand, elem, elem_hint)
 
-				if elem_operand.mode == .Invalid {
-					continue
-				}
-
-				// Check constant-ness (C++ :11441-11443, before the assignment check)
+				// C++ Reference: check_expr.cpp:11439-11441. There is NO early bail on an
+				// invalid element here. An invented `if elem_operand.mode == .Invalid { continue }`
+				// used to sit above this, which skipped the update below -- so a literal whose
+				// element failed to resolve stayed CONSTANT. Callers that inspect the operand
+				// afterwards then saw a perfectly good constant and dropped their own
+				// diagnostics: `@(fast_math = {.Bad})` lost both "Expected a constant attribute
+				// element" and the outer bit_set error.
 				if elem_operand.mode != .Constant {
 					is_constant = false
 				}
