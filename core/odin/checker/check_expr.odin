@@ -9077,6 +9077,158 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			}
 			operands := operand_list[:]
 
+			// C++ Reference: check_expr.cpp:8223-8425 - the validation prologue that runs
+			// BEFORE the record is instantiated. The port went straight from unpacking the
+			// arguments to instantiating, so neither a wrong argument count nor a non-type
+			// argument was ever rejected. `R(5)` against `R :: struct($T: typeid)` therefore
+			// instantiated R with an untyped-integer operand, and the struct field `v: T`
+			// tripped the untyped-parameter diagnostic inside check_record_polymorphic_params
+			// - blaming the DECLARATION for a mistake made at the call.
+			//
+			// Applied to the positional path only: C++ reorders named-field arguments into
+			// parameter order first (check_expr.cpp:8241-8302) and this loop then compares
+			// operand i against parameter i. The port does not reorder, so running it over
+			// named-field operands would compare the wrong pairs. Named-field ordering is
+			// still unported; see task #183.
+			poly_err := false
+			if !named_fields {
+				if tuple := get_record_polymorphic_params(target_type); tuple != nil {
+					param_count := len(tuple.variables)
+
+					// C++ lines 8225-8235: walk back over trailing constants that carry a
+					// default value - those may be omitted at the call.
+					minimum_param_count := param_count
+					for ; minimum_param_count > 0; minimum_param_count -= 1 {
+						e := tuple.variables[minimum_param_count - 1]
+						if e == nil || e.kind != .Constant {
+							break
+						}
+						cd, cd_ok := e.variant.(Entity_Constant)
+						if !cd_ok || cd.param_value.kind == .Invalid {
+							break
+						}
+					}
+
+					// C++ lines 8310-8315: drop trailing operands that were never supplied.
+					for len(operands) > 0 && operands[len(operands) - 1].expr == nil {
+						operands = operands[:len(operands) - 1]
+					}
+
+					// C++ lines 8317-8332
+					if minimum_param_count != param_count {
+						if param_count < len(operands) {
+							error(node, "Too many polymorphic type arguments, expected a maximum of %d, got %d", param_count, len(operands))
+							poly_err = true
+						} else if minimum_param_count > len(operands) {
+							error(node, "Too few polymorphic type arguments, expected a minimum of %d, got %d", minimum_param_count, len(operands))
+							poly_err = true
+						}
+					} else {
+						if param_count < len(operands) {
+							error(node, "Too many polymorphic type arguments, expected %d, got %d", param_count, len(operands))
+							poly_err = true
+						} else if param_count > len(operands) {
+							error(node, "Too few polymorphic type arguments, expected %d, got %d", param_count, len(operands))
+							poly_err = true
+						}
+					}
+
+					// C++ lines 8339-8362: fill the omitted trailing parameters from their
+					// declared defaults, so the instantiation sees a full operand list. This
+					// is also what stops a SHORT list from reaching
+					// check_record_polymorphic_params - see task #181.
+					if !poly_err && minimum_param_count != param_count {
+						filled := make([dynamic]Operand, 0, param_count, context.temp_allocator)
+						append(&filled, ..operands)
+						for len(filled) < param_count {
+							append(&filled, Operand{})
+						}
+						for i in 0 ..< param_count {
+							if filled[i].expr != nil {
+								continue
+							}
+							e := tuple.variables[i]
+							if e == nil {
+								continue
+							}
+							#partial switch e.kind {
+							case .Constant:
+								if cd, cd_ok := e.variant.(Entity_Constant); cd_ok {
+									filled[i].mode = .Constant
+									filled[i].type = default_type(entity_type(e))
+									filled[i].expr = unparen_expr(cd.param_value.original_ast_expr)
+									if cd.param_value.kind == .Constant {
+										filled[i].value = cd.param_value.value
+									}
+								}
+							case .Type_Name:
+								filled[i].mode = .Type
+								filled[i].type = entity_type(e)
+								filled[i].expr = e.identifier
+							}
+						}
+						operands = filled[:]
+					}
+
+					// C++ lines 8363-8420: validate each operand against its parameter.
+					if !poly_err {
+						oo_count := min(param_count, len(operands))
+						for i in 0 ..< oo_count {
+							e := tuple.variables[i]
+							op := &operands[i]
+							if e == nil || op.mode == .Invalid {
+								continue
+							}
+							if e.kind == .Type_Name {
+								// C++ lines 8371-8378: THE check that was missing.
+								if op.mode != .Type {
+									expr_str := expr_to_string(op.expr)
+									error(op.expr, "Expected a type for the argument '%s', got %s", e.token.text, expr_str)
+									poly_err = true
+								}
+							} else {
+								// C++ lines 8384-8390: an operand that is itself still generic
+								// is a polymorphic name, not a value to check.
+								if op.type != nil {
+									if _, is_generic := op.type.variant.(Type_Generic); is_generic {
+										continue
+									}
+								}
+								s: i64 = 0
+								if !check_is_assignable_to_with_score(ctx, op, entity_type(e), &s) {
+									check_assignment(ctx, op, entity_type(e), "polymorphic type argument")
+									poly_err = true
+								}
+								op.type = entity_type(e)
+								// C++ lines 8398-8412
+								if op.mode != .Constant {
+									valid := false
+									if is_type_proc(op.type) {
+										valid = entity_from_expr(ctx.info, op.expr) != nil
+									}
+									if !valid {
+										error(op.expr, "Expected a constant value for this polymorphic type argument")
+										poly_err = true
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
+			// C++ lines 8573-8587: on error the operand simply becomes invalid. C++ emits no
+			// closing message here - the caller's context supplies it (a type-expression
+			// position reports "'R(5)' is not a type", check_type.cpp:3696/4019). The port
+			// used to print "Failed to instantiate polymorphic type '%s'", which appears
+			// nowhere in src/.
+			if poly_err {
+				o.mode = .Invalid
+				o.type = t_invalid
+				o.expr = node
+				return .Expr
+			}
+
 			// Try polymorphic type instantiation
 			specialized_type := check_polymorphic_record_type(ctx, target_type, operands[:], node)
 			if specialized_type != nil {
@@ -9086,12 +9238,10 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 				add_type_and_value(ctx, node, o.mode, o.type, o.value)
 				return .Expr
 			} else {
-				// Failed to instantiate
-				type_str := type_to_string(target_type)
-				error(node, "Failed to instantiate polymorphic type '%s'", type_str)
 				o.mode = .Invalid
+				o.type = t_invalid
 				o.expr = node
-				return .Stmt
+				return .Expr
 			}
 		}
 

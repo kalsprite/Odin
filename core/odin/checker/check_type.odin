@@ -1336,18 +1336,11 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 				// C++ lines 475-530: Check for poly operand or create entity
 				e: ^Entity = nil
 
-				// C++ line 505 gates this on `poly_operands != nullptr` alone, indexes with
-					// entities.count, and falls back to the declared default value when the
-					// caller supplied fewer operands than there are parameters. The port instead
-					// requires that an operand actually EXISTS for this parameter, because it
-					// reaches here with a SHORTER operand list than the parameter list:
-					// `Chan($T, $D)` matched against the specialization `$C/Chan($T)` supplies
-					// one operand for two parameters. C++'s caller never hands that case down
-					// (task #181). Until the port's caller agrees, falling through to the
-					// no-operand branch is what keeps `$D` bound to its declared type rather
-					// than to t_invalid - and `where C.D <= .Both` in core/sync/chan reads
-					// exactly that. Indexing by len(entities) is C++'s: a name that fails the
-					// identifier check above adds no entity, so it consumes no operand either.
+				// C++ Reference: check_type.cpp:505-513. The operand defaults to t_invalid and
+					// falls back to the parameter's declared default when the caller supplied
+					// fewer operands than there are parameters. Indexing is by len(entities), not
+					// by a separate counter: a name that fails the identifier check above adds no
+					// entity, so it must consume no operand either.
 					//
 					// What C++ does NOT do here is validate the operand: no Addressing_Invalid
 					// skip, no nil-type check, and no "is it a type?" test. Each of those was
@@ -1356,8 +1349,15 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 					// reference to it reported "Undeclared name". The operand-is-not-a-type
 					// diagnostic is C++'s to emit, from check_polymorphic_record_type
 					// (check_expr.cpp:8378), before control ever reaches this function.
-					if len(entities) < len(poly_operands) {
-						operand := &poly_operands[len(entities)]
+					if poly_operands != nil {
+						operand_storage := Operand{type = t_invalid}
+						operand := &operand_storage
+						if len(entities) < len(poly_operands) {
+							operand_storage = poly_operands[len(entities)]
+						} else if param_value.kind != .Invalid {
+							operand_storage.mode = .Constant
+							operand_storage.value = param_value.value
+						}
 
 						t := operand.type
 
