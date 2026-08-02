@@ -10444,6 +10444,30 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 				check_assignment(ctx, arg_op, param_type, "procedure argument")
 				data.error = true
 			}
+		} else {
+			// C++ Reference: check_expr.cpp:6873-6875.
+			//
+			//     } else if (show_error) {
+			//         check_assignment(c, o, param_type, str_lit("procedure argument"));
+			//     }
+			//
+			// C++ calls check_assignment on the SUCCESS path too, not only on failure.
+			// check_is_assignable_to answers "could this convert"; check_assignment performs
+			// the conversion and reports what only the conversion can discover. The port
+			// called it solely on failure, so a case that is assignable-in-principle but
+			// unconvertible-in-fact passed silently:
+			//
+			//     E :: enum { A, B };  f :: proc(x: E);  f(0)
+			//     C++  -> Cannot convert untyped value '0' to 'E' from 'untyped integer'
+			//     port -> accepted
+			//
+			// The port's check_assignment was never the problem -- `x: E = 0` in a variable
+			// declaration was already caught. Only the argument path skipped the call.
+			//
+			// data.error is deliberately NOT set here: C++ leaves err untouched in this
+			// branch, so a diagnostic from the conversion does not additionally mark the
+			// call as having failed argument matching.
+			check_assignment(ctx, arg_op, param_type, "procedure argument")
 		}
 	}
 
