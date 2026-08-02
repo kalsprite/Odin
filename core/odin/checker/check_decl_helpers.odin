@@ -1019,14 +1019,28 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				continue
 			}
 
-			// C++ Reference: checker.cpp:4631. Anything still unmatched is an error.
+			// C++ Reference: checker.cpp:4627-4633. Anything still unmatched is an error,
+			// unless the build asked for unknown attributes to be tolerated.
 			//
-			// The accept-list above was derived EMPIRICALLY rather than guessed: a probe
-			// build with this catch-all made unconditional was run over all 169 packages,
-			// and `builtin` was the ONLY name it flagged. `./odin check` accepts the
-			// corpus, so every attribute name appearing in it is valid by construction --
-			// which makes that sweep a complete enumeration of what this chain misses.
+			// The accept-list above was derived EMPIRICALLY: a probe build with this
+			// catch-all made unconditional was run over all 169 packages, and `builtin` was
+			// the ONLY name it flagged. CORRECTION (task 251): that sweep bounds what this
+			// chain wrongly REJECTS -- every name in a corpus `./odin check` accepts is
+			// valid by construction -- but it says nothing about what the chain wrongly
+			// ACCEPTS, because a name the corpus never uses in the wrong place cannot show
+			// up in it. `priority_index` on a procedure is exactly that case. See the
+			// per-declaration-kind gap recorded alongside this task.
+			//
+			// The two guards were both missing: ignore_unknown_attributes was declared in
+			// Build_Context and never read by anything, and there was no custom-attribute
+			// set at all.
+			if build_context.ignore_unknown_attributes || name in build_context.custom_attributes {
+				continue
+			}
+			begin_error_block()
+			defer end_error_block()
 			error(elem, "Unknown attribute element name '%s'", name)
+			error_line("\tDid you forget to use the build flag '-ignore-unknown-attributes' or '-custom-attribute:%s'?\n", name)
 		}
 	}
 }

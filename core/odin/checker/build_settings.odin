@@ -427,6 +427,11 @@ Build_Context :: struct {
 	custom_optimization_level:          bool,
 	optimization_level:                 i32,
 	ignore_unknown_attributes:          bool,
+	// Names accepted as attributes despite matching no built-in attribute, from C++'s
+	// `-custom-attribute:<name>`. Populated by the host, like the rest of Build_Context.
+	// C++ Reference: build_settings.cpp `StringSet custom_attributes`, guarded at
+	// checker.cpp:4628.
+	custom_attributes:                  map[string]bool,
 	no_bounds_check:                    bool,
 	no_type_assert:                     bool,
 	dynamic_literals:                   bool, // Opt-in to `#+feature dynamic-literals` project-wide.
