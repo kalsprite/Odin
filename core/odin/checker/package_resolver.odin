@@ -906,8 +906,22 @@ check_package_from_path :: proc(path: string, allocator := context.allocator) ->
 	files := make([dynamic]^ast.File, allocator)
 	defer delete(files)
 
+	// Packages come from load_result.packages, which is an ordered slice, but the files within
+	// each were iterated as a MAP - so the flat list handed to check_files was
+	// (deterministic package order) x (hash file order).
+	//
+	// C++ never builds a flat list: check_parsed_files walks packages, each holding pkg->files,
+	// an array that check_create_file_scopes sorts by basename (checker.cpp:6052, called from
+	// check_parsed_files at checker.cpp:7677). Sorting the inner loop reproduces that shape --
+	// packages in load order, files sorted within - without interleaving packages, which is what
+	// sorting the flat list by basename would have done.
+	//
+	// NOTE on scope: the SAME map iteration in the loader above (the import-discovery loop) is
+	// deliberately left alone. That code runs before any checking, and its C++ counterpart is in
+	// the parser, which sees pkg->files in raw readdir order - the sort has not happened yet.
+	// Sorting there would diverge from C++ rather than match it.
 	for pkg in load_result.packages {
-		for _, file in pkg.files {
+		for file in sorted_files(pkg.files) {
 			append(&files, file)
 		}
 	}
