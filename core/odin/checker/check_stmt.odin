@@ -2666,10 +2666,14 @@ check_defer_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) -> Viral_State_
 	deferred_stmt := stmt.stmt
 	original_stmt := deferred_stmt
 
-	// C++ lines 2818-2820: Early exit for empty defer blocks
-	// FEATURE: C++ doesn't warn, but we add a warning for empty defer blocks
+	// C++ Reference: check_stmt.cpp:2897-2899 -- `break`, i.e. silently ignore an empty defer.
+	//
+	// The port emitted `warning_node(deferred_stmt, "Empty defer block has no effect")` here,
+	// labelled "FEATURE: C++ doesn't warn, but we add a warning". It is a warning on entirely
+	// valid code that C++ accepts silently, so every `defer {}` in a downstream package gained
+	// a diagnostic the reference compiler does not produce. Removed for parity; if it is wanted
+	// it belongs behind a vet flag and in CPP_DEVIATIONS.md, not unconditionally. LEDGER 315.
 	if block, is_block := deferred_stmt.derived.(^ast.Block_Stmt); is_block && len(block.stmts) == 0 {
-		warning_node(deferred_stmt, "Empty defer block has no effect")
 		return viral_flags
 	}
 
