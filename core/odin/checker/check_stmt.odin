@@ -3287,8 +3287,13 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 
 		// Note: Named return values have both .Param and .Result flags, but they ARE mutable
 		if e != nil && .Param in e.flags && .Result not_in e.flags {
-			// C++: check_stmt.cpp:572-584
-			// ERROR_BLOCK
+			// C++: check_stmt.cpp:584 opens an ERROR_BLOCK here. This port recorded that as a
+			// bare "// ERROR_BLOCK" comment and never opened one, so the error_line suggestions
+			// below had no current error value to attach to and fell back to writing straight
+			// to stderr - ahead of their own diagnostic, unsorted and uncounted. LEDGER 303.
+			begin_error_block()
+			defer end_error_block()
+
 			if .Using in e.flags {
 				error_node(lhs.expr, "Cannot assign to '%s' which is from a 'using' procedure parameter", str)
 			} else {
@@ -3300,8 +3305,11 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 				error_line("\tSuggestion: Did you mean to pass '%s' by pointer?\n", e.token.text)
 			}
 		} else if e == nil || .Result not_in e.flags {
-			// C++: check_stmt.cpp:585-617
-			// ERROR_BLOCK
+			// C++: check_stmt.cpp:597 opens an ERROR_BLOCK here. Same omission as the arm
+			// above; see LEDGER 303.
+			begin_error_block()
+			defer end_error_block()
+
 			error_node(lhs.expr, "Cannot assign to '%s'", str)
 
 			if e != nil && .For_Value in e.flags {
