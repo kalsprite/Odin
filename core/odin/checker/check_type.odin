@@ -2248,7 +2248,9 @@ populate_using_entity_scope :: proc(ctx: ^Checker_Context, target_scope: ^Scope,
 			// C++ lines 50-59
 			e := scope_lookup_current(target_scope, name)
 			if e != nil && name != "_" {
-				error(e.token, "'%s' is already declared, through 'using' from '%v'", name, original_type)
+				// C++ check_type.cpp:50 passes type_to_string(original_type). The port passed
+				// the ^Type itself to a "%v", which dumps the whole Type struct. LEDGER 287.
+				error(e.token, "'%s' is already declared, through 'using' from '%s'", name, type_to_string(original_type))
 			} else {
 				// Add field entity to target scope
 				// C++ line 61

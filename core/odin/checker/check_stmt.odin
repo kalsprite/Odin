@@ -3710,7 +3710,11 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 				if found != nil {
 					expr_str := expr_to_string(expr)
 					defer delete(expr_str)
-					error_node(expr, "Namespace collision while 'using' import name '%s' of: %s\n\tat %v\n\tat %v", expr_str, found.token.text, found.token.pos, decl.token.pos)
+					// C++ check_stmt.cpp:819-826 renders both positions with
+					// token_pos_to_string. The port passed raw tokenizer.Pos values to "%v",
+					// printing Pos{file = "...", offset = ..., line = ..., column = ...}
+					// instead of file(line:col). LEDGER 287.
+					error_node(expr, "Namespace collision while 'using' import name '%s' of: %s\n\tat %s\n\tat %s", expr_str, found.token.text, token_pos_to_string(found.token.pos), token_pos_to_string(decl.token.pos))
 					return false
 				}
 			}

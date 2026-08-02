@@ -6270,10 +6270,17 @@ check_type_assertion :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 		}
 
 		if !ok {
+			// C++ check_expr.cpp:11657-11665. Two divergences here, not one: the port
+			// dropped the EXPRESSION from the message entirely ("Cannot type assert to"
+			// rather than "Cannot type assert '%s' to"), and passed the ^Type to a "%v",
+			// dumping the Type struct where a name belongs. LEDGER 287.
+			assert_expr_str := expr_to_string(o.expr)
+			defer delete(assert_expr_str)
+			dst_type_str := type_to_string(target)
 			if len(union_type.variants) == 0 {
-				error(o.expr, "Cannot type assert to '%v' as this is an empty union", target)
+				error(o.expr, "Cannot type assert '%s' to '%s' as this is an empty union", assert_expr_str, dst_type_str)
 			} else {
-				error(o.expr, "Cannot type assert to '%v' as it is not a variant of that union", target)
+				error(o.expr, "Cannot type assert '%s' to '%s' as it is not a variant of that union", assert_expr_str, dst_type_str)
 			}
 			o.mode = .Invalid
 			o.expr = node
