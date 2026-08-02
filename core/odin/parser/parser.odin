@@ -2401,6 +2401,38 @@ parse_results :: proc(p: ^Parser) -> (list: ^ast.Field_List, diverging: bool) {
 }
 
 
+// string_to_calling_convention decides whether a proc type's convention string names a real
+// calling convention, returning nil when it does not.
+//
+// C++ Reference: src/parser.cpp:4136-4143 (parse_proc_type):
+//
+//     if (f->curr_token.kind == Token_String) {
+//         Token token = expect_token(f, Token_String);
+//         auto c = string_to_calling_convention(string_value_from_token(f, token));
+//         if (c == ProcCC_Invalid) {
+//             syntax_error(token, "Unknown procedure calling convention: '%.*s'", LIT(token.string));
+//         } else {
+//             cc = c;
+//         }
+//     }
+//
+// The port's version tested only that the token LOOKED like a non-empty string literal and
+// then returned the text verbatim, so the guard below it could never fire and every unknown
+// convention fell through to the checker instead -- reported one phase late, at the `proc`
+// keyword rather than the string, as a plain Error rather than a Syntax Error, and with an
+// invented message. probe_cc_neg had all four differences at once.
+//
+// C++ leaves cc as ProcCC_Invalid after reporting, so the declaration falls back to
+// default_calling_convention(). Returning nil here reproduces that: the checker's
+// `switch v in calling_convention` matches no case and keeps its .Odin default, and it does
+// NOT report a second time.
+//
+// NOTE: the name set below and the name->enum switch in the checker's
+// string_to_calling_convention (core/odin/checker/check_stmt.odin) are the same list in two
+// places, because only the checker can resolve "system" (target-dependent) and only the
+// parser runs early enough to report. Probe ccpos exercises every name through both, so a
+// drift between them fails the corpus rather than going quiet -- the checker's own comment
+// records that an earlier inline copy diverged in three ways. LEDGER #372.
 string_to_calling_convention :: proc(s: string) -> ast.Proc_Calling_Convention {
 	if s[0] != '"' && s[0] != '`' {
 		return nil
@@ -2408,7 +2440,13 @@ string_to_calling_convention :: proc(s: string) -> ast.Proc_Calling_Convention {
 	if len(s) == 2 {
 		return nil
 	}
-	return s
+	switch s[1:len(s) - 1] {
+	case "odin", "contextless", "cdecl", "c", "stdcall", "std", "fastcall", "fast",
+	     "none", "naked", "win64", "sysv", "system",
+	     "preserve/none", "preserve/most", "preserve/all":
+		return s
+	}
+	return nil
 }
 
 // C++ Reference: src/parser.cpp:2062 parse_proc_tags, and check_proc_add_tag at 2055.
@@ -2513,7 +2551,11 @@ parse_proc_type :: proc(p: ^Parser, tok: tokenizer.Token) -> ^ast.Proc_Type {
 		str := expect_token(p, .String)
 		cc = string_to_calling_convention(str.text)
 		if cc == nil {
-			error(p, str.pos, "unknown calling convention '%s'", str.text)
+			// C++ prints token.string -- the RAW token text, quotes included -- even though
+			// it looked the name up through string_value_from_token, which strips them. That
+			// is why the oracle shows two layers of quoting:
+			//     Unknown procedure calling convention: '"not_a_real_convention"'
+			error(p, str.pos, "Unknown procedure calling convention: '%s'", str.text)
 		}
 	}
 

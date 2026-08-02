@@ -3521,11 +3521,22 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	if generic_row == nil && generic_column == nil {
 		total_elements := row_count * column_count
 		if total_elements > MATRIX_ELEMENT_COUNT_MAX {
-			error_node(mt, "Matrix types are limited to a maximum of %d elements, got %d", MATRIX_ELEMENT_COUNT_MAX, total_elements)
-			// Do not leave the half-built matrix type published to the caller.
-			type^ = t_invalid
-			set_base_type(named_type, t_invalid)
-			return false
+			// C++ Reference: check_type.cpp:3129-3131 reports at `column.expr`, the COLUMN
+			// COUNT expression -- the same node the two "Invalid matrix column count" errors
+			// just above it use -- not at the matrix type as a whole. `matrix[9, 9]f32` puts
+			// the oracle at 3:16 (the second 9) where the port sat at 3:6 (the `matrix`
+			// keyword). Probe m88. LEDGER #372.
+			error_node(mt.column_count, "Matrix types are limited to a maximum of %d elements, got %d", MATRIX_ELEMENT_COUNT_MAX, total_elements)
+			// C++ REPORTS AND CONTINUES -- check_type.cpp:3129-3132 is a bare `if { error(); }`
+			// with no bail, and the matrix type is built normally afterwards. The port's
+			// `type^ = t_invalid; set_base_type(...); return false` was invented, and it cost
+			// a second diagnostic: the caller then reported "'matrix[9, 9]f32' is not a type".
+			//
+			// That cascade was INVISIBLE while the error above pointed at `mt`, because both
+			// landed on the same position and the same-position merge pass folded them into
+			// one. Moving the error to the column-count expression, where C++ puts it,
+			// separated the positions and exposed the bail. Two defects, one probe, and
+			// fixing the position was what made the second one observable. LEDGER #372.
 		}
 	}
 
