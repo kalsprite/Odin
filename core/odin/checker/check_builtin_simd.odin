@@ -39,6 +39,34 @@ base_array_type :: proc(t: ^Type) -> ^Type {
 	return t
 }
 
+// base_any_array_type returns the element type of ANY array-like type, including the ones
+// base_array_type deliberately excludes: slice, dynamic array and fixed-capacity dynamic array.
+// C++ keeps both functions and they are not interchangeable.
+// C++ Reference: /mnt/c/odin/src/types.cpp:1816-1834
+base_any_array_type :: proc(t: ^Type) -> ^Type {
+	bt := base_type(t)
+	if bt == nil {
+		return t
+	}
+
+	#partial switch bt.kind {
+	case .Array:
+		return bt.variant.(Type_Array).elem
+	case .Slice:
+		return bt.variant.(Type_Slice).elem
+	case .Dynamic_Array:
+		return bt.variant.(Type_Dynamic_Array).elem
+	case .Enumerated_Array:
+		return bt.variant.(Type_Enumerated_Array).elem
+	case .Simd_Vector:
+		return bt.variant.(Type_Simd_Vector).elem
+	case .Matrix:
+		return bt.variant.(Type_Matrix).elem
+	}
+
+	return t
+}
+
 // get_array_type_count returns the element count of array-like types
 // C++ Reference: /mnt/c/odin/src/types.cpp:1783-1794
 get_array_type_count :: proc(t: ^Type) -> i64 {

@@ -3982,6 +3982,12 @@ determine_type_from_polymorphic :: proc(ctx: ^Checker_Context, poly_type: ^Type,
 		// type_to_string(..., true) first. Passing a ^Type straight to %v printed the whole
 		// Type struct, addresses and all, instead of a type name.
 		// NOTE: do NOT free these — see the note at the other call site.
+		// C++ Reference: check_type.cpp:1659 opens an ERROR_BLOCK before this error so the
+		// suggestions below stay attached to it; the port had none, and the suggestion
+		// escaped to stderr ahead of its own diagnostic.
+		begin_error_block()
+		defer end_error_block()
+
 		ots := type_to_string(operand.type)
 		pts := type_to_string(poly_type)
 		error(operand.expr, "Cannot determine polymorphic type from parameter: '%s' to '%s'", ots, pts)
@@ -3996,10 +4002,24 @@ determine_type_from_polymorphic :: proc(ctx: ^Checker_Context, poly_type: ^Type,
 			}
 		}
 
-		// Helpful suggestion for slice vs dynamic_array/array mismatch
+		// C++ Reference: check_type.cpp:1670-1690. THREE branches, and the port had one
+		// merged approximation of the middle one: no expression name, an invented " or use a
+		// slice literal" tail, and no trailing newline. The compound-literal and pointer arms
+		// were absent entirely.
 		if is_type_slice(pt) && (is_type_dynamic_array(operand.type) || is_type_array(operand.type)) {
-			// Suggest using slice syntax
-			error_line("\tSuggestion: Try slicing the value with '[:]' or use a slice literal")
+			expr := unparen_expr(operand.expr)
+			if _, is_cl := expr.derived.(^ast.Comp_Lit); is_cl {
+				es := type_to_string(base_any_array_type(operand.type))
+				error_line("\tSuggestion: Try using a slice compound literal instead '[]%s{...}'\n", es)
+			} else {
+				os := expr_to_string(operand.expr)
+				error_line("\tSuggestion: Try slicing the value with '%s[:]'\n", os)
+			}
+		} else if is_type_pointer(poly_type) {
+			if is_polymorphic_type_assignable(ctx, type_deref(poly_type), operand.type, false, false) {
+				os := expr_to_string(operand.expr)
+				error_line("\tSuggestion: Did you mean '&%s'?\n", os)
+			}
 		}
 	}
 
