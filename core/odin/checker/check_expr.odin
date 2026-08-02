@@ -2001,17 +2001,14 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 			if can_use_other_type_as_type_hint(use_lhs_as_type_hint, y.type) {
 				check_expr_or_type(ctx, x, be.left, y.type)
 			} else {
-				check_expr_or_type(ctx, x, be.left, type_hint)
+				check_expr_with_type_hint(ctx, x, be.left, type_hint)
 			}
 		} else {
-			check_expr_or_type(ctx, x, be.left, type_hint)
-			if x.mode == .Invalid {
-				return
-			}
+			check_expr_with_type_hint(ctx, x, be.left, type_hint)
 			if can_use_other_type_as_type_hint(use_lhs_as_type_hint, x.type) {
-				check_expr_or_type(ctx, &y, be.right, x.type)
+				check_expr_with_type_hint(ctx, &y, be.right, x.type)
 			} else {
-				check_expr_or_type(ctx, &y, be.right, nil if is_cmp else type_hint)
+				check_expr_with_type_hint(ctx, &y, be.right, nil if is_cmp else type_hint)
 			}
 		}
 	}
