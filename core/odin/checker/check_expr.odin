@@ -8997,12 +8997,27 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	ctx.allow_arrow_right_selector_expr = prev_allow_arrow
 
 	// Step 2: Handle invalid operands early
-	// Reference: /mnt/c/odin/src/check_expr.cpp:8196-8207
+	// C++ Reference: check_expr.cpp:8767-8778
 	if o.mode == .Invalid {
-		// Check arguments anyway to find more errors
+		if !check_call_parameter_mixture(call.args, "procedure call") {
+			o.mode = .Invalid
+			o.expr = node
+			return .Stmt
+		}
+		// Check arguments anyway to find more errors. C++ line 8770 unwraps a
+		// `field = value` argument to its VALUE first; the port passed the Field_Value
+		// node straight to check_expr_base, which has no arm for it and answered with
+		// the internal "Expression type not yet supported: ^Field_Value".
 		for arg in call.args {
+			inner := arg
+			if fv, is_fv := inner.derived.(^ast.Field_Value); is_fv {
+				inner = fv.value
+			}
+			if inner == nil {
+				continue
+			}
 			arg_op: Operand
-			check_expr_base(ctx, &arg_op, arg, nil)
+			check_expr_base(ctx, &arg_op, inner, nil)
 		}
 		o.mode = .Invalid
 		o.expr = node
@@ -9457,6 +9472,13 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	// Step 4: Handle built-in procedures
 	// Reference: /mnt/c/odin/src/check_expr.cpp:8213-8227
 	if o.mode == .Builtin {
+		// C++ Reference: check_expr.cpp:8785
+		if !check_call_parameter_mixture(call.args, "builtin call") {
+			o.mode = .Invalid
+			o.expr = node
+			return .Stmt
+		}
+
 		// Dispatch to builtin checker
 		// C++ ref: /mnt/c/odin/src/check_builtin.cpp
 		builtin_id := o.builtin_id
@@ -9470,6 +9492,18 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		// Determine expression kind from builtin info
 		info := builtin_proc_infos[builtin_id]
 		return info.kind == .Expr ? .Expr : .Stmt
+	}
+
+	// C++ Reference: check_expr.cpp:8800. This is the ONLY site that passes allow_mixed,
+	// and it covers both proc-group and ordinary procedure calls - so `f(1, b = 2)` is
+	// legal (positional then named) while `f(a = 1, 2)` is not. The port enforced the same
+	// rule from inside check_call_arguments_basic under an invented message
+	// ("Positional arguments must come before named arguments"); that site is removed in
+	// favour of this one, which also names the construct as C++ does.
+	if !check_call_parameter_mixture(call.args, o.mode == .Proc_Group ? "procedure group call" : "procedure call", true) {
+		o.mode = .Invalid
+		o.expr = node
+		return .Stmt
 	}
 
 	// Step 5: Handle procedure groups
@@ -9861,13 +9895,10 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 		if fv, is_field := arg.derived.(^ast.Field_Value); is_field {
 			append(&named_args, fv)
 		} else {
-			// Positional arguments must come before named arguments
-			if len(named_args) > 0 {
-				error_node(arg, "Positional arguments must come before named arguments")
-				data.error = true
-				data.result_type = pt.results
-				return data
-			}
+			// C++ has no ordering check here. The rule lives in
+			// check_call_parameter_mixture at the call dispatcher (check_expr.cpp:8800),
+			// which is reached before this procedure runs, so re-testing it here only
+			// risked a second, differently-worded diagnostic for the same mistake.
 			append(&positional_args, arg)
 		}
 	}
