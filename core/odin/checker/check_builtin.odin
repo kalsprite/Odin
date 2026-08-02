@@ -3656,6 +3656,71 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp:2558-2612. #hash had NO handler, so every `#hash(...)`
+	// was silently accepted -- including invalid hash kinds. It is the simpler sibling of
+	// #load_hash: it hashes a STRING LITERAL, so there is no file load and the kind check
+	// happens immediately.
+	if name == "hash" {
+		if len(call_expr.args) != 2 {
+			// Same shape as #load_hash: zero-arg anchors at the closing paren, and
+			// "expects 2 argument" is C++'s singular.
+			if len(call_expr.args) == 0 {
+				error(call_expr.close, "'#hash' expects 2 argument, got 0")
+			} else {
+				error(call_expr.args[0], "'#hash' expects 2 argument, got %d", len(call_expr.args))
+			}
+			return false
+		}
+
+		arg0 := call_expr.args[0]
+		arg1 := call_expr.args[1]
+
+		str_op: Operand
+		check_expr(ctx, &str_op, arg0)
+		if str_op.mode != .Constant {
+			error(arg0, "'#hash' expected a constant string argument")
+			return false
+		}
+		if !is_type_string(str_op.type) {
+			ts := type_to_string(str_op.type)
+			error(arg0, "'#hash' expected a constant string, got %s", ts)
+			return false
+		}
+
+		kind_op: Operand
+		check_expr(ctx, &kind_op, arg1)
+		if kind_op.mode != .Constant {
+			error(arg1, "'#hash' expected a constant string argument")
+			return false
+		}
+		if !is_type_string(kind_op.type) {
+			// C++:2591 formats the FIRST operand's type here too -- the same copy-paste slip
+			// as #load_hash (:2521). Reproduced deliberately in both places.
+			ts := type_to_string(str_op.type)
+			error(arg1, "'#hash' expected a constant string, got %s", ts)
+			return false
+		}
+
+		hash_kind, hk_ok := kind_op.value.(string)
+		if !hk_ok {
+			return false
+		}
+
+		pn, _ := load_directive_proc_and_name(call)
+		if !check_hash_kind_valid(pn, name, hash_kind) {
+			return false
+		}
+
+		// INCOMPLETE, same gap as #load_hash -- see #247. C++:2607-2610 sets
+		// t_untyped_integer / Constant / exact_value_u64(the digest); the port has none of
+		// the nine algorithms, so the VALUE is a placeholder 0. Type and mode are right,
+		// the constant is not.
+		operand.type = t_untyped_integer
+		operand.mode = .Constant
+		operand.value = exact_value_i64(0)
+		return true
+	}
+
 	// C++ Reference: check_builtin.cpp:2219-2330. #load_directory had NO handler, so the
 	// call form was silently accepted. Note the scaffolding for it already existed and had
 	// never been written to: Load_Directory_Cache / load_directory_cache /
