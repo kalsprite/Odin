@@ -135,14 +135,14 @@ check_builtin_simd_binary_numeric :: proc(ctx: ^Checker_Context, operand: ^Opera
 	// Validate element type is numeric
 	elem := base_array_type(x.type)
 	if !is_type_integer(elem) && !is_type_float(elem) {
-		error(call.args[0], "'%s' expected a #simd type with an integer or floating point element", builtin_name)
+		error(call.args[0], "'%s' expected a #simd type with an integer or floating point element, got '%s'", builtin_name, type_to_string(x.type))
 		return false
 	}
 
 	// Special case: simd_div does not support integer elements
 	// C++ Reference: check_builtin.cpp:758-763
 	if id == .Simd_Div && is_type_integer(elem) {
-		error(call.args[0], "'%s' is not supported for integer elements", builtin_name)
+		error(call.args[0], "'%s' is not supported for integer elements, got '%s'", builtin_name, type_to_string(x.type))
 		// Note: C++ continues even after this error (doesn't return)
 	}
 
@@ -209,14 +209,14 @@ check_builtin_simd_binary_integer :: proc(ctx: ^Checker_Context, operand: ^Opera
 	#partial switch id {
 	case .Simd_Saturating_Add, .Simd_Saturating_Sub:
 		if !is_type_integer(elem) {
-			error(call.args[0], "'%s' expected a #simd type with an integer element", builtin_name)
+			error(call.args[0], "'%s' expected a #simd type with an integer element, got '%s'", builtin_name, type_to_string(x.type))
 			return false
 		}
 
 	case:
 		// Bitwise operations allow integers or booleans
 		if !is_type_integer(elem) && !is_type_boolean(elem) {
-			error(call.args[0], "'%s' expected a #simd type with an integer or boolean element", builtin_name)
+			error(call.args[0], "'%s' expected a #simd type with an integer or boolean element, got '%s'", builtin_name, type_to_string(x.type))
 			return false
 		}
 	}
@@ -341,7 +341,7 @@ check_builtin_simd_unary :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 
 	elem := base_array_type(x.type)
 	if !is_type_integer(elem) && !is_type_float(elem) {
-		error(call.args[0], "'%s' expected a #simd type with an integer or floating point element", builtin_name)
+		error(call.args[0], "'%s' expected a #simd type with an integer or floating point element, got '%s'", builtin_name, type_to_string(x.type))
 		return false
 	}
 
@@ -394,20 +394,23 @@ check_builtin_simd_comparison :: proc(ctx: ^Checker_Context, operand: ^Operand, 
 	case .Simd_Lanes_Eq, .Simd_Lanes_Ne:
 		// Equality comparisons allow integer, float, or boolean
 		if !is_type_integer(elem) && !is_type_float(elem) && !is_type_boolean(elem) {
-			error(call.args[0], "'%s' expected a #simd type with an integer, floating point, or boolean element", builtin_name)
+			error(call.args[0], "'%s' expected a #simd type with an integer, floating point, or boolean element, got '%s'", builtin_name, type_to_string(x.type))
 			return false
 		}
 
 	case:
 		// Ordering comparisons require integer or float
 		if !is_type_integer(elem) && !is_type_float(elem) {
-			error(call.args[0], "'%s' expected a #simd type with an integer or floating point element", builtin_name)
+			error(call.args[0], "'%s' expected a #simd type with an integer or floating point element, got '%s'", builtin_name, type_to_string(x.type))
 			return false
 		}
 	}
 
 	if !are_types_identical(x.type, y.type) {
-		error(call, "Mismatched types to '%s'", builtin_name)
+		// C++ Reference: check_builtin.cpp:1141 -- names both types. Missed by the gotscan
+		// pass because C++'s tail here is ", '%s' vs '%s'" rather than ", got ...", so the
+		// prefix split did not line the two messages up.
+		error(call, "Mismatched types to '%s', '%s' vs '%s'", builtin_name, type_to_string(x.type), type_to_string(y.type))
 		return false
 	}
 
@@ -495,13 +498,13 @@ check_builtin_simd_memory :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 
 		ptr_elem := base_array_type(ptr.type)
 		if !is_type_rawptr(ptr_elem) {
-			error(call.args[0], "Expected a simd vector of 'rawptr' for the addresses")
+			error(call.args[0], "Expected a simd vector of 'rawptr' for the addresses, got %s", type_to_string(ptr.type))
 			return false
 		}
 	} else {
 		// masked_* operations expect regular pointer
 		if !is_type_pointer(ptr.type) {
-			error(call.args[0], "Expected a pointer type for the address")
+			error(call.args[0], "Expected a pointer type for the address, got %s", type_to_string(ptr.type))
 			return false
 		}
 	}
@@ -509,7 +512,7 @@ check_builtin_simd_memory :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 	// Validate mask element type
 	mask_elem := base_array_type(mask.type)
 	if !is_type_integer(mask_elem) && !is_type_boolean(mask_elem) {
-		error(call.args[2], "Expected a simd vector of integers or booleans for the mask")
+		error(call.args[2], "Expected a simd vector of integers or booleans for the mask, got %s", type_to_string(mask.type))
 		return false
 	}
 
@@ -566,18 +569,18 @@ check_builtin_simd_indices :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	}
 
 	if x.mode != .Type {
-		error(call.args[0], "'%s' expected a simd vector type", builtin_name)
+		error(call.args[0], "'%s' expected a simd vector type, got '%s'", builtin_name, type_to_string(x.type))
 		return false
 	}
 
 	if !is_type_simd_vector(x.type) {
-		error(call.args[0], "'%s' expected a simd vector type", builtin_name)
+		error(call.args[0], "'%s' expected a simd vector type, got '%s'", builtin_name, type_to_string(x.type))
 		return false
 	}
 
 	elem := base_array_type(x.type)
 	if !is_type_numeric(elem) {
-		error(call.args[0], "'%s' expected a simd vector type with a numeric element type", builtin_name)
+		error(call.args[0], "'%s' expected a simd vector type with a numeric element type, got '%s'", builtin_name, type_to_string(x.type))
 	}
 
 	operand.mode = .Value
@@ -714,7 +717,7 @@ check_builtin_simd_reduce_numeric :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 	elem := base_array_type(x.type)
 	if !is_type_integer(elem) && !is_type_float(elem) {
-		error(call.args[0], "'%s' expected a #simd type with an integer or floating point element", builtin_name)
+		error(call.args[0], "'%s' expected a #simd type with an integer or floating point element, got '%s'", builtin_name, type_to_string(x.type))
 		return false
 	}
 
@@ -747,7 +750,7 @@ check_builtin_simd_reduce_bitwise :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 	elem := base_array_type(x.type)
 	if !is_type_integer(elem) && !is_type_boolean(elem) {
-		error(call.args[0], "'%s' expected a #simd type with an integer or boolean element", builtin_name)
+		error(call.args[0], "'%s' expected a #simd type with an integer or boolean element, got '%s'", builtin_name, type_to_string(x.type))
 		return false
 	}
 
@@ -779,7 +782,7 @@ check_builtin_simd_reduce_boolean :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 	elem := base_array_type(x.type)
 	if !is_type_boolean(elem) {
-		error(call.args[0], "'%s' expected a #simd type with a boolean element", builtin_name)
+		error(call.args[0], "'%s' expected a #simd type with a boolean element, got '%s'", builtin_name, type_to_string(x.type))
 		return false
 	}
 
@@ -814,7 +817,7 @@ check_builtin_simd_extract_bits :: proc(ctx: ^Checker_Context, operand: ^Operand
 
 	elem := base_array_type(x.type)
 	if !is_type_integer_like(elem) {
-		error(call.args[0], "'%s' expected a #simd type with integer or boolean elements", builtin_name)
+		error(call.args[0], "'%s' expected a #simd type with integer or boolean elements, got '%s'", builtin_name, type_to_string(x.type))
 		return false
 	}
 
@@ -962,7 +965,7 @@ check_builtin_simd_select :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 
 	cond_elem := base_array_type(cond.type)
 	if !is_type_boolean(cond_elem) && !is_type_integer(cond_elem) {
-		error(call.args[0], "'%s' expected a simd vector boolean or integer type", builtin_name)
+		error(call.args[0], "'%s' expected a simd vector boolean or integer type, got '%s'", builtin_name, type_to_string(cond.type))
 		return false
 	}
 
@@ -1052,12 +1055,12 @@ check_builtin_simd_runtime_swizzle :: proc(ctx: ^Checker_Context, operand: ^Oper
 	indices_elem := base_array_type(indices.type)
 
 	if !is_type_integer(src_elem) {
-		error(call.args[0], "'%s' expected first argument to be a simd vector of integers", builtin_name)
+		error(call.args[0], "'%s' expected first argument to be a simd vector of integers, got '%s'", builtin_name, type_to_string(src.type))
 		return false
 	}
 
 	if !is_type_integer(indices_elem) {
-		error(call.args[1], "'%s' expected indices to be a simd vector of integers", builtin_name)
+		error(call.args[1], "'%s' expected indices to be a simd vector of integers, got '%s'", builtin_name, type_to_string(indices.type))
 		return false
 	}
 
@@ -1248,7 +1251,7 @@ check_builtin_simd_clamp :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 
 	elem := base_array_type(x.type)
 	if !is_type_integer(elem) && !is_type_float(elem) {
-		error(call.args[0], "'%s' expected a #simd type with an integer or floating point element", builtin_name)
+		error(call.args[0], "'%s' expected a #simd type with an integer or floating point element, got '%s'", builtin_name, type_to_string(x.type))
 		return false
 	}
 
