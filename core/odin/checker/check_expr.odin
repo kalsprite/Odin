@@ -10317,7 +10317,22 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 
 		// Validate type compatibility
 		// Reference: check_call_arguments_internal lines 6480+
-		if !check_is_assignable_to(ctx, arg_op, param_type) {
+		// C++ Reference: check_expr.cpp:6852 (eval_param_and_score).
+		// `#no_broadcast` on a parameter disables array programming for THAT parameter, so
+		// the assignability test itself has to be told. The port always passed the default
+		// (true), which is why the flag -- parsed, validated and stored on the entity at
+		// check_type.odin:4787 -- never had any effect: `f :: proc(#no_broadcast x: [4]int)`
+		// happily accepted `f(3)`. Ported but never wired.
+		param_entity_for_flags: ^Entity = nil
+		if pt.params != nil {
+			if ptup, is_tup := pt.params.variant.(Type_Tuple); is_tup && i < len(ptup.variables) {
+				param_entity_for_flags = ptup.variables[i]
+			}
+		}
+		allow_array_programming := param_entity_for_flags == nil ||
+			.No_Broadcast not_in param_entity_for_flags.flags
+
+		if !check_is_assignable_to(ctx, arg_op, param_type, allow_array_programming) {
 			// Check for #any_int flag allowing integer casts
 			// C++ Reference: check_expr.cpp:6475-6479
 			ok := false
@@ -10334,6 +10349,13 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 						ok = check_is_castable_to(ctx, arg_op, param_type)
 					}
 				}
+			}
+
+			// C++ Reference: check_expr.cpp:6861-6865. When broadcasting is disallowed but
+			// the argument WOULD have been assignable with it allowed, C++ names the reason
+			// rather than emitting a bare type mismatch.
+			if !allow_array_programming && check_is_assignable_to(ctx, arg_op, param_type, true) {
+				error_node(arg_op.expr, "'#no_broadcast' disallows automatic broadcasting a value across all elements of an array-like type in a procedure argument")
 			}
 
 			if !ok {
