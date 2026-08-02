@@ -8786,7 +8786,10 @@ check_cast :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^Type, forb
 		if forbid_identical && .Cast in check_vet_flags(ctx) &&
 		   (ctx.curr_proc_sig == nil || !is_type_polymorphic(ctx.curr_proc_sig)) {
 			if are_types_identical(operand.type, target) {
-				error(operand.expr, "Unneeded cast to identical type '%s'", type_to_string(target))
+				// C++ check_expr.cpp:3968-3970 names the OPERAND as well as the target.
+				cast_oper_str := expr_to_string(operand.expr)
+				defer delete(cast_oper_str)
+				error(operand.expr, "Unneeded cast of '%s' to identical type '%s'", cast_oper_str, type_to_string(target))
 			}
 		}
 		_, _ = src, dst
@@ -8843,7 +8846,10 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 	srcz := type_size_of(src_t)
 	dstz := type_size_of(dst_t)
 	if srcz != dstz {
-		error(operand.expr, "Cannot transmute to '%s', %d vs %d bytes", type_to_string(dst_t), srcz, dstz)
+		// C++ check_expr.cpp:4047-4049 names the OPERAND as well as the target.
+		tm_expr_str := expr_to_string(operand.expr)
+		defer delete(tm_expr_str)
+		error(operand.expr, "Cannot transmute '%s' to '%s', %d vs %d bytes", tm_expr_str, type_to_string(dst_t), srcz, dstz)
 		operand.mode = .Invalid
 		operand.expr = node
 		return false
@@ -8876,11 +8882,20 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 		   check_is_castable_to(ctx, src, dst_t) {
 
 			if are_types_identical(src_t, dst_t) {
-				error(operand.expr, "Unneeded transmute to identical type '%s'", type_to_string(dst_t))
+				// C++ check_expr.cpp:4103-4105 names the OPERAND as well as the target.
+				tm_id_str := expr_to_string(operand.expr)
+				defer delete(tm_id_str)
+				error(operand.expr, "Unneeded transmute of '%s' to identical type '%s'", tm_id_str, type_to_string(dst_t))
 			} else if is_type_internally_pointer_like(src_t) && is_type_internally_pointer_like(dst_t) {
 				error(operand.expr, "Use of 'transmute' where 'cast' would be preferred since the types are pointer-like")
 			} else if are_types_identical(src_bt, dst_bt) {
-				error(operand.expr, "Unneeded transmute to identical base type '%s'", type_to_string(dst_t))
+				// C++ check_expr.cpp:4112-4114 emits the SAME message as the identical-type
+				// branch above -- "identical type", not "identical base type". The port had
+				// invented the word "base" for this arm, so the two branches diverged in
+				// wording where C++ deliberately does not. LEDGER 288.
+				tm_base_str := expr_to_string(operand.expr)
+				defer delete(tm_base_str)
+				error(operand.expr, "Unneeded transmute of '%s' to identical type '%s'", tm_base_str, type_to_string(dst_t))
 			}
 		}
 	}
