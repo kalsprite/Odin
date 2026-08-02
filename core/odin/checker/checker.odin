@@ -768,6 +768,8 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Type_Is_Matrix_Column_Major = {name = "type_is_matrix_column_major", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Simd_Vector = {name = "type_is_simd_vector", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Internally_Pointer_Like = {name = "type_is_internally_pointer_like", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Type_Is_Fixed_Capacity_Dynamic_Array = {name = "type_is_fixed_capacity_dynamic_array", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	.Type_Fixed_Capacity_Dynamic_Array_Len_Offset = {name = "type_fixed_capacity_dynamic_array_len_offset", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Subtype_Of = {name = "type_is_subtype_of", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Has_Nil = {name = "type_has_nil", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Field_Index_Of = {name = "type_field_index_of", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},

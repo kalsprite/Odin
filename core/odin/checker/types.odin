@@ -3836,6 +3836,42 @@ type_offset_of :: proc(t: ^Type, index: i64) -> i64 {
 			return 3 * int_size // allocator
 		}
 
+	case .Fixed_Capacity_Dynamic_Array:
+		// C++ Reference: types.cpp:4942-4957.
+		//
+		//     case 0:  return 0;                     // data
+		//     case 1: {                              // len
+		//         i64 elem_size = type_size_of(t->FixedCapacityDynamicArray.elem);
+		//         i64 offset = elem_size * t->FixedCapacityDynamicArray.capacity;
+		//         offset = align_formula(offset, build_context.int_size);
+		//         return offset;
+		//     }
+		//
+		// This arm did not exist. `[dynamic; N]T` fell through to the function's default,
+		// `assert(index == 0)`, so asking for the length field's offset ABORTED the checker
+		// rather than returning a number. Nothing reached it before because
+		// intrinsics.type_fixed_capacity_dynamic_array_len_offset -- the only caller that
+		// asks for index 1 -- was itself missing (task #231). Same family as LEDGER #112,
+		// where type_offset_of had only its aligned arm. LEDGER #384.
+		{
+			fcda := bt.variant.(Type_Fixed_Capacity_Dynamic_Array)
+			switch index {
+			case 0:
+				return 0
+			case 1:
+				// align_formula inlined, as everywhere else in this file (see 2709, 3726):
+				// result = offset + align - 1; result -= result % align
+				elem_size := i64(type_size_of(fcda.elem))
+				offset := elem_size * i64(fcda.capacity)
+				align := i64(build_context.int_size)
+				if align > 0 {
+					offset = offset + align - 1
+					offset -= offset % align
+				}
+				return offset
+			}
+		}
+
 	case .Union:
 		// Union tag field (special index -1)
 		// C++ Reference: types.cpp:4589-4598

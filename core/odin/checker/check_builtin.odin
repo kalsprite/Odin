@@ -214,8 +214,11 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	case .Type_Elem_Type:
 		result = check_builtin_type_elem(ctx, operand, call)
 
-	case .Type_Is_Boolean, .Type_Is_Integer, .Type_Is_Rune, .Type_Is_Float, .Type_Is_Complex, .Type_Is_Quaternion, .Type_Is_String, .Type_Is_Cstring, .Type_Is_Typeid, .Type_Is_Any, .Type_Is_Endian_Platform, .Type_Is_Endian_Little, .Type_Is_Endian_Big, .Type_Is_Unsigned, .Type_Is_Ordered, .Type_Is_Comparable, .Type_Is_Simple_Compare, .Type_Is_Nearly_Simple_Compare, .Type_Is_Numeric, .Type_Is_Ordered_Numeric, .Type_Is_Pointer, .Type_Is_Multi_Pointer, .Type_Is_Array, .Type_Is_Enumerated_Array, .Type_Is_Dynamic_Array, .Type_Is_Slice, .Type_Is_Struct, .Type_Is_Union, .Type_Is_Enum, .Type_Is_Proc, .Type_Is_Bit_Set, .Type_Is_Bit_Field, .Type_Is_Map, .Type_Is_Matrix, .Type_Is_Simd_Vector, .Type_Is_Internally_Pointer_Like:
+	case .Type_Is_Boolean, .Type_Is_Integer, .Type_Is_Rune, .Type_Is_Float, .Type_Is_Complex, .Type_Is_Quaternion, .Type_Is_String, .Type_Is_Cstring, .Type_Is_Typeid, .Type_Is_Any, .Type_Is_Endian_Platform, .Type_Is_Endian_Little, .Type_Is_Endian_Big, .Type_Is_Unsigned, .Type_Is_Ordered, .Type_Is_Comparable, .Type_Is_Simple_Compare, .Type_Is_Nearly_Simple_Compare, .Type_Is_Numeric, .Type_Is_Ordered_Numeric, .Type_Is_Pointer, .Type_Is_Multi_Pointer, .Type_Is_Array, .Type_Is_Enumerated_Array, .Type_Is_Dynamic_Array, .Type_Is_Slice, .Type_Is_Struct, .Type_Is_Union, .Type_Is_Enum, .Type_Is_Proc, .Type_Is_Bit_Set, .Type_Is_Bit_Field, .Type_Is_Map, .Type_Is_Matrix, .Type_Is_Simd_Vector, .Type_Is_Internally_Pointer_Like, .Type_Is_Fixed_Capacity_Dynamic_Array:
 		result = check_builtin_type_is_predicate(ctx, operand, call, id)
+
+	case .Type_Fixed_Capacity_Dynamic_Array_Len_Offset:
+		result = check_builtin_type_fixed_capacity_dynamic_array_len_offset(ctx, operand, call)
 
 	case .Type_Is_Matrix_Row_Major, .Type_Is_Matrix_Column_Major:
 		result = check_builtin_type_is_matrix_major(ctx, operand, call, id)
@@ -4417,6 +4420,8 @@ check_builtin_type_is_predicate :: proc(ctx: ^Checker_Context, operand: ^Operand
 		result = is_type_nearly_simple_compare(input_type)
 	case .Type_Is_Internally_Pointer_Like:
 		result = is_type_internally_pointer_like(input_type)
+	case .Type_Is_Fixed_Capacity_Dynamic_Array:
+		result = is_type_fixed_capacity_dynamic_array(input_type)
 	case .Type_Is_Numeric:
 		result = is_type_numeric(input_type)
 	case .Type_Is_Ordered_Numeric:
@@ -8025,4 +8030,60 @@ check_builtin_c_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 	}
 
 	return false
+}
+
+
+// check_builtin_type_fixed_capacity_dynamic_array_len_offset implements
+// intrinsics.type_fixed_capacity_dynamic_array_len_offset.
+//
+// C++ Reference: check_builtin.cpp:8089-8110.
+//
+//     Operand op = {};
+//     Type *bt = check_type(c, ce->args[0]);
+//     Type *type = base_type(bt);
+//     if (type == nullptr || type == t_invalid) {
+//         error(ce->args[0], "Expected a fixed capacity dynamic array type for '%.*s'", ...);
+//         return false;
+//     }
+//     if (!is_type_fixed_capacity_dynamic_array(type)) {
+//         error(ce->args[0], "Expected a fixed capacity dynamic array type for '%.*s'", ...);
+//         return false;
+//     }
+//     i64 sz = type_size_of(type);   // computed and deliberately unused (gb_unused)
+//     i64 offset = type_offset_of(type, 1);
+//     operand->mode  = Addressing_Constant;
+//     operand->value = exact_value_u64(cast(u64)offset);
+//     operand->type  = t_uintptr;
+//
+// The `sz` call is not decorative: type_size_of is what forces the record to be laid out, and
+// type_offset_of reads the offsets it produces. Dropping it would read offsets from a type
+// that had never been sized. It is reproduced here for that side effect, with the result
+// discarded exactly as C++ discards it.
+//
+// Field index 1 is the length field. LEDGER #384 / task #231.
+check_builtin_type_fixed_capacity_dynamic_array_len_offset :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
+	if len(call.args) != 1 {
+		error_node(call, "'type_fixed_capacity_dynamic_array_len_offset' requires exactly 1 argument, got %d", len(call.args))
+		return false
+	}
+
+	bt := check_type(ctx, call.args[0])
+	type := base_type(bt)
+	if type == nil || type == t_invalid {
+		error_node(call.args[0], "Expected a fixed capacity dynamic array type for 'type_fixed_capacity_dynamic_array_len_offset'")
+		return false
+	}
+	if !is_type_fixed_capacity_dynamic_array(type) {
+		error_node(call.args[0], "Expected a fixed capacity dynamic array type for 'type_fixed_capacity_dynamic_array_len_offset'")
+		return false
+	}
+
+	// Force the layout before reading an offset out of it; see the note above.
+	_ = type_size_of(type)
+	offset := type_offset_of(type, 1)
+
+	operand.mode = .Constant
+	operand.value = exact_value_u64(u64(offset))
+	operand.type = t_uintptr
+	return true
 }

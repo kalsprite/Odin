@@ -791,6 +791,13 @@ Builtin_Proc_Id :: enum {
 	Type_Is_Matrix_Column_Major,
 	Type_Is_Simd_Vector,
 	Type_Is_Internally_Pointer_Like,
+	// C++ Reference: src/checker_builtin_procs.hpp, between BuiltinProc__type_begin and
+	// BuiltinProc__type_end. Both were absent from this enum entirely; the port has had the
+	// Fixed_Capacity_Dynamic_Array TYPE since LEDGER #53 but neither intrinsic over it.
+	// Found by cross-checking C++'s builtin table against this enum, not by any sweep --
+	// nothing in core calls either one. LEDGER #383 / task #231.
+	Type_Is_Fixed_Capacity_Dynamic_Array,
+	Type_Fixed_Capacity_Dynamic_Array_Len_Offset,
 	Type_Is_Subtype_Of,
 	Type_Has_Nil,
 	Type_Field_Index_Of,
