@@ -42,6 +42,24 @@ compound_assign_to_binary_op :: proc(kind: tokenizer.Token_Kind) -> tokenizer.To
 
 // is_diverging_expr checks if an expression never returns (e.g., panic)
 // C++ Reference: check_stmt.cpp lines 0-24
+// immutable_hint_offset mirrors what show_error_on_line (src/error.cpp:283) RETURNS, without
+// printing anything: the error position's index within its leading-whitespace-trimmed source
+// line, or -1 when there is no line to align against. This port never renders the source echo
+// (see #204), but C++'s return value still decides WHICH continuation text is emitted, so the
+// value has to be computed even though the line itself is not printed.
+@(private = "file")
+immutable_hint_offset :: proc(ctx: ^Checker_Context, pos: tokenizer.Pos) -> int {
+	if !show_error_line() {
+		return -1
+	}
+	idx := 0
+	line := get_file_line_as_string(&ctx.checker.info, pos, &idx)
+	if len(line) == 0 {
+		return -1
+	}
+	return idx
+}
+
 is_diverging_expr :: proc(ctx: ^Checker_Context, expr: ^ast.Expr) -> bool {
 	expr := unparen_expr(expr)
 
@@ -3350,14 +3368,33 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 
 			error_node(lhs.expr, "Cannot assign to '%s'", str)
 
-			if e != nil && .For_Value in e.flags {
-				if is_type_map(e.type) {
-					error_line("\tSuggestion: Did you mean? 'for key, &%s in ...'\n", e.token.text)
+			// C++ Reference: check_stmt.cpp:602-628. Both arms call show_error_on_line for
+			// the ENTITY's token and branch on what it returns:
+			//   offset <  0 (no source line available) -> the "Suggestion: Did you mean?" form
+			//   offset >= 0                            -> a line that ALIGNS under the variable
+			// This port only ever emitted the first form, so the aligned text -- a different
+			// message, not a reworded one -- never appeared at all (probe mb1).
+			//
+			// The alignment is `\t` then offset-1 spaces, where offset is the token's index in
+			// the leading-whitespace-trimmed line. Note offset-1, so the text sits one column
+			// LEFT of the caret C++ draws above it; that off-by-one is C++'s, and reproduced.
+			if e != nil && (.For_Value in e.flags || .Switch_Value in e.flags) {
+				offset := immutable_hint_offset(ctx, e.token.pos)
+				if offset >= 0 {
+					error_line("\t")
+					for _ in 0 ..< offset - 1 {
+						error_line(" ")
+					}
+					error_line("'%s' is immutable, declare it as '&%s' to make it mutable\n", e.token.text, e.token.text)
+				} else if .For_Value in e.flags {
+					if is_type_map(e.type) {
+						error_line("\tSuggestion: Did you mean? 'for key, &%s in ...'\n", e.token.text)
+					} else {
+						error_line("\tSuggestion: Did you mean? 'for &%s in ...'\n", e.token.text)
+					}
 				} else {
-					error_line("\tSuggestion: Did you mean? 'for &%s in ...'\n", e.token.text)
+					error_line("\tSuggestion: Did you mean? 'switch &%s in ...'\n", e.token.text)
 				}
-			} else if e != nil && .Switch_Value in e.flags {
-				error_line("\tSuggestion: Did you mean? 'switch &%s in ...'\n", e.token.text)
 			}
 		}
 	}
