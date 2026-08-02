@@ -468,7 +468,20 @@ load_package_with_dependencies :: proc(
 		}
 
 		// Parse the package, skipping any file that does not belong to the target
-		pkg, parse_ok := parse_package_for_target(pkg_path, pkg_to_load.kind)
+		// #180: route parser diagnostics into the checker's collector.
+		//
+		// The port already had the entire syntax-error path -- syntax_error_va with the
+		// "Syntax Error: " prefix, the same collector, the same limit latching -- and
+		// syntax_error_pos has EXACTLY the parser's Error_Handler signature. Nothing ever
+		// installed it, so every parser diagnostic went to default_error_handler, which
+		// fmt.eprintf's straight to stderr: uncounted (errors=0), unsorted, unlabelled, and
+		// printed before the harness header rather than through the collector.
+		//
+		// C++ has no such split -- syntax_error and error share error.cpp's machinery and
+		// both land in the same sorted, counted stream.
+		syntax_parser := parser.default_parser()
+		syntax_parser.err = syntax_error_pos
+		pkg, parse_ok := parse_package_for_target(pkg_path, pkg_to_load.kind, &syntax_parser)
 		if !parse_ok || pkg == nil {
 			result.parse_errors += 1
 			continue

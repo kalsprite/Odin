@@ -79,7 +79,9 @@ parse_package :: proc(pkg: ^ast.Package, p: ^Parser = nil) -> bool {
 		if pkg.name == "" {
 			pkg.name = file.pkg_decl.name
 		} else if pkg.name != file.pkg_decl.name {
-			error(p, file.pkg_decl.pos, "different package name, expected '%s', got '%s'", pkg.name, file.pkg_decl.name)
+			// C++ Reference: src/parser.cpp:7023 -- "Different" is capitalised there. Only
+			// visible once #180 routed parser diagnostics through the collector.
+			error(p, file.pkg_decl.pos, "Different package name, expected '%s', got '%s'", pkg.name, file.pkg_decl.name)
 		}
 	}
 
