@@ -3111,12 +3111,25 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			return operand
 
 		case "relative":
+			// C++ Reference: parser.cpp:2504-2513. #relative types have been REMOVED from
+			// the language; C++ still PARSES them so it can report the removal, and the
+			// removal error is unconditional. The port parsed them and said nothing, so a
+			// construct the reference compiler rejects outright was silently accepted.
+			// Both diagnostics anchor at the tag, so when the paren is missing they land on
+			// the same position and the existing same-position merge keeps only the first --
+			// which is exactly what the oracle prints.
 			tag := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
 			tag.tok = tok
 			tag.name = name.text
 
-			tag_call := parse_call_expr(p, tag)
+			tag_call: ^ast.Expr = tag
+			if p.curr_tok.kind != .Open_Paren {
+				error(p, tag.pos, "expected #relative(<integer type>) <type>")
+			} else {
+				tag_call = parse_call_expr(p, tag)
+			}
 			type := parse_type(p)
+			error(p, tag.pos, "#relative types have now been removed in favour of \"core:relative\"")
 
 			rt := ast.new(ast.Relative_Type, tok.pos, type)
 			rt.tag = tag_call
