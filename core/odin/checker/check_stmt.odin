@@ -3615,7 +3615,7 @@ check_using_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, flags: Stmt_Fla
 			continue
 
 		case:
-			error_node(node, "'using' can only be applied to an entity")
+			error_node(node, "'using' can only be applied to an entity, got %s", ast_kind_string(expr))
 			continue
 		}
 

@@ -1,0 +1,100 @@
+package checker
+
+import "core:odin/ast"
+
+// ast_kind_string is the port's `ast_strings[node->kind]` (src/parser.hpp:850).
+//
+// C++ interpolates this table into diagnostics that report WHAT KIND of node was found where
+// something else was expected -- "'#defined' expects an identifier or selector expression,
+// got basic literal", "'using' can only be applied to an entity, got binary expression". The
+// port had no equivalent, so every such message stopped at the expectation and never said
+// what was actually there. LEDGER #149.
+//
+// The names are C++'s verbatim, extracted from its AST_KINDS table; they are user-visible
+// diagnostic text, so they must not be re-worded.
+ast_kind_string :: proc(node: ^ast.Node) -> string {
+	if node == nil {
+		return "invalid node"
+	}
+	#partial switch _ in node.derived {
+	case ^ast.Array_Type: return "array type"
+	case ^ast.Assign_Stmt: return "assign statement"
+	// C++ calls this node Uninit; the port calls it Undef. Same node, same display name.
+	case ^ast.Undef: return "uninitialized value"
+	case ^ast.Attribute: return "attribute"
+	case ^ast.Auto_Cast: return "auto_cast"
+	case ^ast.Bad_Decl: return "bad declaration"
+	case ^ast.Bad_Expr: return "bad expression"
+	case ^ast.Bad_Stmt: return "bad statement"
+	case ^ast.Basic_Directive: return "basic directive"
+	case ^ast.Basic_Lit: return "basic literal"
+	case ^ast.Binary_Expr: return "binary expression"
+	case ^ast.Bit_Field_Field: return "bit field field"
+	case ^ast.Bit_Field_Type: return "bit field type"
+	case ^ast.Bit_Set_Type: return "bit set type"
+	case ^ast.Block_Stmt: return "block statement"
+	case ^ast.Branch_Stmt: return "branch statement"
+	case ^ast.Call_Expr: return "call expression"
+	case ^ast.Case_Clause: return "case clause"
+	case ^ast.Comp_Lit: return "compound literal"
+	case ^ast.Defer_Stmt: return "defer statement"
+	case ^ast.Deref_Expr: return "dereference expression"
+	case ^ast.Distinct_Type: return "distinct type"
+	case ^ast.Dynamic_Array_Type: return "dynamic array type"
+	case ^ast.Ellipsis: return "ellipsis"
+	case ^ast.Empty_Stmt: return "empty statement"
+	case ^ast.Enum_Type: return "enum type"
+	case ^ast.Expr_Stmt: return "expression statement"
+	case ^ast.Field: return "field"
+	case ^ast.Field_List: return "field list"
+	case ^ast.Field_Value: return "field value"
+	case ^ast.Fixed_Capacity_Dynamic_Array_Type: return "fixed capacity dynamic array type"
+	case ^ast.For_Stmt: return "for statement"
+	case ^ast.Foreign_Block_Decl: return "foreign block declaration"
+	case ^ast.Foreign_Import_Decl: return "foreign import declaration"
+	case ^ast.Helper_Type: return "helper type"
+	case ^ast.Ident: return "identifier"
+	case ^ast.If_Stmt: return "if statement"
+	case ^ast.Implicit: return "implicit"
+	case ^ast.Implicit_Selector_Expr: return "implicit selector expression"
+	case ^ast.Import_Decl: return "import declaration"
+	case ^ast.Index_Expr: return "index expression"
+	case ^ast.Inline_Asm_Expr: return "inline asm expression"
+	case ^ast.Map_Type: return "map type"
+	case ^ast.Matrix_Index_Expr: return "matrix index expression"
+	case ^ast.Matrix_Type: return "matrix type"
+	case ^ast.Multi_Pointer_Type: return "multi pointer type"
+	case ^ast.Or_Branch_Expr: return "or branch expression"
+	case ^ast.Or_Else_Expr: return "or_else expression"
+	case ^ast.Or_Return_Expr: return "or_return expression"
+	case ^ast.Package_Decl: return "package declaration"
+	case ^ast.Paren_Expr: return "parentheses expression"
+	case ^ast.Pointer_Type: return "pointer type"
+	case ^ast.Poly_Type: return "polymorphic type"
+	case ^ast.Proc_Group: return "procedure group"
+	case ^ast.Proc_Lit: return "procedure literal"
+	case ^ast.Proc_Type: return "procedure type"
+	case ^ast.Range_Stmt: return "range statement"
+	case ^ast.Relative_Type: return "relative type"
+	case ^ast.Return_Stmt: return "return statement"
+	case ^ast.Selector_Call_Expr: return "selector call expression"
+	case ^ast.Selector_Expr: return "selector expression"
+	case ^ast.Slice_Expr: return "slice expression"
+	case ^ast.Struct_Type: return "struct type"
+	case ^ast.Switch_Stmt: return "switch statement"
+	case ^ast.Tag_Expr: return "tag expression"
+	case ^ast.Ternary_If_Expr: return "ternary if expression"
+	case ^ast.Ternary_When_Expr: return "ternary when expression"
+	case ^ast.Type_Assertion: return "type assertion"
+	case ^ast.Type_Cast: return "type cast"
+	case ^ast.Type_Switch_Stmt: return "type switch statement"
+	case ^ast.Typeid_Type: return "typeid"
+	case ^ast.Unary_Expr: return "unary expression"
+	case ^ast.Union_Type: return "union type"
+	case ^ast.Unroll_Range_Stmt: return "#unroll range statement"
+	case ^ast.Using_Stmt: return "using statement"
+	case ^ast.Value_Decl: return "value declaration"
+	case ^ast.When_Stmt: return "when statement"
+	}
+	return "invalid node"
+}

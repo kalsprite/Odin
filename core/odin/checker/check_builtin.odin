@@ -1033,10 +1033,12 @@ check_atomic_memory_order_argument :: proc(ctx: ^Checker_Context, expr: ^ast.Exp
 	}
 
 	if x.mode != .Constant {
+		// C++ Reference: check_builtin.cpp:880-883 -- names the type that was supplied.
+		type_str := type_to_string(x.type)
 		if extra_message != "" {
-			error_node(expr, "Expected a constant Atomic_Memory_Order value for the %s of '%s'", extra_message, builtin_name)
+			error_node(expr, "Expected a constant Atomic_Memory_Order value for the %s of '%s', got %s", extra_message, builtin_name, type_str)
 		} else {
-			error_node(expr, "Expected a constant Atomic_Memory_Order value for '%s'", builtin_name)
+			error_node(expr, "Expected a constant Atomic_Memory_Order value for '%s', got %s", builtin_name, type_str)
 		}
 		return false
 	}
@@ -3305,7 +3307,9 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		_, is_ident = arg.derived.(^ast.Ident)
 		_, is_sel = arg.derived.(^ast.Selector_Expr)
 		if !is_ident && !is_sel {
-			error(arg, "'#defined' expects an identifier or selector expression")
+			// C++ Reference: check_builtin.cpp:2693 -- names the node kind that was found,
+			// and reports against the CALL, not the argument.
+			error(call_expr, "'#defined' expects an identifier or selector expression, got %s", ast_kind_string(arg))
 			return false
 		}
 
