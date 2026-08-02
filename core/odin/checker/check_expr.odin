@@ -4665,11 +4665,18 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 	// Arrow operator (->) validation
 	// Reference: check_expr.cpp:5480-5493
 	if !ctx.allow_arrow_right_selector_expr && se.op.kind == .Arrow_Right {
+		// C++ Reference: check_expr.cpp:5863-5867. Two omissions here, and they compounded:
+		// the ERROR_BLOCK was missing, so the suggestion had no error value to attach to and
+		// escaped to stderr; and the format string dropped C++'s trailing newline, so the
+		// escaped line ran straight into whatever was printed next.
+		begin_error_block()
+		defer end_error_block()
+
 		error_node(node, "Illegal use of -> selector shorthand outside of a call")
 		x_str := expr_to_string(se.expr)
 		defer delete(x_str)
 		y_str := se.field.name if se.field != nil else "<unknown>"
-		error_line("\tSuggestion: Did you mean '%s.%s'?", x_str, y_str)
+		error_line("\tSuggestion: Did you mean '%s.%s'?\n", x_str, y_str)
 		// Continue checking to gather more diagnostics
 	}
 
