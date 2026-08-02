@@ -2469,7 +2469,15 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			case ^ast.Pointer_Type:       t.tag = bd
 			case ^ast.Fixed_Capacity_Dynamic_Array_Type: t.tag = bd
 			case:
-				error(p, original_type.pos, "expected an array or pointer type after #%s", name.text)
+				// C++ Reference: src/parser.cpp:2447 and its three siblings (2433, 2460,
+				// 2488). All four were lowercase in the port and all four dropped C++'s
+				// ", got %s" tail -- the node kind, from ast_strings[type->kind]. They were
+				// written together and shared the same two defects; the enumerated-array one
+				// also reported at `tok` rather than the type.
+				//
+				// C++ reports at `type` (the unparenthesised type), not `original_type`:
+				// identical for a bare type, different for `#soa (T)`.
+				error(p, type.pos, "Expected an array or pointer type after #%s, got %s", name.text, ast.node_kind_string(type))
 			}
 			return original_type
 
@@ -2485,7 +2493,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			case ^ast.Matrix_Type:
 				t.is_row_major = name.text == "row_major"
 			case:
-				error(p, original_type.pos, "expected a matrix type after #%s", name.text)
+				error(p, type.pos, "Expected a matrix type after #%s, got %s", name.text, ast.node_kind_string(type))
 			}
 			return original_type
 
@@ -2498,7 +2506,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			#partial switch t in type.derived_expr {
 			case ^ast.Array_Type:         t.tag = bd
 			case:
-				error(p, original_type.pos, "expected an array type after #%s", name.text)
+				error(p, type.pos, "Expected a fixed array type after #%s, got %s", name.text, ast.node_kind_string(type))
 			}
 			return original_type
 
@@ -2508,6 +2516,14 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			tag.name = name.text
 			original_expr := parse_expr(p, lhs)
 			expr := ast.unparen_expr(original_expr)
+			// C++ Reference: src/parser.cpp:2468-2471. A separate, EARLIER branch for the
+			// nil case, with its own message that has no ", got" tail -- there is no node
+			// to name. The port had no nil guard at all here.
+			if expr == nil {
+				error(p, name.pos, "Expected a compound literal after #%s", name.text)
+				be := ast.new(ast.Bad_Expr, tok.pos, end_pos(name))
+				return be
+			}
 			#partial switch t in expr.derived_expr {
 			case ^ast.Comp_Lit:
 				t.tag = tag
@@ -2515,7 +2531,9 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 				t.tag = tag
 				error(p, tok.pos, "#%s has been replaced with #sparse for non-contiguous enumerated array types", name.text)
 			case:
-				error(p, tok.pos, "Expected a compound literal after #%s", name.text)
+				// C++ Reference: src/parser.cpp:2477 -- reports at `expr`, not the tag token,
+				// and carries the ", got %s" tail the port dropped.
+				error(p, expr.pos, "Expected a compound literal after #%s, got %s", name.text, ast.node_kind_string(expr))
 
 			}
 			return original_expr
@@ -2530,7 +2548,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			case ^ast.Array_Type:
 				t.tag = tag
 			case:
-				error(p, tok.pos, "expected an enumerated array type after #%s", name.text)
+				error(p, type.pos, "Expected an enumerated array type after #%s, got %s", name.text, ast.node_kind_string(type))
 
 			}
 			return original_type

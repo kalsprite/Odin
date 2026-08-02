@@ -1241,3 +1241,109 @@ Any_Stmt :: union {
 	^Foreign_Block_Decl,
 	^Foreign_Import_Decl,
 }
+
+// node_kind_string is the port's ast_strings[].
+//
+// C++ Reference: src/parser.hpp:850. C++ builds a table by re-expanding the AST_KINDS macro:
+//
+//     #define AST_KIND(_kind_name_, name, ...) {cast(u8 *)name, gb_size_of(name)-1},
+//     AST_KINDS
+//
+// so every node kind carries its own display name, used by diagnostics that end in
+// ", got <kind>". Odin has no equivalent macro re-expansion, so this is a switch -- but the
+// STRINGS were extracted mechanically from the AST_KIND(...) invocations in parser.hpp rather
+// than retyped, because a hand-copied table of 77 entries is a transcription-error generator.
+//
+// TWO C++ KINDS ARE DELIBERATELY ABSENT: EnumFieldValue and Label. Neither exists as a node in
+// this AST -- labels are a `label: ^Expr` field on the statements that accept them, and enum
+// field values reuse Field_Value. They cannot be produced here, so naming them would be dead
+// code that merely looks complete.
+node_kind_string :: proc(node: ^Node) -> string {
+	if node == nil {
+		return "invalid node"    // C++ parser.hpp:851, the table's zeroth entry
+	}
+	// #partial deliberately. Four members of Any_Node -- ^Package, ^File, ^Comment_Group and
+	// ^Tag_Stmt -- have NO entry in C++'s AST_KINDS (verified: 94 AST_KIND occurrences, 89 real
+	// kinds, and the other 5 are the macro definitions themselves). C++ therefore never renders
+	// a name for them, and neither can we; they fall through to "invalid node" below.
+	#partial switch _ in node.derived {
+	case ^Ident: return "identifier"
+	case ^Implicit: return "implicit"
+	case ^Undef: return "uninitialized value"
+	case ^Basic_Lit: return "basic literal"
+	case ^Basic_Directive: return "basic directive"
+	case ^Ellipsis: return "ellipsis"
+	case ^Proc_Group: return "procedure group"
+	case ^Proc_Lit: return "procedure literal"
+	case ^Comp_Lit: return "compound literal"
+	case ^Bad_Expr: return "bad expression"
+	case ^Tag_Expr: return "tag expression"
+	case ^Unary_Expr: return "unary expression"
+	case ^Binary_Expr: return "binary expression"
+	case ^Paren_Expr: return "parentheses expression"
+	case ^Selector_Expr: return "selector expression"
+	case ^Implicit_Selector_Expr: return "implicit selector expression"
+	case ^Selector_Call_Expr: return "selector call expression"
+	case ^Index_Expr: return "index expression"
+	case ^Deref_Expr: return "dereference expression"
+	case ^Slice_Expr: return "slice expression"
+	case ^Call_Expr: return "call expression"
+	case ^Field_Value: return "field value"
+	case ^Ternary_If_Expr: return "ternary if expression"
+	case ^Ternary_When_Expr: return "ternary when expression"
+	case ^Or_Else_Expr: return "or_else expression"
+	case ^Or_Return_Expr: return "or_return expression"
+	case ^Or_Branch_Expr: return "or branch expression"
+	case ^Type_Assertion: return "type assertion"
+	case ^Type_Cast: return "type cast"
+	case ^Auto_Cast: return "auto_cast"
+	case ^Inline_Asm_Expr: return "inline asm expression"
+	case ^Matrix_Index_Expr: return "matrix index expression"
+	case ^Bad_Stmt: return "bad statement"
+	case ^Empty_Stmt: return "empty statement"
+	case ^Expr_Stmt: return "expression statement"
+	case ^Assign_Stmt: return "assign statement"
+	case ^Block_Stmt: return "block statement"
+	case ^If_Stmt: return "if statement"
+	case ^When_Stmt: return "when statement"
+	case ^Return_Stmt: return "return statement"
+	case ^For_Stmt: return "for statement"
+	case ^Range_Stmt: return "range statement"
+	case ^Unroll_Range_Stmt: return "#unroll range statement"
+	case ^Case_Clause: return "case clause"
+	case ^Switch_Stmt: return "switch statement"
+	case ^Type_Switch_Stmt: return "type switch statement"
+	case ^Defer_Stmt: return "defer statement"
+	case ^Branch_Stmt: return "branch statement"
+	case ^Using_Stmt: return "using statement"
+	case ^Bad_Decl: return "bad declaration"
+	case ^Foreign_Block_Decl: return "foreign block declaration"
+	case ^Value_Decl: return "value declaration"
+	case ^Package_Decl: return "package declaration"
+	case ^Import_Decl: return "import declaration"
+	case ^Foreign_Import_Decl: return "foreign import declaration"
+	case ^Attribute: return "attribute"
+	case ^Field: return "field"
+	case ^Bit_Field_Field: return "bit field field"
+	case ^Field_List: return "field list"
+	case ^Typeid_Type: return "typeid"
+	case ^Helper_Type: return "helper type"
+	case ^Distinct_Type: return "distinct type"
+	case ^Poly_Type: return "polymorphic type"
+	case ^Proc_Type: return "procedure type"
+	case ^Pointer_Type: return "pointer type"
+	case ^Relative_Type: return "relative type"
+	case ^Multi_Pointer_Type: return "multi pointer type"
+	case ^Array_Type: return "array type"
+	case ^Dynamic_Array_Type: return "dynamic array type"
+	case ^Fixed_Capacity_Dynamic_Array_Type: return "fixed capacity dynamic array type"
+	case ^Struct_Type: return "struct type"
+	case ^Union_Type: return "union type"
+	case ^Enum_Type: return "enum type"
+	case ^Bit_Set_Type: return "bit set type"
+	case ^Bit_Field_Type: return "bit field type"
+	case ^Map_Type: return "map type"
+	case ^Matrix_Type: return "matrix type"
+	}
+	return "invalid node"
+}
