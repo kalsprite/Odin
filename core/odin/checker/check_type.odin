@@ -4266,6 +4266,18 @@ check_get_params :: proc(
 		// Check for 'using' parameter flag
 		is_using := ast.Field_Flag.Using in field.flags
 
+		// C++ Reference: check_type.cpp:1910-1916, inside check_get_params -- PARAMETERS only.
+		// C++ does NOT guard `using` on struct fields, so this belongs here and not in
+		// check_struct_fields (placing it there rejects every `using` struct field).
+		// The message differs from the statement form: "statement/procedure parameter".
+		// Blocked until task 243 made check_feature_flags resolve a file from the node.
+		if is_using && check_feature_flags(ctx, cast(^ast.Node)field) & {.Using_Stmt} == {} {
+			begin_error_block()
+			error(field, "'using' has been disallowed as it is considered bad practice to use as a statement/procedure parameter outside of immediate refactoring")
+			error_line("\tIf you do require it for refactoring purposes or legacy code, it can be enabled on a per-file basis with '#+feature using-stmt'\n")
+			end_error_block()
+		}
+
 		// Process each parameter name
 		for name_node, j in field.names {
 			_ = j
