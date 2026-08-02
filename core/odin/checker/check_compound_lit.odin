@@ -1230,9 +1230,12 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			// `PKCS1_HASH_OIDS := #partial [hash.Algorithm][]byte{...}` -- were rejected
 			// for exactly the cases they deliberately omit.
 			//
-			// NOTE: C++ additionally NAMES the unhandled cases and suggests `#partial`.
-			// The port's count-based wording is kept here on purpose; see LEDGER task 192
-			// for why replacing it needs the error-collector semantics sorted out first.
+			// C++ NAMES the unhandled cases and suggests `#partial`; the port used to report
+			// only a count, on the grounds that replacing it "needs the error-collector
+			// semantics sorted out first" (LEDGER task 192). That was the same reasoning
+			// that kept the dynamic-literal suggestions out, and it is obsolete for the same
+			// reason: begin_error_block/end_error_block hold a header and its continuations
+			// together. LEDGER task 268.
 			is_partial := false
 			if cl.tag != nil {
 				if bd, bd_ok := cl.tag.derived.(^ast.Basic_Directive); bd_ok {
@@ -1241,10 +1244,51 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			}
 
 			if !ea.is_sparse && !is_partial {
-				cases_provided := i64(len(indices_visited))
-				if cases_provided != elem_count {
-					error(node, "Enumerated array literal is missing %d case(s); expected %d, got %d",
-						elem_count - cases_provided, elem_count, cases_provided)
+				// C++ Reference: check_expr.cpp:11248-11283. C++ walks the index enum's
+				// fields and collects the ones the literal never mentioned, then names them.
+				et := base_type(index_type)
+				unhandled: [dynamic]^Entity
+				defer delete(unhandled)
+				if et != nil && et.kind == .Enum {
+					for f in et.variant.(Type_Enum).fields {
+						if f == nil || f.kind != .Constant {
+							continue
+						}
+						c, is_const := f.variant.(Entity_Constant)
+						if !is_const {
+							continue
+						}
+						bi, is_int := c.value.(big.Int)
+						if !is_int {
+							continue
+						}
+						tmp := bi
+						idx, err := big.int_get_i64(&tmp)
+						if err != nil {
+							continue
+						}
+						if !indices_visited[idx] {
+							append(&unhandled, f)
+						}
+					}
+				}
+
+				if len(unhandled) > 0 {
+					begin_error_block()
+					defer end_error_block()
+					if len(unhandled) == 1 {
+						error(node, "Unhandled enumerated array case: %s", unhandled[0].token.text)
+					} else {
+						error(node, "Unhandled enumerated array cases:")
+						for f in unhandled {
+							error_line("\t%s\n", f.token.text)
+						}
+					}
+					if !build_context.terse_errors {
+						error_line("\n")
+						type_str := type_to_string(type)
+						error_line("\tSuggestion: Was '#partial %s{...}' wanted?\n", type_str)
+					}
 				}
 			}
 		} else {
