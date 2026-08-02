@@ -9209,8 +9209,14 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		// port's handler does not implement as calls at all.
 		if bd, bd_ok := call.expr.derived.(^ast.Basic_Directive); bd_ok {
 			switch bd.name {
+			// NOTE: "load_or" is deliberately ABSENT. C++ lists it in the
+			// must-be-used-as-a-call set (check_expr.cpp:9769) but its directive-CALL
+			// dispatch has no arm for it, so `#load_or(...)` falls through to
+			// "Unknown directive: #load_or". Both facts are the reference behaviour and
+			// they only look contradictory: one path knows the name, the other does not.
+			// Verified against the oracle in probe loaddir. Do not "tidy" it back in.
 			case "assert", "caller_expression", "config", "defined", "exists", "hash",
-			     "load", "load_directory", "load_hash", "load_or", "location", "panic":
+			     "load", "load_directory", "load_hash", "location", "panic":
 				// Known to C++; the handler owns the diagnostic.
 			case:
 				error_node(node, "Unknown directive: #%s", bd.name)
