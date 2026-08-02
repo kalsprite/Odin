@@ -1752,7 +1752,7 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 	is_partial := stmt.partial
 	if is_partial {
 		if !is_type_enum(x.type) {
-			error_node(stmt.cond if stmt.cond != nil else node, "#partial switch statement can only be used with an enum type")
+			error_node(stmt.cond if stmt.cond != nil else node, "#partial switch statement can be only used with an enum type")
 		}
 	}
 
@@ -1829,7 +1829,7 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 				// Validate that the switch type is ordered
 				if !is_type_ordered(x.type) {
 					type_str := type_to_string(x.type)
-					error_node(case_expr, "Unordered type '%s' is invalid for an interval expression", type_str)
+					error_node(case_expr, "Unordered type '%s', is invalid for an interval expression", type_str)
 					continue
 				}
 
@@ -3936,7 +3936,7 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 
 				// C++ Reference: check_stmt.cpp:1763-1765
 				if ctx.info.build_context != nil && ctx.info.build_context.no_rtti {
-					error_node(node, "Iteration over an enum type is not allowed when runtime type information (RTTI) has been disallowed")
+					error_node(node, "Iteration over an enum type is not allowed runtime type information (RTTI) has been disallowed")
 				}
 				skip_expr_range_stmt = true
 			}
@@ -4002,7 +4002,7 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 
 					// C++ Reference: check_stmt.cpp:1811-1813
 					if ctx.info.build_context != nil && ctx.info.build_context.no_rtti && is_type_enum(bs.elem) {
-						error_node(node, "Iteration over a bit_set of an enum is not allowed when runtime type information (RTTI) has been disallowed")
+						error_node(node, "Iteration over a bit_set of an enum is not allowed runtime type information (RTTI) has been disallowed")
 					}
 
 					// Check for shadowing warning

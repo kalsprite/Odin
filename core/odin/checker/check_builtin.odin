@@ -2148,7 +2148,7 @@ check_builtin_complex :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 	// C++ Reference: check_builtin.cpp:3121-3126
 	if is_type_endian_specific(x.type) {
 		type_str := type_to_string(x.type)
-		error_node(call, "Arguments with a specified endian are not allowed, expected a normal floating point, got '%s'", type_str)
+		error_node(call, "Arguments with a specified endian are not allow, expected a normal floating point, got '%s'", type_str)
 		return false
 	}
 
@@ -2501,7 +2501,7 @@ check_builtin_min :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.C
 	// C++ Reference: check_builtin.cpp:3766-3827
 	if operand.mode == .Type {
 		if len(call.args) != 1 {
-			error_node(call, "If '%s' gets a type, only 1 argument is allowed, got %d", builtin_name, len(call.args))
+			error_node(call, "If '%s' gets a type, only 1 arguments is allowed, got %d", builtin_name, len(call.args))
 			return false
 		}
 
@@ -2731,7 +2731,7 @@ check_builtin_max :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.C
 	// C++ Reference: check_builtin.cpp:3943-4008
 	if operand.mode == .Type {
 		if len(call.args) != 1 {
-			error_node(call, "If '%s' gets a type, only 1 argument is allowed, got %d", builtin_name, len(call.args))
+			error_node(call, "If '%s' gets a type, only 1 arguments is allowed, got %d", builtin_name, len(call.args))
 			return false
 		}
 

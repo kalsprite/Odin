@@ -5034,7 +5034,7 @@ check_get_results :: proc(ctx: ^Checker_Context, scope: ^Scope, results_node: ^a
 			for name_node in field.names {
 				ident, ident_ok := name_node.derived.(^ast.Ident)
 				if !ident_ok {
-					error(name_node, "Expected an identifier for the field name")
+					error(name_node, "Expected an identifer for as the field name")
 					continue
 				}
 
@@ -5042,7 +5042,7 @@ check_get_results :: proc(ctx: ^Checker_Context, scope: ^Scope, results_node: ^a
 
 				// Check for blank identifier (user explicitly wrote `_: type`)
 				if is_blank_ident(name) {
-					error(name_node, "Result value cannot be a blank identifier `_`")
+					error(name_node, "Result value cannot be a blank identifer `_`")
 					continue
 				}
 
