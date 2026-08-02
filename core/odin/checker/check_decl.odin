@@ -606,7 +606,7 @@ check_entity_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, name
 		prev_flags := c.scope.flags
 		defer c.scope.flags = prev_flags
 
-		if check_feature_flags(ctx, d.decl_node) & {.Global_Context} != {} {
+		if check_feature_flags(ctx, cast(^ast.Node)d.decl_node) & {.Global_Context} != {} {
 			c.scope.flags += {.Context_Defined}
 		} else {
 			c.scope.flags -= {.Context_Defined}
@@ -1700,7 +1700,7 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 
 // check_feature_flags retrieves opt-in feature flags for the current context
 // C++ Reference: checker.cpp:559-592
-check_feature_flags :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) -> Opt_In_Feature_Flag {
+check_feature_flags :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> Opt_In_Feature_Flag {
 	file: ^ast.File = ctx.file
 
 	// C++ Reference: checker.cpp:567-570 -- fall back to the current procedure literal's file.
@@ -1786,7 +1786,7 @@ check_init_fini_common :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info,
 	// C++ Reference: checker.cpp:3015-3021
 	feature_flags: Opt_In_Feature_Flag
 	if d != nil {
-		feature_flags = check_feature_flags(ctx, d.decl_node)
+		feature_flags = check_feature_flags(ctx, cast(^ast.Node)d.decl_node)
 	}
 	if feature_flags & {.Global_Context} == {} {
 		if pt.calling_convention != .Contextless {

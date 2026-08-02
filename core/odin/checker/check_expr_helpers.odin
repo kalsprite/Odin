@@ -1281,8 +1281,10 @@ is_call_expr_field_value :: proc(expr: ^ast.Expr) -> bool {
 // Returns true if dynamic literals (dynamic arrays, maps) are allowed
 // Reports an error if not enabled
 check_for_dynamic_literals :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> bool {
-	// Check file feature flags
-	if ctx.file != nil && .Dynamic_Literals in ctx.file.feature_flags {
+	// C++ Reference: check_expr.cpp:10514 uses check_feature_flags(c, node), NOT ctx.file
+	// directly. Reading ctx.file skips the proc-literal and node fallbacks, so the flag was
+	// invisible whenever ctx.file was unset (LEDGER task 244).
+	if check_feature_flags(ctx, node) & {.Dynamic_Literals} != {} {
 		return true
 	}
 

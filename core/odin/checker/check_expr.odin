@@ -2100,7 +2100,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 			if is_zero {
 				// C++ Reference: check_expr.cpp:4396-4441
 				// Handle target-specific division by zero behavior
-				div_by_zero_kind := build_context.integer_division_by_zero_behaviour
+				div_by_zero_kind := check_for_integer_division_by_zero(ctx, node)
 				#partial switch div_by_zero_kind {
 				case .Trap:
 					// Default: error on division by zero
@@ -9853,3 +9853,18 @@ set_call_result_type :: proc(o: ^Operand, result_type: ^Type, call_node: ^ast.No
 
 // NOTE: The actual implementation is in check_compound_lit.odin lines 227-631
 // No stub needed here - Odin allows calling procedures defined later in the same package
+
+// check_for_integer_division_by_zero resolves the division-by-zero behaviour for a node.
+//
+// C++ Reference: check_expr.cpp:10534-10550. The per-FILE `#+feature integer-division-by-zero:*`
+// flags win over the global build setting. The port consulted only
+// build_context.integer_division_by_zero_behaviour, so a file opting into `:zero` still got the
+// "Division by zero not allowed" error -- an over-rejection.
+check_for_integer_division_by_zero :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> Integer_Division_By_Zero_Kind {
+	flags := check_feature_flags(ctx, node)
+	if .Integer_Division_By_Zero_Trap     in flags { return .Trap }
+	if .Integer_Division_By_Zero_Zero     in flags { return .Zero }
+	if .Integer_Division_By_Zero_Self     in flags { return .Self }
+	if .Integer_Division_By_Zero_All_Bits in flags { return .All_Bits }
+	return build_context.integer_division_by_zero_behaviour
+}

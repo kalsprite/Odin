@@ -3574,7 +3574,7 @@ check_using_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, flags: Stmt_Fla
 	// This was blocked in task 242 because check_feature_flags could not see a file's
 	// `#+feature` line during statement checking (core/image/png opts in on line 1 and broke).
 	// Task 243 added C++'s third fallback, `file = node->file()`, so the lookup now works.
-	if check_feature_flags(ctx, node) & {.Using_Stmt} == {} {
+	if check_feature_flags(ctx, cast(^ast.Node)node) & {.Using_Stmt} == {} {
 		begin_error_block()
 		error_node(node, "'using' has been disallowed as it is considered bad practice to use as a statement outside of immediate refactoring")
 		error_line("\tIf you do require it for refactoring purposes or legacy code, it can be enabled on a per-file basis with '#+feature using-stmt'\n")
