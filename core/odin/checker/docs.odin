@@ -413,18 +413,17 @@ print_doc_package :: proc(info: ^Checker_Info, pkg: ^ast.Package, writer: ^strin
 		print_doc_line_string(1, "fullpath:", writer)
 		print_doc_line_string(2, pkg.fullpath, writer)
 		print_doc_line_string(1, "files:", writer)
-		for filepath, file in pkg.files {
-			if file != nil {
-				// Extract filename from path
-				filename := filepath
-				for i := len(filepath) - 1; i >= 0; i -= 1 {
-					if filepath[i] == '/' || filepath[i] == '\\' {
-						filename = filepath[i + 1:]
-						break
-					}
-				}
-				print_doc_line_string(2, filename, writer)
-			}
+		// C++ iterates pkg->files, which is an ARRAY that check_create_file_scopes has already
+		// sorted by basename (checker.cpp:6052, `array_sort(pkg->files, sort_file_by_name)`).
+		// The port's pkg.files is a MAP, so iterating it directly yielded hash order and the
+		// file list came out in an order unrelated to C++'s -- deterministic under setarch -R,
+		// but wrong. sorted_files applies exactly that comparator (basename, then fullpath as
+		// the tie-break) and is already used at five other sites for this same reason.
+		//
+		// The filename is taken from file.fullpath, as C++ takes it from f->fullpath, rather
+		// than from the map key.
+		for file in sorted_files(pkg.files) {
+			print_doc_line_string(2, filename_from_path(file.fullpath), writer)
 		}
 	}
 }
