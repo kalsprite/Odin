@@ -3826,7 +3826,12 @@ expand_values_tuple_type :: proc(ctx: ^Checker_Context, type: ^Type) -> (^Type, 
 	#partial switch v in bt.variant {
 	case Type_Struct:
 		for field in v.fields {
-			append(&types, field.type)
+			// entity_type, not `.type`: the base field is not always populated, and for
+			// struct fields it generally is not. Reading it raw yielded a tuple of nil
+			// types, so `takes3(**v)` reported "Cannot pass argument of type '<no type>'"
+			// on code C++ accepts. The array branch below was unaffected because it reads
+			// v.elem, a real ^Type -- which is why only the struct form ever failed.
+			append(&types, entity_type(field))
 		}
 	case Type_Array:
 		for _ in 0 ..< v.count {
