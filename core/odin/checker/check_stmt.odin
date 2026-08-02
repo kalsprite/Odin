@@ -2176,7 +2176,10 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 			defer end_error_block()
 
 			if len(unhandled) == 1 {
-				error_node(node, "Unhandled switch case: %s", unhandled[0].token.text)
+				// C++ Reference: check_stmt.cpp:1363 -- error_no_newline, so the Suggestion
+				// below lands on the SAME line and no "Error: " label is printed unless the
+				// terminal has colours.
+				error_no_newline(node, "Unhandled switch case: %s", unhandled[0].token.text)
 			} else {
 				error_node(node, "Unhandled switch cases:")
 				for f in unhandled {

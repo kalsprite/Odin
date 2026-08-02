@@ -862,6 +862,64 @@ error_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args: .
 	try_pop_error_value()
 }
 
+// error_no_newline_va reports an error WITHOUT terminating its line, so a following
+// error_line() continues on the same physical line.
+//
+// C++ Reference: error.cpp:605-631. Two things differ from error_va, and both are visible in
+// the output:
+//
+//   1. The "Error: " label is emitted ONLY when the terminal supports ANSI colours. Under a
+//      pipe it is omitted entirely, so the diagnostic reads `path(l:c) message`.
+//   2. No trailing newline, and no source-line echo.
+//
+// That is why the oracle renders the singular forms of the unhandled-switch and
+// unhandled-enumerated-array diagnostics as, for example:
+//
+//      sw/main.odin(16:2) Unhandled switch case: E5\tSuggestion: Was '#partial switch' wanted?
+//
+// It is one primitive, not a per-site quirk. LEDGER task 273.
+error_no_newline_va :: proc(pos: tokenizer.Pos, format: string, args: ..any) {
+	// Same collector bookkeeping as error_va; see the notes there on the library-safe
+	// limit latch and on speculative probes.
+	if error_limit_reached() {
+		return
+	}
+	if tls_error_suppress_depth > 0 {
+		return
+	}
+
+	sync.atomic_add(&global_error_collector.count, 1)
+
+	if sync.atomic_load(&global_error_collector.count) > build_context.max_error_count {
+		sync.atomic_store(&global_error_collector.limit_reached, true)
+		return
+	}
+
+	push_error_value(pos, .Error)
+
+	if pos.line == 0 {
+		error_out_empty()
+		error_out_coloured("Error: ", .Normal, .Red)
+		error_out(format, ..args)
+	} else {
+		if json_errors() {
+			error_out_empty()
+		} else {
+			error_out_pos(pos)
+			if has_ansi_terminal_colours() {
+				error_out_coloured("Error: ", .Normal, .Red)
+			}
+		}
+		error_out(format, ..args)
+	}
+
+	try_pop_error_value()
+}
+
+error_no_newline :: proc(node: ^ast.Node, format: string, args: ..any) {
+	error_no_newline_va(ast_token_pos(node), format, ..args)
+}
+
 // warning_va is the core warning reporting function (variadic version)
 // C++ Reference: error.cpp:565-598
 warning_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args: ..any) {

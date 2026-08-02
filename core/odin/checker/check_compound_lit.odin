@@ -1277,7 +1277,9 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 					begin_error_block()
 					defer end_error_block()
 					if len(unhandled) == 1 {
-						error(node, "Unhandled enumerated array case: %s", unhandled[0].token.text)
+						// C++ Reference: check_expr.cpp:11270 -- error_no_newline. See the
+						// switch-statement twin in check_stmt.odin.
+						error_no_newline(node, "Unhandled enumerated array case: %s", unhandled[0].token.text)
 					} else {
 						error(node, "Unhandled enumerated array cases:")
 						for f in unhandled {
@@ -1286,8 +1288,18 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 					}
 					if !build_context.terse_errors {
 						error_line("\n")
-						type_str := type_to_string(type)
-						error_line("\tSuggestion: Was '#partial %s{...}' wanted?\n", type_str)
+						// The braces must NOT go through the formatter: error_line's
+						// formatting treats `{` as a verb introducer, so the literal
+						// "{...}" came out as
+						//     #partial [E]int%!(MISSING ARGUMENT)%!(MISSING CLOSE BRACE)..}
+						// This was invisible until task 273 made the singular form's line
+						// non-terminating, because the Suggestion was not reaching the
+						// output at all. Build the text first, emit it as one argument.
+						// The literal braces are passed as an ARGUMENT, not left in the
+						// format string: error_line's formatter treats `{` as a verb
+						// introducer and turned "{...}" into
+						//     %!(MISSING ARGUMENT)%!(MISSING CLOSE BRACE)..}
+						error_line("\tSuggestion: Was '#partial %s%s' wanted?\n", type_to_string(type), "{...}")
 					}
 				}
 			}
