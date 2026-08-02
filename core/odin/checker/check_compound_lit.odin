@@ -35,7 +35,8 @@ check_compound_literal_field_values :: proc(ctx: ^Checker_Context, elems: []^ast
 	// C++ Reference: checker.cpp:9637-9640
 	assignment_str := "structure literal"
 	if bt.kind == .Bit_Field {
-		assignment_str = "bit_field literal"
+		// C++ Reference: check_expr.cpp:10289 -- the inner quotes are part of the string.
+		assignment_str = "'bit_field' literal"
 	}
 
 	for elem in elems {
@@ -56,9 +57,11 @@ check_compound_literal_field_values :: proc(ctx: ^Checker_Context, elems: []^ast
 		if implicit_sel, is_implicit := field_expr.derived.(^ast.Implicit_Selector_Expr); is_implicit {
 			expr_str := expr_to_string(field_expr)
 			defer delete(expr_str)
-			error(field_expr, "Field names do not start with a '.', remove the '.' in structure literal")
+			// C++ Reference: check_expr.cpp:10300 -- names the expression AND the context.
+			// The port dropped the "from '%s'" clause and hardcoded "structure literal",
+			// which is wrong for a bit_field literal.
+			error(field_expr, "Field names do not start with a '.', remove the '.' from '%s' in %s", expr_str, assignment_str)
 			field_expr = implicit_sel.field
-			_ = expr_str
 		}
 
 		// Validate field is identifier
@@ -67,7 +70,7 @@ check_compound_literal_field_values :: proc(ctx: ^Checker_Context, elems: []^ast
 		if !is_ident {
 			expr_str := expr_to_string(field_expr)
 			defer delete(expr_str)
-			error(elem, "Invalid field name '%s' in structure literal", expr_str)
+			error(elem, "Invalid field name '%s' in %s", expr_str, assignment_str)
 			continue
 		}
 
@@ -77,7 +80,7 @@ check_compound_literal_field_values :: proc(ctx: ^Checker_Context, elems: []^ast
 		// Reference: C++ lines 9585-9590
 		sel := lookup_field(type, field_name, o.mode == .Type)
 		if sel.entity == nil {
-			error(field_expr, "Unknown field '%s' in structure literal", field_name)
+			error(field_expr, "Unknown field '%s' in %s", field_name, assignment_str)
 			continue
 		}
 
@@ -1422,71 +1425,23 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		}
 
 	case Type_Bit_Field:
-		// Bit_field literal: bit_field{field_a = value, field_b = value}
-		// Reference: C++ lines 10637-10650
-		bf := variant
-
-		// Empty literal is OK
+		// C++ Reference: check_expr.cpp:11477-11488. C++ has NO bit_field element loop --
+		// it delegates to check_compound_literal_field_values, the SAME helper it uses for
+		// struct literals, which is why that helper takes assignment_str at all. The port
+		// HAD the helper (with a live Type_Bit_Field branch) and ALSO a hand-rolled loop
+		// here, so the helper's branch was dead and this copy drifted five ways: no type
+		// hint on the value (so `B{ f = .A }` for an enum-typed field was rejected outright),
+		// an invented assignability message, an un-quoted "bit_field literal" in the
+		// duplicate message, a per-element error for positional syntax where C++ emits one
+		// at the node, and "'B' has no field 'c'" for C++'s "Unknown field 'c' in ...".
 		if len(cl.elems) == 0 {
-			break
+			break // NOTE(bill): No need to init
 		}
-
-		// Track visited fields to detect duplicates
-		fields_visited := make(map[string]bool, context.temp_allocator)
-
-		// Process each element
-		for elem in cl.elems {
-			// Bit_field literals must use named fields
-			fv, is_fv := elem.derived.(^ast.Field_Value)
-			if !is_fv {
-				error(elem, "Bit_field literals require 'field = value' entries")
-				continue
-			}
-
-			// Get field name
-			ident, is_ident := fv.field.derived.(^ast.Ident)
-			if !is_ident {
-				error(fv.field, "Expected identifier for bit_field field name")
-				continue
-			}
-			field_name := ident.name
-
-			// Look up field
-			field, has_field := bf.names[field_name]
-			if !has_field {
-				type_str := type_to_string(type)
-				error(fv.field, "'%s' has no field '%s'", type_str, field_name)
-				continue
-			}
-
-			// Check for duplicate
-			if fields_visited[field_name] {
-				error(fv.field, "Duplicate field '%s' in bit_field literal", field_name)
-				continue
-			}
-			fields_visited[field_name] = true
-
-			// Check field value type
-			field_type := entity_type(field)
-			value_operand := Operand{}
-			check_expr(ctx, &value_operand, fv.value)
-
-			if value_operand.mode == .Invalid {
-				continue
-			}
-
-			// Check assignability
-			if !check_is_assignable_to(ctx, &value_operand, field_type) {
-				field_type_str := type_to_string(field_type)
-				val_type_str := type_to_string(value_operand.type)
-				error(fv.value, "Cannot assign '%s' to bit_field field '%s' of type '%s'", val_type_str, field_name, field_type_str)
-				continue
-			}
-
-			// Check constant-ness
-			if value_operand.mode != .Constant {
-				is_constant = false
-			}
+		if _, is_fv := cl.elems[0].derived.(^ast.Field_Value); !is_fv {
+			type_str := type_to_string(type)
+			error(node, "%s ('bit_field') compound literals are only allowed to contain 'field = value' elements", type_str)
+		} else {
+			check_compound_literal_field_values(ctx, cl.elems, o, type, &is_constant)
 		}
 
 	case Type_Basic:
