@@ -2410,22 +2410,46 @@ string_to_calling_convention :: proc(s: string) -> ast.Proc_Calling_Convention {
 	return s
 }
 
+// C++ Reference: src/parser.cpp:2062 parse_proc_tags, and check_proc_add_tag at 2055.
+//
+// #217. The port recognised 4 of C++'s 7 tags, its unknown-tag case was EMPTY, and it checked
+// duplicates only for the bounds_check pair -- with wording C++ does not use. ast.Proc_Tag
+// already declared all seven, so Type_Assert, No_Type_Assert and Require_Results were
+// declared-but-never-set: another instance of the pattern in #212.
+//
+// Diagnostic positions differ between the two kinds and are load-bearing: the per-tag errors
+// report at the tag's own '#' (probe ptag: 3:35, 4:22), while the pair checks report at
+// f->curr_token AFTER the whole tag list (5:54).
 parse_proc_tags :: proc(p: ^Parser) -> (tags: ast.Proc_Tags) {
+	add_tag :: proc(p: ^Parser, tags: ^ast.Proc_Tags, hash: tokenizer.Token, tag: ast.Proc_Tag, name: string) {
+		if tag in tags^ {
+			error(p, hash.pos, "Procedure tag already used: %s", name)
+		}
+		tags^ += {tag}
+	}
+
 	for p.curr_tok.kind == .Hash {
-		_ = expect_token(p, .Hash)
+		hash := expect_token(p, .Hash)
 		ident := expect_token(p, .Ident)
 
-		switch ident.text {
-		case "bounds_check":    tags += {.Bounds_Check}
-		case "no_bounds_check": tags += {.No_Bounds_Check}
-		case "optional_ok":     tags += {.Optional_Ok}
-		case "optional_allocator_error": tags += {.Optional_Allocator_Error}
+		switch name := ident.text; name {
+		case "optional_ok":              add_tag(p, &tags, hash, .Optional_Ok, name)
+		case "optional_allocator_error": add_tag(p, &tags, hash, .Optional_Allocator_Error, name)
+		case "require_results":          add_tag(p, &tags, hash, .Require_Results, name)
+		case "bounds_check":             add_tag(p, &tags, hash, .Bounds_Check, name)
+		case "no_bounds_check":          add_tag(p, &tags, hash, .No_Bounds_Check, name)
+		case "type_assert":              add_tag(p, &tags, hash, .Type_Assert, name)
+		case "no_type_assert":           add_tag(p, &tags, hash, .No_Type_Assert, name)
 		case:
+			error(p, hash.pos, "Unknown procedure type tag #%s", name)
 		}
 	}
 
 	if .Bounds_Check in tags && .No_Bounds_Check in tags {
-		p.err(p.curr_tok.pos, "#bounds_check and #no_bounds_check applied to the same procedure type")
+		error(p, p.curr_tok.pos, "You cannot apply both #bounds_check and #no_bounds_check to a procedure")
+	}
+	if .Type_Assert in tags && .No_Type_Assert in tags {
+		error(p, p.curr_tok.pos, "You cannot apply both #type_assert and #no_type_assert to a procedure")
 	}
 
 	return
@@ -2867,6 +2891,14 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			p.expr_level = prev_level
 		}
 		tags = parse_proc_tags(p)
+		// C++ Reference: src/parser.cpp:2573-2577. #require_results is still ACCEPTED by
+		// parse_proc_tags -- so that a duplicate or a pair conflict involving it is reported
+		// normally -- and is rejected and cleared here instead. Reporting it inside the loop
+		// would put the error at the wrong position (the '#', not the token after the list).
+		if .Require_Results in tags {
+			error(p, p.curr_tok.pos, "#require_results has now been replaced as an attribute @(require_results) on the declaration")
+			tags -= {.Require_Results}
+		}
 		type.tags = tags
 
 		if p.allow_type && p.expr_level < 0 {
