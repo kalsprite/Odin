@@ -4062,7 +4062,10 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 			param_value.kind = .Constant
 			param_value.value = o.value
 		} else {
-			error(o.expr, "Invalid constant parameter")
+			// C++ check_type.cpp:1825-1826 names the offending EXPRESSION, quoted.
+			const_str := expr_to_string(o.expr)
+			defer delete(const_str)
+			error(o.expr, "Invalid constant parameter, got '%s'", const_str)
 		}
 	}
 
@@ -4442,14 +4445,18 @@ check_get_params :: proc(
 
 					// Validate type is not polymorphic (C++ lines 1992-1997)
 					if is_type_polymorphic(param_type) {
-						error(operand.expr, "Cannot pass polymorphic type as a parameter")
+						// C++ check_type.cpp:2080-2081 names the TYPE, quoted. Computed before
+						// param_type is reset to t_invalid below, as C++ does.
+						error(operand.expr, "Cannot pass polymorphic type as a parameter, got '%s'", type_to_string(param_type))
 						local_success = false
 						param_type = t_invalid
 					}
 
 					// Check type is not untyped (C++ lines 1999-2005)
 					if is_type_untyped(default_type(param_type)) {
-						error(operand.expr, "Cannot determine type from the parameter")
+						// C++ check_type.cpp:2087-2088 (and the identical site at 2222-2223)
+						// name the TYPE, quoted.
+						error(operand.expr, "Cannot determine type from the parameter, got '%s'", type_to_string(param_type))
 						local_success = false
 						param_type = t_invalid
 					}
@@ -4554,7 +4561,11 @@ check_get_params :: proc(
 							} else {
 								// C++ line 2089: Suppress error during proc group overload resolution
 								if !ctx.in_proc_group {
-									error(operand.expr, "Expected a constant value for this polymorphic name parameter")
+									// C++ check_type.cpp:2186 names the EXPRESSION and, unlike its
+									// neighbours here, does NOT quote it.
+									name_str := expr_to_string(operand.expr)
+									defer delete(name_str)
+									error(operand.expr, "Expected a constant value for this polymorphic name parameter, got %s", name_str)
 								}
 								local_success = false
 							}
@@ -4563,7 +4574,9 @@ check_get_params :: proc(
 
 					// Validate operand is not untyped after type determination (C++ lines 2125-2131)
 					if is_type_untyped(default_type(param_type)) {
-						error(operand.expr, "Cannot determine type from the parameter")
+						// C++ check_type.cpp:2087-2088 (and the identical site at 2222-2223)
+						// name the TYPE, quoted.
+						error(operand.expr, "Cannot determine type from the parameter, got '%s'", type_to_string(param_type))
 						local_success = false
 						param_type = t_invalid
 					}
