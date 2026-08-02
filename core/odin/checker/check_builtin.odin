@@ -3347,11 +3347,14 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			// in parentheses. The port printed "Compile-time assertion failed" -- a hyphen C++
 			// does not use, and no condition at all.
 			//
-			// NOT reproduced: C++ wraps this in ERROR_BLOCK() and adds a
-			// "\tCalled within '<proc>' :: <sig>" continuation via error_line when inside a
-			// procedure. Attempting that swallowed EVERY subsequent diagnostic in the package
-			// (see LEDGER task 230) -- the block/continuation interaction needs its own
-			// investigation before it is reproduced here.
+			// STALE COMMENT REMOVED (LEDGER task 269): this used to say the ERROR_BLOCK and
+			// the "Called within" continuation were NOT reproduced, because attempting them
+			// "swallowed EVERY subsequent diagnostic in the package (see LEDGER task 230)".
+			// Task 230's diagnosis was RETRACTED in task 231 -- the abort was a delete() on a
+			// type_to_string result in the probe harness, not a block/continuation problem --
+			// and the continuation was implemented at some point after. The comment sat
+			// directly above the working code claiming it did not exist. Verified against the
+			// oracle: single-argument, two-argument and file-scope forms all match.
 			// C++ Reference: check_builtin.cpp:2639 ERROR_BLOCK() -- keeps the continuation
 			// line attached to this error instead of being flushed ahead of it.
 			begin_error_block()
