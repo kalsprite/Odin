@@ -806,6 +806,15 @@ Field_Flags_Signature :: Field_Flags{
 	.Any_Int,
 	.By_Ptr,
 	.No_Broadcast,
+	// C++ Reference: src/parser.hpp:381-383 (FieldFlag_Signature) includes no_capture.
+	// Its absence here made the PARSER reject `proc(#no_capture x: int)` outright with
+	// "'#no_capture' is not allowed within this field list", so the checker's own
+	// #no_capture validation (check_type.odin, fully ported) could never run on a
+	// procedure parameter -- the only place the directive is legal.
+	.No_Capture,
+	// NOT in C++'s set: C++ passes default-parameter permission as a separate boolean
+	// argument to parse_field_list rather than as a field flag. Folding it in here is a
+	// port structural choice and is read at parser.odin:2027.
 	.Default_Parameters,
 }
 

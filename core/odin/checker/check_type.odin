@@ -4510,8 +4510,19 @@ check_get_params :: proc(
 
 			// #no_alias validation (C++ lines 2134-2138)
 			if ast.Field_Flag.No_Alias in field.flags {
-				if !is_type_pointer(param_type) && !is_type_multi_pointer(param_type) {
-					error(name_node, "'#no_alias' can only be applied pointer or multi-pointer typed parameters")
+				// C++ Reference: check_type.cpp:2230-2240. Three divergences were here:
+				// the port tested is_type_pointer||is_type_multi_pointer instead of
+				// is_type_internally_pointer_like (which is broader), it lacked C++'s two
+				// guards, and its message was invented -- and ungrammatical, missing the
+				// "to" in "can only be applied to".
+				//
+				// C++'s guards matter: on t_invalid we have already errored, and under
+				// no_polymorphic_errors we are speculatively checking a proc-group candidate
+				// that will be re-checked with errors enabled, so erroring now is premature.
+				if param_type != t_invalid &&
+				   !is_type_internally_pointer_like(param_type) &&
+				   !ctx.no_polymorphic_errors {
+					error(name_node, "'#no_alias' can only be applied to pointer-like type parameters")
 					local_success = false
 				}
 			}
@@ -4539,6 +4550,12 @@ check_get_params :: proc(
 					if is_type_internally_pointer_like(param_type) {
 						error(name_node, "'#no_capture' is currently reserved for future use")
 					} else {
+						// C++ Reference: check_type.cpp:2261 opens an ERROR_BLOCK here. Without
+						// it the error_line below is emitted outside the collector, so it
+						// printed BEFORE the harness header and was dropped from the count --
+						// exactly what misroute.py detects.
+						begin_error_block()
+						defer end_error_block()
 						error(name_node, "'#no_capture' can only be applied to pointer-like types")
 						error_line("\t'#no_capture' does not currently do anything useful\n")
 						local_success = false
