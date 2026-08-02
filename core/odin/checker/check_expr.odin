@@ -4187,12 +4187,18 @@ error_operand_no_value :: proc(o: ^Operand) {
 		// Report appropriate error message
 		if x != nil {
 			if _, is_call := x.derived.(^ast.Call_Expr); is_call {
-				error(o.expr, "Call does not return a value and cannot be used as a value")
+				// C++ Reference: check_expr.cpp:312 -- names the call expression.
+				nv_call := expr_to_string(o.expr)
+				defer delete(nv_call)
+				error(o.expr, "'%s' call does not return a value and cannot be used as a value", nv_call)
 			} else {
 				error(o.expr, "Expression used as a value but has no value")
 			}
 		} else {
-			error(o.expr, "Expression has no value")
+			// C++ Reference: check_expr.cpp:2078
+			nv_str := expr_to_string(o.expr)
+			defer delete(nv_str)
+			error(o.expr, "Expression has no value '%s'", nv_str)
 		}
 		o.mode = .Invalid
 	}
@@ -5945,7 +5951,10 @@ check_type_assertion :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 
 	// Cannot assert constants
 	if o.mode == .Constant {
-		error(o.expr, "A type assertion cannot be applied to a constant expression")
+		// C++ Reference: check_expr.cpp:11584
+		tac_str := expr_to_string(o.expr)
+		defer delete(tac_str)
+		error(o.expr, "A type assertion cannot be applied to a constant expression: '%s'", tac_str)
 		o.mode = .Invalid
 		o.expr = node
 		return kind
@@ -5953,7 +5962,10 @@ check_type_assertion :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 
 	// Cannot assert untyped expressions
 	if is_type_untyped(o.type) {
-		error(o.expr, "A type assertion cannot be applied to an untyped expression")
+		// C++ Reference: check_expr.cpp:11593
+		ta_str := expr_to_string(o.expr)
+		defer delete(ta_str)
+		error(o.expr, "A type assertion cannot be applied to an untyped expression: '%s'", ta_str)
 		o.mode = .Invalid
 		o.expr = node
 		return kind
@@ -6068,7 +6080,9 @@ check_type_assertion :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 
 	} else {
 		// Invalid source type for type assertion
-		error(o.expr, "Type assertions can only operate on unions and 'any'")
+		// C++ Reference: check_expr.cpp:11684 -- reports the actual type.
+		ta_got := type_to_string(o.type)
+		error(o.expr, "Type assertions can only operate on unions and 'any', got %s", ta_got)
 		o.mode = .Invalid
 		o.expr = node
 		return kind
@@ -6168,7 +6182,10 @@ check_implicit_selector_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^
 
 	// Type hint is required for implicit selectors
 	if th == nil {
-		error(node, "Cannot determine type for implicit selector expression")
+		// C++ Reference: check_expr.cpp:9375 -- names the expression.
+		ise_str := expr_to_string(node)
+		defer delete(ise_str)
+		error(node, "Cannot determine type for implicit selector expression '%s'", ise_str)
 		return .Expr
 	}
 
@@ -6197,7 +6214,11 @@ check_implicit_selector_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^
 				// C++ Reference: check_expr.cpp:8839-8841
 				error(node, "Cannot convert enum value to bit_set; did you mean '{ .%s }'?", name)
 			} else {
-				error(node, "Invalid type for implicit selector expression")
+				// C++ Reference: check_expr.cpp:9408 -- names the TYPE and the expression.
+				ise_typ := type_to_string(type_hint)
+				ise_str := expr_to_string(node)
+				defer delete(ise_str)
+				error(node, "Invalid type '%s' for implicit selector expression '%s'", ise_typ, ise_str)
 			}
 
 		} else {
@@ -8561,7 +8582,10 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 
 	// Cannot transmute untyped expressions
 	if is_type_untyped(src_t) {
-		error(operand.expr, "Cannot transmute untyped expression")
+		// C++ Reference: check_expr.cpp:4019
+		tm_str := expr_to_string(operand.expr)
+		defer delete(tm_str)
+		error(operand.expr, "Cannot transmute untyped expression: '%s'", tm_str)
 		operand.mode = .Invalid
 		operand.expr = node
 		return false
@@ -9006,7 +9030,10 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	if proc_type == nil || proc_type.kind != .Proc {
 		// Error: trying to call something that's not a procedure
 		type_str := type_to_string(o.type)
-		error_node(call.expr, "Cannot call a non-procedure of type '%s'", type_str)
+		// C++ Reference: check_expr.cpp:8830 -- "Cannot call a non-procedure: '<expr>' of type '<T>'"
+		callee_str := expr_to_string(call.expr)
+		defer delete(callee_str)
+		error_node(call.expr, "Cannot call a non-procedure: '%s' of type '%s'", callee_str, type_str)
 		o.mode = .Invalid
 		o.expr = node
 		return .Stmt

@@ -1049,6 +1049,11 @@ ast_token_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
 		return n.op.pos
 	case ^ast.Deref_Expr:
 		return n.op.pos
+	case ^ast.Implicit_Selector_Expr:
+		// C++ parser_pos.cpp:35-39: reports at the SELECTOR, not the leading '.'.
+		if n.field != nil {
+			return n.field.pos
+		}
 	}
 	return node.pos
 }
