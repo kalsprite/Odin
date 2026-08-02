@@ -6807,21 +6807,47 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 		return .Expr
 
 	case "caller_location":
-		// #caller_location - returns Source_Code_Location of caller
-		// C++ Reference: check_expr.cpp:9109-9118
-		// Used as default parameter value
-		// Ensure Source_Code_Location type is initialized
+		// C++ Reference: check_expr.cpp:9734-9738.
+		//
+		// Reaching THIS function already means the directive is misused. A legitimate
+		// `#caller_location` is a default argument value, and that is substituted at the call
+		// site by the default-argument machinery -- it never arrives here as a bare directive.
+		// So C++ reports unconditionally, and still hands back a typed value so the expression
+		// it sits in does not cascade.
+		//
+		// The port instead treated this arm as the SUCCESS path (its comment said "Used as
+		// default parameter value") and returned silently, so `x: string = #caller_location`
+		// produced only the generic "Cannot assign value ..." from the enclosing declaration.
+		// Probe pos2.
 		init_core_source_code_location(ctx.checker)
-		loc_type := ctx.info.cached_source_code_location
-		if loc_type != nil {
-			o.mode = .Value
-			o.type = loc_type
-			o.expr = node
-			return .Expr
+		error(node, "#caller_location may only be used as a default argument parameter")
+		o.type = ctx.info.cached_source_code_location
+		o.mode = .Value
+		o.expr = node
+		return .Expr
+
+	case "caller_expression":
+		// C++ Reference: check_expr.cpp:9739-9742. Same reasoning as caller_location; this arm
+		// did not exist at all, so the directive fell through to "Unknown directive".
+		error(node, "#caller_expression may only be used as a default argument parameter")
+		o.type = t_string
+		o.mode = .Value
+		o.expr = node
+		return .Expr
+
+	case "branch_location":
+		// C++ Reference: check_expr.cpp:9743-9755. Also absent, so it too reported
+		// "Unknown directive". Unlike the two above this one is legal -- inside a 'defer'.
+		//
+		// NOT PORTED: C++ also sets e->Procedure.uses_branch_location on the enclosing
+		// procedure. That flag is read only by the backend to decide what to materialise, and
+		// this checker has no backend and no such field, so there is nothing to write it to.
+		if !ctx.in_defer {
+			error(node, "#branch_location may only be used within a 'defer' statement")
 		}
-		// Fallback if type not loaded
-		error(node, "'#caller_location' requires base:runtime to be imported")
-		o.mode = .Invalid
+		init_core_source_code_location(ctx.checker)
+		o.type = ctx.info.cached_source_code_location
+		o.mode = .Value
 		o.expr = node
 		return .Expr
 
