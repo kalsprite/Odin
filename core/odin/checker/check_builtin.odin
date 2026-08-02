@@ -1863,11 +1863,42 @@ check_builtin_offset_of_impl :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 			// Check the base expression
 			x: Operand
 			check_expr(ctx, &x, sel.expr)
+			// C++ Reference: check_builtin.cpp:3111 calls check_expr, whose C++ definition
+			// (src/check_expr.cpp:12752-12755) is
+			//     check_multi_expr(c, o, e);   // rejects Addressing_Type / Addressing_NoValue
+			//     check_not_tuple(c, o);
+			// so a TYPE reaching here is reported by error_operand_not_expression
+			// ("'%s' is not an expression but a type") and the operand is invalidated, which
+			// makes offset_of return false and the enclosing constant fall back to 0.
+			//
+			// The port's check_expr is a bare check_expr_base and validates nothing, so
+			// `offset_of(nbio.Operation.user_data)` silently computed a real offset for a form
+			// the language does not allow -- the ONE-argument offset_of takes `value.field`; a
+			// type requires the two-argument `offset_of(Type, field)`. Probe sz4.
+			//
+			// The rejection is applied HERE rather than inside check_expr. Completing
+			// check_expr to match C++ was measured and reverted: the port's own callers rely
+			// on it being permissive in a way C++'s do not, and the bare sweep went 7 -> 1931
+			// errors across essentially every package plus a crash in core/math/linalg. That
+			// divergence is real but it is a separate, much larger piece of work; see #228.
+			// LEDGER #374.
+			if x.mode == .Type {
+				error_operand_not_expression(&x)
+			}
 			if x.mode == .Invalid {
 				return false
 			}
 
 			type = type_deref(x.type)
+
+			// C++ has this guard in BOTH argument forms (check_builtin.cpp:3117-3121); the
+			// port had it only in the two-argument branch.
+			bt := base_type(type)
+			if bt == nil || bt == t_invalid {
+				error_node(call.args[0], "Expected a type for 'offset_of'")
+				return false
+			}
+
 			field_arg = sel.field
 		} else {
 			expr_str := expr_to_string(arg0)
