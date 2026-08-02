@@ -3328,7 +3328,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		// #assert(condition, message?) - compile-time assertion
 		// C++ Reference: check_builtin.cpp assertion handling
 		if len(call_expr.args) < 1 || len(call_expr.args) > 2 {
-			error(call_expr.close, "'#assert' expects 1 or 2 arguments, got %d", len(call_expr.args))
+			error(call_expr.close, "'#assert' expects either 1 or 2 arguments, got %d", len(call_expr.args))
 			return false
 		}
 
@@ -3388,27 +3388,32 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		// continuation prints BEFORE the diagnostic it belongs to.
 		begin_error_block()
 		defer end_error_block()
-		if len(call_expr.args) > 1 {
-			error(call_expr.close, "'#panic' expects 0 or 1 arguments, got %d", len(call_expr.args))
+		// C++ Reference: check_builtin.cpp:2666-2669. C++ requires EXACTLY one argument; the
+		// port tested `> 1`, so `#panic()` was accepted and reported as a panic with no
+		// message where C++ rejects the call outright. C++ also errors at the CALL, not at its
+		// closing paren.
+		if len(call_expr.args) != 1 {
+			error(call_expr.expr, "'#panic' expects 1 argument, got %d", len(call_expr.args))
 			return false
 		}
 
-		// Get message if provided
-		if len(call_expr.args) == 1 {
-			msg_op: Operand
-			check_expr(ctx, &msg_op, call_expr.args[0])
-			if msg_op.mode == .Constant {
-				if str, is_str := msg_op.value.(string); is_str {
-					error(call_expr.expr, "Compile time panic: %s", str)  // C++ check_builtin.cpp:2677 -- no hyphen
-				} else {
-					error(call_expr.expr, "Compile time panic")
-				}
-			} else {
-				error(call_expr.expr, "Compile time panic")
-			}
-		} else {
-			error(call_expr.expr, "Compile time panic")
+		msg_op: Operand
+		check_expr(ctx, &msg_op, call_expr.args[0])
+
+		// C++ Reference: check_builtin.cpp:2670-2675. This check was absent entirely, so a
+		// non-constant or non-string argument fell through to a bare "Compile time panic"
+		// instead of being rejected.
+		if !is_type_string(msg_op.type) && msg_op.mode != .Constant {
+			arg_str := expr_to_string(call_expr.args[0])
+			defer delete(arg_str)
+			error(call_expr.expr, "'%s' is not a constant string", arg_str)
+			return false
 		}
+
+		// C++ Reference: check_builtin.cpp:2677. One form only, always carrying the value;
+		// the port had three branches and two of them dropped the message.
+		msg_str, _ := msg_op.value.(string)
+		error(call_expr.expr, "Compile time panic: %s", msg_str)
 
 		// C++ Reference: check_builtin.cpp:2678-2682 -- same continuation as #assert.
 		// NOTE: no `delete` on the type_to_string result. type_to_string does not always
