@@ -464,7 +464,18 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 		builtin := entity.variant.(Entity_Builtin)
 		o.builtin_id = builtin.id
 		o.mode = .Builtin
-		o.type = nil // Builtins don't have types
+		// C++ sets `o->type = e->type` immediately before its entity-kind switch
+		// (check_expr.cpp, just above `case Entity_Builtin:`), and the Builtin arm does not
+		// overwrite it -- so a builtin operand carries t_invalid, NOT nil. VERIFIED
+		// BEHAVIOURALLY rather than by reading the entity constructor: the oracle diagnoses
+		// `g := len` cleanly, which is only reachable if check_init_variable's prologue guard
+		// (`operand->type == t_invalid`, check_decl.cpp:5-7) fires.
+		//
+		// The port used nil with the comment "Builtins don't have types". The guard then never
+		// matched, the prologue was skipped, and execution reached `assert(is_type_typed(t))`
+		// in check_init_variable -- CRASHING the checker on a three-line program that C++
+		// diagnoses cleanly (LEDGER task 246).
+		o.type = t_invalid
 		// Store type_and_value so is_diverging_expr can detect diverging builtins
 		add_type_and_value(ctx, node, .Builtin, nil, nil)
 		return entity
