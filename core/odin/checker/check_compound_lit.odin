@@ -1169,26 +1169,31 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				index_operand := Operand{}
 				check_expr_with_type_hint(ctx, &index_operand, fv.field, index_type)
 
-				if index_operand.mode == .Invalid {
-					continue
-				}
-
-				// Must be assignable to index type
-				if !check_is_assignable_to(ctx, &index_operand, index_type) {
+				// C++ Reference: check_expr.cpp:11160-11163. C++ demands the index be
+				// CONSTANT and its type IDENTICAL to the index type. The port asked only
+				// for assignability, which accepted a non-constant index outright --
+				// `[E]int{ ev = 1 }` for a variable `ev: E` passed silently. The message
+				// was invented too ("Index '%s' is not valid for enumerated array indexed
+				// by '%s'"), and it anchored at fv.field rather than the operand.
+				if index_operand.mode != .Constant || !are_types_identical(index_operand.type, index_type) {
+					// NOTE: type_to_string results are NOT deleted in this file (LEDGER 142 --
+					// deleting one is a `free(): invalid pointer` abort); expr_to_string
+					// results ARE. The two allocate differently.
 					idx_type_str := type_to_string(index_type)
-					val_type_str := type_to_string(index_operand.type)
-					error(fv.field, "Index '%s' is not valid for enumerated array indexed by '%s'", val_type_str, idx_type_str)
+					error(index_operand.expr, "Expected a constant enum of type '%s' as an array field", idx_type_str)
 					continue
 				}
 
-				// Get index value for duplicate checking
-				if index_operand.mode == .Constant {
-					idx_val := exact_value_to_i64(index_operand.value)
-					if indices_visited[idx_val] {
-						error(fv.field, "Duplicate index in enumerated array literal")
-					}
-					indices_visited[idx_val] = true
+				// C++ Reference: check_expr.cpp:11174-11179 -- names the index and the
+				// context, and anchors at `elem`. The port's message named neither.
+				idx_val := exact_value_to_i64(index_operand.value)
+				if indices_visited[idx_val] {
+					idx_str := expr_to_string(index_operand.expr)
+					defer delete(idx_str)
+					error(elem, "Duplicate field index %s for enumerated array literal", idx_str)
+					continue
 				}
+				indices_visited[idx_val] = true
 
 				// Check value expression WITH the element type as the hint.
 				//
@@ -1203,21 +1208,15 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				value_operand := Operand{}
 				check_expr_with_type_hint(ctx, &value_operand, fv.value, elem_type)
 
-				if value_operand.mode == .Invalid {
-					continue
-				}
+				// C++ Reference: check_expr.cpp:11187-11192. check_assignment, not a bespoke
+				// check_is_assignable_to plus the invented "Cannot assign '%s' to enumerated
+				// array element of type '%s'"; and the constant test is
+				// check_is_operand_compound_lit_constant, not a bare mode comparison -- the
+				// two differ for nil, typeid and procedure-valued elements.
+				check_assignment(ctx, &value_operand, elem_type, "enumerated array literal")
 
-				// Must be assignable to element type
-				if !check_is_assignable_to(ctx, &value_operand, elem_type) {
-					elem_type_str := type_to_string(elem_type)
-					val_type_str := type_to_string(value_operand.type)
-					error(fv.value, "Cannot assign '%s' to enumerated array element of type '%s'", val_type_str, elem_type_str)
-					continue
-				}
-
-				// Check constant-ness
-				if value_operand.mode != .Constant {
-					is_constant = false
+				if is_constant {
+					is_constant = check_is_operand_compound_lit_constant(ctx, &value_operand, elem_type)
 				}
 			}
 
