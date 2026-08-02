@@ -3638,17 +3638,10 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		}
 		if load_ok && cache != nil {
 			// C++ Reference: check_builtin.cpp:2552-2554 -- t_untyped_integer, Constant,
-			// exact_value_u64(hash_value). Type and mode match.
-			//
-			// INCOMPLETE, see #247: the VALUE is a placeholder. C++ computes a real digest
-			// (adler32/crc32/crc64/fnv32/fnv64/fnv32a/fnv64a/murmur32) and the port has none
-			// of those algorithms, nor the hash-kind validation at check_builtin.cpp:2358-2404
-			// ("Invalid hash kind passed to `#%s`, got: %s"). So a #load_hash on a file that
-			// EXISTS yields 0 here where C++ yields the digest -- a wrong constant, not just a
-			// missing one. The error paths above are faithful; the success path is not.
+			// exact_value_u64(hash_value), over the file CONTENTS.
 			operand.type = t_untyped_integer
 			operand.mode = .Constant
-			operand.value = exact_value_i64(0)
+			operand.value = exact_value_u64(check_hash_value(hash_kind, cache.data))
 			return true
 		}
 
@@ -3711,13 +3704,14 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
-		// INCOMPLETE, same gap as #load_hash -- see #247. C++:2607-2610 sets
-		// t_untyped_integer / Constant / exact_value_u64(the digest); the port has none of
-		// the nine algorithms, so the VALUE is a placeholder 0. Type and mode are right,
-		// the constant is not.
+		// C++ Reference: check_builtin.cpp:2607-2610.
+		original_string, os_ok := str_op.value.(string)
+		if !os_ok {
+			return false
+		}
 		operand.type = t_untyped_integer
 		operand.mode = .Constant
-		operand.value = exact_value_i64(0)
+		operand.value = exact_value_u64(check_hash_value(hash_kind, transmute([]u8)original_string))
 		return true
 	}
 
