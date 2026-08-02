@@ -7946,6 +7946,79 @@ check_assignment :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 	defer delete(expr_str)
 	error(operand.expr, "Cannot assign value '%s' of type '%s' to '%s' in %s%s", expr_str, op_type_str, target_type_str, article, context_name)
 	check_assignment_error_suggestion(ctx, operand, target_type, operand.expr)
+
+	// C++ Reference: check_expr.cpp:1309-1378. Everything below was missing; the port stopped
+	// at the bare "Cannot assign" line. The NOTE that used to sit above this block recorded
+	// the gap ("the variadic/calling-convention hints below it") rather than pretending it
+	// was done -- this is that gap closed.
+	src := base_type(operand.type)
+	dst := base_type(target_type)
+
+	// C++ Reference: check_expr.cpp:1311-1317.
+	if context_name == "procedure argument" {
+		if src != nil && dst != nil {
+			if sl, is_sl := src.variant.(Type_Slice); is_sl && are_types_identical(sl.elem, dst) {
+				a := expr_to_string(operand.expr)
+				defer delete(a)
+				error_line("\tSuggestion: Did you mean to pass the slice into the variadic parameter with ..%s?\n\n", a)
+			}
+		}
+	}
+
+	// C++ Reference: check_expr.cpp:1318-1378. Five mutually exclusive branches, selected by
+	// which HALF of the signature matches. C++ compares with are_types_identical_internal and
+	// check_tuple_names = false, so parameter NAMES are deliberately ignored.
+	if src != nil && dst != nil {
+		x, x_is_proc := src.variant.(Type_Proc)
+		y, y_is_proc := dst.variant.(Type_Proc)
+		if x_is_proc && y_is_proc {
+			same_inputs  := are_types_identical_internal(x.params,  y.params,  false)
+			same_outputs := are_types_identical_internal(x.results, y.results, false)
+
+			switch {
+			case same_inputs && same_outputs && x.calling_convention != y.calling_convention:
+				s_expected := type_to_string(dst)
+				s_got := type_to_string(src)
+				error_line("\tNote: The calling conventions differ between the procedure signature types\n")
+				error_line("\t      Expected \"%s\", got \"%s\"\n",
+					proc_calling_convention_strings[y.calling_convention],
+					proc_calling_convention_strings[x.calling_convention])
+				error_line("\t      Expected: %s\n", s_expected)
+				error_line("\t      Got:      %s\n", s_got)
+
+			case same_inputs && same_outputs && x.diverging != y.diverging:
+				s_expected := type_to_string(dst)
+				if y.diverging {
+					s_expected = fmt.tprintf("%s -> !", s_expected)
+				}
+				s_got := type_to_string(src)
+				if x.diverging {
+					s_got = fmt.tprintf("%s -> !", s_got)
+				}
+				error_line("\tNote: One of the procedures is diverging while the other isn't\n")
+				error_line("\t      Expected: %s\n", s_expected)
+				error_line("\t      Got:      %s\n", s_got)
+
+			case same_inputs && !same_outputs:
+				error_line("\tNote: The return types differ between the procedure signature types\n")
+				error_line("\t      Expected: %s\n", type_to_string(y.results))
+				error_line("\t      Got:      %s\n", type_to_string(x.results))
+
+			case !same_inputs && same_outputs:
+				error_line("\tNote: The input parameter types differ between the procedure signature types\n")
+				error_line("\t      Expected: %s\n", type_to_string(y.params))
+				error_line("\t      Got:      %s\n", type_to_string(x.params))
+
+			case:
+				// NOTE(parity): C++ writes "The signature type do not match whatsoever"
+				// (check_expr.cpp:1372) -- singular "type" with plural "do". Reproduced
+				// verbatim; reported upstream rather than corrected here.
+				error_line("\tNote: The signature type do not match whatsoever\n")
+				error_line("\t      Expected: %s\n", type_to_string(dst))
+				error_line("\t      Got:      %s\n", type_to_string(src))
+			}
+		}
+	}
 	end_error_block()
 
 	return false
@@ -8150,24 +8223,24 @@ write_type_to_string :: proc(b: ^strings.Builder, t: ^Type, shorthand := true) {
 	case .Proc:
 		pr := t.variant.(Type_Proc)
 		strings.write_string(b, "proc")
-		// Write calling convention if not default
-		#partial switch pr.calling_convention {
-		case .C:
-			strings.write_string(b, " \"c\" ")
-		case .Std:
-			strings.write_string(b, " \"std\" ")
-		case .Fast:
-			strings.write_string(b, " \"fast\" ")
-		case .None:
-			strings.write_string(b, " \"none\" ")
-		case .Naked:
-			strings.write_string(b, " \"naked\" ")
-		case .Contextless:
-			if default_calling_convention() != .Contextless {
-				strings.write_string(b, " \"contextless\" ")
-			}
-		case .Odin:
-			// Default, don't write
+		// C++ Reference: src/types.cpp:5615-5622.
+		//
+		//     if (type->Proc.calling_convention != default_calling_convention()) {
+		//         str = gb_string_appendc(str, " \"");
+		//         str = gb_string_appendc(str, proc_calling_convention_strings[...]);
+		//         str = gb_string_appendc(str, "\" ");
+		//     }
+		//
+		// One condition and the SHARED table. The port had a hand-written switch that
+		// reinvented the spellings -- ".C" rendered as "c" where the table (and therefore
+		// C++) says "cdecl" -- omitted Win64/SysV/Preserve_*/Inline_Asm entirely, and
+		// hardcoded .Odin as the skipped convention instead of comparing against
+		// default_calling_convention(). Probe sig1 caught the "c"/"cdecl" half: the Note
+		// lines were already right because they index the table directly.
+		if pr.calling_convention != default_calling_convention() {
+			strings.write_string(b, " \"")
+			strings.write_string(b, proc_calling_convention_strings[pr.calling_convention])
+			strings.write_string(b, "\" ")
 		}
 		strings.write_rune(b, '(')
 		if pr.params != nil {
