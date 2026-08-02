@@ -819,7 +819,20 @@ Field_Flags_Signature :: Field_Flags{
 }
 
 Field_Flags_Signature_Params  :: Field_Flags_Signature | {Field_Flag.Typeid_Token}
-Field_Flags_Signature_Results :: Field_Flags_Signature
+
+// C++ Reference: src/parser.cpp:4027 parses results with FieldFlag_Results -- a
+// parser-internal marker -- NOT FieldFlag_Signature. Results therefore permit NO parameter
+// directives at all. Aliasing this to the full signature set was wrong in two ways:
+//
+//   1. `proc() -> (#any_int x: int)` and every other directive was ACCEPTED; C++ rejects all
+//      of them with a syntax error.
+//   2. `.Results` was consequently absent from the set, and parser.odin:2114 tests exactly
+//      that to decide an unnamed result's name. C++ (parser.cpp:4499) gives unnamed results
+//      the empty string; the port was naming them "_".
+//
+// .Default_Parameters stays for the same reason it is in Field_Flags_Signature: C++ passes
+// allow_default_parameters = true separately at that call site.
+Field_Flags_Signature_Results :: Field_Flags{.Results, .Default_Parameters}
 
 
 Proc_Group :: struct {

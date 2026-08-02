@@ -1863,7 +1863,10 @@ check_field_flag_prefixes :: proc(p: ^Parser, name_count: int, allowed_flags, se
 			case .Tags, .Ellipsis, .Results, .Default_Parameters, .Typeid_Token:
 				panic("Impossible prefixes")
 			case:
-				error(p, p.curr_tok.pos, "'%s' is not allowed within this field list", ast.field_flag_strings[flag])
+				// NOTE(parity): C++ writes "in not allowed" (src/parser.cpp:4320) -- "in" where "is"
+				// was meant. Reproduced verbatim because the objective is byte-identical
+				// diagnostics; reported upstream rather than silently corrected here.
+				error(p, p.curr_tok.pos, "'%s' in not allowed within this field list", ast.field_flag_strings[flag])
 			}
 			flags -= {flag}
 		}
