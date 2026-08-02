@@ -1806,20 +1806,32 @@ check_did_you_mean_scope :: proc(name: string, scope: ^Scope, prefix := "") {
 	// between runs of the same binary on the same input, and the sweep never saw it because
 	// sweep_det.sh runs under `setarch -R`. Collect and sort by name first, so the unstable
 	// distance sort receives a fixed input. Same reasoning as LEDGER task 50.
+	ordered := make([dynamic]^Entity, 0, len(scope.elements), context.temp_allocator)
+	for _, entity in scope.elements {
+		if entity != nil {
+			append(&ordered, entity)
+		}
+	}
+	slice.sort_by(ordered[:], proc(a, b: ^Entity) -> bool {
+		if a.token.pos.file != b.token.pos.file {
+			return a.token.pos.file < b.token.pos.file
+		}
+		if a.token.pos.offset != b.token.pos.offset {
+			return a.token.pos.offset < b.token.pos.offset
+		}
+		return a.token.text < b.token.text
+	})
+
 	targets: [dynamic]string
 	defer delete(targets)
 
-	for _, entity in scope.elements {
-		if entity == nil {
-			continue
-		}
+	for entity in scope_map_slot_order(ordered[:], context.temp_allocator) {
 		target := entity.token.text
 		if len(target) == 0 || target == "_" {
 			continue
 		}
 		append(&targets, target)
 	}
-	slice.sort(targets[:])
 
 	suggestions: [dynamic]Distance_And_Target
 	defer delete(suggestions)
