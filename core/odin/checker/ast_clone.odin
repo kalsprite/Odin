@@ -904,19 +904,3 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 
 	return nil // Unreachable, but needed for type checking
 }
-
-// clone_ast_array clones a slice of AST nodes
-// C++ Reference: parser.cpp:165-174
-clone_ast_array :: proc(nodes: []^ast.Node, file: ^ast.File = nil) -> []^ast.Node {
-	if len(nodes) == 0 {
-		return nil
-	}
-
-	// C++ lines 166-173: Allocate new array and clone each element
-	cloned := make([]^ast.Node, len(nodes))
-	for node, i in nodes {
-		cloned[i] = clone_ast_node(node, file)
-	}
-
-	return cloned
-}

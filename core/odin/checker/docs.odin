@@ -110,7 +110,7 @@ cmp_ast_package_by_name :: proc(a: ^ast.Package, b: ^ast.Package) -> slice.Order
 // C++ Reference: /mnt/c/odin/src/docs.cpp:69-179, docs_writer.cpp:281-395
 // ======================================================================================
 
-// C++ Reference: docs.cpp:69-75, 77-86
+// C++ Reference: docs.cpp:100-106, 77-86
 // NOTE: Architectural divergence from C++:
 // - C++ writes to stdout via gb_printf (global state)
 // - Odin accepts writer parameter for flexibility and testability
@@ -122,31 +122,31 @@ print_doc_line :: proc {
 
 // C++ Reference: docs.cpp:69-75
 print_doc_line_string :: proc(indent: i32, data: string, writer: ^strings.Builder) {
-	// C++ line 70-72: Print indent tabs
+	// C++ line 101-103: Print indent tabs
 	for _ in 0 ..< indent {
 		strings.write_string(writer, "\t")
 	}
-	// C++ line 73: Write data
+	// C++ line 104: Write data
 	strings.write_string(writer, data)
-	// C++ line 74: Write newline
+	// C++ line 105: Write newline
 	strings.write_byte(writer, '\n')
 }
 
-// C++ Reference: docs.cpp:77-86
+// C++ Reference: docs.cpp:108-117
 print_doc_line_formatted :: proc(indent: i32, fmt_str: string, writer: ^strings.Builder, args: ..any) {
-	// C++ line 78-80: Print indent tabs
+	// C++ line 109-111: Print indent tabs
 	for _ in 0 ..< indent {
 		strings.write_string(writer, "\t")
 	}
-	// C++ line 81-85: Format and write
+	// C++ line 112-115: Format and write
 	fmt.sbprintf(writer, fmt_str, ..args)
-	// C++ line 86: Write newline
+	// C++ line 116: Write newline
 	strings.write_byte(writer, '\n')
 }
 
-// C++ Reference: docs.cpp:87-92
+// C++ Reference: docs.cpp:118-123
 print_doc_line_no_newline :: proc(indent: i32, data: string, writer: ^strings.Builder) {
-	// C++ line 88-90: Print indent tabs
+	// C++ line 119-121: Print indent tabs
 	for _ in 0 ..< indent {
 		strings.write_string(writer, "\t")
 	}
