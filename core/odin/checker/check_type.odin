@@ -1021,6 +1021,17 @@ check_struct_fields :: proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, st: ^
 			}
 			entity.scope = ctx.scope
 			entity.state = .Resolved
+			// Both type fields, exactly as alloc_entity does. This entity is built by hand
+			// rather than through alloc_entity_field, and it used to set ONLY the variant --
+			// so every struct field in the program had a nil base `.type` while entity_type()
+			// returned the real one. C++ has a single Entity::type field and cannot diverge.
+			//
+			// That gap was silent and load-bearing: are_types_identical compared two nil field
+			// types and returned "identical", so the checker ACCEPTED assigning
+			// `struct{x: f32}` to `struct{x: int}`. It also made the guarded branch in
+			// add_type_info_type_internal (`if field.type != nil`) skip every struct field,
+			// and made canonical struct names omit their field types.
+			entity.type = field_type
 			entity.variant = Entity_Variable {
 				type        = field_type,
 				field_index = field_src_index,
