@@ -2815,6 +2815,12 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 	// Check for new declarations
 	// C++ Reference: check_stmt.cpp lines 2118-2137
 	if new_name_count == 0 {
+		// C++: check_stmt.cpp opens an ERROR_BLOCK before this error so the suggestion below
+		// stays attached to it. Without one the suggestion had no current error value and
+		// escaped to stderr ahead of its own diagnostic. LEDGER 304.
+		begin_error_block()
+		defer end_error_block()
+
 		error_node(node, "No new declarations on the left hand side")
 
 		// Check if all are underscores and suggest using assignment
@@ -3997,6 +4003,10 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 							name := ident.name
 							found := scope_lookup(ctx.scope, name)
 							if found != nil && are_types_identical(get_entity_type(found), bs.elem) {
+								// C++ opens an ERROR_BLOCK here; see LEDGER 304.
+								begin_error_block()
+								defer end_error_block()
+
 								expr_str := expr_to_string(expr)
 								defer delete(expr_str)
 								error_node(stmt.vals[0], "'%s' shadows a previous declaration which might be ambiguous with 'for (%s in %s)'", name, name, expr_str)
