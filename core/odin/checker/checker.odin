@@ -1097,11 +1097,22 @@ Checker_Info :: struct {
 	// Now stored directly on ast.Package.exported_entity_queue (queue.MPMC_Queue)
 	// Perfect parity achieved - no more external maps for AST metadata!
 
-	// AST node to scope mapping - DELETED
-	// Scopes are now stored directly on statement and type nodes:
-	//   - Block_Stmt.scope, If_Stmt.scope, For_Stmt.scope, Range_Stmt.scope, etc.
-	//   - Proc_Type.scope, Struct_Type.scope, Union_Type.scope, Enum_Type.scope, etc.
-	// See: /mnt/c/odin/core/odin/ast/ast.odin lines 217, 231, 266, 280, 611, 663, 684, 698
+	// AST node to scope mapping - STILL IN USE. It is `ast_scope_map` above.
+	//
+	// CORRECTED (#212): this comment used to claim the map had been DELETED and that scopes
+	// were "now stored directly on statement and type nodes", listing Block_Stmt.scope,
+	// If_Stmt.scope, Proc_Type.scope and friends. That was never true. add_scope writes only
+	// ast_scope_map (scope.odin:489) and scope_of_node reads only ast_scope_map; every one of
+	// those ast.* `scope` fields is left nil forever.
+	//
+	// The stale claim was not harmless. check_block_stmt_for_errors trusted it, read
+	// block.scope, got nil, and returned at its first guard -- so the whole procedure was dead
+	// and `if cond { x := 123 }` was silently accepted where C++ reports
+	// "'x' declared but not used". It now goes through scope_of_node.
+	//
+	// Use scope_of_node(info, node). Do NOT read `node.scope` on an ast statement or type
+	// node. (Type_Struct.scope / Type_Union.scope on the CHECKER's Type variants are a
+	// different thing and are written normally.)
 
 	// Delayed declaration queues - DELETED
 	// C++ Reference: checker.cpp:5892-5953 (delayed_decls_queues processing)

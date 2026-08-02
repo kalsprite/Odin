@@ -574,15 +574,22 @@ check_block_stmt_for_errors :: proc(ctx: ^Checker_Context, body: ^ast.Stmt) {
 		return
 	}
 
+	// C++ reads bs->scope straight off the AST node. This port keeps node -> scope in
+	// info.ast_scope_map (see scope.odin add_scope), and ast.Block_Stmt.scope -- though
+	// declared and read here -- is NEVER written by anything. So this guard tripped on every
+	// single block and the whole procedure was dead code: `if cond { x := 123 }` was silently
+	// accepted where C++ reports "'x' declared but not used". Probe do4.
+	scope := scope_of_node(ctx.info, block)
+
 	// Only check blocks with scope elements
-	if block.scope == nil || len(block.scope.elements) == 0 {
+	if scope == nil || len(scope.elements) == 0 {
 		return
 	}
 
 	// Only check blocks that are children of control flow statements
 	// C++ Reference: check_stmt.cpp:1629-1641
-	if block.scope.parent != nil && block.scope.parent.node != nil {
-		parent := block.scope.parent.node
+	if scope.parent != nil && scope.parent.node != nil {
+		parent := scope.parent.node
 		is_control_flow := false
 		#partial switch _ in parent.derived {
 		case ^ast.If_Stmt, ^ast.For_Stmt, ^ast.Range_Stmt, ^ast.Inline_Range_Stmt, ^ast.Switch_Stmt, ^ast.Type_Switch_Stmt:
