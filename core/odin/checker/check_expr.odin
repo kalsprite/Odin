@@ -6753,11 +6753,12 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 		// #defined - checks if an identifier is defined
 		// C++ Reference: check_expr.cpp:9119-9135
 		// This is handled as a call expression, not a bare directive
-		// NOTE: C++ has no such message. A bare `#defined` reaches here only when the
-		// directive is NOT the callee of a call, and C++ simply falls through to its
-		// generic handling; emitting this meant `#defined(1)` produced TWO errors, this
-		// invented one plus the real one from the builtin path.
-		o.mode = .Invalid
+		// C++ Reference: check_expr.cpp:9761-9769. An earlier note here claimed "C++ has no
+		// such message" and deleted the diagnostic. That premise was WRONG: C++ groups
+		// assert/defined/config/exists/load/load_hash/load_directory/load_or and emits
+		// "'#%s' must be used as a call" for every one of them. The message is restored, in
+		// C++'s generic form rather than the bespoke text the other arms used.
+		error(node, "'#%s' must be used as a call", name)
 		o.mode = .Invalid
 		o.expr = node
 		return .Expr
@@ -6766,7 +6767,7 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 		// #config - compile-time configuration values
 		// C++ Reference: check_expr.cpp:9136-9165
 		// This is handled as a call expression, not a bare directive
-		error(node, "'#config' must be called as '#config(name, default_value)'")
+		error(node, "'#%s' must be used as a call", name)
 		o.mode = .Invalid
 		o.expr = node
 		return .Expr
@@ -6775,7 +6776,7 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 		// #load - loads a file at compile time
 		// C++ Reference: check_expr.cpp:9166-9188
 		// This is handled as a call expression, not a bare directive
-		error(node, "'#load' must be called as '#load(path)' or '#load(path, type)'")
+		error(node, "'#%s' must be used as a call", name)
 		o.mode = .Invalid
 		o.expr = node
 		return .Expr
@@ -6783,7 +6784,7 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 	case "load_directory":
 		// #load_directory - loads directory listing
 		// Must be called as a function
-		error(node, "'#load_directory' must be called as '#load_directory(path)'")
+		error(node, "'#%s' must be used as a call", name)
 		o.mode = .Invalid
 		o.expr = node
 		return .Expr
@@ -6791,7 +6792,7 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 	case "assert":
 		// #assert - compile-time assertion
 		// Must be called as a function
-		error(node, "'#assert' must be called as '#assert(condition)'")
+		error(node, "'#%s' must be used as a call", name)
 		o.mode = .Invalid
 		o.expr = node
 		return .Expr
@@ -6799,7 +6800,7 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 	case "panic":
 		// #panic - compile-time panic
 		// Must be called as a function
-		error(node, "'#panic' must be called as '#panic(message)'")
+		error(node, "'#%s' must be used as a call", name)
 		o.mode = .Invalid
 		o.expr = node
 		return .Expr
