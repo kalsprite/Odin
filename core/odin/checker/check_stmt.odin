@@ -2,6 +2,7 @@ package checker
 
 import "core:odin/ast"
 import "core:odin/tokenizer"
+import big "core:math/big"
 import "core:strings"
 import "core:sync"
 
@@ -1667,64 +1668,42 @@ check_for_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt_F
 //   unsigned_val >= 0 in for loop condition -> always true
 //   unsigned_val < 0 in for loop condition -> always false
 check_for_loop_tautological_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, be: ^ast.Binary_Expr) {
-	// Check if it's a comparison operator
-	#partial switch be.op.kind {
-	case .Lt, .Gt, .Lt_Eq, .Gt_Eq:
-		// Continue with check
-	case:
+	// C++ Reference: check_stmt.cpp:2791-2807.
+	//
+	// C++ recognises exactly TWO shapes and emits exactly ONE message for both:
+	//     <unsigned> >= 0      and      0 <= <unsigned>
+	// The port had SIX warnings here with invented wording ("... is always false in 'for'
+	// loop condition"), plus six more of the same family in comparison checking that C++
+	// does not have at all. Both sets are gone; this is C++'s check.
+	//
+	// C++ also reads the recorded type-and-value off the AST rather than re-checking the
+	// operands. The port re-ran check_expr on both sides, which is not free: re-checking a
+	// sub-expression can re-emit whatever diagnostics it produced the first time.
+	if be.left == nil || be.right == nil {
 		return
 	}
 
-	// Check for constant 0 on one side and unsigned on the other
-	left_op, right_op: Operand
-	check_expr(ctx, &left_op, be.left)
-	check_expr(ctx, &right_op, be.right)
-
-	is_constant_zero :: proc(op: ^Operand) -> bool {
-		if op.mode != .Constant || op.value == nil {
+	is_zero_constant :: proc(e: ^ast.Expr) -> bool {
+		if e == nil {
 			return false
 		}
-		return is_exact_value_zero(op.value)
+		if e.tav.mode != .Constant {
+			return false
+		}
+		if _, is_int := e.tav.value.(big.Int); !is_int {
+			return false
+		}
+		return is_exact_value_zero(e.tav.value)
 	}
 
-	is_unsigned_type :: proc(t: ^Type) -> bool {
-		if t == nil {
-			return false
+	#partial switch be.op.kind {
+	case .Gt_Eq:
+		if is_type_unsigned(type_of_expr(be.left, ctx.info)) && is_zero_constant(be.right) {
+			warning_node(node, "Expression is always true since unsigned numbers are always >= 0")
 		}
-		bt := base_type(t)
-		if bt == nil || bt.kind != .Basic {
-			return false
-		}
-		basic := bt.variant.(Type_Basic)
-		#partial switch basic.kind {
-		case .U8, .U16, .U32, .U64, .U128, .Uint, .Uintptr, .U16le, .U32le, .U64le, .U128le, .U16be, .U32be, .U64be, .U128be:
-			return true
-		case:
-			return false
-		}
-	}
-
-	// Check patterns like `unsigned >= 0` (always true) or `unsigned < 0` (always false)
-	if is_constant_zero(&right_op) && is_unsigned_type(left_op.type) {
-		#partial switch be.op.kind {
-		case .Gt_Eq:
-			warning_node(node, "Comparison of unsigned value >= 0 is always true in 'for' loop condition")
-		case .Lt:
-			warning_node(node, "Comparison of unsigned value < 0 is always false in 'for' loop condition")
-		case .Lt_Eq:
-			warning_node(node, "Comparison of unsigned value <= 0 is equivalent to == 0 in 'for' loop condition")
-		}
-	}
-
-	// Check patterns like `0 <= unsigned` (always true) or `0 > unsigned` (always false)
-	if is_constant_zero(&left_op) && is_unsigned_type(right_op.type) {
-		#partial switch be.op.kind {
-		case .Lt_Eq:
-			warning_node(node, "Comparison of 0 <= unsigned value is always true in 'for' loop condition")
-		case .Gt:
-			warning_node(node, "Comparison of 0 > unsigned value is always false in 'for' loop condition")
-		case .Gt_Eq:
-			warning_node(node, "Comparison of 0 >= unsigned value is equivalent to == 0 in 'for' loop condition")
+	case .Lt_Eq:
+		if is_type_unsigned(type_of_expr(be.right, ctx.info)) && is_zero_constant(be.left) {
+			warning_node(node, "Expression is always true since unsigned numbers are always >= 0")
 		}
 	}
 }

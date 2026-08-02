@@ -1545,37 +1545,13 @@ check_tautological_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x:
 		}
 	}
 
-	// Check x >= 0 or x > 0 - 1 patterns where x is unsigned
-	// unsigned >= 0 is always true
-	// unsigned <= 0 is equivalent to == 0
-	if is_constant_zero(y) && is_unsigned_integer(x.type) {
-		#partial switch op {
-		case .Gt_Eq:
-			// unsigned >= 0 is always true
-			warning(node, "Comparison of unsigned value >= 0 is always true")
-		case .Lt:
-			// unsigned < 0 is always false
-			warning(node, "Comparison of unsigned value < 0 is always false")
-		case .Lt_Eq:
-			// unsigned <= 0 is the same as == 0
-			warning(node, "Comparison of unsigned value <= 0 is equivalent to == 0")
-		}
-	}
+	// C++ has NO tautological-comparison warning in comparison checking. The six warnings
+	// that were here ("Comparison of unsigned value >= 0 is always true" and friends) were
+	// INVENTED: grep src/*.cpp for "is always true"/"is always false" and the only hits are
+	// two in check_stmt.cpp, both inside `for`-statement condition handling, both emitting a
+	// single differently-worded message. So the port warned on every comparison anywhere in
+	// the program where C++ warns only on a loop condition. See check_for_loop_tautological_comparison.
 
-	// Check 0 <= x patterns where x is unsigned
-	if is_constant_zero(x) && is_unsigned_integer(y.type) {
-		#partial switch op {
-		case .Lt_Eq:
-			// 0 <= unsigned is always true
-			warning(node, "Comparison of 0 <= unsigned value is always true")
-		case .Gt:
-			// 0 > unsigned is always false
-			warning(node, "Comparison of 0 > unsigned value is always false")
-		case .Gt_Eq:
-			// 0 >= unsigned is the same as == 0
-			warning(node, "Comparison of 0 >= unsigned value is equivalent to == 0")
-		}
-	}
 }
 
 // check_comparison handles comparison operators
