@@ -1131,6 +1131,15 @@ ast_token_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
 		if n.field != nil {
 			return n.field.pos
 		}
+	case ^ast.Field_Value:
+		// C++ parser_pos.cpp:44-47. The point is the RECURSION: C++'s ast_token walks
+		// into the field, which for `.A = x` lands on the Implicit_Selector arm above and
+		// yields the `A`. The port had no Field_Value arm, so it fell through to node.pos
+		// -- the Field_Value's own start, which is the '.' -- leaving every diagnostic
+		// anchored at a named element one column to the left of C++'s.
+		if n.field != nil {
+			return ast_token_pos(n.field)
+		}
 	}
 	return node.pos
 }
