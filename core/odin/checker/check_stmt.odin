@@ -1938,7 +1938,14 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 						}
 						entry := Type_And_Token {
 							type  = x.type,
-							token = ast_token(case_expr),
+							// C++ Reference: check_expr.cpp:9578 -- add_constant_switch_case
+							// stores `ast_token(operand.expr)`, and on this enum-range path
+							// operand.expr is x.expr (the SWITCH OPERAND), exactly the node the
+							// report above uses. Storing the case expression instead made the
+							// error and its own "previous case at" line point at different
+							// places: probe sw2 said `Duplicate case 'e'` at 10:9 with previous
+							// at 11:7, where C++ gives 10:9 for both.
+							token = ast_token(x.expr),
 						}
 						if key not_in seen_cases {
 							seen_cases[key] = make([dynamic]Type_And_Token, context.temp_allocator)
