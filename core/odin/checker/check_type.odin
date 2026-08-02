@@ -1215,62 +1215,95 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 		// C++ lines 374-383: Allocate entity storage
 		entities := make([dynamic]^Entity, 0, param_count, context.temp_allocator)
 
-		poly_operand_index := 0
 		field_group_index := 0
 
 		// C++ lines 386-532: Iterate through field groups
 		for field in polymorphic_params.list {
 			field_group_index += 1
 
-			// C++ lines 387-389: Get field type expression
+			// C++ Reference: check_type.cpp:419-481
 			type_expr := field.type
-			if type_expr == nil {
-				error(field, "Expected a type for this polymorphic parameter")
-				continue
-			}
-
-			// C++ lines 391-405: Check the type expression
-			type := check_type_expr(ctx, type_expr, nil)
-			if type == nil {
-				continue
-			}
-
-			// C++ lines 407-415: Check if this is a type parameter (typeid)
+			default_value := unparen_expr(field.default_value)
+			type: ^Type = nil
 			is_type_param := false
-			if typeid_type, ok := type_expr.derived.(^ast.Typeid_Type); ok {
-				is_type_param = true
-				if typeid_type.specialization != nil {
-					type = check_type_expr(ctx, typeid_type.specialization, nil)
+			is_type_polymorphic_type := false
+			specialization: ^Type = nil
+
+			// C++ lines 425-428
+			if type_expr == nil && default_value == nil {
+				error(field, "Expected a type for this parameter")
+				continue
+			}
+
+			// C++ lines 430-446
+			if type_expr != nil {
+				if ellipsis, is_ellipsis := type_expr.derived.(^ast.Ellipsis); is_ellipsis {
+					type_expr = ellipsis.expr
+					error(field, "A polymorphic parameter cannot be variadic")
 				}
-			}
-
-			// C++ lines 418-420: Check if type itself is polymorphic
-			if is_type_polymorphic(type, true) {
-				is_polymorphic^ = true
-			}
-
-			// C++ lines 424-435: Handle default parameter value
-			param_value: Parameter_Value
-			if field.default_value != nil {
-				out_type := type
-				param_value = handle_parameter_value(ctx, type, &out_type, field.default_value, false)
-			}
-
-			// C++ lines 438-456: Validate the type
-			if is_type_untyped(type) {
-				if is_type_param {
-					error(type_expr, "A type parameter cannot be of an untyped type")
+				if typeid_type, is_typeid := type_expr.derived.(^ast.Typeid_Type); is_typeid {
+					is_type_param = true
+					if typeid_type.specialization != nil {
+						specialization = check_type_expr(ctx, typeid_type.specialization, nil)
+					}
+					// C++ line 445: type = alloc_type_generic(ctx->scope, 0, str_lit(""), specialization);
+					//
+					// C++ never runs check_type over the `typeid` node itself. The port did,
+					// and then overwrote the result with the specialization when one was
+					// written - so `$T: typeid` bound T to whatever check_type_expr makes of a
+					// bare `typeid`, and `$T: typeid/Spec` bound it to Spec rather than to a
+					// generic constrained by Spec. Neither is a type variable, which is also
+					// why the specialization was never checked against the operand: nothing
+					// was left holding it.
+					type = alloc_type_generic(ctx.checker, ctx.scope, 0, "", specialization)
 				} else {
-					error(type_expr, "A constant parameter cannot be of an untyped type")
+					type = check_type_expr(ctx, type_expr, nil)
+					if is_type_polymorphic(type) {
+						is_type_polymorphic_type = true
+					}
 				}
 			}
-			if !is_type_param && is_type_polymorphic(type, true) {
-				error(type_expr, "A constant parameter cannot be of a polymorphic type")
+
+			// C++ lines 449-458
+			param_value: Parameter_Value
+			if default_value != nil {
+				out_type: ^Type = nil
+				param_value = handle_parameter_value(ctx, type, &out_type, default_value, false)
+				if type == nil && out_type != nil {
+					type = out_type
+				}
+				if param_value.kind != .Constant && param_value.kind != .Nil {
+					error(default_value, "Invalid parameter value")
+					param_value = {}
+				}
 			}
 
-			// C++ lines 458-460: Constant params must be constant
-			if !is_type_param && !are_types_identical(type, t_typeid) {
-				type = default_type(type)
+			// C++ lines 462-465
+			if type == nil {
+				error(field, "Invalid parameter type")
+				type = t_invalid
+			}
+
+			// C++ lines 466-473
+			if is_type_untyped(type) {
+				if is_type_untyped_uninit(type) {
+					error(field, "Cannot determine parameter type from ---")
+				} else {
+					error(field, "Cannot determine parameter type from a nil")
+				}
+				type = t_invalid
+			}
+
+			// C++ lines 475-480
+			if is_type_polymorphic_type && !is_type_proc(type) {
+				str := type_to_string(type)
+				error(field, "Parameter types cannot be polymorphic, got %s", str)
+				type = t_invalid
+			}
+
+			// C++ lines 482-484
+			if !is_type_param && check_constant_parameter_value(ctx, type, field) {
+				// failed
 			}
 
 			// C++ lines 463-531: Process each name in the field
@@ -1303,30 +1336,32 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 				// C++ lines 475-530: Check for poly operand or create entity
 				e: ^Entity = nil
 
-				if poly_operand_index < len(poly_operands) {
-					operand := &poly_operands[poly_operand_index]
-					poly_operand_index += 1
+				// C++ line 505 gates this on `poly_operands != nullptr` alone, indexes with
+					// entities.count, and falls back to the declared default value when the
+					// caller supplied fewer operands than there are parameters. The port instead
+					// requires that an operand actually EXISTS for this parameter, because it
+					// reaches here with a SHORTER operand list than the parameter list:
+					// `Chan($T, $D)` matched against the specialization `$C/Chan($T)` supplies
+					// one operand for two parameters. C++'s caller never hands that case down
+					// (task #181). Until the port's caller agrees, falling through to the
+					// no-operand branch is what keeps `$D` bound to its declared type rather
+					// than to t_invalid - and `where C.D <= .Both` in core/sync/chan reads
+					// exactly that. Indexing by len(entities) is C++'s: a name that fails the
+					// identifier check above adds no entity, so it consumes no operand either.
+					//
+					// What C++ does NOT do here is validate the operand: no Addressing_Invalid
+					// skip, no nil-type check, and no "is it a type?" test. Each of those was
+					// invented by this port, and each `continue`d past `add_entity`, so a
+					// rejected operand left the parameter name unbound and every later
+					// reference to it reported "Undeclared name". The operand-is-not-a-type
+					// diagnostic is C++'s to emit, from check_polymorphic_record_type
+					// (check_expr.cpp:8378), before control ever reaches this function.
+					if len(entities) < len(poly_operands) {
+						operand := &poly_operands[len(entities)]
 
-					// C++ lines 478-504: Validate operand
-					if operand.mode == .Invalid {
-						continue
-					}
-
-					t := operand.type
-					if t == nil {
-						error(operand.expr, "Invalid polymorphic parameter operand")
-						continue
-					}
+						t := operand.type
 
 					if is_type_param {
-						// C++ lines 487-499
-						// For type parameters ($T: typeid), the operand should be in Type mode
-						// or have a typeid type. When mode=.Type, t is the actual type being passed.
-						if operand.mode != .Type && !is_type_typeid(t) {
-							error(operand.expr, "Expected a type for this polymorphic parameter")
-							continue
-						}
-
 						// C++ Reference: check_type.cpp:513-516
 						//   if (is_type_polymorphic(base_type(operand.type))) {
 						//       *is_polymorphic_ = true;
@@ -1341,12 +1376,24 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 						// this the instantiation recurses until the stack runs out.
 						if is_type_polymorphic(base_type(operand.type)) {
 							is_polymorphic^ = true
+						} else if specialization != nil &&
+						   !check_type_specialization_to(ctx, specialization, operand.type, false, true) {
+							// C++ lines 517-525
+							if !ctx.no_polymorphic_errors {
+								ts := type_to_string(operand.type)
+								ss := type_to_string(specialization)
+								error(operand.expr, "Cannot convert type '%s' to the specialization '%s'", ts, ss)
+							}
 						}
 
 						// When mode is .Type, operand.type is the actual type (e.g., int)
 						// We create a type name entity bound to this type
 						t = operand.type
 						e = alloc_entity_type_name(ctx.scope, token, t)
+						// C++ line 527: e->TypeName.is_type_alias = true;
+						if tn, tn_ok := &e.variant.(Entity_Type_Name); tn_ok {
+							tn.is_type_alias = true
+						}
 						e.flags += {.Poly_Const}
 						// Note: Don't call set_base_type here - the entity's type is already t
 						// and t already has its base set correctly
@@ -1375,9 +1422,13 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 						}
 					}
 				} else {
-					// C++ lines 517-526: No operand, create entity for polymorphic param
+					// C++ lines 544-553: No operand, create entity for polymorphic param
 					if is_type_param {
 						e = alloc_entity_type_name(scope, token, type)
+						// C++ line 547: e->TypeName.is_type_alias = true;
+						if tn, tn_ok := &e.variant.(Entity_Type_Name); tn_ok {
+							tn.is_type_alias = true
+						}
 						e.flags += {.Poly_Const}
 					} else {
 						e = alloc_entity_const_param(scope, token, type, param_value.value, is_type_polymorphic(type))
@@ -1407,6 +1458,18 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 	}
 
 	return polymorphic_params_type
+}
+
+// check_constant_parameter_value rejects a polymorphic/procedure parameter whose declared
+// type cannot hold a compile-time constant. Returns true when it errored.
+// C++ Reference: check_type.cpp:365-373
+check_constant_parameter_value :: proc(ctx: ^Checker_Context, type: ^Type, expr: ^ast.Node) -> bool {
+	if !is_type_constant_type(type) {
+		str := type_to_string(type)
+		error(expr, "A parameter must be a valid constant type, got %s", str)
+		return true
+	}
+	return false
 }
 
 // check_record_poly_operand_specialization validates polymorphic record operand specialization
