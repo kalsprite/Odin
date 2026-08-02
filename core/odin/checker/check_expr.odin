@@ -10324,7 +10324,13 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			if i < len(pt.params.variant.(Type_Tuple).variables) {
 				param_entity := pt.params.variant.(Type_Tuple).variables[i]
 				if .Any_Int in param_entity.flags {
-					if is_type_integer(param_type) {
+					// C++ Reference: check_expr.cpp:6856-6858. C++ guards with THREE
+					// conditions; the port had only the middle one, so `#any_int x: int`
+					// accepted anything merely CASTABLE to an integer -- a f32, a bool, even
+					// a type operand -- all of which C++ rejects. Probes ai1/ai2/ai4.
+					if arg_op.mode != .Type &&
+					   is_type_integer(param_type) &&
+					   (is_type_integer(arg_op.type) || is_type_enum(arg_op.type)) {
 						ok = check_is_castable_to(ctx, arg_op, param_type)
 					}
 				}
