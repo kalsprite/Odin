@@ -326,10 +326,21 @@ consume_comment :: proc(p: ^Parser) -> (tok: tokenizer.Token, end_line: int) {
 		}
 	}
 
+	// C++ Reference: parser.cpp:1444-1460. C++ commits end_line BEFORE advancing and never
+	// adjusts it afterwards:
+	//
+	//     if (end_line_) *end_line_ = end_line;
+	//     next_token0(f);
+	//
+	// The port advanced first and then added `if curr.line > tok.line { end_line += 1 }`, which
+	// C++ has no counterpart for. end_line means "the line the comment group ENDS on"; bumping
+	// it to the line of whatever token follows makes it one too high in the ordinary case (any
+	// comment not followed by a token on its own line). That inflation was then partly cancelled
+	// by consume_comment_groups testing `end_line+1 >= curr.line` instead of C++'s `==`, so the
+	// pair happened to agree with C++ for a comment directly above a declaration and to disagree
+	// when a blank line separated them -- attaching a visually detached comment as documentation.
+	// Both deviations have to go together; removing either alone inverts the behaviour.
 	_ = next_token0(p)
-	if p.curr_tok.pos.line > tok.pos.line {
-		end_line += 1
-	}
 
 	return
 }
@@ -373,7 +384,10 @@ consume_comment_groups :: proc(p: ^Parser, prev: tokenizer.Token) {
 	for p.curr_tok.kind == .Comment {
 		comment, end_line = consume_comment_group(p, 1)
 	}
-	if end_line+1 >= p.curr_tok.pos.line || end_line < 0 {
+	// C++ Reference: parser.cpp:1509. `==`, not `>=`: the group attaches as a lead comment only
+	// when it ends on the line immediately above the token. See consume_comment for why this and
+	// the `end_line += 1` there were a compensating pair.
+	if end_line+1 == p.curr_tok.pos.line || end_line < 0 {
 		p.lead_comment = comment
 	}
 
