@@ -38,6 +38,13 @@ Parser :: struct {
 	allow_in_expr:    bool, // NOTE(bill): in expression are only allowed in certain cases
 	in_foreign_block: bool,
 	allow_type:       bool,
+	allow_newline:    bool, // NOTE(bill): Only valid for expr_level == 0. C++ parser.hpp:138
+
+	// The build-level inputs to file_allow_newline. C++ reads these from the global
+	// build_context; this package has none, so the driver supplies them.
+	// C++ Reference: src/parser.cpp:42 file_allow_newline
+	strict_style:     bool,           // build_context.strict_style
+	vet_flags:        ast.Vet_Flags,  // build_context.vet_flags -- the fallback when a file sets none
 
 	lead_comment: ^ast.Comment_Group,
 	line_comment: ^ast.Comment_Group,
@@ -486,6 +493,64 @@ end_of_line_pos :: proc(p: ^Parser, tok: tokenizer.Token) -> tokenizer.Pos {
 	return pos
 }
 
+// C++ Reference: src/parser.cpp:18-32, 42-45.
+//
+// ast_file_vet_flags prefers the file's own `#+vet` tag and falls back to the build-level
+// flags. See #210: this parser collects File_Tag tokens into file.tags but never interprets
+// them, so file.vet_flags_set is always false here and the fallback always wins. The lookup
+// is written in its C++ shape anyway, so it becomes correct the moment tags are interpreted.
+file_vet_flags :: proc(p: ^Parser) -> ast.Vet_Flags {
+	if p.file != nil && p.file.vet_flags_set {
+		return p.file.vet_flags
+	}
+	return p.vet_flags
+}
+
+file_allow_newline :: proc(p: ^Parser) -> bool {
+	is_strict := p.strict_style || .Style in file_vet_flags(p)
+	return !is_strict
+}
+
+// allow_field_separator is C++ src/parser.cpp:4388. It had NEVER been ported.
+//
+// Twelve C++ call sites route their list separator through it; the port instead spelled
+// a bare comma-only accept at eleven of them and grew one private, divergent
+// reimplementation (`expect_field_separator`, nested inside parse_field_list) at the twelfth.
+//
+// What the missing logic does: a newline-inserted semicolon IS a legal separator, but only
+// when newlines are allowed for this file AND the very next token closes the list. That is
+// what makes
+//
+//	f(1,
+//	  2
+//	)
+//
+// legal Odin. The port rejected it with "Expected ')', got 'newline'" -- an over-rejection of
+// ordinary formatting (probe an1). In the other direction, a newline separator followed by
+// anything else is an error C++ raises and the port did not.
+allow_field_separator :: proc(p: ^Parser) -> bool {
+	token := p.curr_tok
+	if allow_token(p, .Comma) {
+		return true
+	}
+	if token.kind == .Semicolon {
+		ok := false
+		if file_allow_newline(p) && tokenizer.is_newline(token) {
+			#partial switch peek_token(p).kind {
+			case .Close_Brace, .Close_Paren:
+				ok = true
+			}
+		}
+		if !ok {
+			str := tokenizer.token_to_string(token)
+			error(p, end_of_line_pos(p, p.prev_tok), "Expected a comma, got a %s", str)
+		}
+		advance_token(p)
+		return true
+	}
+	return false
+}
+
 // expect_closing mirrors C++ src/parser.cpp:1805-1817.
 //
 // C++ has THREE closing helpers that are NOT interchangeable, and the port had collapsed them:
@@ -498,12 +563,23 @@ end_of_line_pos :: proc(p: ^Parser, tok: tokenizer.Token) -> tokenizer.Pos {
 // folds the context in -- so `f(1 ..< 2)` said "Expected ')' after argument list, got '..<'"
 // where C++ says "Expected ')', got '..<'". Probe rng7.
 //
-// NOT PORTED: C++'s missing-comma branch is guarded by f->allow_newline, a Parser field this
-// port does not have -- so that message is unreachable here and is not emitted at all. Filed
-// as #209 rather than approximated, because emitting it unconditionally would be a NEW
-// divergence in the opposite direction.
+// The missing-comma branch below is gated on p.allow_newline (#209 / progress#189 added the
+// field). Note that the token is skipped either way -- allow_newline decides only whether the
+// skip is announced.
 expect_closing :: proc(p: ^Parser, kind: tokenizer.Token_Kind, context_name: string) -> tokenizer.Token {
-	_ = context_name
+	// C++'s second disjunct (`|| f->curr_token.kind == Token_EOF`) is dead -- a token cannot
+	// be both Semicolon and EOF -- and is left out rather than reproduced.
+	if p.curr_tok.kind != kind &&
+	   p.curr_tok.kind == .Semicolon &&
+	   p.curr_tok.text == "\n" {
+		if p.allow_newline {
+			tok := p.prev_tok
+			pos := tok.pos
+			pos.column += len(tok.text)
+			error(p, pos, "Missing ',' before newline in %s", context_name)
+		}
+		advance_token(p)
+	}
 	return expect_token(p, kind)
 }
 
@@ -511,14 +587,24 @@ expect_closing_brace_of_field_list :: proc(p: ^Parser) -> tokenizer.Token {
 	return expect_closing_token_of_field_list(p, .Close_Brace, "field list")
 }
 
+// C++ Reference: src/parser.cpp:1722 expect_closing_brace_of_field_list.
+//
+// C++ consumes a possible newline first, but ONLY when f->allow_newline; with newlines
+// disallowed the newline-semicolon falls through to the `allow_token(Semicolon)` arm and is
+// reported. The port had no allow_newline, so it hard-coded "a newline is never an error
+// here" and could not report it under -strict-style.
 expect_closing_token_of_field_list :: proc(p: ^Parser, closing_kind: tokenizer.Token_Kind, msg: string) -> tokenizer.Token {
 	token := p.curr_tok
 	if allow_token(p, closing_kind) {
 		return token
 	}
-	if allow_token(p, .Semicolon) && !tokenizer.is_newline(token) {
+	ok := true
+	if p.allow_newline {
+		ok = !skip_possible_newline(p)
+	}
+	if ok && allow_token(p, .Semicolon) {
 		str := tokenizer.token_to_string(token)
-		error(p, end_of_line_pos(p, p.prev_tok), "expected a comma, got %s", str)
+		error(p, end_of_line_pos(p, p.prev_tok), "Expected a comma, got a %s", str)
 	}
 	expect_closing := expect_token_after(p, closing_kind, msg)
 
@@ -532,22 +618,20 @@ expect_closing_token_of_field_list :: proc(p: ^Parser, closing_kind: tokenizer.T
 	return expect_closing
 }
 
+// C++ Reference: src/parser.cpp:4155-4160 (parse_proc_type) and 4026-4030 (parse_results).
+// C++ has no helper here at all -- it inlines exactly two steps:
+//
+//	if (file_allow_newline(f)) { skip_possible_newline(f); }
+//	expect_token_after(f, Token_CloseParen, "parameter list");
+//
+// The port had grown an invented one: an early accept, a semicolon-consuming "expected a
+// comma" error C++ never raises for a parameter list, and a skip-to-close recovery loop.
+// Replaced with C++'s behaviour; the wrapper survives only so the call site is unchanged.
 expect_closing_parentheses_of_field_list :: proc(p: ^Parser) -> tokenizer.Token {
-	token := p.curr_tok
-	if allow_token(p, .Close_Paren) {
-		return token
+	if file_allow_newline(p) {
+		skip_possible_newline(p)
 	}
-
-	if allow_token(p, .Semicolon) && !tokenizer.is_newline(token) {
-		str := tokenizer.token_to_string(token)
-		error(p, end_of_line_pos(p, p.prev_tok), "expected a comma, got %s", str)
-	}
-
-	for p.curr_tok.kind != .Close_Paren && p.curr_tok.kind != .EOF && !is_non_inserted_semicolon(p.curr_tok) {
-		advance_token(p)
-	}
-
-	return expect_token(p, .Close_Paren)
+	return expect_token_after(p, .Close_Paren, "parameter list")
 }
 
 is_non_inserted_semicolon :: proc(tok: tokenizer.Token) -> bool {
@@ -1199,7 +1283,7 @@ parse_attribute :: proc(p: ^Parser, tok: tokenizer.Token, open_kind, close_kind:
 			}
 			append(&elems, elem)
 
-			allow_token(p, .Comma) or_break
+			allow_field_separator(p) or_break
 		}
 		p.expr_level -= 1
 		// C++ Reference: src/parser.cpp:5289 uses expect_closing, not expect_token_after.
@@ -1322,7 +1406,7 @@ parse_foreign_decl :: proc(p: ^Parser) -> ^ast.Decl {
 				path := parse_expr(p, false)
 				append(&fullpaths, path)
 
-				allow_token(p, .Comma) or_break
+				allow_field_separator(p) or_break
 			}
 			expect_token(p, .Close_Brace)
 		} else {
@@ -1388,7 +1472,7 @@ parse_unrolled_for_loop :: proc(p: ^Parser, inline_tok: tokenizer.Token) -> ^ast
 
 				append(&args, arg)
 
-				allow_token(p, .Comma) or_break
+				allow_field_separator(p) or_break
 			}
 		}
 
@@ -2048,19 +2132,12 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 	                     allowed_flags, set_flags: ast.Field_Flags,
 	                     ) -> bool {
 
-		expect_field_separator :: proc(p: ^Parser, param: ^ast.Expr) -> bool {
-			tok := p.curr_tok
-			if allow_token(p, .Comma) {
-				return true
-			}
-			if allow_token(p, .Semicolon) {
-				if !tokenizer.is_newline(tok) {
-					error(p, tok.pos, "expected a comma, got a semicolon")
-				}
-				return true
-			}
-			return false
-		}
+		// REMOVED (#209): a private `expect_field_separator` used to live here -- a divergent
+		// reimplementation of C++'s allow_field_separator that reported at the wrong position
+		// ("expected a comma, got a semicolon" at tok.pos, not "Expected a comma, got a %s" at
+		// the end of the previous line), never consulted file_allow_newline, and never checked
+		// that the newline was actually followed by a closing token. Its one call site now uses
+		// the real allow_field_separator.
 		is_type_ellipsis :: proc(type: ^ast.Expr) -> bool {
 			if type == nil {
 				return false
@@ -2133,7 +2210,8 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 			}
 		}
 
-		ok := expect_field_separator(p, type)
+		// C++ Reference: src/parser.cpp:4656
+		ok := allow_field_separator(p)
 
 		field := new_ast_field(names, type, default_value)
 		field.tag     = tag
@@ -2145,6 +2223,11 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 		return ok
 	}
 
+
+	// C++ Reference: src/parser.cpp:4455-4457
+	prev_allow_newline := p.allow_newline
+	defer p.allow_newline = prev_allow_newline
+	p.allow_newline = file_allow_newline(p)
 
 	start_tok := p.curr_tok
 
@@ -2176,7 +2259,7 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 
 		eaf := Expr_And_Flags{param, prefix_flags}
 		append(&list, eaf)
-		allow_token(p, .Comma) or_break
+		allow_field_separator(p) or_break
 	}
 
 	if p.curr_tok.kind != .Colon {
@@ -2259,6 +2342,10 @@ parse_results :: proc(p: ^Parser) -> (list: ^ast.Field_List, diverging: bool) {
 
 	expect_token(p, .Open_Paren)
 	list, _ = parse_field_list(p, .Close_Paren, ast.Field_Flags_Signature_Results)
+	// C++ Reference: src/parser.cpp:4028
+	if file_allow_newline(p) {
+		skip_possible_newline(p)
+	}
 	expect_token_after(p, .Close_Paren, "parameter list")
 	return
 }
@@ -2463,8 +2550,14 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 	case .Open_Paren:
 		open := expect_token(p, .Open_Paren)
 		prev_expr_level := p.expr_level
+		// C++ Reference: src/parser.cpp:2398-2407
+		prev_allow_newline := p.allow_newline
+		if p.expr_level < 0 {
+			p.allow_newline = false
+		}
 		p.expr_level = max(p.expr_level, 0) + 1
 		expr := parse_expr(p, false)
+		p.allow_newline = prev_allow_newline
 		p.expr_level = prev_expr_level
 		close := expect_token(p, .Close_Paren)
 
@@ -2682,7 +2775,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 				}
 				append(&args, elem)
 
-				allow_token(p, .Comma) or_break
+				allow_field_separator(p) or_break
 			}
 
 			close := expect_closing_brace_of_field_list(p)
@@ -3063,7 +3156,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			if _, ok := type.derived.(^ast.Bad_Expr); !ok {
 				append(&variants, type)
 			}
-			allow_token(p, .Comma) or_break
+			allow_field_separator(p) or_break
 		}
 
 		close := expect_closing_brace_of_field_list(p)
@@ -3166,7 +3259,8 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			if p.curr_tok.kind == .String {
 				tag = expect_token(p, .String)
 			}
-			ok := allow_token(p, .Comma)
+			// C++ Reference: src/parser.cpp:2788
+			ok := allow_field_separator(p)
 
 			field := ast.new(ast.Bit_Field_Field, name.pos, bit_size)
 
@@ -3335,7 +3429,7 @@ parse_elem_list :: proc(p: ^Parser) -> []^ast.Expr {
 
 		append(&elems, elem)
 
-		allow_token(p, .Comma) or_break
+		allow_field_separator(p) or_break
 	}
 
 	return elems[:]
@@ -3369,7 +3463,10 @@ parse_call_expr :: proc(p: ^Parser, operand: ^ast.Expr) -> ^ast.Expr {
 	ellipsis: tokenizer.Token
 
 	prev_expr_level := p.expr_level
+	// C++ Reference: src/parser.cpp:3198-3242
+	prev_allow_newline := p.allow_newline
 	p.expr_level = 0
+	p.allow_newline = file_allow_newline(p)
 	open := expect_token(p, .Open_Paren)
 
 	seen_ellipsis := false
@@ -3413,9 +3510,12 @@ parse_call_expr :: proc(p: ^Parser, operand: ^ast.Expr) -> ^ast.Expr {
 			seen_ellipsis = true
 		}
 
-		allow_token(p, .Comma) or_break
+		allow_field_separator(p) or_break
 	}
 
+	// C++ restores allow_newline BEFORE calling expect_closing, so the missing-comma message
+	// is gated on the ENCLOSING context's setting, not the argument list's. Order matters.
+	p.allow_newline = prev_allow_newline
 	p.expr_level = prev_expr_level
 	// C++ Reference: src/parser.cpp:3244 uses expect_closing, not the field-list helper.
 	close := expect_closing(p, .Close_Paren, "argument list")
@@ -3850,6 +3950,11 @@ parse_binary_expr :: proc(p: ^Parser, lhs: bool, prec_in: int) -> ^ast.Expr {
 
 
 parse_expr_list :: proc(p: ^Parser, lhs: bool) -> ([]^ast.Expr) {
+	// C++ Reference: src/parser.cpp:3642-3656
+	prev_allow_newline := p.allow_newline
+	defer p.allow_newline = prev_allow_newline
+	p.allow_newline = file_allow_newline(p)
+
 	list: [dynamic]^ast.Expr
 	for {
 		expr := parse_expr(p, lhs)

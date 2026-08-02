@@ -481,6 +481,11 @@ load_package_with_dependencies :: proc(
 		// both land in the same sorted, counted stream.
 		syntax_parser := parser.default_parser()
 		syntax_parser.err = syntax_error_pos
+		// #209: file_allow_newline needs build_context.strict_style and the build-level vet
+		// flags. The parser package has no build context of its own, so the driver supplies
+		// them -- without this every file parses as if -strict-style were off.
+		syntax_parser.strict_style = build_context.strict_style
+		syntax_parser.vet_flags = transmute(ast.Vet_Flags)build_context.vet_flags
 		pkg, parse_ok := parse_package_for_target(pkg_path, pkg_to_load.kind, &syntax_parser)
 		if !parse_ok || pkg == nil {
 			result.parse_errors += 1
