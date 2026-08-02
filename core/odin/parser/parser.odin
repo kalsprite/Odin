@@ -1996,7 +1996,8 @@ is_token_field_prefix :: proc(p: ^Parser) -> ast.Field_Flag {
 	case .EOF:
 		return .Invalid
 	case .Using:
-		advance_token(p)
+		// C++ Reference: parser.cpp:4223-4224 -- returns WITHOUT advancing. The caller
+		// consumes the token, uniformly for every flag.
 		return .Using
 	case .Hash:
 		if tok := peek_token(p); tok.kind == .Ident {
@@ -2006,13 +2007,16 @@ is_token_field_prefix :: proc(p: ^Parser) -> ast.Field_Flag {
 			}
 		}
 
-		tok: tokenizer.Token
+		// C++ Reference: parser.cpp:4242-4255. Advance past the '#' ONLY, then test the
+		// CURRENT token. C++ deliberately leaves curr on the directive ident so the caller
+		// can (a) consume it on the success path and (b) NAME it in the Unknown error.
+		// The port advanced twice here, so by the time parse_field_prefixes reported
+		// "Unknown prefix kind" it was pointing at whatever followed -- for
+		// `struct { #bogus x: int }` it named the FIELD NAME, '#x', and had eaten it.
 		advance_token(p)
-		tok = p.curr_tok
-		advance_token(p)
-		if tok.kind == .Ident {
+		if p.curr_tok.kind == .Ident {
 			for kf in ast.field_hash_flag_strings {
-				if kf.key == tok.text {
+				if kf.key == p.curr_tok.text {
 					return kf.flag
 				}
 			}
@@ -2033,10 +2037,12 @@ parse_field_prefixes :: proc(p: ^Parser) -> (flags: ast.Field_Flags) {
 
 		if kind == .Unknown {
 			error(p, p.curr_tok.pos, "Unknown prefix kind '#%s'", p.curr_tok.text)
+			advance_token(p)
 			continue
 		}
 
 		counts[kind] += 1
+		advance_token(p)
 	}
 
 	for kind in ast.Field_Flag {
