@@ -4307,8 +4307,45 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 
 // check_expr is a wrapper that calls check_expr_base
 // Reference: /mnt/c/odin/src/check_expr.cpp:11767-11779
-check_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node) {
+// check_multi_expr is C++'s check_multi_expr (src/check_expr.cpp:12705-12718):
+//
+//     check_expr_base(c, o, e, nullptr);
+//     switch (o->mode) {
+//     default: return;                                          // Valid
+//     case Addressing_NoValue: error_operand_no_value(o);        break;
+//     case Addressing_Type:    error_operand_not_expression(o);  break;
+//     }
+//     o->mode = Addressing_Invalid;
+//
+// The port did not have this procedure, and check_expr below was a bare check_expr_base -- so
+// the most-used expression entry point in the checker performed NO operand validation. A TYPE
+// where a value is required, a no-value operand and a tuple all passed through silently.
+// LEDGER #385.
+check_multi_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node) {
 	check_expr_base(ctx, o, node, nil)
+	#partial switch o.mode {
+	case .No_Value:
+		error_operand_no_value(o)
+	case .Type:
+		error_operand_not_expression(o)
+	case:
+		return // NOTE(bill): Valid
+	}
+	o.mode = .Invalid
+}
+
+// check_expr is C++'s check_expr (src/check_expr.cpp:12752-12755):
+//
+//     check_multi_expr(c, o, e);
+//     check_not_tuple(c, o);
+//
+// Both halves were missing. Turning them on requires the builtin prologue to route type
+// arguments to check_expr_or_type first (LEDGER #383/#385) -- without that, the seven
+// type-argument intrinsics reachable from core take the bare sweep from 7 to 1931 errors plus
+// a crash, which is what LEDGER #382 measured.
+check_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node) {
+	check_multi_expr(ctx, o, node)
+	check_not_tuple(ctx, o)
 }
 
 // check_expr_with_type_hint checks an expression with an optional type hint

@@ -3411,7 +3411,16 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	generic_row: ^Type = nil
 	if mt.row_count != nil {
 		row_op: Operand
-		check_expr(ctx, &row_op, mt.row_count)
+		// C++ Reference: check_type.cpp:3095-3096 routes both counts through
+		// check_array_count, which uses check_expr_or_type (this port's own copy does too,
+		// check_type.odin:6246) precisely so a POLYMORPHIC count like `matrix[$N, N]$E`
+		// arrives as an Addressing_Type operand -- C++ then tests
+		// `row.mode == Addressing_Type && row.type->kind == Type_Generic` to detect it.
+		//
+		// This site used plain check_expr, which was harmless only while check_expr did not
+		// reject a type. The moment it does (LEDGER #385) every polymorphic matrix in
+		// core/math/linalg draws "'$N' is not an expression but a type". LEDGER #385.
+		check_expr_or_type(ctx, &row_op, mt.row_count)
 
 		if row_op.mode == .Constant {
 			if !is_type_integer(row_op.type) {
@@ -3466,7 +3475,16 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	generic_column: ^Type = nil
 	if mt.column_count != nil {
 		col_op: Operand
-		check_expr(ctx, &col_op, mt.column_count)
+		// C++ Reference: check_type.cpp:3095-3096 routes both counts through
+		// check_array_count, which uses check_expr_or_type (this port's own copy does too,
+		// check_type.odin:6246) precisely so a POLYMORPHIC count like `matrix[$N, N]$E`
+		// arrives as an Addressing_Type operand -- C++ then tests
+		// `row.mode == Addressing_Type && row.type->kind == Type_Generic` to detect it.
+		//
+		// This site used plain check_expr, which was harmless only while check_expr did not
+		// reject a type. The moment it does (LEDGER #385) every polymorphic matrix in
+		// core/math/linalg draws "'$N' is not an expression but a type". LEDGER #385.
+		check_expr_or_type(ctx, &col_op, mt.column_count)
 
 		if col_op.mode == .Constant {
 			if !is_type_integer(col_op.type) {

@@ -42,8 +42,18 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	// C++ ref: check_builtin.cpp:2421-2468
 	// Some builtins accept types or expressions, handle specially
 	#partial switch id {
-	case .Len, .Cap, .Size_Of, .Align_Of, .Offset_Of, .Type_Of, .Type_Info_Of, .Typeid_Of:
-		// These are checked inside their handlers
+	case .Len, .Cap, .Size_Of, .Align_Of, .Offset_Of, .Type_Of, .Type_Info_Of, .Typeid_Of,
+	     .Offset_Of_By_String, .Type_Is_Subtype_Of, .Type_Is_Superset_Of,
+	     .Objc_Send, .Objc_Find_Selector, .Objc_Find_Class,
+	     .Objc_Register_Selector, .Objc_Register_Class,
+	     .Atomic_Type_Is_Lock_Free, .Has_Target_Feature, .Procedure_Of, .Simd_Indices:
+		// C++ Reference: check_builtin.cpp:2803-2826 -- "NOTE(bill): The first arg may be a
+		// Type, this will be checked case by case". The port listed 8 of C++'s 21 names; the
+		// twelve added here were falling through to the default arm and having their first
+		// argument checked as a plain expression. That is invisible today only because the
+		// port's check_expr does not reject a type (task #228) -- simd_indices and
+		// type_is_superset_of are two of the seven intrinsics that light up the moment it
+		// does. LEDGER #385.
 		break
 
 	case .Min, .Max:
@@ -87,7 +97,32 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		// 32 in core/strings.
 		if arg_count > 0 {
 			if _, is_field_value := call.args[0].derived_expr.(^ast.Field_Value); !is_field_value {
-				check_expr(ctx, operand, call.args[0])
+				// C++ Reference: check_builtin.cpp:2844-2850.
+				//
+				//     default:
+				//         if (BuiltinProc__type_begin < id && id < BuiltinProc__type_end) {
+				//             check_expr_or_type(c, operand, ce->args[0]);
+				//         } else if (ce->args.count > 0) {
+				//             check_multi_expr(c, operand, ce->args[0]);
+				//         }
+				//
+				// The port had NEITHER branch -- plain check_expr for everything. Every
+				// builtin whose first argument is a TYPE was therefore checked as an
+				// expression. LEDGER #385.
+				//
+				// C++ selects on an enum RANGE. That cannot be ported: this port's
+				// Builtin_Proc_Id spans indices 8..242 for names beginning `Type_` and that
+				// span holds ~140 members which are not type builtins at all (the whole
+				// Simd_*, Atomic_* and Objc_* families). A name-prefix test fails the other
+				// way -- Type_Of and Type_Info_Of are named `Type_*` but sit OUTSIDE C++'s
+				// markers. So the membership is an EXPLICIT SET, generated from the 93 names
+				// between BuiltinProc__type_begin and BuiltinProc__type_end
+				// (src/checker_builtin_procs.hpp:257-381). LEDGER #383.
+				if is_type_builtin_id(id) {
+					check_expr_or_type(ctx, operand, call.args[0])
+				} else {
+					check_expr(ctx, operand, call.args[0])
+				}
 			}
 		}
 	}
@@ -8086,4 +8121,50 @@ check_builtin_type_fixed_capacity_dynamic_array_len_offset :: proc(ctx: ^Checker
 	operand.value = exact_value_u64(u64(offset))
 	operand.type = t_uintptr
 	return true
+}
+
+
+// is_type_builtin_id reports whether a builtin is one of C++'s "type" builtins -- the members
+// between BuiltinProc__type_begin and BuiltinProc__type_end in
+// src/checker_builtin_procs.hpp:257-381.
+//
+// C++ tests this with an enum RANGE comparison. This port cannot: its Builtin_Proc_Id orders
+// the members differently, so the equivalent range would sweep in ~140 unrelated builtins (the
+// whole Simd_*, Atomic_* and Objc_* families), and a `Type_` name-prefix test fails the other
+// way -- Type_Of and Type_Info_Of are named `Type_*` but sit OUTSIDE C++'s markers. The
+// membership is therefore written out explicitly.
+//
+// Generated from C++'s list; all 93 names resolve against this port's enum as of LEDGER #384,
+// which added the last two. If C++ gains a type builtin it belongs here as well as in
+// Builtin_Proc_Id -- the two-table survey in LEDGER #383 is what catches a divergence.
+@(private = "file")
+is_type_builtin_id :: proc(id: Builtin_Proc_Id) -> bool {
+	#partial switch id {
+	case .Type_Base_Type, .Type_Core_Type, .Type_Elem_Type, .Type_Convert_Variants_To_Pointers,
+	     .Type_Merge, .Type_Integer_To_Unsigned, .Type_Integer_To_Signed, .Type_Is_Boolean,
+	     .Type_Is_Bit_Field, .Type_Is_Integer, .Type_Is_Rune, .Type_Is_Float,
+	     .Type_Is_Complex, .Type_Is_Quaternion, .Type_Is_String, .Type_Is_String16,
+	     .Type_Is_Cstring, .Type_Is_Cstring16, .Type_Is_Typeid, .Type_Is_Any,
+	     .Type_Is_Endian_Platform, .Type_Is_Endian_Little, .Type_Is_Endian_Big, .Type_Is_Unsigned,
+	     .Type_Is_Numeric, .Type_Is_Ordered, .Type_Is_Ordered_Numeric, .Type_Is_Indexable,
+	     .Type_Is_Sliceable, .Type_Is_Comparable, .Type_Is_Simple_Compare, .Type_Is_Nearly_Simple_Compare,
+	     .Type_Is_Dereferenceable, .Type_Is_Valid_Map_Key, .Type_Is_Valid_Matrix_Elements, .Type_Is_Named,
+	     .Type_Is_Pointer, .Type_Is_Multi_Pointer, .Type_Is_Array, .Type_Is_Enumerated_Array,
+	     .Type_Is_Slice, .Type_Is_Dynamic_Array, .Type_Is_Map, .Type_Is_Struct,
+	     .Type_Is_Union, .Type_Is_Enum, .Type_Is_Proc, .Type_Is_Bit_Set,
+	     .Type_Is_Simd_Vector, .Type_Is_Matrix, .Type_Is_Raw_Union, .Type_Is_Fixed_Capacity_Dynamic_Array,
+	     .Type_Is_Internally_Pointer_Like, .Type_Is_Specialized_Polymorphic_Record, .Type_Is_Unspecialized_Polymorphic_Record, .Type_Has_Nil,
+	     .Type_Is_Matrix_Row_Major, .Type_Is_Matrix_Column_Major, .Type_Has_Field, .Type_Field_Type,
+	     .Type_Field_Bit_Offset, .Type_Field_Bit_Size, .Type_Is_Specialization_Of, .Type_Is_Variant_Of,
+	     .Type_Union_Tag_Type, .Type_Union_Tag_Offset, .Type_Union_Base_Tag_Value, .Type_Union_Variant_Count,
+	     .Type_Variant_Type_Of, .Type_Variant_Index_Of, .Type_Bit_Set_Elem_Type, .Type_Bit_Set_Underlying_Type,
+	     .Type_Struct_Field_Count, .Type_Struct_Has_Implicit_Padding, .Type_Proc_Parameter_Count, .Type_Proc_Return_Count,
+	     .Type_Proc_Parameter_Type, .Type_Proc_Return_Type, .Type_Proc_Calling_Convention, .Type_Polymorphic_Record_Parameter_Count,
+	     .Type_Polymorphic_Record_Parameter_Value, .Type_Is_Subtype_Of, .Type_Is_Superset_Of, .Type_Field_Index_Of,
+	     .Type_Fixed_Capacity_Dynamic_Array_Len_Offset, .Type_Bit_Set_Backing_Type, .Type_Enum_Is_Contiguous, .Type_Equal_Proc,
+	     .Type_Hasher_Proc, .Type_Map_Info, .Type_Map_Cell_Info, .Type_Has_Shared_Fields,
+	     .Type_Canonical_Name:
+		return true
+	}
+	return false
 }
