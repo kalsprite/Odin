@@ -1017,6 +1017,10 @@ Matrix_Type :: struct {
 	row_count:    ^Expr,
 	column_count: ^Expr,
 	elem:         ^Expr,
+	// Set by the parser when the type was written `#row_major matrix[...]`. C++ folds the
+	// tag into the node the same way (src/parser.cpp:2457) rather than leaving a TagExpr,
+	// which is why neither checker has a #row_major case in its tag handler.
+	is_row_major: bool,
 }
 
 Bit_Field_Type :: struct {

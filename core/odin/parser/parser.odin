@@ -2458,6 +2458,22 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			}
 			return original_type
 
+		case "row_major", "column_major":
+			// C++ Reference: src/parser.cpp:2451-2464. The tag is FOLDED INTO the matrix node
+			// rather than wrapped as a Tag_Expr, so it never reaches the checker's tag
+			// handler -- which is why neither checker has a #row_major case there. Without
+			// this the port left a Tag_Expr and the checker rejected it with "Unknown tag
+			// expression, #row_major" on code C++ accepts.
+			original_type := parse_type(p)
+			type := ast.unparen_expr(original_type)
+			#partial switch t in type.derived_expr {
+			case ^ast.Matrix_Type:
+				t.is_row_major = name.text == "row_major"
+			case:
+				error(p, original_type.pos, "expected a matrix type after #%s", name.text)
+			}
+			return original_type
+
 		case "simd":
 			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
 			bd.tok  = tok

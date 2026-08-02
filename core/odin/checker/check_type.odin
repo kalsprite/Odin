@@ -3454,6 +3454,8 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 
 	mat.column_count = column_count
 	mat.generic_column_count = generic_column
+	// C++ Reference: check_type.cpp:3154 passes mt->is_row_major to alloc_type_matrix.
+	mat.is_row_major = mt.is_row_major
 
 	// C++ Reference: check_type.cpp:2887-2930
 	// Validate total element count (row * column)
