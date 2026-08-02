@@ -1199,24 +1199,20 @@ exit_with_errors :: proc() {
 
 // error_value_cmp compares two error values by position for sorting
 // C++ Reference: error.cpp:828-832
+// C++'s error_value_cmp is a one-liner: `return token_pos_cmp(x->pos, y->pos)`. That
+// comparator (src/tokenizer.cpp:210) orders by OFFSET, then line, then column, and only then
+// by file path. This port had the file FIRST -- while citing the same C++ lines -- which
+// groups every diagnostic by filename before position.
+//
+// The difference is visible whenever one package's diagnostics span several files: C++ emits
+// all the offset-8 `package` clauses together regardless of which file they are in, the port
+// emitted them file by file (probe rt, 27 lines in a wholly different order).
+//
+// Comparing offsets across different files is odd, but it is what C++ does, and the file path
+// is the tie-break that makes it total. tokenizer.pos_compare is already a faithful port of
+// token_pos_cmp, so defer to it rather than restating the field order here.
 error_value_cmp :: proc(a, b: Error_Value) -> bool {
-	// Compare file_id first
-	if a.pos.file != b.pos.file {
-		return a.pos.file < b.pos.file
-	}
-	// Then offset
-	if a.pos.offset != b.pos.offset {
-		return a.pos.offset < b.pos.offset
-	}
-	// Then line
-	if a.pos.line != b.pos.line {
-		return a.pos.line < b.pos.line
-	}
-	// Then column
-	if a.pos.column != b.pos.column {
-		return a.pos.column < b.pos.column
-	}
-	return false
+	return tokenizer.pos_compare(a.pos, b.pos) < 0
 }
 
 // positions_equal checks if two positions are equal
