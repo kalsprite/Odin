@@ -8406,16 +8406,32 @@ check_cast :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^Type, forb
 		defer delete(expr_str)
 		from_str := type_to_string(operand.type)
 		to_str := type_to_string(target)
+		// C++ Reference: check_expr.cpp:3901-3923. ERROR_BLOCK keeps the continuation lines
+		// attached to this error; without it they printed BEFORE it.
+		//
+		// The "types have the same size, try 'transmute'" line the port used to emit here does
+		// not exist anywhere in C++ -- it was invented, and it fired on cases where C++ gives
+		// specific and more useful advice (pointer<->integer must go through 'uintptr').
+		begin_error_block()
+		defer end_error_block()
 		error(operand.expr, "Cannot cast '%s' as '%s' from '%s'", expr_str, to_str, from_str)
-
-		// Cast error suggestions
-		// Reference: check_expr.cpp:3573-3596
-		src_size := type_size_of(operand.type)
-		dst_size := type_size_of(target)
-		if src_size == dst_size && src_size > 0 {
-			// Same size - suggest transmute
-			error_line("Suggestion: the types have the same size, try 'transmute' instead of 'cast'")
+		if is_const_expr {
+			val_str := exact_value_to_string(operand.value)
+			defer delete(val_str)
+			if is_type_float(operand.type) && is_type_integer(target) {
+				error_line("\t%s cannot be represented without truncation/rounding as the type '%s'\n", val_str, to_str)
+				// C++ keeps the mode and retypes, to minimise follow-on errors.
+				operand.mode = .Constant
+				operand.type = target
+			} else {
+				error_line("\t'%s' cannot be represented as the type '%s'\n", val_str, to_str)
+				if is_type_numeric(target) {
+					operand.mode = .Constant
+					operand.type = target
+				}
+			}
 		}
+		check_cast_error_suggestion(ctx, operand, target, operand.expr)
 		return
 	}
 

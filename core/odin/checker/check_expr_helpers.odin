@@ -1359,40 +1359,53 @@ check_assignment_error_suggestion :: proc(ctx: ^Checker_Context, operand: ^Opera
 // check_cast_error_suggestion provides helpful hints after a cast error
 // C++ Reference: check_expr.cpp:2486-2527
 check_cast_error_suggestion :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: ^Type, node: ^ast.Node) {
-	if operand == nil || target_type == nil {
+	// C++ Reference: check_expr.cpp:2704-2743.
+	//
+	// The previous implementation was INVENTED, like its assignment sibling (LEDGER task 237):
+	// none of its messages ("If reinterpreting bits, use 'transmute(T)value'", "Cast through
+	// rawptr", "Use explicit enum member") appear anywhere in C++, and it used independent
+	// `if`s where C++ has one else-if chain.
+	//
+	// NOTE: C++'s uintptr-source arm writes `"\tSuggestion: %a may be directly casted to %s\n"`
+	// -- `%a` is a format-specifier slip in the original. Reproduced here as a plain string so
+	// the port prints the expression, which is evidently what was meant.
+	if operand == nil || target_type == nil || operand.type == nil {
 		return
 	}
 
-	op_type := operand.type
-	if op_type == nil {
+	a := expr_to_string(operand.expr)
+	defer delete(a)
+	b := type_to_string(target_type)
+
+	src := base_type(operand.type)
+	dst := base_type(target_type)
+	if src == nil || dst == nil {
 		return
 	}
 
-	op_base := base_type(op_type)
-	target_base := base_type(target_type)
-
-	if op_base == nil || target_base == nil {
-		return
-	}
-
-	// Suggestion: use transmute for reinterpretation
-	if type_size_of(op_base) == type_size_of(target_base) {
-		error_line("\tSuggestion: If reinterpreting bits, use 'transmute(%s)value'", type_to_string(target_type))
-	}
-
-	// Suggestion: pointer casts through rawptr
-	if op_base.kind == .Pointer && target_base.kind == .Pointer {
-		error_line("\tSuggestion: Cast through rawptr: 'cast(%s)cast(rawptr)value'", type_to_string(target_type))
-	}
-
-	// Suggestion: integer to enum
-	if is_type_integer(op_base) && target_base.kind == .Enum {
-		error_line("\tSuggestion: Use explicit enum member or 'cast(%s)value' if intentional", type_to_string(target_type))
-	}
-
-	// Suggestion: enum to integer
-	if op_base.kind == .Enum && is_type_integer(target_base) {
-		error_line("\tSuggestion: Use 'int(value)' or 'cast(%s)value'", type_to_string(target_type))
+	if is_type_array(src) && is_type_slice(dst) {
+		if are_types_identical(src.variant.(Type_Array).elem, dst.variant.(Type_Slice).elem) {
+			error_line("\tSuggestion: the array expression may be sliced with %s[:]\n", a)
+		}
+	} else if is_type_pointer(operand.type) && is_type_integer(target_type) {
+		if is_type_uintptr(target_type) {
+			error_line("\tSuggestion: a pointer may be directly casted to %s\n", b)
+		} else {
+			error_line("\tSuggestion: for a pointer to be casted to an integer, it must be converted to 'uintptr' first\n")
+			x := type_size_of(operand.type)
+			y := type_size_of(target_type)
+			if x != y {
+				error_line("\tNote: the type of expression and the type of the cast have a different size in bytes, %d vs %d\n", x, y)
+			}
+		}
+	} else if is_type_integer(operand.type) && is_type_pointer(target_type) {
+		if is_type_uintptr(operand.type) {
+			error_line("\tSuggestion: %s may be directly casted to %s\n", a, b)
+		} else {
+			error_line("\tSuggestion: for an integer to be casted to a pointer, it must be converted to 'uintptr' first\n")
+		}
+	} else if are_types_identical(src, t_string) && is_type_u8_slice(dst) {
+		error_line("\tSuggestion: a string may be transmuted to %s\n", b)
 	}
 }
 
