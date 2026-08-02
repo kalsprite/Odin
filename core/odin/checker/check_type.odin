@@ -741,7 +741,17 @@ check_dynamic_array_type :: proc(ctx: ^Checker_Context, dat: ^ast.Dynamic_Array_
 check_struct_type_expr :: proc(ctx: ^Checker_Context, st: ^ast.Struct_Type, type: ^^Type, named_type: ^Type) -> bool {
 	// Create a new scope for the struct's fields
 	// This scope is used for field conflict detection (e.g., using field conflicts)
+	// C++ reaches every one of these through check_open_scope (checker.cpp:349-360),
+	// which sets ScopeFlag_Type for StructType/EnumType/UnionType/BitSetType/BitFieldType.
+	// These sites call create_scope directly and so never set it. That flag is what stops
+	// check_vet_unused (checker.cpp:720) from treating FIELDS as unused local variables:
+	// without it, -vet reported every field of every unreferenced struct, 68,119 spurious
+	// diagnostics across the sweep against the oracle's ~1 per package. make_soa_struct_internal
+	// already sets it (check_type.odin:372); these three were simply missed. LEDGER 290.
 	struct_scope := create_scope(ctx.scope, ctx.checker.allocator)
+	if struct_scope != nil {
+		struct_scope.flags += {.Type}
+	}
 
 	// Create the struct type
 	struct_type := new(Type, ctx.checker.allocator)
@@ -801,7 +811,11 @@ check_struct_type :: proc(ctx: ^Checker_Context, struct_type: ^Type, node: ^ast.
 	st.node = node
 	// Only set scope if not already set (may have been created in check_struct_type_expr)
 	if st.scope == nil {
+		// See the note at check_struct_type_expr: ScopeFlag_Type. LEDGER 290.
 		st.scope = create_scope(ctx.scope, ctx.checker.allocator)
+		if st.scope != nil {
+			st.scope.flags += {.Type}
+		}
 	}
 	st.is_packed = node.is_packed
 	st.is_all_or_none = node.is_all_or_none
@@ -3046,7 +3060,12 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 
 	// Create scope for bit field fields
 	// C++ line 1039
+	// See the note at check_struct_type_expr: ScopeFlag_Type. C++ sets it for BitFieldType
+	// too (checker.cpp:358). LEDGER 290.
 	scope := create_scope(ctx.scope)
+	if scope != nil {
+		scope.flags += {.Type}
+	}
 	bft.scope = scope
 
 	// Process each field
