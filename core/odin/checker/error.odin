@@ -1354,13 +1354,24 @@ print_error_values :: proc(values: ^[dynamic]Error_Value) {
 		return
 	}
 
-	// Sort errors by position. STABLE, deliberately: the merge below keeps the FIRST
-	// diagnostic at a given position and folds later ones into it, so the relative order of
-	// diagnostics sharing a position decides which text survives. `slice.sort_by` is
-	// unstable, which let that pair swap -- an undeclared name in type position printed
-	// "'X' is not a type" (reported second) instead of "Undeclared name: X" (reported first),
-	// diverging from C++. Emission order must be preserved for equal positions.
-	slice.stable_sort_by(values[:], error_value_cmp)
+	// C++ Reference: error.cpp:899 -- `array_sort(global_error_collector.error_values,
+	// error_value_cmp)`, i.e. gb_sort, which is UNSTABLE.
+	//
+	// This matters because the merge below keeps the FIRST diagnostic at a given position and
+	// folds later ones into it, so which of two same-position diagnostics survives is decided
+	// entirely by how the sort permutes them.
+	//
+	// The history here is worth stating precisely. An earlier tick replaced a stable sort with
+	// `slice.sort_by`, saw "'X' is not a type" survive where C++ prints "Undeclared name: X",
+	// and concluded that stability was required. The real lesson was narrower: slice.sort_by is
+	// A different unstable algorithm, and matching C++ needs C++'s PERMUTATION, not merely
+	// instability. gb_sort_by (below) is a faithful port of gb_sort and gives exactly that.
+	// #219: with a stable sort the port printed "'3.14...' truncated to 'int'" where C++ prints
+	// "Invalid declaration value '3.14...'" -- both are emitted at the same position, and gb's
+	// permutation is what decides it.
+	gb_sort_by(values[:], proc(a, b: Error_Value) -> int {
+		return tokenizer.pos_compare(a.pos, b.pos)
+	})
 
 	// Merge neighboring errors at the same position
 	// C++ Reference: error.cpp:902-937
