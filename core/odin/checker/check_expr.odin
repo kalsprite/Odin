@@ -9523,7 +9523,17 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 		}
 	} else {
 		if positional_count > param_count {
-			error_node(call, "Too many arguments for this procedure: expected %d, got %d", param_count, positional_count)
+			// C++ Reference: check_expr.cpp:6680-6689. C++ NAMES the procedure and, when
+			// some parameters have defaults, reports the accepted RANGE rather than a single
+			// count. The port's wording was invented and named neither.
+			proc_str := expr_to_string(call.expr)
+			defer delete(proc_str)
+			required := get_procedure_param_count_excluding_defaults(proc_type)
+			if required != param_count {
+				error_node(call, "Too many arguments for '%s', expected %d..=%d arguments, got %d", proc_str, required, param_count, positional_count)
+			} else {
+				error_node(call, "Too many arguments for '%s', expected %d arguments, got %d", proc_str, param_count, positional_count)
+			}
 			data.error = true
 			data.result_type = pt.results
 			return data
@@ -9687,19 +9697,22 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			}
 
 			if !has_default {
-				// Get parameter name for better error message
-				param_name := ""
+				// C++ Reference: check_expr.cpp:6835-6844. C++ names the parameter's TYPE as
+				// well, and gives type parameters their own message; "Missing argument for
+				// parameter '%s'" was invented, and the positional fallback has no C++
+				// counterpart at all.
+				param_entity: ^Entity = nil
 				if pt.params != nil {
 					params_tuple, is_tuple := pt.params.variant.(Type_Tuple)
 					if is_tuple && i < len(params_tuple.variables) {
-						param_entity := params_tuple.variables[i]
-						if param_entity.token.text != "" {
-							param_name = param_entity.token.text
-						}
+						param_entity = params_tuple.variables[i]
 					}
 				}
-				if param_name != "" {
-					error_node(call, "Missing argument for parameter '%s'", param_name)
+				if param_entity != nil && param_entity.kind == .Type_Name {
+					error_node(call, "Type parameter '%s' is missing in procedure call", param_entity.token.text)
+				} else if param_entity != nil {
+					type_str := type_to_string(entity_type(param_entity))
+					error_node(call, "Parameter '%s' of type '%s' is missing in procedure call", param_entity.token.text, type_str)
 				} else {
 					error_node(call, "Missing argument for parameter at position %d", i)
 				}

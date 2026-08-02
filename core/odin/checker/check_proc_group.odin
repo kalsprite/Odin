@@ -934,10 +934,14 @@ report_missing_parameters :: proc(pt: ^Type_Proc, params: ^Type_Tuple, visited: 
 		if pt.variadic && i == pt.variadic_index {
 			continue
 		}
-		// Polymorphic type/constant parameters are resolved during instantiation
-		#partial switch e.kind {
-		case .Type_Name, .Constant:
-			continue
+		// C++ Reference: check_expr.cpp:6835-6844. C++ does NOT skip these wholesale: a
+		// missing type parameter gets its own message, and a constant parameter is ignored
+		// only when it actually carries a value. The port skipped both unconditionally, so a
+		// call missing a type parameter reported nothing at all.
+		if e.kind == .Constant {
+			if c, is_const := e.variant.(Entity_Constant); is_const && c.value != nil {
+				continue
+			}
 		}
 		// A default value stands in for the missing argument
 		if v, is_var := e.variant.(Entity_Variable); is_var {
@@ -947,10 +951,13 @@ report_missing_parameters :: proc(pt: ^Type_Proc, params: ^Type_Tuple, visited: 
 		}
 
 		if show_error {
-			if e.token.text != "" {
-				error_node(call_node, "Missing argument for parameter '%s'", e.token.text)
+			// C++ Reference: check_expr.cpp:6835-6845. The port's wording was invented:
+			// C++ names the parameter's TYPE as well, and distinguishes type parameters.
+			if e.kind == .Type_Name {
+				error_node(call_node, "Type parameter '%s' is missing in procedure call", e.token.text)
 			} else {
-				error_node(call_node, "Missing argument for parameter at position %d", i)
+				type_str := type_to_string(entity_type(e))
+				error_node(call_node, "Parameter '%s' of type '%s' is missing in procedure call", e.token.text, type_str)
 			}
 		}
 		ok = false

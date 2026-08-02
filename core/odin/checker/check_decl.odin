@@ -143,7 +143,23 @@ check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 			return nil
 		}
 
-		// C++ Reference: check_decl.cpp:112-113
+		// C++ Reference: check_decl.cpp:112-113.
+		//
+		// C++ asserts here unguarded, and can afford to: every path that reaches this point
+		// has a non-nil type. The port CAN reach it with `t == nil`, because its parser
+		// recovers from a malformed initialiser differently -- `a, b, c := **v` is a syntax
+		// error ("expected an operand"), and the recovery node reaches the checker with an
+		// operand carrying no type at all. is_type_untyped(nil) is false and is_type_typed(nil)
+		// is false, so nil slips past every branch above and trips the assert: a hard abort of
+		// the whole checker on input the parser had ALREADY diagnosed.
+		//
+		// Treated as invalid rather than asserted. This is not a divergence from C++'s
+		// behaviour on well-formed input -- it is the port declining to abort on input C++'s
+		// parser never hands to its checker in this shape.
+		if t == nil {
+			set_entity_type(e, t_invalid)
+			return nil
+		}
 		assert(is_type_typed(t))
 		set_entity_type(e, t)
 	}
