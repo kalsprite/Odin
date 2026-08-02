@@ -1887,26 +1887,24 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 
 	// C++ line 1075-1087: String
 	case string:
-		// C++ Reference: exact_value.cpp:1102. C++'s quote_to_ascii (string.cpp:851) always
-		// emits the surrounding quote character, so a string constant renders as
-		// `"not an int"`, not `not an int`.
+		// C++ Reference: exact_value.cpp:1102-1112. quote_to_ascii supplies the
+		// surrounding quote characters, so a string constant renders as
+		// `"not an int"`.
 		//
-		// The quotes are added HERE rather than inside the port's quote_to_ascii, which is
-		// shared with name canonicalisation and must keep escaping-only semantics.
-		//
-		// This was blocked until LEDGER task 233: the port used to READ attribute values
-		// through this formatter, so quoting broke link_name / linkage / @(private)
-		// comparisons tree-wide. Those call sites now bind the raw string, as C++ does.
+		// Both the limit test and the truncation operate on the QUOTED, ESCAPED
+		// string, not the raw one: a 36-character source string quotes to 38 bytes
+		// and is therefore truncated, and the reported character count is the quoted
+		// length. The truncation splits raw bytes, so it can cut an escape in half.
+		quoted := quote_to_ascii(val, context.temp_allocator)
 		limit := max(string_limit, 36)
-		if len(val) <= limit {
-			quoted := quote_to_ascii(val, context.temp_allocator)
-			strings.write_byte(buf, '"')
+		if len(quoted) <= limit {
 			strings.write_string(buf, quoted)
-			strings.write_byte(buf, '"')
 		} else {
-			// C++ line 1081-1084: Truncate long strings
+			// C++ line 1107-1110: Truncate long strings
 			n := limit / 5
-			fmt.sbprintf(buf, "%q..%d chars..%q", val[:n], len(val) - (2 * n), val[len(val) - n:])
+			strings.write_string(buf, quoted[:n])
+			fmt.sbprintf(buf, "\"..%d chars..\"", len(quoted) - (2 * n))
+			strings.write_string(buf, quoted[len(quoted) - n:])
 		}
 
 	// C++ line 1089-1101: UTF-16 String
@@ -1917,9 +1915,11 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 		if len(quoted) <= limit {
 			strings.write_string(buf, quoted)
 		} else {
-			// C++ line 1095-1098: Truncate long strings
+			// C++ line 1121-1124: Truncate long strings
 			n := limit / 5
-			fmt.sbprintf(buf, "%s..%d chars..%s", quoted[:n], len(quoted) - (2 * n), quoted[len(quoted) - n:])
+			strings.write_string(buf, quoted[:n])
+			fmt.sbprintf(buf, "\"..%d chars..\"", len(quoted) - (2 * n))
+			strings.write_string(buf, quoted[len(quoted) - n:])
 		}
 
 	// C++ line 1103-1107: Integer

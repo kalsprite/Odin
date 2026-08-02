@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:slice"
 import "core:strings"
 import "core:unicode/utf16"
+import "core:unicode/utf8"
 
 /*
 Name canonicalization and type hashing infrastructure.
@@ -96,93 +97,118 @@ proc_calling_convention_strings := [Calling_Convention]string {
 }
 
 // quote_to_ascii escapes special characters in strings for canonical representation
-// C++ Reference: string.cpp:772-842 (quote_to_ascii for String)
+// C++ Reference: string.cpp:851 (String) and string.cpp:935 (String16)
 quote_to_ascii :: proc {
 	quote_to_ascii_string,
 	quote_to_ascii_string16,
 }
 
-// quote_to_ascii_string escapes UTF-8 strings
-// C++ Reference: string.cpp:772-842
-quote_to_ascii_string :: proc(s: string, allocator := context.allocator) -> string {
-	// Quick check if escaping is needed
-	needs_escape := false
-	for c in s {
-		if c == '"' || c == '\\' || c < 32 || c >= 127 {
-			needs_escape = true
-			break
+// quote_to_ascii_string escapes a UTF-8 string and wraps the result in `quote`.
+//
+// C++ Reference: string.cpp:851-919 (quote_to_ascii for String)
+//
+// The surrounding quote characters are part of the result, exactly as in C++.
+// All three call sites depend on that: exact_value_to_string renders a string
+// constant as `"text"`, and write_type_to_canonical_string embeds a quoted
+// struct tag.
+quote_to_ascii_string :: proc(s: string, allocator := context.allocator, quote: byte = '"') -> string {
+	// C++ always builds — there is no unescaped fast path, because even a string
+	// needing no escapes still has to gain its quote characters.
+	sb := strings.builder_make(0, len(s) + 2, allocator)
+	strings.write_byte(&sb, quote)
+
+	b := transmute([]byte)s
+	for len(b) > 0 {
+		r := rune(b[0])
+		width := 1
+		if r >= utf8.RUNE_SELF {
+			r, width = utf8.decode_rune(b)
 		}
+
+		// C++ line 861: a one-byte decode yielding U+FFFD is malformed input, so
+		// the original byte is emitted rather than the replacement character.
+		if width == 1 && r == utf8.RUNE_ERROR {
+			fmt.sbprintf(&sb, "\\x%02x", b[0])
+			b = b[1:]
+			continue
+		}
+
+		if r == rune(quote) || r == '\\' {
+			strings.write_byte(&sb, '\\')
+			strings.write_byte(&sb, byte(r))
+			b = b[width:]
+			continue
+		}
+		if r < 0x80 && is_printable_ascii(r) {
+			strings.write_byte(&sb, byte(r))
+			b = b[width:]
+			continue
+		}
+
+		// C++ lines 879-931: the switch over '\a'..'\v' gives those cases no body of
+		// their own, so every remaining rune falls into `default`, where the two
+		// tests below run in SEQUENCE rather than as alternatives. A control
+		// character therefore emits BOTH forms: a newline renders as an \x0a
+		// escape immediately followed by a \u000a escape.
+		if r < ' ' {
+			fmt.sbprintf(&sb, "\\x%02x", byte(r))
+		}
+		if r > utf8.MAX_RUNE {
+			r = 0xFFFD
+		}
+		if r < 0x10000 {
+			fmt.sbprintf(&sb, "\\u%04x", r)
+		} else {
+			fmt.sbprintf(&sb, "\\U%08x", r)
+		}
+		b = b[width:]
 	}
 
-	if !needs_escape {
-		return s
-	}
-
-	// Build escaped string
-	sb := strings.builder_make(0, len(s) * 2, allocator)
-	for c in s {
-		switch c {
-		case '"':
-			strings.write_string(&sb, "\\\"")
-		case '\\':
-			strings.write_string(&sb, "\\\\")
-		case '\n':
-			strings.write_string(&sb, "\\n")
-		case '\r':
-			strings.write_string(&sb, "\\r")
-		case '\t':
-			strings.write_string(&sb, "\\t")
-		case:
-			if c < 32 || c >= 127 {
-				// Non-printable ASCII - use hex escape
-				strings.write_string(&sb, fmt.tprintf("\\x%02x", c))
-			} else {
-				strings.write_byte(&sb, byte(c))
-			}
-		}
-	}
+	strings.write_byte(&sb, quote)
 	return strings.to_string(sb)
 }
 
-// quote_to_ascii_string16 converts and escapes UTF-16 strings to ASCII
-// C++ Reference: string.cpp:856-885
-quote_to_ascii_string16 :: proc(val: Exact_Value_String16, allocator := context.allocator) -> string {
-	if val.text == nil || val.len == 0 {
-		return "\"\""
-	}
+// quote_to_ascii_string16 escapes a UTF-16 string to ASCII, wrapping the result
+// in `quote`.
+//
+// C++ Reference: string.cpp:935-1010 (quote_to_ascii for String16)
+quote_to_ascii_string16 :: proc(val: Exact_Value_String16, allocator := context.allocator, quote: byte = '"') -> string {
+	sb := strings.builder_make(0, val.len * 2 + 2, allocator)
+	strings.write_byte(&sb, quote)
 
-	// Convert UTF-16 to []u16 slice for processing
-	utf16_slice := val.text[:val.len]
-
-	// Build escaped string with quote marks
-	sb := strings.builder_make(0, val.len * 2, allocator)
-	strings.write_byte(&sb, '"')
+	utf16_slice := val.text[:val.len] if val.text != nil else nil
 
 	// Process each UTF-16 code unit
 	i := 0
-	for i < val.len {
-		r := rune(utf16.REPLACEMENT_CHAR)
+	for i < len(utf16_slice) {
+		c := utf16_slice[i]
+		r := rune(c)
 		width := 1
 
-		// Decode UTF-16 code unit (handling surrogates)
-		// C++ Reference: string.cpp:869-880
-		c := utf16_slice[i]
+		// C++ lines 946-957. Note that a LONE LOW surrogate matches neither branch,
+		// so `r` keeps its raw value and escapes as \udcxx rather than being folded
+		// into the replacement character.
 		if c < 0xd800 || 0xe000 <= c {
-			// Not a surrogate
-			r = rune(c)
+			// Not a surrogate — keep as-is.
 		} else if 0xd800 <= c && c < 0xdc00 {
-			// High surrogate - check for low surrogate
-			if i + 1 < val.len {
-				c2 := utf16_slice[i + 1]
-				if 0xdc00 <= c2 && c2 < 0xe000 {
-					r = utf16.decode_surrogate_pair(rune(c), rune(c2))
+			// High surrogate: pair with the next unit, or fail.
+			if i + 1 < len(utf16_slice) {
+				r = utf16.decode_surrogate_pair(rune(c), rune(utf16_slice[i + 1]))
+				if r != utf16.REPLACEMENT_CHAR {
 					width = 2
 				}
+			} else {
+				r = utf16.REPLACEMENT_CHAR
 			}
 		}
 
 		// Handle invalid UTF-16 sequences
-		// C++ Reference: string.cpp:881-887
+		// C++ Reference: string.cpp:959-965
+		//
+		// UPSTREAM (LEDGER task 275): C++ indexes lower_hex with the full u16
+		// `s[0]>>4`, which for the surrogate values that are the only way to reach
+		// this branch is 0xd80..0xdbf — an out-of-bounds read of a 16-byte table.
+		// There is no stable output to match, so the port emits the low byte.
 		if width == 1 && r == utf16.REPLACEMENT_CHAR {
 			fmt.sbprintf(&sb, "\\x%02x", c & 0xff)
 			i += 1
@@ -190,42 +216,41 @@ quote_to_ascii_string16 :: proc(val: Exact_Value_String16, allocator := context.
 		}
 
 		// Handle quote and backslash escaping
-		// C++ Reference: string.cpp:889-893
-		if r == '"' || r == '\\' {
+		// C++ Reference: string.cpp:967-971
+		if r == rune(quote) || r == '\\' {
 			strings.write_byte(&sb, '\\')
-			strings.write_rune(&sb, r)
+			strings.write_byte(&sb, byte(r))
 			i += width
 			continue
 		}
 
 		// Handle printable ASCII
-		// C++ Reference: string.cpp:894-897
+		// C++ Reference: string.cpp:972-975
 		if r < 0x80 && is_printable_ascii(r) {
 			strings.write_byte(&sb, byte(r))
 			i += width
 			continue
 		}
 
-		// Handle special escapes and Unicode
-		// C++ Reference: string.cpp:898-932
+		// C++ lines 976-1006: as in quote_to_ascii_string, the switch cases carry no
+		// body, so these tests run in SEQUENCE. A control character emits both its
+		// \xNN escape and its \u00NN escape.
 		if r < ' ' {
-			// Control characters (includes '\a', '\b', '\f', '\n', '\r', '\t', '\v')
 			fmt.sbprintf(&sb, "\\x%02x", byte(r))
-		} else if r > 0x10FFFF {
-			// Invalid rune - normalize to replacement character
-			fmt.sbprintf(&sb, "\\u%04x", 0xFFFD)
-		} else if r < 0x10000 {
-			// BMP character - use \uXXXX
+		}
+		if r > utf8.MAX_RUNE {
+			r = 0xFFFD
+		}
+		if r < 0x10000 {
 			fmt.sbprintf(&sb, "\\u%04x", r)
 		} else {
-			// Supplementary character - use \UXXXXXXXX
 			fmt.sbprintf(&sb, "\\U%08x", r)
 		}
 
 		i += width
 	}
 
-	strings.write_byte(&sb, '"')
+	strings.write_byte(&sb, quote)
 	return strings.to_string(sb)
 }
 
