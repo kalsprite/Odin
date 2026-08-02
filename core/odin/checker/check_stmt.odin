@@ -2869,7 +2869,7 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 		link_prefix = ctx.foreign_context.link_prefix,
 		link_suffix = ctx.foreign_context.link_suffix,
 	}
-	check_decl_attributes(ctx, vd.attributes[:], &ac)
+	check_decl_attributes(ctx, vd.attributes[:], &ac, .Var)
 
 	// Apply attributes to entities
 	for i in 0 ..< entity_count {

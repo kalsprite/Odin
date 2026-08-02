@@ -390,10 +390,117 @@ check_decl_attribute_value :: proc(ctx: ^Checker_Context, value: ^ast.Expr) -> E
 	return ev
 }
 
+// Attribute_Decl_Kind selects which attribute table applies, as C++ does by passing a
+// different DECL_ATTRIBUTE_PROC to check_decl_attributes.
+//
+// C++ Reference: src/checker.cpp -- foreign_block_decl_attribute (3706), proc_group_attribute
+// (3779), proc_decl_attribute (3833), var_decl_attribute (4285), const_decl_attribute (4431),
+// type_decl_attribute (4456), import_decl_attribute (5570), foreign_import_decl_attribute
+// (5671). The caller picks the table; a name absent from it makes the handler return false,
+// which lands on the "Unknown attribute element name" path.
+//
+// The port previously had ONE flat chain shared by every declaration kind, so it accepted
+// every attribute everywhere: @(objc_class) on a procedure, @(cold) on a variable,
+// @(priority_index) on anything. See LEDGER task 251/253.
+Attribute_Decl_Kind :: enum {
+	Proc,
+	Var,
+	Const,
+	Type,
+	Proc_Group,
+	Foreign_Block,
+	Foreign_Import,
+	Import,
+}
+
+// The tables below were derived EMPIRICALLY from the oracle, one attribute per package so
+// that attributes cannot interact, with the error cap raised and runs that crashed or hit the
+// cap discarded rather than read as "accepted". A static read of checker.cpp disagreed with
+// reality in both directions -- it over-assigned names to proc_decl_attribute because the
+// function's line range ran past its end, and it missed that `private` is accepted on every
+// kind.
+//
+// Each name is probed in SEVERAL forms (bare, ="none", =1, =helper, =int) and counted valid
+// if ANY form avoids the unknown-name error. Probing only the bare form is not enough: an
+// attribute whose handler needs a value returns false when written bare, which is
+// indistinguishable from "not in this table". That mistake put `linkage` in no table but
+// const, and cost a 6 -> 3048 sweep before the corpus caught it.
+// LEDGER task 252/253 records the four failed derivations and why each was wrong.
+@(rodata) attr_names_proc := [?]string{
+	"cold", "deferred", "deferred_in", "deferred_in_by_ptr", "deferred_in_out",
+	"deferred_in_out_by_ptr", "deferred_none", "deferred_out", "deferred_out_by_ptr",
+	"deprecated", "disabled", "enable_target_feature", "entry_point_only", "export",
+	"fast_math", "fini", "init", "instrumentation_enter", "instrumentation_exit", "link_name",
+	"link_prefix", "link_section", "link_suffix", "linkage", "no_instrumentation",
+	"no_sanitize_address",
+	"no_sanitize_memory", "no_sanitize_thread", "objc_implement", "objc_is_class_method",
+	"objc_name", "objc_selector", "objc_type", "optimization_mode", "private", "require",
+	"require_results", "require_target_feature", "test",
+}
+@(rodata) attr_names_var := [?]string{
+	"export", "link_name", "link_prefix", "link_section", "link_suffix", "linkage", "private",
+	"require", "rodata", "static", "thread_local",
+}
+@(rodata) attr_names_const := [?]string{
+	"link_name", "link_prefix", "link_suffix", "linkage", "private", "require", "rodata",
+	"static", "thread_local",
+}
+@(rodata) attr_names_type := [?]string{
+	"deprecated", "objc_class", "objc_context_provider", "objc_implement", "objc_ivar",
+	"objc_superclass", "private", "raddbg_type_view",
+}
+@(rodata) attr_names_proc_group := [?]string{
+	"objc_is_class_method", "objc_name", "objc_type", "private", "require_results",
+}
+@(rodata) attr_names_foreign_block := [?]string{
+	"default_calling_convention", "link_prefix", "link_suffix", "private", "require_results",
+}
+@(rodata) attr_names_foreign_import := [?]string{
+	"export", "extra_linker_flags", "force", "ignore_duplicates", "priority_index", "require",
+}
+@(rodata) attr_names_import := [?]string{"require"}
+
+attribute_is_valid_for_kind :: proc(name: string, kind: Attribute_Decl_Kind) -> bool {
+	// C++ handles `builtin` before the table is consulted (checker.cpp:4623), gated on the
+	// declaration being in base:runtime, so it is never subject to the per-kind tables.
+	if name == "builtin" {
+		return true
+	}
+	table: []string
+	switch kind {
+	case .Proc:           table = attr_names_proc[:]
+	case .Var:            table = attr_names_var[:]
+	case .Const:          table = attr_names_const[:]
+	case .Type:           table = attr_names_type[:]
+	case .Proc_Group:     table = attr_names_proc_group[:]
+	case .Foreign_Block:  table = attr_names_foreign_block[:]
+	case .Foreign_Import: table = attr_names_foreign_import[:]
+	case .Import:         table = attr_names_import[:]
+	}
+	for n in table {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// report_unknown_attribute emits C++'s unknown-attribute diagnostic, honouring the two build
+// flags that suppress it. C++ Reference: checker.cpp:4627-4633.
+report_unknown_attribute :: proc(elem: ^ast.Node, name: string) {
+	if build_context.ignore_unknown_attributes || name in build_context.custom_attributes {
+		return
+	}
+	begin_error_block()
+	defer end_error_block()
+	error(elem, "Unknown attribute element name '%s'", name)
+	error_line("\tDid you forget to use the build flag '-ignore-unknown-attributes' or '-custom-attribute:%s'?\n", name)
+}
+
 // check_decl_attributes checks declaration attributes
 // C++ Reference: /mnt/c/odin/src/checker.cpp:4227-4311
 // Extended to handle common attributes: deprecated, warning, link_name, test, init, fini, etc.
-check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribute, ac: ^Attribute_Context) {
+check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribute, ac: ^Attribute_Context, kind: Attribute_Decl_Kind) {
 	// C++ Reference: checker.cpp:4228 - Early return if no attributes
 	if len(attributes) == 0 {
 		return
@@ -420,6 +527,13 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				}
 			case:
 				error(elem, "Invalid attribute element")
+				continue
+			}
+
+			// C++ selects the attribute table by declaration kind; a name the table does not
+			// name makes the handler return false, landing on the unknown-attribute path.
+			if !attribute_is_valid_for_kind(name, kind) {
+				report_unknown_attribute(elem, name)
 				continue
 			}
 
@@ -1034,13 +1148,7 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			// The two guards were both missing: ignore_unknown_attributes was declared in
 			// Build_Context and never read by anything, and there was no custom-attribute
 			// set at all.
-			if build_context.ignore_unknown_attributes || name in build_context.custom_attributes {
-				continue
-			}
-			begin_error_block()
-			defer end_error_block()
-			error(elem, "Unknown attribute element name '%s'", name)
-			error_line("\tDid you forget to use the build flag '-ignore-unknown-attributes' or '-custom-attribute:%s'?\n", name)
+			report_unknown_attribute(elem, name)
 		}
 	}
 }
@@ -1639,7 +1747,7 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 	if effective_ac == nil {
 		decl := decl_info_of_entity(e)
 		if decl != nil && len(decl.attributes) > 0 {
-			check_decl_attributes(ctx, decl.attributes[:], &local_ac)
+			check_decl_attributes(ctx, decl.attributes[:], &local_ac, .Type)
 			effective_ac = &local_ac
 		}
 	}

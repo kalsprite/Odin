@@ -216,7 +216,7 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 	decl := decl_info_of_entity(e)
 	assert(decl == ctx.decl)
 	if decl != nil {
-		check_decl_attributes(ctx, decl.attributes, &ac)
+		check_decl_attributes(ctx, decl.attributes, &ac, .Var)
 	}
 
 	// C++ Reference: check_decl.cpp:1631-1634
@@ -899,7 +899,7 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 	decl := decl_info_of_entity(e)
 	if decl != nil && len(decl.attributes) > 0 {
 		ac := Attribute_Context{}
-		check_decl_attributes(ctx, decl.attributes[:], &ac)
+		check_decl_attributes(ctx, decl.attributes[:], &ac, .Const)
 
 		// C++ Reference: checker.cpp:4143-4163 (const_decl_attribute)
 		// Error on attributes not valid for compile-time constants
@@ -1108,7 +1108,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 	ac := make_attribute_context(proc_variant.link_prefix, proc_variant.link_suffix)
 
 	if d != nil {
-		check_decl_attributes(ctx, d.attributes, &ac)
+		check_decl_attributes(ctx, d.attributes, &ac, .Proc)
 	}
 
 	// C++ Reference: check_decl.cpp:1284-1293
@@ -1702,7 +1702,7 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 
 	// C++ Reference: check_decl.cpp:1890-1892
 	ac := Attribute_Context{}
-	check_decl_attributes(ctx, d.attributes, &ac)
+	check_decl_attributes(ctx, d.attributes, &ac, .Proc_Group)
 	check_objc_methods(ctx, pg_entity, &ac)
 }
 
