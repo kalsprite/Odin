@@ -611,7 +611,9 @@ expect_semicolon_newline_error :: proc(p: ^Parser, token: tokenizer.Token, s: ^a
 
 		tok := token
 		tok.pos.column -= 1
-		error(p, tok.pos, "expected ';', got newline")
+		// C++ Reference: src/parser.cpp:4731. Missed by the earlier case scan because its
+		// extractor desynchronised on a rune literal at parser.odin:2210 (LEDGER 339).
+		error(p, tok.pos, "Expected ';', got newline")
 	}
 }
 
@@ -3424,6 +3426,37 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 
 			p.expr_level += 1
 			open := expect_token(p, .Open_Bracket)
+
+			// C++ Reference: src/parser.cpp:3342-3355. An EMPTY index -- `a[]` -- has its own
+			// branch which the port lacked entirely. C++ reports "Expected an operand, got ]",
+			// CONSUMES the ']', builds an index expression with a nil index and breaks.
+			//
+			// Without it the port fell through to the general operand parse, emitted the
+			// tail-less "Expected an operand" from parse_atom_expr, never consumed the ']',
+			// and then cascaded a second error ("Expected ']', got ';'") that C++ never emits.
+			// A recovery divergence, not a wording one.
+			if p.curr_tok.kind == .Close_Bracket {
+				error(p, p.curr_tok.pos, "Expected an operand, got ]")
+				close := expect_token(p, .Close_Bracket)
+
+				// NOT PORTED, and stated rather than silently dropped: C++ wraps this in an
+				// ERROR_BLOCK and, when allow_type is set, appends
+				//   "\tSuggestion: If a type was wanted, did you mean '[]%s'?"
+				// using expr_to_string(operand) (parser.cpp:3347-3351). The port's parser
+				// package has NEITHER facility -- it exposes only error/warn, with no
+				// continuation channel and no expression printer; both live in the checker,
+				// which the parser must not depend on. Adding them is a package-structure
+				// change, not a one-liner. The primary diagnostic and, more importantly, the
+				// RECOVERY (consuming the ']') are faithful. Filed as #204.
+
+				ie := ast.new(ast.Index_Expr, operand.pos, end_pos(close))
+				ie.expr  = operand
+				ie.index = nil
+				ie.open  = open.pos
+				ie.close = close.pos
+				operand = ie
+				break
+			}
 
 			#partial switch p.curr_tok.kind {
 			case .Colon, .Ellipsis, .Range_Half, .Range_Full:
