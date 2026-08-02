@@ -3681,9 +3681,9 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
-		// C++:2249-2250 sets the operand BEFORE reading the directory, so the type is in
-		// place even on the error paths. t_load_directory_file_slice is currently nil in the
-		// port (nothing runs C++'s init_core_load_directory_file), so guard it -- see #248.
+		// C++:2247-2250 -- resolve the result type lazily, then set the operand BEFORE
+		// reading the directory so the type is in place even on the error paths.
+		init_core_load_directory_file(ctx.checker)
 		if t_load_directory_file_slice != nil {
 			operand.type = t_load_directory_file_slice
 		}

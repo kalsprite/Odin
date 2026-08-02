@@ -2475,6 +2475,27 @@ check_foreign_procedure :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info
 	}
 }
 
+// init_core_load_directory_file ensures base:runtime.Load_Directory_File is loaded and the
+// three type globals are built.
+//
+// C++ Reference: checker.cpp:3594-3601. The port DECLARED t_load_directory_file{,_ptr,_slice}
+// (types.odin:250-252) and the only assignments anywhere were the three `= nil` resets, so
+// #load_directory could never produce its []Load_Directory_File result type. Called lazily
+// from the directive arm, exactly as C++ calls it from check_load_directory_directive.
+init_core_load_directory_file :: proc(c: ^Checker) {
+	if t_load_directory_file != nil {
+		return
+	}
+	ldf := find_core_type(c, "Load_Directory_File")
+	if ldf == nil {
+		// Runtime package not loaded -- leave the globals nil; the caller guards on them.
+		return
+	}
+	t_load_directory_file       = ldf
+	t_load_directory_file_ptr   = alloc_type_pointer(ldf)
+	t_load_directory_file_slice = alloc_type_slice(ldf)
+}
+
 // init_core_source_code_location ensures core:runtime.Source_Code_Location is loaded
 // C++ Reference: /mnt/c/odin/src/checker.cpp:3362-3368
 init_core_source_code_location :: proc(c: ^Checker) {
