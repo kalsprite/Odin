@@ -2232,27 +2232,64 @@ check_unary_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, ty
 		// Address-of operator: check addressability
 		// Reference: check_expr.cpp:1996-2020, 2691-2746
 		if check_is_not_addressable(ctx, o) {
-			// C++ Reference: check_expr.cpp:2691-2746
-			// Provide detailed contextual error messages
-			error(op.pos, "Cannot take address of expression")
+			// C++ Reference: check_expr.cpp:2910-2960.
+			//
+			// The port used one generic message plus two INVENTED suggestions
+			// ("Cannot take address of constant. Assign it to a variable first.") which appear
+			// nowhere in C++, and emitted them OUTSIDE an error block so they printed before
+			// the error. C++ instead selects a SPECIFIC message naming the expression and the
+			// reason, and only the default arm carries continuations.
+			str := expr_to_string(o.expr)
+			defer delete(str)
 
-			// Check for specific cases and provide suggestions
+			e: ^Entity
 			if o.expr != nil {
-				// Check if it's a for-loop value
-				if o.mode == .Value {
-					// Check entity flags for special values
-					expr := unparen_expr(o.expr)
-					if ident, is_ident := expr.derived.(^ast.Ident); is_ident {
-						if entity := ident.entity; entity != nil {
-							if .For_Value in entity.flags {
-								error_line("\tSuggestion: Cannot take address of for-loop iteration value. Consider using a pointer-based loop or storing the value in a variable.\n")
-							} else if .Switch_Value in entity.flags {
-								error_line("\tSuggestion: Cannot take address of switch expression value. Consider using 'case &x:' syntax for pointer binding.\n")
+				if ident, is_ident := unparen_expr(o.expr).derived.(^ast.Ident); is_ident {
+					e = ident.entity
+				}
+			}
+
+			if e != nil && .Param in e.flags {
+				error(op.pos, "Cannot take the pointer address of '%s' which is a procedure parameter", str)
+			} else if e != nil && .Bit_Field_Field in e.flags {
+				error(op.pos, "Cannot take the pointer address of '%s' which is a bit_field's field", str)
+			} else {
+				#partial switch o.mode {
+				case .Constant:
+					error(op.pos, "Cannot take the pointer address of '%s' which is a constant", str)
+				case .Swizzle_Value, .Swizzle_Variable:
+					error(op.pos, "Cannot take the pointer address of '%s' which is a swizzle intermediate array value", str)
+				case:
+					// C++ Reference: check_expr.cpp:2930-2957 -- the ONLY arm with continuations.
+					begin_error_block()
+					defer end_error_block()
+					error(op.pos, "Cannot take the pointer address of '%s'", str)
+					if e != nil {
+						if .For_Value in e.flags {
+							// C++ reads e->Variable.for_loop_parent_type; here it lives on the
+							// Entity_Variable variant, so guard the assertion.
+							parent_raw: ^Type
+							if ev, ev_ok := e.variant.(Entity_Variable); ev_ok {
+								parent_raw = ev.for_loop_parent_type
+							}
+							parent := type_deref(parent_raw)
+							if parent != nil && is_type_string(parent) {
+								error_line("\tSuggestion: Iterating over a string produces an intermediate 'rune' value which cannot be addressed.\n")
+							} else if parent != nil && is_type_tuple(parent) {
+								error_line("\tSuggestion: Iterating over a procedure does not produce values which are addressable.\n")
+							} else {
+								error_line("\tSuggestion: Did you want to pass the iterable value to the for statement by pointer to get addressable semantics?\n")
+							}
+							if parent != nil && is_type_map(parent) {
+								error_line("\t            Prefer doing 'for key, &%s in ...'\n", e.token.text)
+							} else {
+								error_line("\t            Prefer doing 'for &%s in ...'\n", e.token.text)
 							}
 						}
+						if .Switch_Value in e.flags {
+							error_line("\tSuggestion: Did you want to pass the value to the switch statement by pointer to get addressable semantics?\n")
+						}
 					}
-				} else if o.mode == .Constant {
-					error_line("\tSuggestion: Cannot take address of constant. Assign it to a variable first.\n")
 				}
 			}
 
