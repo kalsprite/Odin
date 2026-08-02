@@ -243,6 +243,7 @@ t_context_ptr: ^Type // ^Context
 t_source_code_location: ^Type // core:runtime.Source_Code_Location
 t_source_code_location_ptr: ^Type // ^Source_Code_Location
 t_atomic_memory_order: ^Type // core:runtime.Atomic_Memory_Order
+t_fast_math_flags:     ^Type // base:intrinsics.Fast_Math_Flags
 
 // Load directory file types
 // C++ Reference: /mnt/c/odin/src/types.cpp:734-736

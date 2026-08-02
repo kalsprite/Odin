@@ -373,12 +373,18 @@ make_attribute_context :: proc(link_prefix, link_suffix: string) -> Attribute_Co
 
 // check_decl_attribute_value evaluates an attribute value expression
 // C++ Reference: /mnt/c/odin/src/checker.cpp:3395-3410
-check_decl_attribute_value :: proc(ctx: ^Checker_Context, value: ^ast.Expr) -> Exact_Value {
+check_decl_attribute_value :: proc(ctx: ^Checker_Context, value: ^ast.Expr, type_hint: ^Type = nil) -> Exact_Value {
 	// C++ Reference: checker.cpp:3396-3409
 	ev := Exact_Value{}
 	if value != nil {
 		operand := Operand{}
-		check_expr(ctx, &operand, value)
+		// The hint is what lets an untyped bit_set literal such as `@(fast_math = {.No_NaNs})`
+		// resolve its element type; without it the literal has nothing to infer from.
+		if type_hint != nil {
+			check_expr_with_type_hint(ctx, &operand, value, type_hint)
+		} else {
+			check_expr(ctx, &operand, value)
+		}
 		if operand.mode != .Invalid {
 			if operand.mode == .Constant {
 				ev = operand.value
@@ -1114,7 +1120,7 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				if value == nil {
 					error(elem, "Expected a constant bit_set of type 'intrinsics.Fast_Math_Flags' for '%s'", name)
 				} else {
-					ev := check_decl_attribute_value(ctx, value)
+					ev := check_decl_attribute_value(ctx, value, t_fast_math_flags)
 					if _, ok := ev.(big.Int); !ok {
 						error(elem, "Expected a constant bit_set of type 'intrinsics.Fast_Math_Flags' for '%s'", name)
 					}

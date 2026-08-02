@@ -1219,6 +1219,7 @@ populate_builtin_package_scope :: proc(info: ^Checker_Info, allocator := context
 		named_type := alloc_type_named(TYPE_NAME, bit_set_type, entity)
 		set_base_type(named_type, bit_set_type)
 		set_type_name_entity_type(entity, named_type)
+		t_fast_math_flags = named_type
 
 		scope_insert(intrinsics_scope, entity)
 	}
