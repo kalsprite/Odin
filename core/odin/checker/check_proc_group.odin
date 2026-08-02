@@ -1019,12 +1019,35 @@ check_call_arguments_single :: proc(
 		return false
 	}
 
-	// If successful and not just testing, add entity use and type tracking
-	if ok && !return_on_failure && entity != nil {
-		add_entity_use(ctx, operand.expr, entity)
-		// Add type and value for proper expression type tracking
-		if operand.expr != nil && operand.type != nil {
-			add_type_and_value(ctx, operand.expr, operand.mode, operand.type, operand.value)
+	// C++ Reference: check_expr.cpp:7249-7253 and 7274-7279. Four divergences fixed here.
+	//
+	// (1) C++ unwraps SelectorExpr to the SELECTOR before recording the use:
+	//       while (ident->kind == Ast_SelectorExpr) ident = ident->SelectorExpr.selector;
+	//     so `pkg.foo(...)` records against `foo`, not against the whole `pkg.foo`.
+	// (2) C++ uses `entity_to_use = data->gen_entity ? data->gen_entity : e` -- for a
+	//     polymorphic call the INSTANTIATED entity, not the generic one.
+	// (3) C++ calls update_untyped_expr_type with entity_to_use->type; the port omitted it.
+	// (4) add_type_and_value takes entity_to_use->TYPE, not the operand's.
+	ident := operand.expr
+	for ident != nil {
+		// NOTE: the port names this field `field`, not `selector` as C++ does.
+		se, se_ok := ident.derived.(^ast.Selector_Expr)
+		if !se_ok || se.field == nil {
+			break
+		}
+		ident = se.field
+	}
+
+	entity_to_use := entity
+	if data.gen_entity != nil {
+		entity_to_use = data.gen_entity
+	}
+
+	if ok && !return_on_failure && entity_to_use != nil {
+		add_entity_use(ctx, ident, entity_to_use)
+		if operand.expr != nil && entity_to_use.type != nil {
+			update_untyped_expr_type(ctx, operand.expr, entity_to_use.type, true)
+			add_type_and_value(ctx, operand.expr, operand.mode, entity_to_use.type, operand.value)
 		}
 	}
 
@@ -1065,6 +1088,14 @@ check_call_arguments_single :: proc(
 				}
 			} else {
 				decl.where_clauses_evaluated = true
+				// C++ Reference: check_expr.cpp:7304-7307. The generated entity's RESULTS
+				// become the call's result type; the port never set this, so a polymorphic
+				// call's result came from whatever the generic signature said.
+				if is_type_proc(gen.type) {
+					if pt, pt_ok := base_type(entity_to_use.type).variant.(Type_Proc); pt_ok {
+						data.result_type = pt.results
+					}
+				}
 			}
 		}
 	}
