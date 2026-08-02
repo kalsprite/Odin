@@ -5161,7 +5161,9 @@ check_builtin_bit_count :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	if is_type_simd_vector(x.type) {
 		elem := base_array_type(x.type)
 		if !is_type_integer_like(elem) {
-			error_node(x.expr, "#simd values passed to '%s' must have an element of an integer-like type (integer, boolean, enum, bit_set)", builtin_name)
+			// C++ Reference: check_builtin.cpp:5572 -- names the offending type. Note C++ does
+			// NOT quote it here, unlike most of its sibling messages.
+			error_node(x.expr, "#simd values passed to '%s' must have an element of an integer-like type (integer, boolean, enum, bit_set), got %s", builtin_name, type_to_string(x.type))
 		}
 	} else if !is_type_integer_like(x.type) {
 		error_node(x.expr, "Values passed to '%s' must be an integer-like type (integer, boolean, enum, bit_set)", builtin_name)

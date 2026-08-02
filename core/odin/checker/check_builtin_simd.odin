@@ -125,7 +125,10 @@ check_builtin_simd_binary_numeric :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 	// Validate types match
 	if !are_types_identical(x.type, y.type) {
-		error(call, "'%s' expected 2 arguments of the same type", builtin_name)
+		// C++ Reference: check_builtin.cpp:932 etc. C++ names BOTH offending types and reports
+		// against the first argument, not the whole call. The port named neither and pointed at
+		// the call, so the diagnostic said only that two types differed -- not which, nor where.
+		error(x.expr, "'%s' expected 2 arguments of the same type, got '%s' vs '%s'", builtin_name, type_to_string(x.type), type_to_string(y.type))
 		return false
 	}
 
@@ -192,7 +195,10 @@ check_builtin_simd_binary_integer :: proc(ctx: ^Checker_Context, operand: ^Opera
 	}
 
 	if !are_types_identical(x.type, y.type) {
-		error(call, "'%s' expected 2 arguments of the same type", builtin_name)
+		// C++ Reference: check_builtin.cpp:932 etc. C++ names BOTH offending types and reports
+		// against the first argument, not the whole call. The port named neither and pointed at
+		// the call, so the diagnostic said only that two types differed -- not which, nor where.
+		error(x.expr, "'%s' expected 2 arguments of the same type, got '%s' vs '%s'", builtin_name, type_to_string(x.type), type_to_string(y.type))
 		return false
 	}
 
@@ -872,7 +878,10 @@ check_builtin_simd_shuffle :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	}
 
 	if !are_types_identical(x.type, y.type) {
-		error(call, "'%s' expected 2 arguments of the same type", builtin_name)
+		// C++ Reference: check_builtin.cpp:932 etc. C++ names BOTH offending types and reports
+		// against the first argument, not the whole call. The port named neither and pointed at
+		// the call, so the diagnostic said only that two types differed -- not which, nor where.
+		error(x.expr, "'%s' expected 2 arguments of the same type, got '%s' vs '%s'", builtin_name, type_to_string(x.type), type_to_string(y.type))
 		return false
 	}
 
@@ -1088,7 +1097,8 @@ check_builtin_simd_rounding :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 
 	elem := base_array_type(x.type)
 	if !is_type_float(elem) {
-		error(call.args[0], "'%s' expected a simd vector floating point type", builtin_name)
+		// C++ Reference: check_builtin.cpp:1741 -- names the offending type.
+		error(call.args[0], "'%s' expected a simd vector floating point type, got '%s'", builtin_name, type_to_string(x.type))
 		return false
 	}
 
@@ -1379,7 +1389,10 @@ check_builtin_simd_odd_even :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 	}
 
 	if !are_types_identical(x.type, y.type) {
-		error(call, "'%s' expected 2 arguments of the same type", builtin_name)
+		// C++ Reference: check_builtin.cpp:932 etc. C++ names BOTH offending types and reports
+		// against the first argument, not the whole call. The port named neither and pointed at
+		// the call, so the diagnostic said only that two types differed -- not which, nor where.
+		error(x.expr, "'%s' expected 2 arguments of the same type, got '%s' vs '%s'", builtin_name, type_to_string(x.type), type_to_string(y.type))
 		return false
 	}
 
