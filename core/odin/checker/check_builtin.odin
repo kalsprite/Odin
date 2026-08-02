@@ -3625,7 +3625,8 @@ cache_load_file_directive :: proc(
 			}
 			// Handle cached error
 			if err_on_not_found {
-				report_load_file_error(call, cache.file_error, path)
+				pn, bn := load_directive_proc_and_name(call)
+				report_load_file_error(pn, cache.file_error, path, bn)
 			}
 			return cache, false
 		}
@@ -3667,7 +3668,8 @@ cache_load_file_directive :: proc(
 	// Handle errors
 	if cache.file_error != .None {
 		if err_on_not_found {
-			report_load_file_error(call, cache.file_error, path)
+			pn, bn := load_directive_proc_and_name(call)
+			report_load_file_error(pn, cache.file_error, path, bn)
 		}
 		return cache, false
 	}
@@ -3675,17 +3677,39 @@ cache_load_file_directive :: proc(
 	return cache, true
 }
 
+// load_directive_proc_and_name unwraps a `#load(...)`-style call to the directive node and
+// its name, which is what C++ passes to the failure messages: `ce->proc` as the error
+// ANCHOR and `builtin_name` as the interpolated text (check_builtin.cpp:2091-2103).
+load_directive_proc_and_name :: proc(call: ^ast.Node) -> (proc_node: ^ast.Node, name: string) {
+	proc_node, name = call, "load"
+	if ce, ok := call.derived.(^ast.Call_Expr); ok && ce.expr != nil {
+		proc_node = ce.expr
+		if bd, bd_ok := unparen_expr(ce.expr).derived.(^ast.Basic_Directive); bd_ok {
+			name = bd.name
+		}
+	}
+	return
+}
+
 // report_load_file_error reports an appropriate error for file loading failures
-report_load_file_error :: proc(call: ^ast.Node, file_error: File_Error, path: string) {
+//
+// C++ Reference: check_builtin.cpp:2087-2105. Three divergences fixed here:
+//   1. C++ interpolates the DIRECTIVE NAME in backticks -- "Failed to `#load` file: ..." --
+//      where the port hardcoded the generic "Failed to load file: ...".
+//   2. C++'s `default:` FALLS THROUGH to gbFileError_Invalid, so an unrecognised error
+//      reports "invalid file or cannot be found". The port invented a fourth
+//      "unknown error" message that C++ never produces, and its Invalid text was
+//      "invalid file" rather than C++'s "invalid file or cannot be found".
+//   3. C++ anchors at ce->proc (the directive itself), not the whole call node.
+report_load_file_error :: proc(proc_node: ^ast.Node, file_error: File_Error, path: string, builtin_name: string) {
 	#partial switch file_error {
 	case .Not_Exists:
-		error_node(call, "Failed to load file: %s; file cannot be found", path)
+		error_node(proc_node, "Failed to `#%s` file: %s; file cannot be found", builtin_name, path)
 	case .Permission:
-		error_node(call, "Failed to load file: %s; file permissions problem", path)
-	case .Invalid:
-		error_node(call, "Failed to load file: %s; invalid file", path)
+		error_node(proc_node, "Failed to `#%s` file: %s; file permissions problem", builtin_name, path)
 	case:
-		error_node(call, "Failed to load file: %s; unknown error", path)
+		// .Invalid and anything unrecognised -- C++'s default falls into the Invalid arm.
+		error_node(proc_node, "Failed to `#%s` file: %s; invalid file or cannot be found", builtin_name, path)
 	}
 }
 
