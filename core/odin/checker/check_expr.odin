@@ -701,7 +701,64 @@ parse_exact_value_from_token :: proc(tok: tokenizer.Token) -> Exact_Value {
 		return nil
 
 	case .Float:
-		// Parse float literal
+		// C++ Reference: exact_value.cpp:363-365.
+		//
+		//     if (!string_contains_char(string, '.') && !string_contains_char(string, '-')) {
+		//         // NOTE(bill): treat as integer
+		//         return exact_value_integer_from_string(string);
+		//     }
+		//
+		// Both tokenizers classify `1e20` as a FLOAT token -- C++'s scan_number sets
+		// Token_Float the moment it sees an 'e'. The difference is here: C++ then looks at
+		// the TEXT, and a float token carrying neither '.' nor '-' becomes an INTEGER exact
+		// value. That is why the oracle reports `1e20` as an 'untyped integer' and calls a
+		// malformed `1e400` an "Invalid INTEGER literal". The port ran every float token
+		// through parse_f64, so `x: int = 1e20` was reported as a truncated float instead.
+		// C++ Reference: exact_value.cpp:335-361 -- the `0h` hexadecimal FLOAT bit-pattern
+		// form is handled BEFORE the integer treatment below and stays a float. It contains
+		// neither '.' nor '-', so without this guard `0h7ff00000_00000000` fell into the
+		// integer branch, failed to parse as base-10, and produced "Invalid float literal"
+		// for every such constant in core/strconv.
+		is_hex_float := len(text) > 2 && text[0] == '0' && (text[1] == 'h' || text[1] == 'H')
+		if !is_hex_float && !strings.contains(text, ".") && !strings.contains(text, "-") {
+			mantissa := text
+			exponent := 0
+			if idx := strings.index_any(text, "eE"); idx >= 0 {
+				mantissa = text[:idx]
+				exp_text := text[idx + 1:]
+				if len(exp_text) > 0 && exp_text[0] == '+' {
+					exp_text = exp_text[1:]
+				}
+				n, ok := strconv.parse_int(exp_text)
+				if !ok || n < 0 {
+					return nil
+				}
+				exponent = n
+			}
+			cleaned := mantissa
+			if strings.contains(mantissa, "_") {
+				cleaned, _ = strings.replace_all(mantissa, "_", "", context.temp_allocator)
+			}
+			v: big.Int
+			if big.int_atoi(&v, cleaned, 10) != nil {
+				return nil
+			}
+			if exponent > 0 {
+				ten: big.Int
+				scale: big.Int
+				if big.int_atoi(&ten, "10", 10) != nil {
+					return nil
+				}
+				if big.int_pow(&scale, &ten, exponent) != nil {
+					return nil
+				}
+				if big.int_mul(&v, &v, &scale) != nil {
+					return nil
+				}
+			}
+			return v
+		}
+
 		value, ok := strconv.parse_f64(text)
 		if ok {
 			return value
@@ -1054,9 +1111,22 @@ check_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, type_
 		}
 
 	case .Float:
-		// Float literal -> untyped float
-		o.type = t_untyped_float
 		o.value = parse_exact_value_from_token(tok)
+
+		// C++ Reference: check_expr.cpp:12318-12325 -- the literal's type comes from the
+		// EXACT VALUE's kind, not the token's:
+		//     switch (node->tav.value.kind) {
+		//     case ExactValue_Float:   t = t_untyped_float;   break;
+		//     case ExactValue_Integer: t = t_untyped_integer; break;
+		// A float TOKEN can carry an integer VALUE, because exact_value_float_from_string
+		// treats text with no '.' and no '-' as an integer (see parse_exact_value_from_token).
+		// `1e20` is such a case: C++ reports it as an 'untyped integer', the port reported it
+		// as a truncated float. Switching on the token kind here is what made the two
+		// disagree even once the value was parsed correctly.
+		o.type = t_untyped_float
+		if _, is_integer := o.value.(big.Int); is_integer {
+			o.type = t_untyped_integer
+		}
 
 		if o.value == nil {
 			error(node, "Invalid float literal: %s", tok.text)
