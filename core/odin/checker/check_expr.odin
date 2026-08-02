@@ -733,6 +733,14 @@ parse_exact_value_from_token :: proc(tok: tokenizer.Token) -> Exact_Value {
 				if !ok || n < 0 {
 					return nil
 				}
+				// C++ Reference: big_int.cpp:274-280 -- big_int_from_string refuses an
+				// exponent above 308 ("A valid integer can never have an exponent larger
+				// than 308 (per `max(f64)`)"), so `1e309` is an INVALID exact value, not a
+				// large one. The parser reports it (see check_basic_literal_value); this
+				// keeps the two in agreement about what the value is. LEDGER #367.
+				if n > 308 {
+					return nil
+				}
 				exponent = n
 			}
 			cleaned := mantissa
@@ -3092,6 +3100,49 @@ UNSIGNED_INTEGER_MAXS := [9]u64 {
 	max(u64), // [8] u64 (18446744073709551615)
 }
 
+// check_update_float_precision rounds a float constant to the target type's precision.
+//
+// C++ Reference: check_expr.cpp:2259-2287.
+//
+//     switch (type->Basic.kind) {
+//     case Basic_f16: case Basic_f16le: case Basic_f16be:
+//         // TODO(bill): This is not technically correct for 16-bit floats, but it will be
+//         // better than before
+//         /*fallthrough*/
+//     case Basic_f32: case Basic_f32le: case Basic_f32be:
+//         {
+//             f64 x_64 = exact_value_to_f64(*value);
+//             f32 x_32 = cast(f32)x_64;
+//             if (cast(f64)x_32 != x_64) {
+//                 // make sure there IS precision loss
+//                 *value = exact_value_float(cast(f64)x_32);
+//                 return true;
+//             }
+//         }
+//         break;
+//     }
+//
+// f16 deliberately falls through to the f32 body -- C++'s own TODO says so. f64, the
+// endian-tagged f64 spellings and untyped float are not listed, so they keep full
+// precision. The caller has already resolved core_type; the Basic_Kind is passed in.
+//
+// This is the whole of C++'s narrowing behaviour for float constants: the value is ROUNDED,
+// never rejected, and 1e50 into an f32 becomes +Inf and is accepted. LEDGER #367.
+@(private = "file")
+check_update_float_precision :: proc(value: ^f64, kind: Basic_Kind) -> bool {
+	#partial switch kind {
+	case .F16, .F16le, .F16be, .F32, .F32le, .F32be:
+		x_64 := value^
+		x_32 := f32(x_64)
+		if f64(x_32) != x_64 {
+			// make sure there IS precision loss
+			value^ = f64(x_32)
+			return true
+		}
+	}
+	return false
+}
+
 // check_representable_as_constant validates if a constant value can be represented in a target type
 // Returns true if the value fits, false otherwise
 // C++ Reference: check_expr.cpp:2107-2361
@@ -3471,55 +3522,49 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 			return true
 		}
 
-		// C++ Reference: check_expr.cpp:2240-2255
-		// Check for float overflow on conversion to smaller types
+		// C++ Reference: check_expr.cpp:2450-2477.
+		//
+		//     } else if (is_type_float(type)) {
+		//         ExactValue v = exact_value_to_float(in_value);
+		//         if (v.kind != ExactValue_Float) return false;
+		//         check_update_float_precision(&v, type);
+		//         if (out_value) *out_value = v;
+		//         switch (type->Basic.kind) {
+		//         case Basic_f16: ... case Basic_f32: ... return true;
+		//         case Basic_f64: ... return true;
+		//         case Basic_UntypedFloat: return true;
+		//         default: GB_PANIC("Compiler error: Unknown float type!");
+		//         }
+		//
+		// There is NO range check. A float constant is representable in EVERY float type
+		// once it is representable as an f64 -- C++ rounds it to the target's precision and
+		// accepts it, even when the rounding overflows to an infinity. `f(1e50)` with an f32
+		// parameter is silently accepted by the oracle; the port rejected it with "Cannot
+		// convert numeric value ... to 'f32'", an over-rejection with no counterpart in C++.
+		//
+		// The f16/f32 limits below were invented (the "check_expr.cpp:2240-2255" citation
+		// pointed at the INTEGER arm's byte-size table). The real bound on a float constant
+		// is imposed one phase earlier, by the parser: big_int_from_string rejects a base-10
+		// exponent above 308, so `1e309` never reaches the checker at all. See parse_operand
+		// in core/odin/parser. LEDGER #367.
 		bt := base_type(ct)
 		if bt == nil || bt.kind != .Basic {
 			return false
 		}
 		basic := bt.variant.(Type_Basic)
 
-		// Float limits
-		F16_MAX :: 65504.0 // Maximum value representable in f16
-		F32_MAX :: 3.40282346e+38 // Maximum value representable in f32
-
-		// Infinity constant for comparison
-		INF_F64 :: 0h7FF0_0000_0000_0000
+		check_update_float_precision(&value_f64, basic.kind)
+		if out_value != nil {
+			out_value^ = value_f64
+		}
 
 		#partial switch basic.kind {
-		case .F16, .F16le, .F16be:
-			// Check f16 overflow (only if not already infinity)
-			abs_val := abs(value_f64)
-			is_inf := abs_val == INF_F64
-			if abs_val > F16_MAX && !is_inf {
-				return false
-			}
-			if out_value != nil {
-				out_value^ = value_f64
-			}
-			return true
-
-		case .F32, .F32le, .F32be:
-			// Check f32 overflow (only if not already infinity)
-			abs_val := abs(value_f64)
-			is_inf := abs_val == INF_F64
-			if abs_val > F32_MAX && !is_inf {
-				return false
-			}
-			if out_value != nil {
-				out_value^ = value_f64
-			}
-			return true
-
-		case .F64, .F64le, .F64be, .Untyped_Float:
-			// f64 is the native type, no overflow check needed
-			if out_value != nil {
-				out_value^ = value_f64
-			}
+		case .F16, .F16le, .F16be, .F32, .F32le, .F32be,
+		     .F64, .F64le, .F64be, .Untyped_Float:
 			return true
 
 		case:
-			// C++ Reference: check_expr.cpp:2472 - GB_PANIC("Compiler error: Unknown float type!")
+			// C++ Reference: check_expr.cpp:2476 - GB_PANIC("Compiler error: Unknown float type!")
 			// Every Basic_Kind carrying Basic_Flag.Float is covered above.
 			panic(fmt.tprintf("check_representable_as_constant: Compiler error: Unknown float type: %v", basic.kind))
 		}

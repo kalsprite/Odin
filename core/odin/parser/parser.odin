@@ -2591,6 +2591,103 @@ parse_inlining_or_tailing_operand :: proc(p: ^Parser, lhs: bool, tok: tokenizer.
 	return ast.new(ast.Bad_Expr, tok.pos, expr)
 }
 
+// check_basic_literal_value reports the literals the compiler cannot turn into an exact value.
+//
+// C++ Reference: parser.cpp:793-827, exact_value_from_token, which parse_operand calls on
+// every Token_Integer/Float/Imag/Rune/String before it builds the Ast_BasicLit:
+//
+//     ExactValue value = exact_value_from_basic_literal(token.kind, s);
+//     if (value.kind == ExactValue_Invalid) {
+//         switch (token.kind) {
+//         case Token_Integer: syntax_error(token, "Invalid integer literal"); break;
+//         case Token_Float:
+//             // NOTE(Jeroen): Could be an integer, see `exact_value_float_from_string`
+//             if (!string_contains_char(s, '.') && !string_contains_char(s, '-')) {
+//                 syntax_error(token, "Invalid integer literal");
+//             } else {
+//                 syntax_error(token, "Invalid float literal");
+//             }
+//             break;
+//         default: syntax_error(token, "Invalid token literal"); break;
+//         }
+//     }
+//
+// The tokenizer has already validated the digits, so the only way a literal that reached
+// here can fail to convert is the exponent bound inside big_int_from_string
+// (src/big_int.cpp:274-280):
+//
+//     // NOTE(Jeroen): A valid integer can never have an exponent larger than 308 (per
+//     //               `max(f64)`). As an integer, not even larger than `max(u128)` which
+//     //               has a base 10 exponent of 38. But we also use this path to parse
+//     //               float literals like those in `core:math.pow10_f64`, so we have to
+//     //               stick with 1e308.
+//     if (exp > 308) { *success = false; return; }
+//
+// and that path is only reached for text with NO '.' and NO '-', which
+// exact_value_float_from_string routes to the integer parser (src/exact_value.cpp:363-366).
+// So `1e309` and `1e400` are syntax errors -- reported as "Invalid INTEGER literal", because
+// the message is chosen by the text, not the token kind -- while `1.0e309` and `1.5e400` go
+// through strtod, overflow to an infinity, and are accepted silently.
+//
+// This bound is the ONLY thing that stops an out-of-range float constant: the checker's
+// check_representable_as_constant has no range check for float types at all. Without it the
+// port accepted `x: f64 = 1e309`. LEDGER #367.
+@(private)
+check_basic_literal_value :: proc(p: ^Parser, tok: tokenizer.Token) {
+	#partial switch tok.kind {
+	case .Integer, .Float:
+		// big_int_from_string reads the base prefix first and only reaches the exponent
+		// branch with `GB_ASSERT(base == 10)` -- in base 16 an 'e' is a DIGIT and is
+		// consumed as one, so `0x1e400` has no exponent at all. `0h` is the float
+		// bit-pattern form and never takes the integer path either
+		// (src/exact_value.cpp:335-360). Only the unprefixed and `0d` spellings are base 10.
+		body := tok.text
+		if len(body) > 2 && body[0] == '0' {
+			switch body[1] {
+			case 'd', 'D':
+				body = body[2:]
+			case 'b', 'B', 'o', 'O', 'x', 'X', 'h', 'H':
+				return
+			}
+		}
+		idx := -1
+		for i in 0 ..< len(body) {
+			switch body[i] {
+			case '.', '-':
+				return
+			case 'e', 'E':
+				if idx < 0 {
+					idx = i
+				}
+			}
+		}
+		if idx < 0 {
+			return
+		}
+		exp_text := body[idx + 1:]
+		if len(exp_text) > 0 && exp_text[0] == '+' {
+			exp_text = exp_text[1:]
+		}
+		exp := 0
+		for i in 0 ..< len(exp_text) {
+			c := exp_text[i]
+			if c == '_' {
+				continue
+			}
+			if c < '0' || c > '9' {
+				return
+			}
+			exp = exp * 10 + int(c - '0')
+			if exp > 308 {
+				break
+			}
+		}
+		if exp > 308 {
+			error(p, tok.pos, "Invalid integer literal")
+		}
+	}
+}
+
 parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 	#partial switch p.curr_tok.kind {
 	case .Ident:
@@ -2611,6 +2708,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 	case .Integer, .Float, .Imag,
 	     .Rune, .String:
 		tok := advance_token(p)
+		check_basic_literal_value(p, tok)
 		bl := ast.new(ast.Basic_Lit, tok.pos, end_pos(tok))
 		bl.tok = tok
 		return bl
