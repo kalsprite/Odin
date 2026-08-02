@@ -773,6 +773,30 @@ check_package_from_path :: proc(path: string, allocator := context.allocator) ->
 		return
 	}
 
+	// C++ Reference: src/main.cpp:4257-4260.
+	//
+	//     if (any_errors()) { print_all_errors(); return 1; }
+	//     checker->parser = parser;
+	//     init_checker(checker);
+	//     ...
+	//     check_parsed_files(checker);
+	//
+	// C++ NEVER type-checks a program whose parse produced diagnostics -- it prints and
+	// exits between the two phases. The port checked anyway, running semantic analysis over
+	// an AST it already knew was malformed and emitting cascade diagnostics C++ never
+	// produces (probe eb4: C++ 1 syntax error, the port that plus 7 invented semantic ones).
+	//
+	// error_count() is exactly C++'s any_errors() now that #180 routes parser diagnostics
+	// through the same collector; before that wiring this gate could not have been written,
+	// because the syntax errors were not in any count the checker could see.
+	//
+	// The library deviation from CPP_DEVIATIONS.md [EMBED-1] still applies: C++ exits the
+	// process here, we return a populated result instead.
+	if error_count() > 0 {
+		harvest_check_diagnostics(&result)
+		return
+	}
+
 	// Run the checker.
 	//
 	// The error-limit signal travels out of the checker on the global error collector, the

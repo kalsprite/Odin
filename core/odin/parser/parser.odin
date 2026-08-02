@@ -398,7 +398,10 @@ expect_token :: proc(p: ^Parser, kind: tokenizer.Token_Kind) -> tokenizer.Token 
 	if prev.kind != kind {
 		e := tokenizer.to_string(kind)
 		g := tokenizer.token_to_string(prev)
-		error(p, prev.pos, "expected '%s', got '%s'", e, g)
+		// C++ Reference: src/parser.cpp:1619. casescan could not pair this one: the port had
+		// two literals normalising to the same key and C++ has two variants, so it was
+		// reported as ambiguous and skipped. expect_token is C++'s quoted form.
+		error(p, prev.pos, "Expected '%s', got '%s'", e, g)
 	}
 	advance_token(p)
 	return prev
@@ -3879,7 +3882,7 @@ parse_value_decl :: proc(p: ^Parser, names: []^ast.Expr, docs: ^ast.Comment_Grou
 
 		values = parse_rhs_expr_list(p)
 		if len(values) > len(names) {
-			error(p, p.curr_tok.pos, "too many values on the right-hand side of the declaration")
+			error(p, p.curr_tok.pos, "Too many values on the right hand side of the declaration")
 		} else if len(values) < len(names) && !is_mutable {
 			error(p, p.curr_tok.pos, "All constant declarations must be defined")
 		} else if len(values) == 0 {
