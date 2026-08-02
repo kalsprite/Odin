@@ -4048,7 +4048,11 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 				param_value.kind = .Constant
 				param_value.value = o.value
 			} else {
-				error(expr, "Default parameter must be a constant")
+				// C++ Reference: check_type.cpp:1815-1816 -- names the offending EXPRESSION,
+				// not a type. LEDGER #149.
+				expr_str := expr_to_string(o.expr)
+				defer delete(expr_str)
+				error(expr, "Default parameter must be a constant, got %s", expr_str)
 			}
 		}
 	} else {
