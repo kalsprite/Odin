@@ -3622,8 +3622,20 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		if !path_ok {
 			return false
 		}
+		hash_kind, hk_ok := hash_op.value.(string)
+		if !hk_ok {
+			return false
+		}
 
+		// C++ Reference: check_builtin.cpp:2546 -- the kind is validated AFTER the file is
+		// loaded, so a bad path reports the file error and never reaches this.
 		cache, load_ok := cache_load_file_directive(ctx, call, original_path, true, .Contents)
+		if load_ok && cache != nil {
+			pn, _ := load_directive_proc_and_name(call)
+			if !check_hash_kind_valid(pn, name, hash_kind) {
+				return false
+			}
+		}
 		if load_ok && cache != nil {
 			// C++ Reference: check_builtin.cpp:2552-2554 -- t_untyped_integer, Constant,
 			// exact_value_u64(hash_value). Type and mode match.
@@ -3842,6 +3854,37 @@ cache_load_file_directive :: proc(
 	}
 
 	return cache, true
+}
+
+// SUPPORTED_HASH_KINDS is C++'s supported_hashes table (check_builtin.cpp:2360-2369).
+// ORDER MATTERS: the invalid-kind diagnostic lists them in exactly this order.
+SUPPORTED_HASH_KINDS := [?]string{
+	"adler32", "crc32", "crc64",
+	"fnv32", "fnv64", "fnv32a", "fnv64a",
+	"murmur32", "murmur64",
+}
+
+// check_hash_kind_valid reports C++'s invalid-hash-kind diagnostic.
+//
+// C++ Reference: check_builtin.cpp:2371-2386. Shared by `#load_hash` and `#hash`; the
+// message interpolates whichever directive name was used and anchors at ce->proc. The
+// continuation lines are an ERROR_BLOCK -- a header plus one line per kind -- so the whole
+// thing is 10 lines, and error_line must be inside begin/end_error_block or it escapes to
+// stderr ahead of the diagnostic (LEDGER 346).
+check_hash_kind_valid :: proc(proc_node: ^ast.Node, directive_name: string, hash_kind: string) -> bool {
+	for k in SUPPORTED_HASH_KINDS {
+		if k == hash_kind {
+			return true
+		}
+	}
+	begin_error_block()
+	defer end_error_block()
+	error_node(proc_node, "Invalid hash kind passed to `#%s`, got: %s", directive_name, hash_kind)
+	error_line("\tAvailable hash kinds:\n")
+	for k in SUPPORTED_HASH_KINDS {
+		error_line("\t%s\n", k)
+	}
+	return false
 }
 
 // load_directive_proc_and_name unwraps a `#load(...)`-style call to the directive node and
