@@ -2918,8 +2918,30 @@ check_bit_set_type_expr :: proc(ctx: ^Checker_Context, bst: ^ast.Bit_Set_Type, t
 		upper := exact_value_to_i64(jv)
 
 		if lower > upper {
+			// C++ Reference: check_type.cpp:1336-1341 formats the BigInts themselves via
+			// big_int_to_string, not an i64. The port went through exact_value_to_i64, which
+			// renders identically for anything that fits in 64 bits and TRUNCATES anything
+			// that does not -- the same class as #166. Print the big integers, as C++ does.
+			if iv_big, ok1 := iv.(big.Int); ok1 {
+				if jv_big, ok2 := jv.(big.Int); ok2 {
+					lo := iv_big
+					hi := jv_big
+					si, _ := big.int_itoa_string(&lo, 10, false, context.temp_allocator)
+					sj, _ := big.int_itoa_string(&hi, 10, false, context.temp_allocator)
+					error(bst.elem, "Lower interval bound larger than upper bound, %s .. %s", si, sj)
+					return true
+				}
+			}
 			error(bst.elem, "Lower interval bound larger than upper bound, %d .. %d", lower, upper)
-			return false
+			// C++ Reference: check_type.cpp:1343 -- a bare `return;` from a VOID function
+			// whose caller (check_type.cpp:3903) allocated the type and never inspects a
+			// result. C++ therefore reports the bad bounds and leaves a usable type behind.
+			//
+			// The port returned false, which propagates to check_type_expr and produces a
+			// SECOND, spurious "'bit_set[5 ..= 2]' is not a type" that C++ never emits.
+			// Probe iv3: oracle 1 diagnostic, port 2. Same invalidate-and-cascade shape as
+			// the matrix row/column fix above.
+			return true
 		}
 
 		// Get default type
@@ -3421,7 +3443,17 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 			// not invalidate the type and does not skip the column check below. The port did
 			// both, so `matrix[0, 0]f32` produced one diagnostic where C++ produces two, plus
 			// a spurious "'matrix[0, 0]f32' is not a type" from the invalidation.
-			error_node(mt.row_count, "Invalid matrix row count, expected %d+ rows, got %d", MATRIX_ELEMENT_COUNT_MIN, row_count)
+			// C++ Reference: check_type.cpp:3110-3116. Two branches, and C++ prints the
+			// SOURCE EXPRESSION via expr_to_string(row.expr) -- not the evaluated count. The
+			// port printed the integer, which is identical for `matrix[0,2]f32` and WRONG for
+			// `matrix[ROWS,2]f32`: C++ says "got ROWS", the port said "got 0". Probe mxc1.
+			if mt.row_count == nil {
+				error_node(mt, "Invalid matrix row count, got nothing")
+			} else {
+				rc_str := expr_to_string(mt.row_count)
+				defer delete(rc_str)
+				error_node(mt.row_count, "Invalid matrix row count, expected %d+ rows, got %s", MATRIX_ELEMENT_COUNT_MIN, rc_str)
+			}
 		}
 	}
 
@@ -3466,7 +3498,15 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 			// copy-paste slip upstream. The port had corrected it to "columns", which is a
 			// byte-for-byte divergence in text the comparator checks. Reproduced as-is and
 			// reported as task #189. See also the same class in progress#159.
-			error_node(mt.column_count, "Invalid matrix column count, expected %d+ rows, got %d", MATRIX_ELEMENT_COUNT_MIN, column_count)
+			// C++ Reference: check_type.cpp:3120-3126, same two branches and the same
+			// expr_to_string. Probe mxc2.
+			if mt.column_count == nil {
+				error_node(mt, "Invalid matrix column count, got nothing")
+			} else {
+				cc_str := expr_to_string(mt.column_count)
+				defer delete(cc_str)
+				error_node(mt.column_count, "Invalid matrix column count, expected %d+ rows, got %s", MATRIX_ELEMENT_COUNT_MIN, cc_str)
+			}
 		}
 	}
 
