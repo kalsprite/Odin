@@ -591,25 +591,49 @@ split_call_arguments :: proc(call: ^ast.Call_Expr, allocator := context.allocato
 	return Split_Args{positional = positional, named = named}
 }
 
-// check_call_parameter_mixture validates that positional arguments don't appear after named ones
-// C++ Reference: check_expr.cpp (implied in argument parsing)
-// Returns true if argument order is valid, false if positional appears after named
-check_call_parameter_mixture :: proc(ctx: ^Checker_Context, call: ^ast.Call_Expr) -> bool {
-	seen_named := false
-
-	for arg in call.args {
-		_, is_named := arg.derived.(^ast.Field_Value)
-
-		if is_named {
-			seen_named = true
-		} else if seen_named {
-			// Positional argument after a named argument
-			error_node(arg, "Positional arguments must appear before named arguments in procedure calls")
-			return false
-		}
+// check_call_parameter_mixture rejects an argument list that mixes `field = value` arguments
+// with positional ones. `context_name` names the construct for the message.
+//
+// C++ Reference: check_expr.cpp:8525-8551.
+//
+// This procedure previously had no callers at all, cited "check_expr.cpp (implied in argument
+// parsing)", and implemented only C++'s `allow_mixed` branch under an invented message
+// ("Positional arguments must appear before named arguments in procedure calls"). All four of
+// C++'s call sites take the DEFAULT branch - allow_mixed is never passed as true - so the one
+// rule that was written is the one C++ never applies here, and the rule C++ always applies was
+// missing. Both branches are now present and the default is faithful.
+check_call_parameter_mixture :: proc(args: []^ast.Expr, context_name: string, allow_mixed := false) -> bool {
+	success := true
+	if len(args) == 0 {
+		return true
 	}
 
-	return true
+	// C++ lines 8528-8538
+	if allow_mixed {
+		was_named := false
+		for arg in args {
+			_, is_named := arg.derived.(^ast.Field_Value)
+			if was_named && !is_named {
+				error_node(arg, "Non-named parameter is not allowed to follow named parameter i.e. 'field = value' in a %s", context_name)
+				success = false
+				break
+			}
+			was_named = was_named || is_named
+		}
+		return success
+	}
+
+	// C++ lines 8539-8549
+	_, first_is_field_value := args[0].derived.(^ast.Field_Value)
+	for arg in args {
+		_, is_field_value := arg.derived.(^ast.Field_Value)
+		mix := is_field_value != first_is_field_value
+		if mix {
+			error_node(arg, "Mixture of 'field = value' and value elements in a %s is not allowed", context_name)
+			success = false
+		}
+	}
+	return success
 }
 
 // filter_proc_group_by_param_count removes candidates with incompatible parameter counts

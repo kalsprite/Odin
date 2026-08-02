@@ -9022,46 +9022,56 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			add_entity_use(ctx, call.expr, type_entity)
 		}
 
-		// Validate argument count
-		// C++ Reference: check_expr.cpp:8064-8072
-		if len(call.args) == 0 {
-			// No arguments - error
-			type_str := type_to_string(target_type)
-			error(node, "Missing argument in conversion to '%s'", type_str)   // C++ check_expr.cpp:8598
-			o.mode = .Invalid
-			o.expr = node
-			return .Stmt
-		}
-
-		// Check for field value syntax (not allowed in type conversion)
-		// C++ Reference: check_expr.cpp:8073-8081
-		if call.args[0] != nil {
-			if _, is_fv := call.args[0].derived.(^ast.Field_Value); is_fv {
-				type_str := type_to_string(target_type)
-				error(call.args[0], "Field values are not allowed in type conversion '%s'", type_str)
-				error_line("\tSuggestion: use '%s{{...}}' for compound literals", type_str)
-				o.mode = .Invalid
-				o.expr = node
-				return .Stmt
-			}
-		}
-
 		// Handle polymorphic record type instantiation
 		// When target_type is a polymorphic struct/union, this is type instantiation
 		// like Container(int) or Fixed_Array(10, f32), not a type conversion
 		// Arguments can be types ($T: typeid) or constants ($N: int)
 		// C++ Reference: check_expr.cpp handles this differently - see check_type.cpp:3412
 		if is_type_polymorphic_record_unspecialized(target_type) {
+			// C++ Reference: check_expr.cpp:8563
+			if !check_call_parameter_mixture(call.args, "polymorphic type construction") {
+				o.mode = .Invalid
+				o.expr = node
+				return .Stmt
+			}
+
 			// Check all arguments - they can be types or constant values
 			named_fields := len(call.args) > 0 && is_call_expr_field_value(call.args[0])
 
 			operand_list := make([dynamic]Operand, 0, 2 * len(call.args), context.temp_allocator)
 			if named_fields {
-				// `Foo(T = int)`: each field value is checked on its own; there
-				// is nothing positional to unpack.
+				// C++ Reference: check_expr.cpp:8171-8194. Each named argument is checked on
+				// its own; there is nothing positional to unpack. The port used to hand
+				// check_expr_or_type the whole Field_Value node rather than its VALUE, so the
+				// operand never described `int` in `R(T = int)` - it described the assignment.
+				// C++ also hints a constant parameter's value with that parameter's declared
+				// type, which is what lets `R(N = 4)` see 4 as an int rather than untyped.
 				resize(&operand_list, len(call.args))
 				for arg, i in call.args {
-					check_expr_or_type(ctx, &operand_list[i], arg, nil)
+					fv, fv_ok := arg.derived.(^ast.Field_Value)
+					if !fv_ok {
+						check_expr_or_type(ctx, &operand_list[i], arg, nil)
+						continue
+					}
+					if fv.value == nil {
+						error_node(arg, "Expected a value")
+						continue
+					}
+					hinted := false
+					if ident, id_ok := fv.field.derived.(^ast.Ident); id_ok {
+						if index := lookup_polymorphic_record_parameter(target_type, ident.name); index >= 0 {
+							if params := get_record_polymorphic_params(target_type); params != nil {
+								e := params.variables[index]
+								if e != nil && e.kind == .Constant {
+									check_expr_with_type_hint(ctx, &operand_list[i], fv.value, entity_type(e))
+									hinted = true
+								}
+							}
+						}
+					}
+					if !hinted {
+						check_expr_or_type(ctx, &operand_list[i], fv.value, nil)
+					}
 				}
 			} else {
 				// Positional parameters, so a multi-valued expression spreads
@@ -9085,13 +9095,8 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			// tripped the untyped-parameter diagnostic inside check_record_polymorphic_params
 			// - blaming the DECLARATION for a mistake made at the call.
 			//
-			// Applied to the positional path only: C++ reorders named-field arguments into
-			// parameter order first (check_expr.cpp:8241-8302) and this loop then compares
-			// operand i against parameter i. The port does not reorder, so running it over
-			// named-field operands would compare the wrong pairs. Named-field ordering is
-			// still unported; see task #183.
 			poly_err := false
-			if !named_fields {
+			{
 				if tuple := get_record_polymorphic_params(target_type); tuple != nil {
 					param_count := len(tuple.variables)
 
@@ -9107,6 +9112,71 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 						if !cd_ok || cd.param_value.kind == .Invalid {
 							break
 						}
+					}
+
+					// C++ lines 8241-8302: named arguments are placed at their PARAMETER's
+					// index, not at the position they were written. Without this,
+					// `R(N = 4, T = int)` bound T:=4 and N:=int. Every diagnostic in this
+					// block was absent from the port.
+					if named_fields {
+						ordered := make([]Operand, param_count, context.temp_allocator)
+						visited := make([]bool, param_count, context.temp_allocator)
+						for arg, i in call.args {
+							fv, fv_ok := arg.derived.(^ast.Field_Value)
+							if !fv_ok {
+								continue
+							}
+							ident, id_ok := fv.field.derived.(^ast.Ident)
+							if !id_ok {
+								field_str := expr_to_string(fv.field)
+								error_node(arg, "Invalid parameter name '%s' in polymorphic type call", field_str)
+								poly_err = true
+								continue
+							}
+							index := lookup_polymorphic_record_parameter(target_type, ident.name)
+							if index < 0 {
+								error_node(arg, "No parameter named '%s' for this polymorphic type", ident.name)
+								poly_err = true
+								continue
+							}
+							if visited[index] {
+								error_node(arg, "Duplicate parameter '%s' in polymorphic type", ident.name)
+								poly_err = true
+								continue
+							}
+							visited[index] = true
+							if i < len(operands) {
+								ordered[index] = operands[i]
+							}
+						}
+						// C++ lines 8281-8301: a parameter nobody named and that has no way to
+						// be filled is an error - except a blank one, which cannot be named.
+						for i in 0 ..< param_count {
+							if visited[i] {
+								continue
+							}
+							e := tuple.variables[i]
+							if e == nil || is_blank_ident(e.token.text) {
+								continue
+							}
+							if e.kind == .Type_Name {
+								error_node(node, "Type parameter '%s' is missing in polymorphic type call", e.token.text)
+							} else {
+								type_str := type_to_string(entity_type(e))
+								error_node(node, "Parameter '%s' of type '%s' is missing in polymorphic type call", e.token.text, type_str)
+							}
+							poly_err = true
+						}
+						operands = ordered
+					}
+
+					// C++ lines 8304-8307: ordering failures return before the arity checks,
+					// which would otherwise count a list this code already knows is wrong.
+					if poly_err {
+						o.mode = .Invalid
+						o.type = t_invalid
+						o.expr = node
+						return .Expr
 					}
 
 					// C++ lines 8310-8315: drop trailing operands that were never supplied.
@@ -9244,6 +9314,38 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 				return .Expr
 			}
 		}
+
+		// C++ Reference: check_expr.cpp:8590
+		if !check_call_parameter_mixture(call.args, "type conversion") {
+			o.mode = .Invalid
+			o.expr = node
+			return .Stmt
+		}
+
+		// Validate argument count
+		// C++ Reference: check_expr.cpp:8064-8072
+		if len(call.args) == 0 {
+			// No arguments - error
+			type_str := type_to_string(target_type)
+			error(node, "Missing argument in conversion to '%s'", type_str)   // C++ check_expr.cpp:8598
+			o.mode = .Invalid
+			o.expr = node
+			return .Stmt
+		}
+
+		// Check for field value syntax (not allowed in type conversion)
+		// C++ Reference: check_expr.cpp:8073-8081
+		if call.args[0] != nil {
+			if _, is_fv := call.args[0].derived.(^ast.Field_Value); is_fv {
+				type_str := type_to_string(target_type)
+				error(call.args[0], "Field values are not allowed in type conversion '%s'", type_str)
+				error_line("\tSuggestion: use '%s{{...}}' for compound literals", type_str)
+				o.mode = .Invalid
+				o.expr = node
+				return .Stmt
+			}
+		}
+
 
 		// Handle complex/quaternion constructors with multiple arguments
 		// C++ Reference: check_expr.cpp:8083-8108
