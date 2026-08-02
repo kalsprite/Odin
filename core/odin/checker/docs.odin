@@ -303,8 +303,13 @@ print_doc_package :: proc(info: ^Checker_Info, pkg: ^ast.Package, writer: ^strin
 	// C++ line 200: Print package name
 	print_doc_line_string(0, fmt.tprintf("package %s", pkg.name), writer)
 
-	// C++ lines 203-209: Print package-level docs from all files
-	for _, file in pkg.files {
+	// C++ lines 203-209: Print package-level docs from all files.
+	//
+	// sorted_files, not raw map iteration: C++ walks pkg->files, the array the checker sorted by
+	// basename (checker.cpp:6052). When two files in a package both carry a package doc comment,
+	// map order decided which was printed first -- core/container/queue emitted queue.odin's doc
+	// ahead of mp_queue.odin's, where C++ emits them in basename order.
+	for file in sorted_files(pkg.files) {
 		if file != nil && file.pkg_decl != nil {
 			pkg_decl := file.pkg_decl.derived.(^ast.Package_Decl)
 			if pkg_decl != nil {
