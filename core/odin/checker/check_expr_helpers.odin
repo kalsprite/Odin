@@ -1293,11 +1293,21 @@ check_for_dynamic_literals :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> bo
 		return true
 	}
 
-	// Not enabled - C++'s first line verbatim (check_expr.cpp:10516). C++ follows it with
-	// error_line() suggestions, deliberately not reproduced: `error` is buffered by the
-	// collector while `error_line` writes immediately, so appending them prints the detail
-	// before its own header (LEDGER task 192).
+	// C++ Reference: check_expr.cpp:10516-10521.
+	//
+	// The two continuation lines used to be omitted on the grounds that `error` is buffered
+	// while `error_line` writes immediately, so they would print before their own header
+	// (LEDGER task 192). That reasoning is obsolete: begin_error_block/end_error_block exist
+	// precisely to hold the header and its continuations together, and the same omission has
+	// now been found and fixed at four other sites this session.
+	begin_error_block()
+	defer end_error_block()
 	error(node, "Compound literals of dynamic types are disabled by default")
+	error_line("\tSuggestion: If you want to enable them for this specific file, add '#+feature dynamic-literals' at the top of the file\n")
+	error_line("\tWarning: Please understand that dynamic literals will implicitly allocate using the current 'context.allocator' in that scope\n")
+	if build_context.ODIN_DEFAULT_TO_NIL_ALLOCATOR {
+		error_line("\tWarning: As '-default-to-panic-allocator' has been set, the dynamic compound literal may not be initialized as expected\n")
+	}
 
 	return false
 }

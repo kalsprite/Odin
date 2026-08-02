@@ -1671,7 +1671,23 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 	}
 
 	if !defined {
-		error(node, "Cannot compare '%s' and '%s'", type_to_string(x.type), type_to_string(y.type))
+		// C++ Reference: check_expr.cpp:3255-3267 and 3292. C++ distinguishes THREE cases and
+		// wraps each in "Cannot compare expression. %s."; the port collapsed all of them into
+		// one invented sentence that named the two types and nothing else -- so a comparison
+		// failing because a type is not simply comparable read the same as one failing because
+		// the operator is undefined between two perfectly comparable types.
+		xs := type_to_string(x.type)
+		ys := type_to_string(y.type)
+		op_str := tokenizer.to_string(op)
+		err_str: string
+		if !is_type_comparable(x.type) {
+			err_str = fmt.tprintf("Type '%s' is not simply comparable, so operator '%s' is not defined for it", xs, op_str)
+		} else if !is_type_comparable(y.type) {
+			err_str = fmt.tprintf("Type '%s' is not simply comparable, so operator '%s' is not defined for it", ys, op_str)
+		} else {
+			err_str = fmt.tprintf("Operator '%s' not defined between the types '%s' and '%s'", op_str, xs, ys)
+		}
+		error(node, "Cannot compare expression. %s.", err_str)
 		x.type = t_untyped_bool
 		x.mode = .Invalid
 		return
