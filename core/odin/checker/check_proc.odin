@@ -892,8 +892,16 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 		// C++ Reference: check_expr.cpp:6730-6776
 		if !value_bool {
 			if print_err {
+				// C++ opens an ERROR_BLOCK here (check_expr.cpp:7113) so the header, the
+				// definition list and the caller-location line are flushed together. Without
+				// it the unblocked error_line output raced ahead of the error() -- which goes
+				// through the collector and is position-sorted -- so the continuation lines
+				// appeared at the very top of the output, detached from their own diagnostic.
+				begin_error_block()
+				defer end_error_block()
+
 				// Display error with clause expression
-				// C++ Reference: check_expr.cpp:6742-6744
+				// C++ Reference: check_expr.cpp:7115-7117
 				clause_str := expr_to_string(clause)
 				defer delete(clause_str)
 				error(clause, "'where' clause evaluated to false:\n\t%s", clause_str)
@@ -958,8 +966,14 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 					}
 				}
 
+				// C++ check_expr.cpp:7153-7156. Unlike the two "expects a constant boolean
+				// evaluation" branches above (C++ 7105/7109), which DO emit a second
+				// diagnostic, this branch writes a CONTINUATION line carrying the position
+				// itself: error_line("%s at caller location\n", ...). The port used error()
+				// here too, which prefixed "Error: " and incremented the error count, so a
+				// single failing clause was reported as two errors instead of one.
 				if call_expr != nil {
-					error(call_expr, "at caller location")
+					error_line("%s at caller location\n", token_pos_to_string(ast_token_pos(call_expr)))
 				}
 			}
 			return false

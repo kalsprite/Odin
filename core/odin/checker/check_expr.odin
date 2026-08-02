@@ -9504,6 +9504,37 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			// Update callee for proper entity tracking
 			callee.type = entity_type(poly_data.gen_entity)
 			add_entity_use(ctx, call.expr, poly_data.gen_entity)
+
+			// C++ Reference: check_expr.cpp:7281-7305, reached from the SINGLE-procedure
+			// call at check_expr.cpp:8107.
+			//
+			// LEDGER task 278/279. C++ runs one `check_call_arguments_single` for both
+			// proc-group and single calls, so this committed pass happens either way. The
+			// port has two argument checkers -- `check_call_arguments_single` for groups and
+			// this one for everything else -- and only the group copy had the block, so for
+			// a plain polymorphic call the committed pass NEVER RAN. Nothing set
+			// `where_clauses_evaluated`, so check_proc_body's evaluation (check_proc.odin,
+			// print_err = !where_clauses_evaluated) printed the failure on every entry --
+			// four times per instantiation, with no "at caller location", because only the
+			// call site passes a non-nil call expression.
+			//
+			// A false clause does NOT abort the call here: C++'s committed branch records
+			// the flag and continues, and only skips RE-scheduling the body. The port
+			// already schedules unconditionally inside
+			// find_or_generate_polymorphic_procedure_from_parameters, exactly as C++ does at
+			// check_expr.cpp:651, so there is no re-schedule to skip.
+			gen_decl := poly_data.gen_entity.decl_info
+			if gen_decl != nil && gen_decl.proc_lit != nil {
+				where_ctx := ctx^
+				where_ctx.scope = gen_decl.scope
+				where_ctx.decl = gen_decl
+				where_ctx.proc_name = poly_data.gen_entity.token.text
+				where_ctx.curr_proc_decl = gen_decl
+				where_ctx.curr_proc_sig = entity_type(poly_data.gen_entity)
+
+				_ = evaluate_where_clauses(&where_ctx, call, gen_decl.scope, gen_decl.proc_lit.where_clauses, true)
+				gen_decl.where_clauses_evaluated = true
+			}
 		}
 		// Continue with normal argument checking using the specialized type
 	}
