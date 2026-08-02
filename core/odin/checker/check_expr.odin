@@ -9902,6 +9902,25 @@ apply_optional_ok_call_result :: proc(ctx: ^Checker_Context, o: ^Operand, call: 
 set_call_result_type :: proc(o: ^Operand, result_type: ^Type, call_node: ^ast.Node) {
 	o.expr = call_node
 
+	// A call's result is never a compile-time constant, so it must not carry an exact value.
+	//
+	// It could, and did. The callee is checked into THIS SAME operand, and for a procedure
+	// entity that sets `o.value = exact_value_procedure(...)` (check_expr.odin:583, matching
+	// C++ check_expr.cpp:2025). Nothing downstream cleared it, so after checking `g()` the
+	// operand read mode=Value, type=int, value=Exact_Value_Procedure{g} -- the CALLEE's value
+	// attached to the CALL's result.
+	//
+	// C++ avoids this by resetting the whole operand at the top of every expression check
+	// (check_expr.cpp:12247-12249: mode=Invalid, type=t_invalid, value={ExactValue_Invalid}).
+	// The port's dispatch has no such reset, so the stale value survived.
+	//
+	// Consequence found via LEDGER #163: check_type.odin's default-parameter chain tests
+	// `o.value != nil` as C++ tests `value.kind != ExactValue_Invalid`, so a call passed as a
+	// default parameter was silently accepted as constant -- `proc(x: int = g())` produced no
+	// diagnostic where the oracle rejects it. Any other site using o.value as a proxy for
+	// constness had the same wrong answer available to it.
+	o.value = nil
+
 	if result_type == nil {
 		// Procedure returns nothing
 		o.mode = .No_Value
