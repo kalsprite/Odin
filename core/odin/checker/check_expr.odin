@@ -9067,7 +9067,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	if pt.calling_convention == .Odin {
 		// Odin calling convention requires context to be defined
 		if .Context_Defined not_in ctx.scope.flags {
-			error_node(node, "Procedures requiring 'context' cannot be called in this scope")
+			error_node(node, "Procedures requiring a 'context' cannot be called at the global scope")   // C++ check_expr.cpp:8870
 			o.mode = .Invalid
 			o.expr = node
 			return .Stmt

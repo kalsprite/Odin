@@ -1396,17 +1396,22 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	// Check results
 	if len(valid_candidates) == 0 {
 		// No valid candidates
-		error_node(operand.expr, "No procedures in group match the given arguments")
-		// Print argument types for better diagnostics
-		if len(positional_operands) > 0 {
-			error_line("Given argument types:")
-			for op, i in positional_operands {
-				if op.type != nil {
-					type_str := type_to_string(op.type)
-					error_line("\t[%d] %s", i, type_str)
-				} else {
-					error_line("\t[%d] <unknown>", i)
-				}
+		// C++ Reference: check_expr.cpp:7676-7684. C++ NAMES THE GROUP and renders the
+		// argument list as a bulleted block; the port printed neither the group name nor
+		// C++'s format ("\t[0] T" instead of "\t • T"), and emitted the continuation
+		// outside an error block so it preceded the diagnostic.
+		begin_error_block()
+		defer end_error_block()
+		expr_name := expr_to_string(operand.expr)
+		defer delete(expr_name)
+		error_node(operand.expr, "No procedures or ambiguous call for procedure group '%s' that match with the given arguments", expr_name)
+		if len(positional_operands) == 0 {
+			error_line("\tNo given arguments\n")
+		} else {
+			error_line("\tGiven argument types:\n")
+			for op in positional_operands {
+				type_str := type_to_string(op.type)
+				error_line("\t \u2022 %s\n", type_str)
 			}
 		}
 		data.error = true
