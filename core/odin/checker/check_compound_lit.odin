@@ -973,53 +973,49 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		key_type := mp.key
 		value_type := mp.value
 
-		// Maps are never constant (require runtime allocation)
-		is_constant = false
-
-		// Empty map literal is OK
+		// C++ Reference: check_expr.cpp:11374-11407. This arm was a REIMPLEMENTATION, not a
+		// port, and diverged in five ways -- two of which rejected valid code:
+		//   1. Elements were checked with a bare check_expr, no type hint, so an
+		//      implicit-selector key (`map[E]int{.A = 1}`) had nothing to resolve against
+		//      and drew a spurious "Cannot determine type for implicit selector expression".
+		//   2. No typeid branch, so a typeid-keyed literal (`map[typeid]int{int = 1}`) drew
+		//      a spurious "'int' is not an expression but a type".
+		//   3. check_assignment was replaced by check_is_assignable_to plus two invented
+		//      messages ("Cannot use '%s' as key in map[%s]"), losing C++'s wording.
+		//   4. The invalid-bail sat BEFORE the assignment check rather than after it.
+		//   5. A failed key `continue`d past the VALUE, so its diagnostics were dropped.
+		// The empty-literal break also comes BEFORE is_constant is cleared in C++ (:11375).
 		if len(cl.elems) == 0 {
 			break
 		}
+		is_constant = false
 
-		// All elements must be key = value pairs
+		key_is_typeid := is_type_typeid(key_type)
+		value_is_typeid := is_type_typeid(value_type)
+
 		for elem in cl.elems {
 			fv, is_fv := elem.derived.(^ast.Field_Value)
 			if !is_fv {
-				error(elem, "Map literals require 'key = value' entries")
+				error(elem, "Only 'field = value' elements are allowed in a map literal")
 				continue
 			}
 
-			// Check key expression
-			key_operand := Operand{}
-			check_expr(ctx, &key_operand, fv.field)
-
-			if key_operand.mode == .Invalid {
+			if key_is_typeid {
+				check_expr_or_type(ctx, o, fv.field, key_type)
+			} else {
+				check_expr_with_type_hint(ctx, o, fv.field, key_type)
+			}
+			check_assignment(ctx, o, key_type, "map literal")
+			if o.mode == .Invalid {
 				continue
 			}
 
-			// Key must be assignable to key type
-			if !check_is_assignable_to(ctx, &key_operand, key_type) {
-				key_type_str := type_to_string(key_type)
-				val_type_str := type_to_string(key_operand.type)
-				error(fv.field, "Cannot use '%s' as key in map[%s]", val_type_str, key_type_str)
-				continue
+			if value_is_typeid {
+				check_expr_or_type(ctx, o, fv.value, value_type)
+			} else {
+				check_expr_with_type_hint(ctx, o, fv.value, value_type)
 			}
-
-			// Check value expression
-			value_operand := Operand{}
-			check_expr(ctx, &value_operand, fv.value)
-
-			if value_operand.mode == .Invalid {
-				continue
-			}
-
-			// Value must be assignable to value type
-			if !check_is_assignable_to(ctx, &value_operand, value_type) {
-				val_type_str := type_to_string(value_type)
-				given_type_str := type_to_string(value_operand.type)
-				error(fv.value, "Cannot use '%s' as value in map (expected '%s')", given_type_str, val_type_str)
-				continue
-			}
+			check_assignment(ctx, o, value_type, "map literal")
 		}
 
 	case Type_Bit_Set:
