@@ -7884,9 +7884,12 @@ type_to_string :: proc(t: ^Type, shorthand := true) -> string {
 		return "<no type>"
 	}
 
-	if t == t_invalid {
-		return "<invalid>"
-	}
+	// NOTE: C++ has NO special case for t_invalid. t_invalid is basic_types[Basic_Invalid]
+	// (types.cpp:581) whose name string is "invalid type" (types.cpp:484), so it renders
+	// through the ordinary Basic path. The port had an invented early return here producing
+	// "<invalid>", which preempted basic_kind_to_string -- which already returns the correct
+	// "invalid type". Every diagnostic naming an invalid type was therefore wrong.
+	// The nil case above IS faithful: C++ prints "<no type>" at types.cpp:5368. LEDGER 286.
 
 	builder := strings.builder_make(context.temp_allocator)
 	write_type_to_string(&builder, t, shorthand)

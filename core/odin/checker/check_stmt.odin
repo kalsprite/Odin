@@ -2260,12 +2260,6 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 		}
 	}
 
-	// LHS must be an identifier
-	lhs_ident, is_ident := lhs.derived.(^ast.Ident)
-	if !is_ident {
-		error_node(lhs, "Expected an identifier, got '%v'", lhs)
-	}
-
 	// Check RHS expression (the value being type-switched)
 	x: Operand
 	x.mode = .Invalid
@@ -2294,6 +2288,23 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 	if switch_kind == .Invalid {
 		type_str := type_to_string(x.type)
 		error_node(rhs, "Invalid type for this type switch expression, got '%s'", type_str)
+		return viral_flags
+	}
+
+	// C++ check_stmt.cpp:1487-1490. Three things about this, all deliberate:
+	//
+	//   1. It sits AFTER the switch-kind validation, which RETURNS. The port ran it before
+	//      check_expr, so an invalid type switch reported this extra diagnostic that C++
+	//      never emits.
+	//   2. It names the node kind, not the node. The port passed the AST node to a "%v",
+	//      which dumped ~700 characters of Expr struct -- absolute file paths, offsets and
+	//      raw pointers -- into the diagnostic. That is the task 83 class at its worst.
+	//   3. UPSTREAM ODDITY, reproduced deliberately: C++ reports the kind of RHS and
+	//      positions the error at RHS, even though it is LHS that failed the test. Almost
+	//      certainly a copy-paste slip, but it is what the oracle prints.
+	lhs_ident, is_ident := lhs.derived.(^ast.Ident)
+	if !is_ident {
+		error_node(rhs, "Expected an identifier, got '%s'", ast_kind_string(rhs))
 		return viral_flags
 	}
 
