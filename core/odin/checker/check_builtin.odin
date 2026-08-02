@@ -5236,6 +5236,11 @@ check_builtin_byte_swap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 
 // check_builtin_overflow_arith handles overflow_add, overflow_sub, overflow_mul
 // C++ Reference: check_builtin.cpp L5338-5380
+// C++ Reference: check_builtin.cpp:5747/5753/5762, duplicated at 5798/5804/5813, plus the
+// float variants at 5850/5899. EIGHT sites in the port, every one dropping C++'s ", got %s"
+// tail. They come in pairs because overflow_arith/saturating_arith and sqrt/fused_mul_add each
+// repeat the same three checks -- a single replace would have fixed one of each pair and
+// silently left the other. Caught only because the substitution asserted on its own count.
 check_builtin_overflow_arith :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
 	if len(call.args) != 2 {
 		builtin_name := builtin_proc_infos[id].name
@@ -5266,11 +5271,11 @@ check_builtin_overflow_arith :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 	}
 
 	if is_type_untyped(x.type) {
-		error_node(x.expr, "Expected a typed integer for '%s'", builtin_name)
+		error_node(x.expr, "Expected a typed integer for '%s', got %s", builtin_name, type_to_string(x.type))
 		return false
 	}
 	if !is_type_integer(x.type) {
-		error_node(x.expr, "Expected an integer for '%s'", builtin_name)
+		error_node(x.expr, "Expected an integer for '%s', got %s", builtin_name, type_to_string(x.type))
 		return false
 	}
 
@@ -5278,7 +5283,7 @@ check_builtin_overflow_arith :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 	if is_type_different_to_arch_endianness(ct) {
 		if basic, ok := ct.variant.(Type_Basic); ok {
 			if .Endian_Little in basic.flags || .Endian_Big in basic.flags {
-				error_node(x.expr, "Expected an integer which does not specify the explicit endianness for '%s'", builtin_name)
+				error_node(x.expr, "Expected an integer which does not specify the explicit endianness for '%s', got %s", builtin_name, type_to_string(x.type))
 				return false
 			}
 		}
@@ -5321,11 +5326,11 @@ check_builtin_saturating_arith :: proc(ctx: ^Checker_Context, operand: ^Operand,
 	}
 
 	if is_type_untyped(x.type) {
-		error_node(x.expr, "Expected a typed integer for '%s'", builtin_name)
+		error_node(x.expr, "Expected a typed integer for '%s', got %s", builtin_name, type_to_string(x.type))
 		return false
 	}
 	if !is_type_integer(x.type) {
-		error_node(x.expr, "Expected an integer for '%s'", builtin_name)
+		error_node(x.expr, "Expected an integer for '%s', got %s", builtin_name, type_to_string(x.type))
 		return false
 	}
 
@@ -5333,7 +5338,7 @@ check_builtin_saturating_arith :: proc(ctx: ^Checker_Context, operand: ^Operand,
 	if is_type_different_to_arch_endianness(ct) {
 		if basic, ok := ct.variant.(Type_Basic); ok {
 			if .Endian_Little in basic.flags || .Endian_Big in basic.flags {
-				error_node(x.expr, "Expected an integer which does not specify the explicit endianness for '%s'", builtin_name)
+				error_node(x.expr, "Expected an integer which does not specify the explicit endianness for '%s', got %s", builtin_name, type_to_string(x.type))
 				return false
 			}
 		}
@@ -5367,7 +5372,7 @@ check_builtin_sqrt :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.
 	if is_type_different_to_arch_endianness(elem) {
 		if basic, ok := elem.variant.(Type_Basic); ok {
 			if .Endian_Little in basic.flags || .Endian_Big in basic.flags {
-				error_node(x.expr, "Expected a float which does not specify the explicit endianness for 'sqrt'")
+				error_node(x.expr, "Expected a float which does not specify the explicit endianness for 'sqrt', got %s", type_to_string(x.type))
 				return false
 			}
 		}
@@ -5442,7 +5447,7 @@ check_builtin_fused_mul_add :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 	if is_type_different_to_arch_endianness(elem) {
 		if basic, ok := elem.variant.(Type_Basic); ok {
 			if .Endian_Little in basic.flags || .Endian_Big in basic.flags {
-				error_node(x.expr, "Expected a float which does not specify the explicit endianness for 'fused_mul_add'")
+				error_node(x.expr, "Expected a float which does not specify the explicit endianness for 'fused_mul_add', got %s", type_to_string(x.type))
 				return false
 			}
 		}

@@ -7278,7 +7278,13 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 		// First, check the type expression
 		check_expr_or_type(ctx, o, tc.type)
 		if o.mode != .Type {
-			error(tc.type, "Expected a type, got %v", o.mode)
+			// C++ Reference: check_expr.cpp:12442 prints expr_to_string(tc->type) -- the
+			// EXPRESSION the user wrote. The port printed o.mode, an internal Addressing_Mode
+			// enum, so `cast(y)2` reported "got Variable" where C++ reports "got y". An
+			// implementation detail leaking into a user-facing diagnostic.
+			tc_str := expr_to_string(tc.type)
+			defer delete(tc_str)
+			error(tc.type, "Expected a type, got %s", tc_str)
 			o.mode = .Invalid
 		}
 		if o.mode == .Invalid {

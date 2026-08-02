@@ -1026,7 +1026,11 @@ check_builtin_simd_select :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 	}
 
 	if !are_types_identical(x.type, y.type) {
-		error(call, "'%s' expected 2 results of the same type", builtin_name)
+		// C++ Reference: check_builtin.cpp:1593 -- reports at x.expr, not the call, and
+		// names BOTH types. The port stopped at the category.
+		xs := type_to_string(x.type)
+		ys := type_to_string(y.type)
+		error(x.expr, "'%s' expected 2 results of the same type, got '%s' vs '%s'", builtin_name, xs, ys)
 		return false
 	}
 
@@ -1093,7 +1097,10 @@ check_builtin_simd_runtime_swizzle :: proc(ctx: ^Checker_Context, operand: ^Oper
 	}
 
 	if !are_types_identical(src.type, indices.type) {
-		error(call, "'%s' expected both arguments to have the same type", builtin_name)
+		// C++ Reference: check_builtin.cpp:1654 -- reports at indices.expr and names both types.
+		src_str := type_to_string(src.type)
+		indices_str := type_to_string(indices.type)
+		error(indices.expr, "'%s' expected both arguments to have the same type, got '%s' vs '%s'", builtin_name, src_str, indices_str)
 		return false
 	}
 
