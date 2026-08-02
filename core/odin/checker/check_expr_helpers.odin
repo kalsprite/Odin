@@ -1304,7 +1304,7 @@ check_for_dynamic_literals :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> bo
 
 // check_assignment_error_suggestion provides helpful hints after an assignment error
 // C++ Reference: check_expr.cpp:102, 2434
-check_assignment_error_suggestion :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: ^Type, node: ^ast.Node) {
+check_assignment_error_suggestion :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: ^Type, node: ^ast.Node, max_bit_size: i64 = 0) {
 	// C++ Reference: check_expr.cpp:2652-2702.
 	//
 	// The previous implementation was INVENTED, not ported: its wording differed from C++
@@ -1342,6 +1342,10 @@ check_assignment_error_suggestion :: proc(ctx: ^Checker_Context, operand: ^Opera
 		error_line("\t            whereas slices in general are assumed to be mutable.\n")
 	} else if is_type_u8_slice(src) && are_types_identical(dst, t_string) && operand.mode != .Constant {
 		error_line("\tSuggestion: The expression may be casted to %s\n", b)
+	} else if check_integer_exceed_suggestion(ctx, operand, target_type, max_bit_size) {
+		// C++ Reference: check_expr.cpp:2683. This arm was missing entirely, so an
+		// out-of-range integer constant got no explanation of what the bound actually is.
+		return
 	} else if is_expr_inferred_fixed_array(ctx.type_hint_expr) && is_type_array_like(target_type) && is_type_array_like(operand.type) {
 		hint := expr_to_string(ctx.type_hint_expr)
 		defer delete(hint)
@@ -1411,51 +1415,100 @@ check_cast_error_suggestion :: proc(ctx: ^Checker_Context, operand: ^Operand, ta
 	}
 }
 
-// check_integer_exceed_suggestion provides hints when integer values exceed type bounds
-// C++ Reference: check_expr.cpp:2356
-check_integer_exceed_suggestion :: proc(ctx: ^Checker_Context, value: Exact_Value, target_type: ^Type, node: ^ast.Node) {
-	if target_type == nil {
-		return
+// check_integer_exceed_suggestion explains WHY an integer constant does not fit, by computing
+// the actual representable bound for the target type.
+//
+// C++ Reference: check_expr.cpp:2574-2651.
+//
+// The previous implementation was INVENTED and DEAD, both at once. It was a hardcoded table
+// of hand-written strings C++ never emits ("Note: u8 range is 0 to 255", "Suggestion: Use a
+// larger unsigned type (u16, u32, u64) or check the value"), covering only the ten named
+// basic kinds and silently saying nothing for any other integer type; and it had ZERO callers,
+// so none of it ever reached a user. C++ derives the bound arithmetically from the type's bit
+// size, so it works for every integer type including bit_field fields of arbitrary width.
+//
+// Returns whether it handled the operand, because C++ uses it as an arm of an else-if chain.
+check_integer_exceed_suggestion :: proc(ctx: ^Checker_Context, operand: ^Operand, type: ^Type, max_bit_size: i64 = 0) -> bool {
+	if operand == nil || type == nil || !is_type_integer(type) {
+		return false
+	}
+	value_int, is_integer := operand.value.(big.Int)
+	if !is_integer {
+		return false
 	}
 
-	target_base := base_type(target_type)
-	if target_base == nil || target_base.kind != .Basic {
-		return
+	b := type_to_string(type)
+
+	if is_type_enum(operand.type) {
+		if check_is_castable_to(ctx, operand, type) {
+			ot := type_to_string(operand.type)
+			// NOTE(parity): C++ omits the trailing newline on this one line. Reproduced.
+			error_line("\tSuggestion: Try casting the '%s' expression to '%s'", ot, b)
+		}
+		return true
 	}
 
-	basic := target_base.variant.(Type_Basic)
-
-	// Provide suggestions based on the type
-	#partial switch basic.kind {
-	case .I8:
-		error_line("\tNote: i8 range is -128 to 127")
-		error_line("\tSuggestion: Use a larger integer type (i16, i32, i64) or check the value")
-	case .I16:
-		error_line("\tNote: i16 range is -32768 to 32767")
-		error_line("\tSuggestion: Use a larger integer type (i32, i64) or check the value")
-	case .I32:
-		error_line("\tNote: i32 range is -2147483648 to 2147483647")
-		error_line("\tSuggestion: Use i64 for larger values or check the value")
-	case .I64:
-		error_line("\tNote: Value exceeds i64 range")
-		error_line("\tSuggestion: Consider using i128 or arbitrary precision integers")
-	case .U8:
-		error_line("\tNote: u8 range is 0 to 255")
-		error_line("\tSuggestion: Use a larger unsigned type (u16, u32, u64) or check the value")
-	case .U16:
-		error_line("\tNote: u16 range is 0 to 65535")
-		error_line("\tSuggestion: Use a larger unsigned type (u32, u64) or check the value")
-	case .U32:
-		error_line("\tNote: u32 range is 0 to 4294967295")
-		error_line("\tSuggestion: Use u64 for larger values or check the value")
-	case .U64:
-		error_line("\tNote: Value exceeds u64 range")
-		error_line("\tSuggestion: Consider using u128 or arbitrary precision integers")
-	case .Int:
-		error_line("\tNote: Value exceeds int range for this platform")
-	case .Uint:
-		error_line("\tNote: Value exceeds uint range for this platform")
+	bit_size := i64(8 * type_size_of(type))
+	size_changed := false
+	if max_bit_size > 0 {
+		size_changed = bit_size != max_bit_size
+		bit_size = min(bit_size, max_bit_size)
 	}
+
+	bi := value_int
+	negative, _ := big.is_neg(&bi)
+
+	max_size: big.Int
+	defer big.destroy(&max_size)
+	one: big.Int
+	defer big.destroy(&one)
+	big.int_set_from_integer(&one, 1)
+
+	print_max :: proc(b: string, size_changed: bool, bit_size: i64, max_size: ^big.Int) {
+		str, err := big.int_to_string(max_size)
+		if err != nil {
+			return
+		}
+		defer delete(str)
+		if size_changed {
+			error_line("\tThe maximum value that can be represented with that bit_field's field of '%s | %d' is '%s'\n", b, bit_size, str)
+		} else {
+			error_line("\tThe maximum value that can be represented by '%s' is '%s'\n", b, str)
+		}
+	}
+
+	if is_type_unsigned(type) {
+		big.int_set_from_integer(&max_size, 1)
+		big.int_shl(&max_size, &max_size, int(bit_size))
+		big.int_sub(&max_size, &max_size, &one)
+
+		if negative {
+			error_line("\tA negative value cannot be represented by the unsigned integer type '%s'\n", b)
+			dst: big.Int
+			defer big.destroy(&dst)
+			big.int_neg(&dst, &bi)
+			if cmp, err := big.int_cmp(&dst, &max_size); err == nil && cmp < 0 {
+				big.int_sub(&dst, &dst, &one)
+				if str, serr := big.int_to_string(&dst); serr == nil {
+					defer delete(str)
+					error_line("\tSuggestion: ~%s(%s)\n", b, str)
+				}
+			}
+		} else {
+			print_max(b, size_changed, bit_size, &max_size)
+		}
+	} else {
+		big.int_set_from_integer(&max_size, 1)
+		big.int_shl(&max_size, &max_size, int(bit_size - 1))
+		if negative {
+			big.int_neg(&max_size, &max_size)
+		} else {
+			big.int_sub(&max_size, &max_size, &one)
+		}
+		print_max(b, size_changed, bit_size, &max_size)
+	}
+
+	return true
 }
 
 // calling_convention_to_string returns a string representation of a calling convention

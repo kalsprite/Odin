@@ -30,7 +30,11 @@ check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 
 		// C++ Reference: check_decl.cpp:9-23
 		if operand.mode == .Builtin {
-			// ERROR_BLOCK()
+			// C++ Reference: check_decl.cpp:10. The block was noted here as a comment but
+			// never opened, so the explanatory error_line below was emitted unblocked and
+			// did not reach the output attached to its error.
+			begin_error_block()
+			defer end_error_block()
 			expr_str := expr_to_string(operand.expr)
 			defer delete(expr_str)
 
@@ -1630,7 +1634,11 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 					continue
 				}
 
-				// ERROR_BLOCK() in C++
+				// C++ Reference: check_decl.cpp:1927. Noted as a comment but never opened,
+				// so the "previous procedure at" line below never reached the output.
+				begin_error_block()
+				defer end_error_block()
+
 				if .Disabled in q.flags {
 					continue
 				}

@@ -3658,20 +3658,39 @@ check_is_expressible :: proc(ctx: ^Checker_Context, operand: ^Operand, target_ty
 		value_str := exact_value_to_string(operand.value)
 		defer delete(value_str)
 
+		// C++ Reference: check_expr.cpp:2766 -- the whole reporting tail is one error block,
+		// and every arm except the truncation one follows its message with
+		// check_assignment_error_suggestion. The port emitted the messages and none of the
+		// suggestions, so an out-of-range constant never said what the bound actually was.
+		begin_error_block()
+		defer end_error_block()
+
 		if is_type_numeric(operand.type) && is_type_numeric(target_type) {
 			if !is_type_integer(operand.type) && is_type_integer(target_type) {
-				// C++ check_expr.cpp:2771
+				// C++ check_expr.cpp:2771. NOTE: no suggestion on this arm.
 				error(operand.expr, "'%s' truncated to '%s', got %s", expr_str, dst_type_str, value_str)
-			} else if are_types_identical(operand.type, target_type) {
-				// C++ check_expr.cpp:2779
-				error(operand.expr, "Numeric value '%s' from '%s' cannot be represented by '%s'", value_str, expr_str, dst_type_str)
 			} else {
-				// C++ check_expr.cpp:2781
-				error(operand.expr, "Cannot convert numeric value '%s' from '%s' to '%s' from '%s'", value_str, expr_str, dst_type_str, src_type_str)
+				// C++ check_expr.cpp:2773-2776: the bit_field width in scope, when there is
+				// one, narrows the bound the suggestion reports.
+				max_bit_size: i64 = 0
+				if ctx.bit_field_bit_size != 0 {
+					max_bit_size = ctx.bit_field_bit_size
+				}
+
+				if are_types_identical(operand.type, target_type) {
+					// C++ check_expr.cpp:2779
+					error(operand.expr, "Numeric value '%s' from '%s' cannot be represented by '%s'", value_str, expr_str, dst_type_str)
+				} else {
+					// C++ check_expr.cpp:2781
+					error(operand.expr, "Cannot convert numeric value '%s' from '%s' to '%s' from '%s'", value_str, expr_str, dst_type_str, src_type_str)
+				}
+
+				check_assignment_error_suggestion(ctx, operand, target_type, operand.expr, max_bit_size)
 			}
 		} else {
 			// C++ check_expr.cpp:2787
 			error(operand.expr, "Cannot convert '%s' to '%s' from '%s', got %s", expr_str, dst_type_str, src_type_str, value_str)
+			check_assignment_error_suggestion(ctx, operand, target_type, operand.expr)
 		}
 
 		operand.mode = .Invalid
