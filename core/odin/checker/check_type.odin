@@ -3399,11 +3399,11 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	if generic_row == nil {
 		// C++ check_type.cpp:3108-3116 - minimum only; the maximum is enforced on the total below.
 		if row_count < MATRIX_ELEMENT_COUNT_MIN {
+			// C++ Reference: check_type.cpp:3108-3116. C++ reports and CARRIES ON - it does
+			// not invalidate the type and does not skip the column check below. The port did
+			// both, so `matrix[0, 0]f32` produced one diagnostic where C++ produces two, plus
+			// a spurious "'matrix[0, 0]f32' is not a type" from the invalidation.
 			error_node(mt.row_count, "Invalid matrix row count, expected %d+ rows, got %d", MATRIX_ELEMENT_COUNT_MIN, row_count)
-			// Do not leave the half-built matrix type published to the caller.
-			type^ = t_invalid
-			set_base_type(named_type, t_invalid)
-			return false
 		}
 	}
 
@@ -3444,11 +3444,11 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	if generic_column == nil {
 		// C++ check_type.cpp:3118-3126 - minimum only; the maximum is enforced on the total below.
 		if column_count < MATRIX_ELEMENT_COUNT_MIN {
-			error_node(mt.column_count, "Invalid matrix column count, expected %d+ columns, got %d", MATRIX_ELEMENT_COUNT_MIN, column_count)
-			// Do not leave the half-built matrix type published to the caller.
-			type^ = t_invalid
-			set_base_type(named_type, t_invalid)
-			return false
+			// NOTE(parity): C++ (check_type.cpp:3124) says "rows" in the COLUMN message - a
+			// copy-paste slip upstream. The port had corrected it to "columns", which is a
+			// byte-for-byte divergence in text the comparator checks. Reproduced as-is and
+			// reported as task #189. See also the same class in progress#159.
+			error_node(mt.column_count, "Invalid matrix column count, expected %d+ rows, got %d", MATRIX_ELEMENT_COUNT_MIN, column_count)
 		}
 	}
 
