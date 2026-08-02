@@ -3770,7 +3770,15 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 				}
 			}
 		} else {
-			error_node(expr, "'using' can only be applied to variables of type 'struct'")
+			// C++ Reference: check_stmt.cpp:860 -- error(us->token, ...), NOT the expression.
+			// The position matters: when `using` is already rejected by the feature gate, that
+			// error sits on the same token, and the error collector merges neighbouring
+			// diagnostics at the same position. Reporting this one against `expr` gave it a
+			// different column, so it survived the merge and the port emitted two errors
+			// where C++ emits one.
+			// The port's AST does not store the `using` keyword token separately; the
+			// statement node's own position IS that keyword, which is what C++ reports.
+			error_node(us, "'using' can only be applied to variables of type 'struct'")
 			return false
 		}
 
@@ -4194,7 +4202,15 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 
 			if found == nil {
 				entity = alloc_entity_variable(ctx.scope, token, type, .Resolved, ctx.checker.allocator)
-				entity.flags += {.For_Value, .Value}
+				// C++ Reference: check_stmt.cpp:2067-2069 -- `if (!is_range) flags |= ForValue`.
+				// The port set .For_Value unconditionally. The flag is what gates the
+				// addressability Suggestion at check_expr.cpp:2937, so `for v in 0..<3 { &v }`
+				// printed a "Prefer doing 'for &v in ...'" hint that C++ never emits: there is
+				// no iterable to take by pointer in a range loop. (LEDGER #148.)
+				entity.flags += {.Value}
+				if !is_ast_range(cast(^ast.Expr)expr) {
+					entity.flags += {.For_Value}
+				}
 				// C++ Reference: check_stmt.cpp:2043-2049
 				// Add entity to scope before adding definition
 				add_entity(ctx, ctx.scope, name, entity)

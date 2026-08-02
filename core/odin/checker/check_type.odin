@@ -2438,6 +2438,11 @@ check_union_type :: proc(ctx: ^Checker_Context, union_type: ^Type, node: ^ast.Un
 						ok = false
 						// C++ Reference: check_type.cpp:775
 						type_str := type_to_string(t)
+						// C++ Reference: check_type.cpp:828-832. The "Previous found at" line
+						// below was written but never reached the output: without a block an
+						// unblocked error_line does not stay attached to its error.
+						begin_error_block()
+						defer end_error_block()
 						error(variant_node, "Duplicate variant type '%s'", type_str)
 						if j < len(node.variants) {
 							pos_str := token_pos_to_string(node.variants[j].pos)
