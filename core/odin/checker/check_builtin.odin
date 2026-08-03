@@ -8128,9 +8128,27 @@ check_builtin_likely :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^as
 // check_builtin_type_is_matrix_major handles type_is_matrix_row_major and type_is_matrix_column_major
 // C++ Reference: check_builtin.cpp, `case BuiltinProc_type_is_matrix_row_major:`
 //
-// Deviation: C++ reads `bt->Matrix.is_row_major` off the *unbased* type, which is only
-// correct when the argument is an unnamed matrix type; for a named matrix it reads another
-// variant's storage. The port reads the based type, which is what that code intends.
+// IRREDUCIBLE DIVERGENCE, and the port has no choice. C++ (check_builtin.cpp:7091-7112)
+// validates `base_type(bt)` is a matrix and then reads `bt->Matrix.is_row_major` off the
+// *unbased* bt. When the argument is a NAMED matrix type, bt is Type_Named, so that reads the
+// Matrix variant's fields out of the Named variant's storage -- a type pun, not a lookup.
+//
+// The divergence is measurable, and it INVERTS the answer. For
+// `Named_RM :: distinct #row_major matrix[2,2]f32`:
+//     oracle: type_is_matrix_row_major(Named_RM) is FALSE, column_major TRUE
+//     port:   row_major TRUE, column_major FALSE          (probe $S/matmaj)
+// The two compilers accept different programs, so this is not cosmetic.
+//
+// It is nonetheless NOT a choice this port gets to make. Odin's unions are checked: the
+// equivalent of C++'s read is `bt.variant.(Type_Matrix)` on a Named type, and that assertion
+// simply fails -- there is no way to read the wrong variant's memory short of hand-emulating
+// C++'s struct layout. Reading the based type is the only behaviour available, so the port
+// reads it. Filed as an upstream bug rather than carried as a port defect.
+//
+// Recorded this way deliberately: the previous comment here said the port reads the based type
+// because that is "what that code intends", which reads as a judgement that C++ is wrong and
+// the port knows better -- the wrong-by-being-better trap this project keeps paying for. The
+// real reason is that the alternative is unrepresentable, which is a different claim entirely.
 check_builtin_type_is_matrix_major :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
 	builtin_name := builtin_proc_infos[id].name
 
