@@ -4787,13 +4787,25 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 					entity = nil
 				}
 
-				// C++ Reference: check_expr.cpp:5554-5561
-				// Check if the entity is exported from its package
-				if entity != nil && !allow_builtin && !is_entity_exported(entity, false) {
+				// C++ Reference: check_expr.cpp:5937-5945.
+				//
+				// C++ reports this and DELIBERATELY CONTINUES. The three lines that would bail
+				// are present in the source but commented out, with bill's note:
+				//     // NOTE(bill): make the state valid still, even if it's "invalid"
+				//     // operand->mode = Addressing_Invalid;
+				//     // operand->expr = node;
+				//     // return nullptr;
+				// so check_entity_decl and the Proc_Group / Builtin / entity-type handling below
+				// still run. The port had exactly those three lines live, which is the one shape
+				// the reference explicitly rejected.
+				//
+				// The predicate also differs. C++ passes allow_builtin THROUGH to
+				// is_entity_exported; the port hoisted `!allow_builtin` out and passed false, so
+				// with allow_builtin set the check was skipped entirely. That is not equivalent:
+				// is_entity_exported does more than the kind test -- the NotExported flag, for
+				// one -- so C++ can still report an unexported entity when allow_builtin is true.
+				if entity != nil && !is_entity_exported(entity, allow_builtin) {
 					error(node, "'%s' is not exported by '%s'", entity_name, import_name)
-					operand.mode = .Invalid
-					operand.expr = node
-					return nil
 				}
 
 				if entity == nil {
