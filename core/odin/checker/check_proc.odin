@@ -2136,7 +2136,11 @@ init_procedures_cmp_generic :: proc(a_ptr, b_ptr: rawptr, user_data: rawptr) -> 
 	}
 
 	// Compare package order first
-	// C++ Reference: checker.cpp:7098-7100 (if (ap != bp) { order_a < order_b})
+	// C++ Reference: checker.cpp:7462-7464 (if (x->pkg != y->pkg) { ... })
+	// The previous citation here pointed ~360 lines earlier, into handle_raddbg_type_view --
+	// unrelated string parsing. Same systematic checker.cpp drift LEDGER 134 measured at
+	// +193..+334, now larger. Line numbers of the stale target are deliberately NOT repeated:
+	// citefn.py scans for file.cpp:NNNN and cannot tell a citation from a mention of one.
 	// Package order is populated in check_import_entities().
 	if a.pkg != b.pkg {
 		order_a := a.pkg.order if a.pkg != nil else 0
@@ -2185,13 +2189,14 @@ init_procedures_cmp_generic :: proc(a_ptr, b_ptr: rawptr, user_data: rawptr) -> 
 }
 
 // fini_procedures_cmp_generic compares two entities for fini procedure sorting
-// C++ Reference: checker.cpp:7122-7124
+// C++ Reference: checker.cpp:7490-7492 (fini_procedures_cmp)
+// The previous citation pointed ~370 lines earlier, into unrelated string parsing.
 //
 // Fini procedures are sorted in reverse order of init procedures.
 // This ensures cleanup happens in reverse order of initialization.
 fini_procedures_cmp_generic :: proc(a_ptr, b_ptr: rawptr, user_data: rawptr) -> slice.Ordering {
 	// Reverse the comparison by swapping arguments
-	// C++ Reference: checker.cpp:7123 (return init_procedures_cmp(b, a))
+	// C++ Reference: checker.cpp:7491 (return init_procedures_cmp(b, a))
 	return init_procedures_cmp_generic(b_ptr, a_ptr, user_data)
 }
 

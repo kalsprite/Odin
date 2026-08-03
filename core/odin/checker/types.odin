@@ -3016,7 +3016,9 @@ lookup_field :: proc(type: ^Type, field_name: string, is_type: bool, allow_blank
 // lookup_field_with_selection recursively looks up a field in a type
 // Handles struct fields, enum values, union variants, and 'using' fields
 // lookup_field_with_selection finds a field by name in a type and returns the selection path
-// C++ Reference: /mnt/c/odin/src/types.cpp:3500-3850
+// C++ Reference: /mnt/c/odin/src/types.cpp:3756-4196 (lookup_field_with_selection)
+// The previous citation began ~250 lines earlier, at an unrelated predicate
+// (union_variant_index_types_equal). The definition is at 3756; 3698 is only the forward decl.
 lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: bool, sel: Selection, allow_blank_ident := false) -> Selection {
 	if type_ == nil {
 		return empty_selection
