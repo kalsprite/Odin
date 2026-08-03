@@ -1,6 +1,5 @@
 package checker
 
-import expr_fmt "core:fmt"
 import "core:math/big"
 import "core:odin/ast"
 import "core:odin/tokenizer"
@@ -760,17 +759,20 @@ write_expr_to_string :: proc(builder: ^strings.Builder, node: ^ast.Node, shortha
 		}
 
 	case:
-		// Fallback for unhandled expression types.
+		// C++ Reference: check_expr.cpp:12882-12884 -- the `default:` arm of
+		// write_expr_to_string writes the literal "(BadExpr)".
 		//
-		// NOTE: this used to write "(BadExpr)", which is actively misleading - it names a real
-		// AST node (ast.Bad_Expr, produced by the parser on a syntax error), so a diagnostic
-		// like "Invalid type expression: (BadExpr)" reads as "the parser failed here" when in
-		// fact the parser succeeded and it is this printer that has no case for the node.
-		if node != nil {
-			expr_fmt.sbprintf(builder, "<unprintable %T>", node.derived)
-		} else {
-			strings.write_string(builder, "<nil>")
-		}
+		// This previously wrote "<unprintable %T>" instead, on the reasoning that "(BadExpr)"
+		// is misleading because it names a real AST node and so reads as "the parser failed
+		// here". That reasoning is about which text is BETTER, which is not the question this
+		// port answers -- the oracle writes "(BadExpr)" and matching it is the whole job. The
+		// substitute was also broken in its own right: node.derived is a UNION, and %T on a
+		// union prints the union's own name, so every unhandled node rendered identically as
+		// "<unprintable Any_Node>" and the format verb could never name the kind it promised.
+		//
+		// The nil case is not handled here because it cannot arrive: the prologue returns
+		// early for a nil node, exactly as C++ does. The old `else` branch was dead.
+		strings.write_string(builder, "(BadExpr)")
 	}
 }
 
