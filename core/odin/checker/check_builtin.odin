@@ -8139,11 +8139,21 @@ check_builtin_likely :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^as
 //     port:   row_major TRUE, column_major FALSE          (probe $S/matmaj)
 // The two compilers accept different programs, so this is not cosmetic.
 //
-// It is nonetheless NOT a choice this port gets to make. Odin's unions are checked: the
-// equivalent of C++'s read is `bt.variant.(Type_Matrix)` on a Named type, and that assertion
-// simply fails -- there is no way to read the wrong variant's memory short of hand-emulating
-// C++'s struct layout. Reading the based type is the only behaviour available, so the port
-// reads it. Filed as an upstream bug rather than carried as a port defect.
+// It is nonetheless NOT a choice this port gets to make -- though not because punning is
+// impossible in Odin. It is perfectly expressible (`#raw_union`, or reinterpreting the payload
+// pointer); the checked assertion `bt.variant.(Type_Matrix)` merely refuses to do it silently.
+//
+// What is unavailable is C++'s VALUE, because that value is a function of C++'s struct layout
+// and the two struct sets are written independently:
+//     C++  Matrix:    elem, row/col count, 2 generics, stride  -> is_row_major at offset 48
+//     C++  TypeNamed: name(16) base(8) type_name(8) = 32, then BlockingMutex, then
+//                     gen_types_data -- so byte 48 falls inside the mutex, or past the struct
+//     port Type_Named: name(16) base(8) type_name(8) gen_types_data(8) = 40, then sync.Mutex
+//                     -- a DIFFERENT field order, and Odin's mutex, not BlockingMutex
+// Punning here would read byte 48 of the port's Named storage and yield a THIRD answer, not
+// C++'s. Reproducing the oracle would mean pinning the port's variant structs to C++'s exact
+// layout, which is a far larger commitment than this builtin. Reading the based type is the
+// only defensible behaviour available, so the port reads it. Filed as an upstream bug.
 //
 // Recorded this way deliberately: the previous comment here said the port reads the based type
 // because that is "what that code intends", which reads as a judgement that C++ is wrong and
