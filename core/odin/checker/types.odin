@@ -2763,7 +2763,8 @@ init_map_internal_debug_types :: proc(type: ^Type) {
 }
 
 // alloc_type_proc creates a procedure type
-// C++ Reference: /mnt/c/odin/src/types.cpp:667-690
+// C++ Reference: /mnt/c/odin/src/types.cpp:1223-1247 (alloc_type_proc)
+// The previous citation began ~555 lines earlier, in a block of gb_global Type * declarations.
 alloc_type_proc :: proc(scope: ^Scope, params: ^Type, results: ^Type, param_count: int, result_count: int, variadic := false, calling_convention := Calling_Convention.Odin) -> ^Type {
 	// Variadic validation (C++ Reference: types.cpp:1157-1167)
 	if variadic {

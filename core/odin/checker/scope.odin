@@ -828,7 +828,8 @@ add_dependency_to_set :: proc(c: ^Checker, entity: ^Entity) {
 		return
 	}
 
-	// C++ Reference: checker.cpp:2574-2580
+	// C++ Reference: checker.cpp:2773-2828 (add_dependency_to_set)
+	// The previous citation pointed ~200 lines earlier, into check_procedure_later's tail.
 	// Skip polymorphic entities that haven't been specialized
 	if entity.type != nil && is_type_polymorphic(entity.type) {
 		decl := entity.decl_info
