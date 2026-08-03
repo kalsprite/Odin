@@ -4336,13 +4336,27 @@ parse_unary_expr :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 	return parse_atom_expr(p, parse_operand(p, lhs), lhs)
 }
 parse_binary_expr :: proc(p: ^Parser, lhs: bool, prec_in: int) -> ^ast.Expr {
-	start_pos := p.curr_tok.pos
 	expr := parse_unary_expr(p, lhs)
 
-	if expr == nil {
-		return ast.new(ast.Bad_Expr, start_pos, end_pos(p.prev_tok))
-	}
-
+	// C++ Reference: src/parser.cpp:3573-3574. C++ takes parse_unary_expr's result and goes
+	// straight into the operator loop; it never substitutes anything when the result is null,
+	// and it can return null.
+	//
+	// The port had an INVENTED early return here that manufactured a Bad_Expr from a nil expr.
+	// That is not a cosmetic difference: parse_atom_expr deliberately returns nil while
+	// allow_type is set (matching C++ at parser.cpp:3273), which is how "no operand here" is
+	// signalled to a type context. Converting that nil into a Bad_Expr destroyed the signal.
+	//
+	// The visible consequence was on `x: () = 1`. C++ leaves Paren_Expr.expr as nullptr, so the
+	// checker's ParenExpr arm (check_type.cpp:3702) sees it and reports "Expected an expression
+	// or type within the parentheses". The port stored a Bad_Expr instead, so its own equivalent
+	// guard -- which is present and correct at check_type.odin:192 -- could never fire; checking
+	// recursed into the Bad_Expr and fell through to the "'%s' is not a type" default arm.
+	//
+	// The operator loop below dereferences expr.pos for the ternary forms, so a nil expr
+	// followed by a binary/ternary operator would fault -- but C++ has exactly the same shape
+	// and the same exposure, and it is unreachable for the empty-paren case because ')' has no
+	// precedence and the loop is never entered.
 	for prec := token_precedence(p, p.curr_tok.kind); prec >= prec_in; prec -= 1 {
 		loop: for {
 			op := p.curr_tok
