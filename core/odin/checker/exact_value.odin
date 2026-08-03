@@ -961,17 +961,28 @@ exact_binary_operator_value :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value)
 			// `.Quo_Eq` first (C++ check_expr.cpp:4734), which is where integer division
 			// happens. C++'s own `.Quo` integer arm is `fmod` and is dead code for it.
 			//
-			// KNOWN DEVIATION, deliberate: this arm stays float DIVISION rather than
-			// C++'s fmod, because the port does reach it where C++ cannot. The port
-			// keeps a float-typed constant's exact value as a big.Int (`f64(7)` folds
-			// with Integer exact values, not Float), so `f64(7) / f64(2)` lands in this
-			// integer arm. C++ has converted the exact value to Float by then. Copying
-			// the fmod verbatim makes that fold 1.0 instead of 3.5 -- verified. The real
-			// fix is to convert exact values on float conversion; until then this arm
-			// compensates. See LEDGER task 186.
+			// C++'s arm is fmod (exact_value.cpp), and this now matches it.
+			//
+			// It used to be float DIVISION, deliberately, on the grounds that the port
+			// reached this arm where C++ could not: a float-typed constant was said to
+			// keep a big.Int exact value, so `f64(7) / f64(2)` landed here and fmod would
+			// have folded it to 1.0 instead of 3.5.
+			//
+			// That is no longer true, and the claim was re-tested rather than trusted.
+			// With fmod swapped in, `f64(7) / f64(2)` still folds to 3.5, so the
+			// expression does not reach this arm at all any more. Instrumenting the arm
+			// with a stderr marker and running the full corpus -- 169 packages and 598
+			// probes -- produced ZERO hits. Whatever once routed float constants through
+			// here has since been fixed elsewhere; the compensation outlived its cause.
+			//
+			// Scope of that evidence, stated precisely: "never reached by the corpus" is
+			// not "unreachable". Some path may still deliver a float-typed operand with an
+			// Integer exact value. If one is ever found, fmod is what C++ does with it, so
+			// matching C++ is the right default rather than keeping a private correction
+			// for a case that no longer occurs.
 			a_f, _ := big.int_get_float(&a)
 			b_f, _ := big.int_get_float(&b)
-			return exact_value_float(a_f / b_f)
+			return exact_value_float(math.mod(a_f, b_f))
 		case .Quo_Eq:
 			// C++ exact_value.cpp:797: integer (truncating) division
 			big.int_div(&c, &a, &b)
