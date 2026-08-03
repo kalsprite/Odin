@@ -1842,11 +1842,48 @@ parse_type_or_ident :: proc(p: ^Parser) -> ^ast.Expr {
 	lhs := true
 	return parse_atom_expr(p, parse_operand(p, lhs), lhs)
 }
+// C++ Reference: src/parser.cpp:3683-3706.
+//
+// The port had a one-line reduction of this: a lowercase "expected a type" with no offender
+// named, no token consumed, and the whole trailing Paren_Expr branch missing.
 parse_type :: proc(p: ^Parser) -> ^ast.Expr {
 	type := parse_type_or_ident(p)
 	if type == nil {
-		error(p, p.curr_tok.pos, "expected a type")
-		return ast.new(ast.Bad_Expr, p.curr_tok.pos, end_pos(p.curr_tok))
+		// prev_token is captured BEFORE the advance below, because it is what the message
+		// names. C++ does not advance past '{' -- consuming it there would eat the brace that
+		// opens a body the caller still has to parse.
+		prev_token := p.curr_tok
+		token: tokenizer.Token
+		if p.curr_tok.kind == .Open_Brace {
+			token = p.curr_tok
+		} else {
+			token = advance_token(p)
+		}
+		if prev_token.text == "\n" {
+			error(p, token.pos, "Expected a type, got newline")
+		} else {
+			error(p, token.pos, "Expected a type, got '%s'", prev_token.text)
+		}
+		return ast.new(ast.Bad_Expr, token.pos, end_pos(p.curr_tok))
+	} else if pe, is_paren := type.derived.(^ast.Paren_Expr); is_paren {
+		// C++: `type->kind == Ast_ParenExpr && unparen_expr(type) == nullptr`, i.e. peeling
+		// every layer of parens yields nothing, as in `()` or `(())`.
+		//
+		// This CANNOT be written as `ast.unparen_expr(type) == nil`: the port's helper differs
+		// from C++'s. C++ follows into ParenExpr.expr unconditionally, so an empty paren peels
+		// to nullptr; the port's stops and returns the Paren_Expr itself when .expr is nil
+		// (ast.odin:697-711), so it never yields nil. The equivalent test is therefore "peels
+		// down to a Paren_Expr that is still empty". The helper divergence is real and affects
+		// 15 call sites, so it is filed separately rather than changed from here.
+		inner := ast.unparen_expr(type)
+		empty := false
+		if ipe, ok := inner.derived.(^ast.Paren_Expr); ok && ipe.expr == nil {
+			empty = true
+		}
+		if empty {
+			error(p, type.pos, "Expected a type within the parentheses")
+			return ast.new(ast.Bad_Expr, pe.open, pe.close)
+		}
 	}
 	return type
 }
