@@ -153,9 +153,12 @@ t_untyped_quaternion: ^Type
 t_objc_object: ^Type // intrinsics.objc_object (struct)
 t_objc_selector: ^Type // intrinsics.objc_selector (struct)
 t_objc_class: ^Type // intrinsics.objc_class (struct)
+t_objc_ivar: ^Type // intrinsics.objc_ivar (struct)
 t_objc_id: ^Type // ^objc_object
 t_objc_SEL: ^Type // ^objc_selector
 t_objc_Class: ^Type // ^objc_class
+t_objc_Ivar: ^Type // ^objc_ivar
+t_objc_instancetype: ^Type // intrinsics.objc_instancetype, an alias of ^objc_object
 
 // C variadic types
 // C++ Reference: /mnt/c/odin/src/checker.cpp:1589-1590
@@ -269,12 +272,41 @@ t_hasher_proc: ^Type // proc(rawptr, uintptr) -> uintptr {contextless}
 // This is needed because tests may run in parallel, creating/destroying multiple checkers
 runtime_type_globals_mutex: sync.Mutex
 
+// DO NOT add a lock-free fast path here without re-reading LEDGER #341.
+//
+// This mutex is taken on every init_core_type_info call, ~70 per package, all but the first
+// hitting the early return -- so it looks like an obvious contention win to skip it once
+// initialisation has completed. That was tried (an atomic completion flag, the same shape as
+// core:odin/tokenizer's keyword-LUT init) and REVERTED, not because it was wrong in itself --
+// output was byte-identical across 8 packages, both parity sweeps were 0/0/0 and the corpus was
+// clean -- but because the determinism screen came back 3 intermittent TIMEOUTs on the changed
+// binary against 0 on the unchanged one, over 2700 package-runs each.
+//
+// p is only ~0.25 for that split, so it is NOT proof. What makes it worth heeding is that the
+// baseline showed ZERO events where #301's supposed ~0.1% rate predicts ~2.7 -- so "it is just
+// the known artefact" does not fit the data either. The working hypothesis is that this
+// unconditional lock doubles as an incidental synchronisation barrier between workers, and
+// removing it exposes a latent race elsewhere. Find and fix that race first; the contention win
+// is worthless next to an intermittent hang in a compiler.
+
 // reset_runtime_type_globals clears all runtime-dependent type globals
 // This MUST be called in destroy_checker to prevent stale pointers when
 // tests use temp_allocator. Without this, the next test would read freed memory.
 reset_runtime_type_globals :: proc() {
 	sync.mutex_lock(&runtime_type_globals_mutex)
 	defer sync.mutex_unlock(&runtime_type_globals_mutex)
+
+	// NO SESSION EXEMPTION HERE, and the absence is load-bearing. #354 put one in -- "the session
+	// owns these, so there is nothing stale to clear" -- and it leaked one checker's types into
+	// the next one's check. Measured, single-threaded, one process:
+	//     core/sync then core/odin/parser, no session  ->  0 errors, 0 errors
+	//     acquire_runtime_session then core/odin/parser -> 37 errors, cap reached
+	// Every one of the 37 was "Cannot determine type for implicit selector expression" in
+	// core/sync. The probe printed the globals either side of the check: without a session they
+	// are 0x0 going in and the checker repopulates them from its OWN scopes; with a session they
+	// arrive already pointing at the session checker's Atomic_Memory_Order, so the lazy "resolve
+	// once" guards never fire and the package is checked against a type it does not own. A check
+	// that starts from a clean slate is correct; one that inherits is not. LEDGER #368.
 
 	// Reset Objective-C runtime types
 	// These are resolved out of the owning Checker's base:intrinsics scope
@@ -283,9 +315,12 @@ reset_runtime_type_globals :: proc() {
 	t_objc_object = nil
 	t_objc_selector = nil
 	t_objc_class = nil
+	t_objc_ivar = nil
 	t_objc_id = nil
 	t_objc_SEL = nil
 	t_objc_Class = nil
+	t_objc_Ivar = nil
+	t_objc_instancetype = nil
 
 	// Reset C variadic types (resolved out of the owning checker's base:intrinsics scope)
 	t_c_va_list = nil
@@ -1646,12 +1681,19 @@ type_size_of :: proc(t: ^Type) -> int {
 			align := type_align_of(bt)
 			max_size := 0
 			for i in 0 ..< count {
-				// Read the field type via entity_type(), NOT Entity.type.
-				// For struct field entities in this port only the VARIANT carries the type;
-				// Entity.type is nil (verified by instrumentation: f0.type=<nil> while
-				// f0.variant.(Entity_Variable).type=int). type_offset_of already goes through
-				// the variant, which is why it returned the correct offset 8 while this
-				// returned size 0 — `struct { a: int, b: int }` measured 8 instead of 16.
+				// Read the field type via entity_type().
+				//
+				// This comment used to say the opposite of what is true now: that only the
+				// variant carried a struct field's type and Entity.type was nil. That was
+				// accurate when it was written, and the missing Entity.type write in
+				// check_struct_fields was fixed later (LEDGER 192). The duplicate variant
+				// storage it described is gone as well -- entity_type now reads Entity.type,
+				// the single store, as C++ does (entity.cpp:170).
+				//
+				// The original symptom it recorded is still worth keeping: reading the wrong
+				// one of the two made `struct { a: int, b: int }` measure 8 instead of 16
+				// while type_offset_of returned the correct offset 8, because the two helpers
+				// were reading different halves of the same split.
 				field_size := type_size_of(entity_type(struc.fields[i]))
 				if max_size < field_size {
 					max_size = field_size
@@ -2080,12 +2122,19 @@ is_type_nearly_simple_compare :: proc(t: ^Type) -> bool {
 		return is_type_nearly_simple_compare(mat.elem)
 
 	case .Struct:
-		// All fields must be nearly simple compare
+		// C++ Reference: types.cpp:2959-2961. A `#simple` struct is nearly-simple BY
+		// DECLARATION and short-circuits before the per-field walk. This is not merely an
+		// optimisation: it is what lets a #simple struct nest inside another #simple struct
+		// whose own fields would otherwise be re-walked. The early-out could not exist until
+		// Type_Struct carried the flag (LEDGER #312).
 		struc := ct.variant.(Type_Struct)
+		if struc.is_simple {
+			return true
+		}
+		// All remaining fields must be nearly simple compare
 		for field in struc.fields {
 			if field.kind == .Variable {
-				var_field := field.variant.(Entity_Variable)
-				if !is_type_nearly_simple_compare(var_field.type) {
+				if !is_type_nearly_simple_compare(entity_type(field)) {
 					return false
 				}
 			}
@@ -3336,6 +3385,11 @@ lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: b
 					selection_add_index(&sel, 2)
 					sel.entity = entity_z
 					return sel
+				case "xyz":
+					entity_xyz := alloc_entity_field(nil, make_token_ident("xyz"), alloc_type_array(t_f16, 3), false, -1)
+					selection_add_index(&sel, -1)
+					sel.entity = entity_xyz
+					return sel
 				}
 
 			case .Quaternion128:
@@ -3360,6 +3414,11 @@ lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: b
 					entity_z := alloc_entity_field(nil, make_token_ident("z"), t_f32, false, 2)
 					selection_add_index(&sel, 2)
 					sel.entity = entity_z
+					return sel
+				case "xyz":
+					entity_xyz := alloc_entity_field(nil, make_token_ident("xyz"), alloc_type_array(t_f32, 3), false, -1)
+					selection_add_index(&sel, -1)
+					sel.entity = entity_xyz
 					return sel
 				}
 
@@ -3386,6 +3445,11 @@ lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: b
 					selection_add_index(&sel, 2)
 					sel.entity = entity_z
 					return sel
+				case "xyz":
+					entity_xyz := alloc_entity_field(nil, make_token_ident("xyz"), alloc_type_array(t_f64, 3), false, -1)
+					selection_add_index(&sel, -1)
+					sel.entity = entity_xyz
+					return sel
 				}
 
 			case .Untyped_Quaternion:
@@ -3410,6 +3474,48 @@ lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: b
 					entity_z := alloc_entity_field(nil, make_token_ident("z"), t_untyped_float, false, 2)
 					selection_add_index(&sel, 2)
 					sel.entity = entity_z
+					return sel
+				}
+			}
+		} else if type.kind == .Array {
+			// SINGLE-component access on an array / #simd vector: v.x, v.r, and friends.
+			// C++ Reference: types.cpp:4160-4188, via the _ARRAY_FIELD_CASE macro (4147-4157).
+			//
+			// THIS IS WHY `&v.x` MUST WORK. C++ resolves a one-character component HERE, as an
+			// ordinary indexed field, so the operand stays a plain lvalue. Its swizzle path is
+			// gated on `1 < field_name.len` (check_expr.cpp:6007) and on the entity not already
+			// having been found, so single components never reach it. The port had no such arm,
+			// and someone had instead special-cased `swizzle_count == 1` inside the swizzle
+			// machinery -- which marked v.x a Swizzle_Variable and made &v.x
+			// "a swizzle intermediate array value". Oracle accepts &v.x; probe swzaddr. LEDGER #364.
+			//
+			// RESTRUCTURED, NOT CHANGED: C++ writes a switch on the count whose cases fall
+			// through (case 4 tries w/a then falls into 3, then 2, then 1), which admits exactly
+			// the names whose index is < count. The map + `idx < count` test below is that same
+			// predicate written directly.
+			// ARRAY ONLY, deliberately. C++'s lookup_field has a SimdVector arm too
+			// (types.cpp:4174-4188), but it is UNREACHABLE from a selector: check_selector bails on
+			// `is_type_simd_vector` before any lookup (check_expr.cpp:5994-6002) and always errors.
+			// The port has no such early bail, so mirroring C++'s arm here did not mirror C++'s
+			// behaviour -- it HUNG the checker on `v.x` for `v: #simd[4]f32` (pre-#364 binary: one
+			// diagnostic, instantly; post-#364: 90s timeout). Measured, not reasoned. The SIMD
+			// selector path is its own item. LEDGER #365.
+			arr := type.variant.(Type_Array)
+			elem := arr.elem
+			count := arr.count
+
+			if count <= 4 {
+				idx := i64(-1)
+				switch field_name {
+				case "x", "r": idx = 0
+				case "y", "g": idx = 1
+				case "z", "b": idx = 2
+				case "w", "a": idx = 3
+				}
+				if 0 <= idx && idx < count {
+					entity := alloc_entity_array_elem(nil, make_token_ident(field_name), elem, i32(idx))
+					selection_add_index(&sel, int(idx))
+					sel.entity = entity
 					return sel
 				}
 			}
@@ -3708,7 +3814,7 @@ type_offset_of :: proc(t: ^Type, index: i64) -> i64 {
 			curr_offset: i64 = 0
 			for i in 0 ..< index {
 				if field := struc.fields[i]; field.kind == .Variable {
-					curr_offset += i64(type_size_of(field.variant.(Entity_Variable).type))
+					curr_offset += i64(type_size_of(entity_type(field)))
 				}
 			}
 			return curr_offset
@@ -3720,11 +3826,10 @@ type_offset_of :: proc(t: ^Type, index: i64) -> i64 {
 
 		for i in 0 ..< index {
 			if field := struc.fields[i]; field.kind == .Variable {
-				var_field := field.variant.(Entity_Variable)
-
 				// Get field alignment and size
-				field_align := i64(type_align_of(var_field.type))
-				field_size := i64(type_size_of(var_field.type))
+				ft := entity_type(field)
+				field_align := i64(type_align_of(ft))
+				field_size := i64(type_size_of(ft))
 
 				// Align current offset to field's alignment requirement
 				// align_formula: (offset + align - 1) - ((offset + align - 1) % align)
@@ -3739,8 +3844,7 @@ type_offset_of :: proc(t: ^Type, index: i64) -> i64 {
 
 		// Now align to the target field's alignment to get its actual offset
 		if field := struc.fields[index]; field.kind == .Variable {
-			var_field := field.variant.(Entity_Variable)
-			target_align := i64(type_align_of(var_field.type))
+			target_align := i64(type_align_of(entity_type(field)))
 			if target_align > 0 {
 				curr_offset = (curr_offset + target_align - 1) - ((curr_offset + target_align - 1) % target_align)
 			}
@@ -3933,8 +4037,7 @@ type_offset_of_from_selection :: proc(type: ^Type, sel: Selection) -> i64 {
 			struc := t.variant.(Type_Struct)
 			if index >= 0 && index < i64(len(struc.fields)) {
 				if field := struc.fields[index]; field.kind == .Variable {
-					var_field := field.variant.(Entity_Variable)
-					t = var_field.type
+					t = entity_type(field)
 				}
 			}
 
@@ -4031,6 +4134,37 @@ alloc_type_struct :: proc(c: ^Checker) -> ^Type {
 	sync.wait_group_add(&st.polymorphic_wait_signal, 1)
 	sync.wait_group_add(&st.fields_wait_signal, 1)
 
+	return t
+}
+
+// alloc_type_struct_complete allocates a struct type that is ALREADY complete.
+//
+// C++ Reference: src/types.cpp:1164-1169 --
+//     Type *t = alloc_type(Type_Struct);
+//     wait_signal_set(&t->Struct.fields_wait_signal);
+//     wait_signal_set(&t->Struct.polymorphic_wait_signal);
+//
+// This is for the types the checker SYNTHESISES rather than checks -- the Objective-C opaque
+// types and c_va_list (checker.cpp:1514-1516 and 1584, all four via alloc_type_struct_complete).
+// They never pass through check_struct_fields, so nothing would ever signal their completion.
+//
+// The port built all four with alloc_type_struct instead, which ADDS 1 to both wait groups and
+// depends on a later wait_group_done that, for a synthesised type, never comes. Their counters
+// therefore stayed at 1 permanently, and every waiter -- check_stmt.odin:3840, type_info.odin:463,
+// check_type.odin:6300 -- blocked FOREVER on the first construct needing the layout. Minimal
+// repro, which the reference accepts in well under a second:
+//     f :: proc(a: Maybe(intrinsics.objc_class)) -> intrinsics.objc_class { return a.? }
+// The same two lines hang with intrinsics.c_va_list, and with any type transitively containing
+// one -- which is how core/sys/darwin/Foundation hung (#278): Object_VTable_Info holds a proc
+// whose parameter is Class :: ^intrinsics.objc_class, and register_subclass unwraps a Maybe of it.
+// A user-declared `E :: struct {}` in the same position is fine, so this is not about empty
+// structs; it is specifically the never-completed synthesised ones.
+//
+// C++'s futex is SET to mean complete; Wait_Group counts DOWN to zero, so the port's equivalent
+// of "already set" is to never add in the first place.
+alloc_type_struct_complete :: proc() -> ^Type {
+	t := alloc_type(Type_Struct)
+	set_base_type(t, t)
 	return t
 }
 

@@ -129,6 +129,17 @@ check_deferred_procedures :: proc(c: ^Checker) {
 			continue
 		}
 
+		// Reject deferred-procedure CHAINING. C++ checker.cpp:6893-6898, between the
+		// self-reference check above and the polymorphic check below. The port had no equivalent,
+		// so `@(deferred_none=b)` on a procedure whose target `b` itself carries a deferred
+		// procedure was accepted in silence (probe nc_defchain).
+		if entity_has_deferred_procedure(dst) {
+			error(src.token,
+			      "Deferred procedure '%s' cannot be used as the target of '%s' because it has a deferred procedure itself (deferred procedure chaining is not allowed)",
+			      dst.token.text, src.token.text)
+			continue
+		}
+
 		// Check polymorphic procedures
 		// C++ Reference: checker.cpp:6540-6543
 		if is_type_polymorphic(src.type) || is_type_polymorphic(dst.type) {
@@ -145,10 +156,15 @@ check_deferred_procedures :: proc(c: ^Checker) {
 			continue
 		}
 
-		// Both must be procedure types
-		// C++ Reference: checker.cpp:6551-6556
-		assert(is_type_proc(src.type))
-		assert(is_type_proc(dst.type))
+		// Both must be procedure types. C++ checker.cpp:6911-6913 DIAGNOSES and continues; the
+		// port asserted, which turns a reportable program into an abort. Same family as #21/#283:
+		// an assert on a condition user input can reach. I have not built a repro that gets a
+		// non-proc here -- the attribute checker may reject earlier -- so this is a latent abort
+		// rather than a demonstrated one, and the change is to fail the way C++ fails either way.
+		if !is_type_proc(src.type) || !is_type_proc(dst.type) {
+			error(src.token, "Invalid procedure type found during deferred procedure checking")
+			continue
+		}
 
 		src_proc_type, src_ok := base_type(src.type).variant.(Type_Proc)
 		dst_proc_type, dst_ok := base_type(dst.type).variant.(Type_Proc)

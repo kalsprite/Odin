@@ -173,6 +173,7 @@ current_build_target :: proc() -> parser.Build_Target {
 		os           = odin_os_from_target_os(build_context.metrics.os),
 		arch         = odin_arch_from_target_arch(build_context.metrics.arch),
 		project_name = build_context.ODIN_BUILD_PROJECT_NAME,
+		bedrock      = build_context.bedrock,
 	}
 }
 
@@ -246,7 +247,7 @@ odin_arch_from_target_arch :: proc(arch_kind: Target_Arch_Kind) -> runtime.Odin_
 // at all, so it emitted none of the three. Those checks are replayed here, on the excluded
 // path only; files that survive get them from the real parse as before.
 @(private = "file")
-file_header_selects_target :: proc(fullpath: string, src: string, target: parser.Build_Target, kind: ast.Package_Kind) -> bool {
+file_header_selects_target :: proc(header: ^ast.File, fullpath: string, src: string, target: parser.Build_Target, kind: ast.Package_Kind) -> bool {
 	t: tokenizer.Tokenizer
 	tokenizer.init(&t, src, fullpath, nil)
 	if t.ch <= 0 {
@@ -290,6 +291,22 @@ file_header_selects_target :: proc(fullpath: string, src: string, target: parser
 	// NOTE: stub.docs is left nil on purpose. parse_file_tags will also honour tags written as
 	// `//+build` doc comments, but the C++ compiler recognises only `#+` file tags, so feeding
 	// it the doc comments would exclude files the compiler would have kept.
+	// #306: the malformed-`#+build` diagnostics, reported HERE and only here.
+	//
+	// This is the one point at which every file of the package is still in hand -- included and
+	// build-EXCLUDED alike -- which is what C++ has: parse_file_tag reports and only then returns
+	// false to exclude (parser.cpp:6772-6820), so a bad tag on a file the target skips still
+	// reports. The port drops excluded files a few lines below, so anything deferred to the
+	// post-parse pass in check_file_tags would never see them (probe bt_subt: `#+build
+	// darwin:bogussub` resolves to Darwin, does not match a linux target, and is dropped).
+	//
+	// parse_file_tags itself stays SILENT and is called twice -- once here for inclusion, once
+	// from check_files for the private/lazy/no-instrumentation flags -- so reporting from inside
+	// it would double every diagnostic.
+	// #308: the ONE ordered tag walk. Here because this is the only place that has both the tag
+	// list and `saw_package`, and because a build-excluded file is still in hand.
+	check_file_tags_for_file(header, stub.tags[:], saw_package, target)
+
 	tags := parser.parse_file_tags(stub, context.allocator)
 	defer {
 		delete(tags.build)
@@ -447,7 +464,25 @@ collect_package_for_target :: proc(path: string, kind: ast.Package_Kind = .Norma
 		}
 
 		// (2) `#+build` tags - decided from the file header, still before the parse.
-		selected := file_header_selects_target(fullpath, string(src), target, kind)
+		//
+		// #306: publish the source FIRST. file_header_selects_target now reports malformed-tag
+		// diagnostics (parser.report_file_tag_diagnostics), and those render their source line
+		// inline at emit time through the #279 path-keyed registry. Registering afterwards -- or
+		// only for files that survive selection, as the register_source_file call further down
+		// does -- left every one of them showing "( empty line )" instead of the offending tag.
+		//
+		// The registry takes ownership of `fullpath` and `src` from here on, which is why the
+		// !selected path below no longer frees them: a registered entry pointing at freed source
+		// is precisely the use-after-free just fixed in parse_file_tags. Selected files already
+		// worked this way -- their File owns both for the life of the process -- so this makes
+		// excluded files consistent rather than introducing a new class of leak.
+		header := ast.new(ast.File, NO_POS, NO_POS)
+		header.pkg = pkg
+		header.src = string(src)
+		header.fullpath = fullpath
+		register_source_file(header)
+
+		selected := file_header_selects_target(header, fullpath, string(src), target, kind)
 
 		// (3) Tokenize. C++ Reference: init_ast_file (src/parser.cpp:5709-5787) runs the
 		// tokenizer over the WHOLE file into an array before the parser sees a single
@@ -499,16 +534,22 @@ collect_package_for_target :: proc(path: string, kind: ast.Package_Kind = .Norma
 		}
 
 		if !selected {
-			delete(fullpath)
-			delete(src)
+			// fullpath/src deliberately NOT freed -- the registry entry published above still
+			// points at them so this file's tag diagnostics can render their source line. See
+			// the note at the registration site.
 			continue
 		}
 
-		file := ast.new(ast.File, NO_POS, NO_POS)
-		file.pkg = pkg
-		file.src = string(src)
-		file.fullpath = fullpath
+		file := header
 		pkg.files[fullpath] = file
+
+		// LEDGER #279 part 2: publish for source-line rendering NOW, while the file has its
+		// source but before it is parsed. Syntax diagnostics render their source line inline
+		// at emit time (error_va -> show_error_on_line), so anything published later -- for
+		// instance info.files at check_collect.odin:340, which runs during COLLECTION -- is
+		// too late for every parse-stage diagnostic. This is the port's analogue of C++'s
+		// global ast-file table (parser.cpp:57), keyed by path rather than id.
+		register_source_file(file)
 	}
 
 	success = true
@@ -529,6 +570,11 @@ parse_package_for_target :: proc(path: string, kind: ast.Package_Kind = .Normal,
 		return
 	}
 	ok = parser.parse_package(pkg, p)
+
+	// NOTE(#308): the tag walk used to run here, after parse_package. It now runs at COLLECT
+	// time, from collect_package_for_target -- see check_file_tags_for_file. A build-excluded
+	// file never reaches this point, so a walk here could not report its tags at all, and the
+	// two half-walks disagreed on ordering (probe bt_order2).
 	return
 }
 
@@ -626,6 +672,19 @@ load_package_with_dependencies :: proc(
 		// both land in the same sorted, counted stream.
 		syntax_parser := parser.default_parser()
 		syntax_parser.err = syntax_error_pos
+		// #307: the parser package has no continuation-line channel of its own, so the driver
+		// supplies one -- same arrangement as `err` above. The block pair is what makes the
+		// continuation ATTACH: error_line_va only appends while an error value is live, and
+		// syntax_error_va pops one per call, so without the bracket the Suggestion under
+		// "Expected a package declaration ..." fell through to a bare stderr write and came
+		// out ahead of the sorted stream.
+		syntax_parser.err_line        = error_line
+		syntax_parser.err_block_begin = begin_error_block
+		syntax_parser.err_block_end   = end_error_block
+		// #322: the span-carrying channel, for the parser diagnostics C++ anchors to a NODE
+		// rather than a token. syntax_error_va already takes (pos, end) and renders the caret
+		// across the range -- the parser simply had no way to reach it.
+		syntax_parser.err_range       = syntax_error_va
 		// #209: file_allow_newline needs build_context.strict_style and the build-level vet
 		// flags. The parser package has no build context of its own, so the driver supplies
 		// them -- without this every file parses as if -strict-style were off.
@@ -718,17 +777,49 @@ load_package_with_dependencies :: proc(
 // init_odin_root_from_env initializes ODIN_ROOT from environment if not set
 // Falls back to auto-detection from current working directory
 // Uses heap allocator to ensure the string persists across temp allocator resets
+// with_trailing_separator returns `path` guaranteed to end in a path separator, allocating a copy
+// only when one has to be added.
+//
+// ODIN_ROOT ENDS WITH A SEPARATOR. C++ guarantees it structurally: internal_odin_root_dir walks
+// back from the end of the executable's path to the last '/' or '\\' and BREAKS on it
+// (build_settings.cpp:1219-1225), so the separator is the final character it keeps. User code
+// relies on this -- vendor/miniaudio/common.odin:16 writes
+//     ODIN_ROOT + "vendor/miniaudio/src/build_miniaudio.sh"
+// with no separator of its own. Without this the port produced ".../dev/odinvendor/miniaudio/...",
+// which is not merely a cosmetic difference in a diagnostic: any #exists or #load built the same
+// way resolves to the wrong path. LEDGER #363.
+@(private = "file")
+with_trailing_separator :: proc(path: string, allocator: runtime.Allocator) -> string {
+	if len(path) == 0 {
+		return path
+	}
+	if path[len(path) - 1] == '/' || path[len(path) - 1] == '\\' {
+		return path
+	}
+	joined, err := strings.concatenate({path, "/"}, allocator)
+	if err != nil {
+		return path
+	}
+	return joined
+}
+
 init_odin_root_from_env :: proc() {
 	if len(build_context.ODIN_ROOT) == 0 {
-		// Use heap allocator for persistent storage - tests may use temp_allocator
-		// which would cause ODIN_ROOT to become garbage after the test completes
-		persistent_allocator := context.allocator
-		if context.allocator == context.temp_allocator {
-			persistent_allocator = runtime.heap_allocator()
-		}
+		// ALWAYS the heap. ODIN_ROOT is cached in a process-lifetime global, so its storage must
+		// outlive every caller, full stop -- not merely outlive the one caller-allocator this code
+		// happens to recognise.
+		//
+		// This used to read `context.allocator`, redirecting to the heap only when it could see
+		// that the caller had installed context.temp_allocator. That test names ONE bad allocator
+		// and trusts every other. The Odin test runner hands each test a per-task allocator which
+		// it recycles when the slot is reused -- not the temp allocator, so the old guard did not
+		// fire, and ODIN_ROOT became garbage between tests. The symptom was not a crash but 37
+		// spurious "Unable to find package: core:fmt" diagnostics on the SECOND package check in a
+		// process, which reads like a checker defect and is not one. LEDGER #358.
+		persistent_allocator := runtime.heap_allocator()
 
 		if odin_root := os.get_env("ODIN_ROOT", persistent_allocator); len(odin_root) > 0 {
-			build_context.ODIN_ROOT = odin_root
+			build_context.ODIN_ROOT = with_trailing_separator(odin_root, persistent_allocator)
 			return
 		}
 
@@ -742,7 +833,7 @@ init_odin_root_from_env :: proc() {
 				return
 			}
 			if os.is_dir(runtime_path) {
-				build_context.ODIN_ROOT = cwd
+				build_context.ODIN_ROOT = with_trailing_separator(cwd, persistent_allocator)
 				return
 			}
 
@@ -760,7 +851,7 @@ init_odin_root_from_env :: proc() {
 					return
 				}
 				if os.is_dir(runtime_path) {
-					build_context.ODIN_ROOT = parent
+					build_context.ODIN_ROOT = with_trailing_separator(parent, persistent_allocator)
 					return
 				}
 				dir = parent
@@ -892,6 +983,27 @@ check_package_from_path :: proc(path: string, allocator := context.allocator) ->
 	c := &Checker{}
 	init_checker(c, allocator)
 	defer destroy_checker(c)
+
+	// NOTE(#279 part 2): set_error_collector_info(&c.info) belongs here and is NOT yet wired.
+	// Wiring it was TRIED and MEASURED on 2026-08-03 and is net-negative as things stand:
+	//   for it     -- it makes the source-line/caret display live (a full port of C++
+	//                 error.cpp:282-516 that is currently dead code, because
+	//                 set_error_collector_info at error.odin:188 has NO caller anywhere), and it
+	//                 restores the "Suggestion: Did you mean '[3]int'?" line that the
+	//                 same-position merge currently swallows.
+	//   against    -- corpus went 55 FULL-MATCH / 0 DIFFER  ->  53 / 2. Probes matcnt2 and p_cte3,
+	//                 both SYNTAX-error probes, gained a spurious "\t( empty line )" before each
+	//                 diagnostic. Cause: parse-stage positions do not resolve through
+	//                 info.files (error.odin:531), so get_file_line_as_string returns "" and
+	//                 show_error_on_line takes C++'s genuine empty-line branch
+	//                 (error.odin:649-654, faithful to error.cpp:294).
+	// RESOLVED: parse-stage positions are now resolvable. register_source_file publishes each
+	// file at creation (package_resolver.odin, in collect_package_for_target) -- with its source
+	// attached and before it is parsed -- into a global path-keyed registry that
+	// get_file_line_as_string consults when info.files misses. That is what C++ does
+	// (parser.cpp:57 reads a global ast-file table, not the checker's Info), so the source-line
+	// and caret display can now be switched on.
+	set_error_collector_info(&c.info)
 
 	// Load package and dependencies.
 	//

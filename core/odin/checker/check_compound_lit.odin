@@ -738,9 +738,19 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			}
 		}
 
-	case Type_Array, Type_Slice:
-		// Array and slice literal checking
+	case Type_Array, Type_Slice, Type_Fixed_Capacity_Dynamic_Array:
+		// Array, slice and fixed-capacity-dynamic-array literal checking
 		// Reference: C++ lines 9949-10187
+		//
+		// LEDGER #309: Type_Fixed_Capacity_Dynamic_Array was the ONE kind C++'s chain
+		// (check_expr.cpp:10781-10810) covers that this switch did not, so `x: [dynamic; 2]int
+		// = {1, 2}` -- entirely legal -- fell through to the catch-all and was rejected with
+		// "Invalid compound literal type". An OVER-rejection: valid code refused. #53 ported the
+		// TYPE and #127 audited its sites, but the literal form was not among them.
+		//
+		// It belongs HERE rather than with Type_Dynamic_Array because C++ treats it as bounded,
+		// like an array: it sets max_type_count from the capacity and, unlike the dynamic-array
+		// branch one line above it, does NOT set is_constant = false.
 
 		elem_type: ^Type
 		context_name: string
@@ -755,6 +765,13 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		} else if slice, is_slice := variant.(Type_Slice); is_slice {
 			elem_type = slice.elem
 			context_name = "slice literal"
+		} else if fc, is_fc := variant.(Type_Fixed_Capacity_Dynamic_Array); is_fc {
+			// C++ Reference: check_expr.cpp:10799-10802. context_name is what the shared
+			// index-bounds diagnostics interpolate, so this spelling is what produces
+			// "Index 2 is out of bounds (>= 2) for fixed capacity dynamic array literal".
+			elem_type = fc.elem
+			context_name = "fixed capacity dynamic array literal"
+			max_type_count = fc.capacity
 		}
 
 		max: i64 = 0
@@ -957,6 +974,21 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 						error(node, "Expected %d values for this array literal, got %d", arr.count, max)
 					}
 				}
+			}
+		}
+
+		// C++ Reference: check_expr.cpp:10992-10997. Note the asymmetry with the array case just
+		// above, which is C++'s and not a slip: an array literal is faulted for having TOO FEW
+		// values, a fixed-capacity one only for having too many. The capacity is an upper bound,
+		// not a required length.
+		if fc, is_fc := variant.(Type_Fixed_Capacity_Dynamic_Array); is_fc {
+			if max > fc.capacity {
+				error(
+					node,
+					"Expected a maximum of %d values for this fixed capacity dynamic array, got %d",
+					fc.capacity,
+					max,
+				)
 			}
 		}
 

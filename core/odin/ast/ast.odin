@@ -86,6 +86,11 @@ Feature_Flag_Bit :: enum {
 	Integer_Division_By_Zero_Zero     = 3,
 	Integer_Division_By_Zero_Self     = 4,
 	Integer_Division_By_Zero_All_Bits = 5,
+	// C++ build_settings.cpp:375-376. These two were missing, so the bit_set could not
+	// name the flags that `#+feature force-type-assert` / `#+feature using-stmt` set --
+	// the values still travelled through the u64 backing, but only as anonymous bits.
+	Force_Type_Assert                 = 6,
+	Using_Stmt                        = 7,
 }
 Feature_Flags :: distinct bit_set[Feature_Flag_Bit; u64]
 
@@ -460,6 +465,13 @@ Bad_Stmt :: struct {
 Empty_Stmt :: struct {
 	using node: Stmt,
 	semicolon: tokenizer.Pos, // Position of the following ';'
+	// C++ Reference: Ast_EmptyStmt carries the whole token, and
+	// parse_check_directive_for_statement branches on `token.string == "\n"` to tell an
+	// INSERTED (newline) semicolon from an explicit ';' -- they get different diagnostics.
+	// The port stored only the position, discarding a distinction the tokenizer does make
+	// (is_non_inserted_semicolon tests tok.text != "\n"). Retained here so LEDGER #304 can
+	// reproduce both messages rather than guessing one. Additive field.
+	token: tokenizer.Token,
 }
 
 Expr_Stmt :: struct {
@@ -688,6 +700,11 @@ Foreign_Import_Decl :: struct {
 	name:            ^Ident, // possibly nil
 	collection_name: string,
 	fullpaths:       []^Expr,
+	// C++ AstForeignImportDecl.multiple_filepaths (parser.cpp:1417), set true only for the brace
+	// form `foreign import lib { "a", "b" }` (parser.cpp:5216). parse_setup_file_decls gates the
+	// absolute-path check on `!multiple_filepaths && count == 1`, so the flag is load-bearing:
+	// without it a one-element brace list would be validated where C++ leaves it alone.
+	multiple_filepaths: bool,
 	comment:         ^Comment_Group, // possibly nil
 }
 

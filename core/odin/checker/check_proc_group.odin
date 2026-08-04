@@ -639,13 +639,23 @@ check_call_parameter_mixture :: proc(args: []^ast.Expr, context_name: string, al
 // filter_proc_group_by_param_count removes candidates with incompatible parameter counts
 // Reference: /mnt/c/odin/src/check_expr.cpp:6998-7019
 filter_proc_group_by_param_count :: proc(candidates: ^[dynamic]^Entity, min_arg_count: int, max_arg_count: int) {
-	// Filter in reverse to safely remove elements
-	for i := len(candidates) - 1; i >= 0; i -= 1 {
+	// C++ Reference: check_expr.cpp:7378-7404. C++ walks FORWARD with a manual index and removes
+	// with `array_unordered_remove`, which swaps the LAST element into the vacated slot and does
+	// not advance the index -- so the surviving order is a PERMUTATION of the original, and that
+	// permutation is what the "Did you mean one of the following overloads?" list prints.
+	//
+	// The port walked in reverse with `ordered_remove`, preserving the original order. Same
+	// membership, different sequence, so every overload list whose group had a candidate filtered
+	// out printed in a different order from C++ (probe: builtin_arity).
+	//
+	// C++ also does NOT remove non-procedure entries -- it does `proc_index++; continue;` and
+	// keeps them. The port dropped them, which is a second membership divergence.
+	for i := 0; i < len(candidates); /**/ {
 		entity_proc := candidates[i]
 		proc_type := base_type(entity_type(entity_proc))
 
 		if proc_type == nil || proc_type.kind != .Proc {
-			ordered_remove(candidates, i)
+			i += 1
 			continue
 		}
 
@@ -656,15 +666,16 @@ filter_proc_group_by_param_count :: proc(candidates: ^[dynamic]^Entity, min_arg_
 
 		// Too few arguments for required parameters
 		if required_param_count > max_arg_count {
-			ordered_remove(candidates, i)
+			unordered_remove(candidates, i)
 			continue
 		}
 
 		// Too many arguments for non-variadic procedure
 		if !pt.variadic && max_arg_count != max(int) && total_param_count < max_arg_count {
-			ordered_remove(candidates, i)
+			unordered_remove(candidates, i)
 			continue
 		}
+		i += 1
 	}
 }
 
@@ -695,10 +706,64 @@ check_call_arguments_internal :: proc(
 	// C++ Reference: check_expr.cpp:6116-6140
 	specialized_proc_type := proc_type
 	if pt.is_polymorphic && !pt.is_poly_specialized {
-		// Build operands array from positional operands
-		operands := make([]Operand, len(positional_operands))
+		// C++ Reference: check_expr.cpp:6666-6700 and 6759-6788.
+		//
+		// The operand array handed to polymorphic instantiation is sized to the PARAMETER count,
+		// not the argument count, and a variadic procedure's variadic slot is ALWAYS filled with
+		// a synthetic operand. Its TYPE is what decides whether inference can succeed:
+		//   variadic args present -> the variadic parameter's own declared type
+		//   variadic args absent  -> t_untyped_nil, which `..$E` cannot infer E from, so
+		//                            find_or_generate FAILS and this candidate is rejected.
+		//
+		// That failure IS the mechanism by which `append(&d)` (array, zero values) is rejected.
+		// It is NOT an arity rule -- three earlier attempts expressed it as a count check
+		// (max(args,param_count); exact param_count; empty slot) and all three had to be reverted.
+		//
+		// C++ builds the synthetic operand as an `ast_ident("nil")` whose only contribution is a
+		// position; Operand.expr here is ^ast.Node, so an existing node carrying the same position
+		// serves identically -- call_node when there are no variadic args (C++ uses
+		// ast_token(call).pos) and the first variadic argument otherwise.
+		//
+		// C++'s `dummy_argument_count` (declared check_expr.cpp:6745, incremented 6785 and 6822)
+		// is deliberately NOT ported: it is written twice and never read anywhere in that file.
+		operands: []Operand
 		defer delete(operands)
-		copy(operands, positional_operands)
+		if pt.params != nil && pt.params.kind == .Tuple {
+			ptup := &pt.params.variant.(Type_Tuple)
+			pcount := len(ptup.variables)
+			ops := make([]Operand, pcount)
+
+			has_variadic_slot := pt.variadic && pt.variadic_index >= 0 && pt.variadic_index < pcount
+
+			positional_count := len(positional_operands)
+			if has_variadic_slot {
+				positional_count = min(positional_count, pt.variadic_index)
+			}
+			positional_count = min(positional_count, pcount)
+			for i in 0 ..< positional_count {
+				ops[i] = positional_operands[i]
+			}
+
+			if has_variadic_slot {
+				variadic_args := positional_operands[positional_count:]
+				o := Operand {
+					mode = .Value,
+					expr = call_node,
+				}
+				if len(variadic_args) != 0 {
+					o.expr = variadic_args[0].expr
+					o.type = ptup.variables[pt.variadic_index].type
+				} else {
+					o.type = t_untyped_nil
+				}
+				ops[pt.variadic_index] = o
+			}
+			operands = ops
+		} else {
+			ops := make([]Operand, len(positional_operands))
+			copy(ops, positional_operands)
+			operands = ops
+		}
 
 		// Try to instantiate the polymorphic procedure
 		poly_data := Poly_Proc_Data{}
@@ -1651,8 +1716,18 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	// Reference: /mnt/c/odin/src/check_expr.cpp:7204-7221
 	max_matched_features := 0
 
-	// Test each candidate
-	for entity_proc, i in proc_entities {
+	// Test each candidate.
+	//
+	// C++ Reference: check_expr.cpp:7549 `for_array(i, procs)`. C++ iterates `procs`, which is
+	// FIXED for the duration of the loop, while appending generated specializations to the
+	// SEPARATE `proc_entities` (check_expr.cpp:7578). The port iterated `proc_entities` -- the very
+	// array the body appends to -- so every polymorphic candidate that produced a specialization
+	// was scored a SECOND time as if it were another group member. Measured on a two-member group
+	// (`proc{c1, c2}` where both take `^$T/[dynamic]$E` and `..E`): procs=2 but THREE candidate
+	// evaluations, yielding two "valid" entries with identical score 301 for what is really one
+	// procedure. `proc_entities` starts as a copy of `procs`, so index `i` still addresses the same
+	// entity in both and `candidate_index = i` below stays correct.
+	for entity_proc, i in procs {
 		if .Disabled in entity_proc.flags {
 			continue
 		}
@@ -1741,6 +1816,20 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 		} else {
 			print_call_argument_types(positional_operands, named_operands[:], args_split)
 		}
+		// C++ Reference: check_expr.cpp:7688-7690 --
+		//     if (procs.count == 0) { procs = proc_group_entities_cloned(c, *operand); }
+		// The candidate filtering above can empty `procs` entirely; measured, a zero-argument
+		// group call (`g()`) arrives here with len(procs) == 0 while `g(1.5)` arrives with 2.
+		// print_procedure_group_overloads then early-returns on the empty list, so the whole
+		// "Did you mean one of the following overloads?" block vanished for exactly the calls
+		// that need it most. C++ REFILLS from the group entity instead of giving up.
+		if len(procs) == 0 {
+			refill := proc_group_entities_cloned(ctx, operand, context.temp_allocator)
+			if len(refill) > 0 {
+				resize(&procs, len(refill))
+				copy(procs[:], refill)
+			}
+		}
 		print_procedure_group_overloads(ctx, procs[:], positional_operands, named_operands[:], args_split, expr_name)
 		data.error = true
 		return data
@@ -1748,7 +1837,15 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 
 	if len(valid_candidates) == 1 {
 		// Exactly one match - use it
-		winner := procs[valid_candidates[0].index]
+		// C++ Reference: check_expr.cpp:7992 `Entity *e = proc_entities[valids[0].index];`.
+		// The index stored in a candidate is an index into `proc_entities`, NOT `procs` -- when a
+		// polymorphic candidate produces a specialization the loop appends it to `proc_entities`
+		// and records `len(proc_entities)-1`, which is out of range for `procs`. The port read
+		// `procs` here. It never crashed only because the duplicate-scoring defect above kept
+		// `len(valid_candidates)` at 2, so this single-winner branch was unreachable in exactly
+		// the cases that would have gone out of bounds. Fixing the loop exposed it immediately
+		// ("Index 3 is out of range 0..<3").
+		winner := proc_entities[valid_candidates[0].index]
 		proc_type := base_type(entity_type(winner))
 
 		ok := check_call_arguments_single(ctx, call_node, operand, winner, proc_type, positional_operands, named_operands[:], args_split, .Show_Errors, &data, false)

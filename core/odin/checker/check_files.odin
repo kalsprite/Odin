@@ -23,7 +23,6 @@ Usage:
 import "core:container/queue"
 import "core:odin/ast"
 import "core:odin/parser"
-import "core:strings"
 import "core:odin/tokenizer"
 
 // =============================================================================
@@ -251,10 +250,24 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 
 	check_update_dependency_tree_for_procedures(c)
 
-	// C++ runs generate_minimum_dependency_set(c, entry_point) HERE. The port does not have
-	// that pass (task #42), so `min_dep_count` is never raised above zero and the loop inside
-	// check_unchecked_bodies currently finds nothing to do. It is wired anyway: it is the
-	// correct position, and it stops being a no-op the moment #42 lands.
+	// C++ runs generate_minimum_dependency_set(c, entry_point) HERE (checker.cpp:3110). The port
+	// does not implement that pass at all, so `min_dep_count` is never raised above zero and the
+	// loop inside check_unchecked_bodies finds nothing to do. Wired anyway: this is the correct
+	// position, and it costs nothing while empty.
+	//
+	// SCOPE (task #272, decided by enumerating every reader of min_dep_count in C++):
+	//   llvm_backend*.cpp x5, main.cpp:3408          -> CODEGEN, out of scope for a checker
+	//   checker.cpp:6650  check_unchecked_bodies      -> a RACE BACKSTOP; bill's own comment there
+	//                                                   calls it "a partial hack ... HACK TODO:
+	//                                                   Actually fix this race condition"
+	//   checker.cpp:7509/7513 add_type_info_for_type_definitions -> populates the RTTI type-info
+	//                                                   table
+	// NONE of them emit a diagnostic, so the missing pass does not affect diagnostic parity, and
+	// the corpus agrees: parity.sh is 225/225 on both counts and text with the loop empty.
+	//
+	// The earlier version of this comment blamed task #42. That was wrong by the time it was read:
+	// #42 closed with the OPPOSITE conclusion ("the error cap all along -- NOT a dependency set"),
+	// so nothing was ever going to make this loop non-empty. Corrected here.
 	check_unchecked_bodies(c)
 
 	check_merge_queues_into_arrays(c)
@@ -386,43 +399,13 @@ register_packages_from_files :: proc(c: ^Checker, files: []^ast.File) {
 				disable_file_instrumentation(&c.info, file)
 			}
 
-			// `#+feature ...` and `#+vet ...`. parse_file_tags does NOT carry these --
-			// File_Tags has no feature/vet field -- so read them straight off the raw
-			// tag tokens. get_feature_flag_from_name / get_vet_flag_from_name already
-			// existed with zero callers; this is their entry point.
-			//
-			// The two bit_set types (checker Opt_In_Feature_Flag_Bit and ast
-			// Feature_Flag_Bit) declare identical bits in identical order, so the
-			// transmute is a rename, not a reinterpretation.
-			for tag in file.tags {
-				t := tag.text
-				if len(t) < 3 || t[:2] != "#+" {
-					continue
-				}
-				rest := t[2:]
-				sp := strings.index_any(rest, " \t")
-				if sp < 0 {
-					continue
-				}
-				directive := rest[:sp]
-				payload, _ := strings.replace_all(rest[sp:], ",", " ", context.temp_allocator)
-				switch directive {
-				case "feature":
-					names, _ := strings.fields(payload, context.temp_allocator)
-					for nm in names {
-						f := get_feature_flag_from_name(nm)
-						file.feature_flags |= transmute(ast.Feature_Flags)(transmute(u64)f)
-						file.feature_flags_set = true
-					}
-				case "vet":
-					names, _ := strings.fields(payload, context.temp_allocator)
-					for nm in names {
-						v := get_vet_flag_from_name(nm)
-						file.vet_flags |= transmute(ast.Vet_Flags)(transmute(u64)v)
-						file.vet_flags_set = true
-					}
-				}
-			}
+			// `#+feature ...` and `#+vet ...` are NOT read here. They used to be, by a
+			// whitespace split over the raw tag tokens, which was a simplified stand-in
+			// for C++'s parse_vet_tag / parse_feature_tag and silently accepted four
+			// things C++ rejects (#305). The faithful port lives in file_tags.odin and
+			// runs on the PARSE side of check_package_from_path's error gate, where C++
+			// runs it -- by the time control reaches here, file.vet_flags and
+			// file.feature_flags are already populated.
 		}
 
 		// Check if already registered by path
@@ -509,8 +492,10 @@ check_merge_queues_into_arrays :: proc(c: ^Checker) {
 
 	// Drain required_foreign_imports_through_force queue
 	// C++ Reference: checker.cpp:2975-2978, inside generate_minimum_dependency_set_internal.
-	// C++ also calls add_to_set(c, e) here; that belongs to the dependency-set pass the port
-	// does not have yet (LEDGER task #42), so only the array_add half is reproduced.
+	// C++ also calls add_to_set(c, e) here; that belongs to generate_minimum_dependency_set,
+	// which the port does not implement (task #272 -- SCOPED OUT: no reader of min_dep_count
+	// emits a diagnostic). Only the array_add half is reproduced, and that is sufficient.
+	// (This previously cited task #42, which closed with an unrelated conclusion.)
 	for {
 		if entity, ok := queue.mpsc_dequeue(&c.info.required_foreign_imports_through_force_queue); ok {
 			append(&c.info.required_foreign_imports_through_force, entity)
@@ -529,8 +514,9 @@ check_merge_queues_into_arrays :: proc(c: ^Checker) {
 	// dead drain_required_global_variable_queue. A single `@(require)` global therefore left
 	// an item in the queue and tripped mpsc_destroy's "MPSC queue must be empty before
 	// destroy" assertion at teardown, killing the checker on a package C++ accepts silently.
-	// As above, add_to_set awaits task #42; the .Used marking is reproduced here because it
-	// is observable semantics, not bookkeeping.
+	// As above, add_to_set belongs to the dependency-set pass scoped out under #272; the .Used
+	// marking is reproduced here because it is observable semantics, not bookkeeping.
+	// (This previously cited task #42, which closed with an unrelated conclusion.)
 	for {
 		if entity, ok := queue.mpsc_dequeue(&c.info.required_global_variable_queue); ok {
 			if entity != nil {

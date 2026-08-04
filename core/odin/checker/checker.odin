@@ -986,6 +986,13 @@ Checker_Info :: struct {
 	raddbg_type_views_queue:                      queue.MPSC_Queue(Raddbg_Type_View), // C++ line 501
 	intrinsics_entry_point_usage:                 queue.MPSC_Queue(^ast.Node), // C++ line 504
 	objc_class_implementations:                   queue.MPSC_Queue(^Entity), // C++ line 511
+	// C++ Reference: checker.hpp -- `objc_class_name_mutex` guarding `obcj_class_name_set`
+	// (C++ spells the set with a typo; the port does not reproduce the typo in its own name).
+	// Used by check_decl.cpp:536-541 to reject two @(objc_class) declarations claiming the same
+	// name. MUST stay mutex-guarded: this runs during threaded checking, and #141 was exactly an
+	// unguarded shared-container write corrupting the heap.
+	objc_class_name_mutex:                        sync.Mutex,
+	objc_class_names:                             map[string]bool,
 	objc_method_mutex:                            sync.Mutex, // C++ line 513: Thread-safe access to objc_method_implementations
 	objc_method_implementations:                  map[^Type][dynamic]Objc_Method_Data, // C++ line 514: Type -> method data array
 	all_procedures_queue:                         queue.MPSC_Queue(^Proc_Info), // C++ line 520
@@ -1186,6 +1193,10 @@ Checker_Context :: struct {
 	curr_proc_sig:                     ^Type,
 	curr_proc_calling_convention:      Calling_Convention,
 	in_proc_sig:                       bool,
+	// C++ CheckerContext::allow_c_vararg_param (checker.hpp:837). Set only while checking
+	// c_va_start's second argument, which is the ONE place a `#c_vararg` parameter may be named
+	// directly; every other mention of it is an error. See check_expr's Ident arm.
+	allow_c_vararg_param:              bool,
 	foreign_context:                   Foreign_Context,
 	type_level:                        int,
 	untyped:                           ^map[^ast.Expr]^Expr_Info,

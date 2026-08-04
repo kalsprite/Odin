@@ -809,8 +809,12 @@ check_builtin_simd_reduce_boolean :: proc(ctx: ^Checker_Context, operand: ^Opera
 	}
 
 	elem := base_array_type(x.type)
-	if !is_type_boolean(elem) {
-		error(call.args[0], "'%s' expected a #simd type with a boolean element, got '%s'", builtin_name, type_to_string(x.type))
+	// C++ check_builtin.cpp:1410 accepts a boolean OR an INTEGER element. The port tested boolean
+	// alone, which was an over-rejection and not merely a wording drift: `simd.reduce_any` on a
+	// `#simd[4]i32` is legal to the reference (probe n9_simdint, oracle silent) and the port
+	// rejected it. The message wording follows from the same line.
+	if !is_type_boolean(elem) && !is_type_integer(elem) {
+		error(call.args[0], "'%s' expected a #simd type with a boolean or an integer element, got '%s'", builtin_name, type_to_string(x.type))
 		return false
 	}
 
@@ -839,7 +843,10 @@ check_builtin_simd_extract_bits :: proc(ctx: ^Checker_Context, operand: ^Operand
 	}
 
 	if !is_type_simd_vector(x.type) {
-		error(call.args[0], "'%s' expected a simd vector type", builtin_name)
+		// C++ Reference: check_builtin.cpp:1430. This is the ONE simd site where C++ names the
+		// offending type; the other ~34 are bare, and the neighbouring reduce-bitwise case
+		// (check_builtin.cpp:1382) is deliberately bare. Do not generalise either way.
+		error(call.args[0], "'%s' expected a simd vector type, got '%s'", builtin_name, type_to_string(x.type))
 		return false
 	}
 
@@ -852,7 +859,7 @@ check_builtin_simd_extract_bits :: proc(ctx: ^Checker_Context, operand: ^Operand
 	num_elems := get_array_type_count(x.type)
 
 	// Return a bit set type with range 0..<num_elems
-	// C++ Reference: check_builtin.cpp:1248-1254
+	// C++ Reference: check_builtin.cpp:1443-1446
 	result_type := alloc_type_bit_set()
 	// Cannot mutate variant fields directly - must create new struct
 	bit_set_data := Type_Bit_Set {

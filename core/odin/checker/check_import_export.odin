@@ -13,6 +13,8 @@ C++ Reference: /mnt/c/odin/src/checker.cpp:5130-5926
 import "base:runtime"
 import "core:odin/ast"
 import "core:odin/tokenizer"
+import "core:slice"
+import "core:strings"
 import "core:unicode"
 
 // lookup_imported_package maps an import declaration's path to the package it names.
@@ -270,11 +272,29 @@ check_add_import_decl :: proc(ctx: ^Checker_Context, import_decl: ^ast.Import_De
 		// Create import entity (C++ line 5325-5327)
 		import_token := import_decl.name
 		if import_token.text == "" {
-			// Use a synthetic token for unnamed imports
+			// Use a synthetic token for unnamed imports.
+			//
+			// C++ Reference: parser.cpp:5151-5159. The position is the PATH string, not the
+			// `import` keyword:
+			//
+			//	Token import_name = {};
+			//	switch (f->curr_token.kind) {
+			//	case Token_Ident: import_name = advance_token(f); break;
+			//	default:          import_name.pos = f->curr_token.pos; break;
+			//	}
+			//
+			// At the `default` arm the parser has consumed `import` and not yet consumed the
+			// path, so curr_token IS the path string. checker.cpp:5658 then hands that token to
+			// alloc_entity_import_name, and checker.cpp:842 reports "declared but not used" at
+			// e->token -- so the oracle points at `"core:sync"`, column 8, while this port
+			// pointed at `import`, column 1.
+			//
+			// import_decl.pos is the keyword (Import_Decl embeds Decl, whose pos is import_tok's).
+			// relpath is the path token, which is the equivalent of C++'s curr_token here.
 			import_token = tokenizer.Token {
 				text = import_name,
 				kind = .Ident,
-				pos  = import_decl.pos,
+				pos  = import_decl.relpath.pos,
 			}
 		}
 
@@ -633,11 +653,41 @@ check_export_entities_in_pkg :: proc(c: ^Checker, pkg: ^ast.Package) {
 	}
 
 	// C++ line 5785-5813: while (mpmc_dequeue(&pkg->exported_entity_queue, &ee))
+	//
+	// DETERMINISM (#271). C++ publishes in sorted-FILE order, but gets that emergently from its
+	// thread pool's FIFO dispatch, NOT from an explicit sort: checker.cpp:2229-2237 enqueues from
+	// inside the parallel collect worker (bill's own comment there notes multiple threads reach
+	// it). Measured: oracle 60/60 identical on core/rexcode/isa/ppc_vle/tools; the port's raw
+	// queue order was 16/20 sorted-file order and 4/20 scrambled, which flipped WHICH of two
+	// duplicate `main`s was named the redeclaration and which the original.
+	//
+	// So this sort is NOT a transcription of C++ code -- there is no sort to cite. It reproduces
+	// C++'s OBSERVABLE publish order, which is what parity requires. Do not "correct" it to match
+	// C++ line-for-line by removing it.
+	//
+	// Sorted by (file basename, byte offset): basename to match the collect dispatch's own
+	// ordering (check_collect.odin uses filename_from_path), offset to keep declaration order
+	// within a file. Every file in a package shares a directory, so basename order and full-path
+	// order agree here.
+	drained := make([dynamic]ast.Package_Exported_Entity, 0, 64, context.temp_allocator)
+	defer delete(drained)
 	for {
 		exported, ok := dequeue_exported_entity(&c.info, pkg)
 		if !ok {
 			break
 		}
+		append(&drained, exported)
+	}
+	slice.sort_by(drained[:], proc(a, b: ast.Package_Exported_Entity) -> bool {
+		pa, pb := a.entity.token.pos, b.entity.token.pos
+		na, nb := filename_from_path(pa.file), filename_from_path(pb.file)
+		if na != nb {
+			return strings.compare(na, nb) < 0
+		}
+		return pa.offset < pb.offset
+	})
+
+	for exported in drained {
 
 		// C++ Reference: checker.cpp:6119 — `add_entity(ctx, pkg->scope, ee.identifier, ee.entity)`.
 		//

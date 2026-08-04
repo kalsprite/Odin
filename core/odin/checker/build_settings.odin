@@ -397,6 +397,9 @@ Build_Context :: struct {
 	// C++: build_settings.cpp:622 - `-bedrock`. Drops 128-bit integers from the universe
 	// scope and disallows `map`.
 	bedrock:                            bool,
+	// C++: build_settings.cpp:624 - `-disable-init-fini`. Read at check_decl.cpp:1337 to reject
+	// any @(init)/@(fini) declaration outright.
+	disable_init_fini:                  bool,
 	// C++: build_settings.cpp:579. Backend-only in effect, but ODIN_USE_SEPARATE_MODULES is
 	// visible to checked code, so init_build_context derives it exactly as C++ does.
 	use_separate_modules:               bool,

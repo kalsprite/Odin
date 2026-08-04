@@ -1066,6 +1066,12 @@ Type_Struct :: struct {
 	is_packed:               bool,
 	is_raw_union:            bool,
 	is_all_or_none:          bool,  // #all_or_none attribute
+	// #simple: every field must be at least "nearly simple compare". Set by check_struct_type
+	// once the fields validate. C++ types.cpp:166 (a 1-bit field on Type_Struct). Read back by
+	// is_type_nearly_simple_compare, where it short-circuits the per-field walk -- a #simple
+	// struct is nearly-simple BY DECLARATION, which is what makes one nest inside another.
+	// LEDGER #312.
+	is_simple:               bool,
 	custom_align:            i64,
 	custom_min_field_align:  i64,
 	custom_max_field_align:  i64,

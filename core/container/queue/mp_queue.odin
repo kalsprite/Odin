@@ -11,6 +11,15 @@ package container_queue
 import "base:runtime"
 import "core:sync"
 
+// Every declaration below is polymorphic -- both queue types are `struct($T: typeid)` and every
+// procedure takes `^MPSC_Queue($T)` / `^MPMC_Queue($T)`. Polymorphic bodies and field types are
+// only resolved on instantiation, and nothing inside this package instantiates them, so when the
+// package is checked on its own there is no resolved use of `sync` and
+// `odin check core/container/queue -vet -strict-style` reports "'sync' declared but not used".
+// The diagnostic is correct, not a compiler bug: the import really is unused at this point.
+// `_ :: sync` is the standard way to say "this is deliberate". LEDGER #341.
+_ :: sync
+
 // MPSC_Queue is a Multi-Producer Single-Consumer queue.
 //
 // Multiple threads can safely enqueue items concurrently,

@@ -512,6 +512,15 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 		return
 	}
 
+	// C++ Reference: checker.cpp:4565-4569. Snapshot the INHERITED link_prefix/link_suffix so the
+	// epilogue can tell "inherited from the foreign block, untouched" from "set by this
+	// declaration". C++ compares the string DATA POINTER, not the contents -- a declaration that
+	// re-states the same prefix text is an override (and so a genuine conflict), not an
+	// inheritance. Note this snapshot is taken AFTER the empty-attribute early return, exactly as
+	// C++ does: a declaration with no attributes at all keeps its inherited prefix.
+	original_link_prefix := ac != nil ? ac.link_prefix : ""
+	original_link_suffix := ac != nil ? ac.link_suffix : ""
+
 	// Process each attribute
 	// C++ Reference: checker.cpp:4253-4299
 	for attr in attributes {
@@ -956,21 +965,48 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				}
 			}
 
-			// @(objc_is_class_method) - Mark as ObjC class method (not instance method)
+			// @(objc_is_class_method=<bool>) - Mark as ObjC class method (not instance method)
+			//
+			// C++ Reference: checker.cpp:4151-4158 --
+			//     ExactValue ev = check_decl_attribute_value(c, value);
+			//     if (ev.kind == ExactValue_Bool) { ac->objc_is_class_method = ev.value_bool; }
+			//     else { error(elem, "Expected a boolean value for '%.*s'", LIT(name)); }
+			//
+			// The port required exactly the OPPOSITE: it rejected any value with "expects no
+			// parameter" and then set the flag true unconditionally -- so the reference's required
+			// form `@(objc_is_class_method=true)` errored, and `=false` errored yet still set the
+			// flag TRUE. core/sys/darwin/Foundation writes that form throughout, which was the
+			// entirety of its 36-diagnostic divergence from the reference (#277).
 			if name == "objc_is_class_method" {
-				if value != nil {
-					error(elem, "'%s' expects no parameter", name)
+				ev := check_decl_attribute_value(ctx, value)
+				if b, ok := ev.(bool); ok {
+					ac.objc_is_class_method = b
+				} else {
+					error(elem, "Expected a boolean value for '%s'", name)
 				}
-				ac.objc_is_class_method = true
 				continue
 			}
 
-			// @(objc_is_implement) - Mark type/proc for ObjC implementation
-			if name == "objc_is_implement" {
-				if value != nil {
-					error(elem, "'%s' expects no parameter", name)
+			// C++ Reference: checker.cpp:4174-4183 and 4474-4483. The attribute is spelled
+			// "objc_implement"; the port handled "objc_is_implement", which C++ does not have.
+			// Since the port ALSO lists "objc_implement" as a legal attribute name,
+			// `@(objc_implement)` was accepted and then silently ignored -- so
+			// ac.objc_is_implementation never became true and the whole gate below was DEAD
+			// CODE. LEDGER #283.
+			//
+			// C++ also accepts an optional BOOLEAN (`@(objc_implement=false)`); the port
+			// rejected any value at all.
+			if name == "objc_implement" {
+				if value == nil {
+					ac.objc_is_implementation = true
+				} else {
+					ev := check_decl_attribute_value(ctx, value)
+					if b, ok := ev.(bool); ok {
+						ac.objc_is_implementation = b
+					} else {
+						error(elem, "Expected a boolean value, or no value, for '%s'", name)
+					}
 				}
-				ac.objc_is_implementation = true
 				continue
 			}
 
@@ -1157,6 +1193,20 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			report_unknown_attribute(elem, name)
 		}
 	}
+
+	// C++ Reference: checker.cpp:4638-4650. An INHERITED link_prefix/link_suffix is silently
+	// dropped when this declaration supplies its own link_name; only a prefix set on the SAME
+	// declaration as the link_name is the conflict that handle_link_name reports. Without this,
+	// the common idiom of @(link_prefix="CF") on a foreign block plus @(link_name=...) on one
+	// member inside it is rejected -- see core/sys/darwin/CoreFoundation/CFString.odin:179.
+	if ac != nil {
+		if raw_data(ac.link_prefix) == raw_data(original_link_prefix) && len(ac.link_name) > 0 {
+			ac.link_prefix = ""
+		}
+		if raw_data(ac.link_suffix) == raw_data(original_link_suffix) && len(ac.link_name) > 0 {
+			ac.link_suffix = ""
+		}
+	}
 }
 
 // handle_link_name processes link name with prefix/suffix
@@ -1203,12 +1253,33 @@ handle_link_name :: proc(ctx: ^Checker_Context, token: tokenizer.Token, link_nam
 // is_platform_darwin checks if target OS is Darwin (macOS, iOS, etc.)
 // C++ Reference: /mnt/c/odin/src/check_builtin.cpp:271
 // Used to validate that Objective-C intrinsics are only used on Darwin platforms
+// C++ Reference: check_builtin.cpp:283-287, inside check_builtin_objc_procedure:
+//
+//     if (build_context.metrics.os != TargetOs_darwin) {
+//         // allow on doc generation (e.g. Metal stuff)
+//         if (build_context.command_kind != Command_doc && build_context.command_kind != Command_check) {
+//             error(call, "'%.*s' only works on darwin", LIT(builtin_name));
+//         }
+//     }
+//
+// So the diagnostic is suppressed under `odin check` and `odin doc` even off-darwin. That
+// exemption was never ported. Until #329 the omission was invisible, because build_context was
+// always nil and the guard below returned true unconditionally -- accidentally matching the
+// reference under `odin check`, and accidentally NOT matching it under `odin build`. Wiring the
+// field (#329) turned core/sys/darwin/Foundation from 0 diagnostics to 36 against an oracle
+// reporting 0, which is what surfaced this.
 is_platform_darwin :: proc(ctx: ^Checker_Context) -> bool {
-	// Default to Darwin if no build context specified (for backward compatibility)
-	if ctx.info.build_context == nil {
-		return true // Allow objc intrinsics by default
+	bc := ctx.info.build_context
+	if bc == nil {
+		return true
 	}
-	return ctx.info.build_context.metrics.os == .Darwin
+	if bc.metrics.os == .Darwin {
+		return true
+	}
+	if .Check in bc.command_kind || .Doc in bc.command_kind {
+		return true
+	}
+	return false
 }
 
 // is_foreign_name_valid checks if a string is a valid foreign identifier
@@ -1860,14 +1931,16 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 		if type_name, ok := &e.variant.(Entity_Type_Name); ok {
 			// C++ Reference: check_decl.cpp:521-528
 			// Verify the type is zero-size (ObjC class bindings must be opaque)
+			// e.token, NOT init_expr. C++ anchors this on the ENTITY (check_decl.cpp:603,
+			// `error(e->token, ...)`), i.e. the declared name, so `Foo :: struct {}` reports at
+			// column 1. Anchoring on the initialising expression put us at column 8 -- the `struct`
+			// keyword -- for every @(objc_class) type. Same class as #179 and #197: the message was
+			// right and the anchor was not, which a count-only comparison cannot see.
 			if type_size_of(base) != 0 {
-				error(init_expr, "@(objc_class) marked type must be of zero size")
+				error_token(e.token, "@(objc_class) marked type must be of zero size")
 			}
 
 			// C++ Reference: check_decl.cpp:530-540
-			// Check for duplicate objc_class names
-			// NOTE: This would require a global map to track used names
-			// For now, just store the name
 			type_name.objc_class_name = effective_ac.objc_class
 
 			// C++ Reference: check_decl.cpp:542-555
@@ -1876,6 +1949,38 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 				type_name.objc_is_implementation = true
 				type_name.objc_ivar = effective_ac.objc_ivar
 				type_name.objc_context_provider = effective_ac.objc_context_provider
+
+				// C++ Reference: check_decl.cpp:536-541 --
+				//     mutex_lock(&ctx->info->objc_class_name_mutex);
+				//     bool class_exists = string_set_update(&ctx->info->obcj_class_name_set, ac.objc_class);
+				//     mutex_unlock(&ctx->info->objc_class_name_mutex);
+				//     if (class_exists) { error(e->token, "@(objc_class) name '%.*s' has already been used elsewhere", ...); }
+				//
+				// string_set_update INSERTS AND REPORTS whether the name was already present -- a
+				// plain insert would not detect anything. The port previously carried a
+				// "NOTE: This would require a global map ... For now, just store the name"
+				// placeholder here, so two implementations claiming one name were accepted
+				// silently (probe objcdup2, #165).
+				//
+				// The check sits INSIDE this objc_is_implementation branch exactly as C++ has it:
+				// declarations without @(objc_implement) are not registered and must stay silent
+				// (probe objcdup covers that direction).
+				info := &ctx.checker.info
+				class_exists: bool
+				{
+					sync.lock(&info.objc_class_name_mutex)
+					defer sync.unlock(&info.objc_class_name_mutex)
+					class_exists = effective_ac.objc_class in info.objc_class_names
+					info.objc_class_names[effective_ac.objc_class] = true
+				}
+				if class_exists {
+					error(
+						e.token,
+						"@(objc_class) name '%s' has already been used elsewhere",
+						effective_ac.objc_class,
+					)
+				}
+
 				// Queue for later processing
 				queue.mpsc_enqueue(&ctx.checker.info.objc_class_implementations, e)
 
@@ -1890,6 +1995,63 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 						e,
 					)
 				}
+
+				// C++ Reference: check_decl.cpp:532 and 557-592. Both the objc_superclass STORE
+				// and the validation walk live INSIDE the objc_is_implementation gate. The port
+				// had the validation as a SIBLING, so every @(objc_class) type carrying a
+				// superclass but no @(objc_implement) was checked -- and rejected -- where C++
+				// never looks. Probe objcsuper: oracle 0 diagnostics, port 2 errors. LEDGER #283.
+				//
+				// C++ walks the ENTIRE ancestry with a TypeSet seeded from e->type, validating
+				// every ancestor and detecting cycles; the port inspected one level and had only
+				// the LAST of C++'s four ordered checks, firing it where C++ fires the third.
+				type_name.objc_superclass = effective_ac.objc_superclass
+
+				super_set := make(map[^Type]bool)
+				defer delete(super_set)
+				super_set[e.type] = true
+
+				super := effective_ac.objc_superclass
+				for super != nil {
+					// C++ Reference: check_decl.cpp:566-569
+					if super.kind != .Named {
+						error(e.token, "@(objc_superclass) Referenced type must be a named struct")
+						break
+					}
+					// C++ Reference: check_decl.cpp:571-574. C++'s type_set_update returns true
+					// when the type was ALREADY present -- that is the cycle.
+					if super in super_set {
+						error(e.token, "@(objc_superclass) Superclass hierarchy cycle encountered")
+						break
+					}
+					super_set[super] = true
+
+					// C++ Reference: check_decl.cpp:576 calls check_single_global_entity here to
+					// force the superclass to resolve. OMITTED: C++ runs this block from
+					// generate_minimum_dependency_set, a LATER pass, while the port runs it at
+					// DECLARATION time, so re-entering global entity checking here is not safe.
+					named_type := base_named_type(super)
+					if named_type == nil || named_type.kind != .Named {
+						break
+					}
+					nt := named_type.variant.(Type_Named)
+
+					// C++ Reference: check_decl.cpp:581-584
+					if !is_type_objc_object(named_type) {
+						error(e.token, "@(objc_superclass) Superclass '%s' must be an Objective-C class", nt.name)
+						break
+					}
+					// C++ Reference: check_decl.cpp:586-589
+					if !has_type_got_objc_class_attribute(named_type) {
+						error(e.token, "@(objc_superclass) Superclass '%s' must have a valid @(objc_class) attribute", nt.name)
+						break
+					}
+
+					if nt.type_name == nil {
+						break
+					}
+					super = nt.type_name.variant.(Entity_Type_Name).objc_superclass
+				}
 			} else {
 				// C++ Reference: check_decl.cpp, the `else` of the objc_is_implementation
 				// branch inside the objc_class block.
@@ -1900,17 +2062,6 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 				}
 			}
 
-			// C++ Reference: check_decl.cpp:557-590
-			// Handle objc_superclass attribute
-			if effective_ac.objc_superclass != nil {
-				superclass_type := effective_ac.objc_superclass
-				// Verify superclass is also an objc_class type
-				if !has_type_got_objc_class_attribute(superclass_type) {
-					superclass_str := type_to_string(superclass_type)
-					error(init_expr, "@(objc_superclass) Superclass '%s' must have a valid @(objc_class) attribute", superclass_str)
-				}
-				type_name.objc_superclass = superclass_type
-			}
 		}
 	} else if effective_ac != nil && effective_ac.objc_is_implementation {
 		// C++ Reference: check_decl.cpp:593-596
@@ -1964,259 +2115,6 @@ make_decl_info :: proc(scope: ^Scope, parent: ^Decl_Info = nil, allocator := con
 	return d
 }
 
-// destroy_decl_info frees a Decl_Info and its resources
-destroy_decl_info :: proc(d: ^Decl_Info, allocator := context.allocator) {
-	if d == nil {
-		return
-	}
-
-	delete(d.deps)
-	delete(d.type_info_deps)
-	delete(d.labels)
-	delete(d.variadic_reuses)
-
-	free(d, allocator)
-}
-
-// ======================================================================================
-// DECLARATION CHECKING HELPER FUNCTIONS
-// ======================================================================================
-
-// ======================================================================================
-// Declaration Info Helpers
-// ======================================================================================
-
-// NOTE: make_decl_info_with_parent removed - does not exist in C++ implementation.
-// The C++ codebase only has make_decl_info(scope, parent) with 2 parameters.
-// Use make_decl_info() directly instead (defined at line 439 in this file).
-
-// decl_info_set_parent sets parent on existing decl info
-// C++ Reference: check_decl.cpp:190-200
-decl_info_set_parent :: proc(d: ^Decl_Info, parent: ^Decl_Info) {
-	// C++ Reference: check_decl.cpp:190-200
-	// Sets or updates the parent of a declaration info.
-	// Used when parent relationship needs to be established after creation.
-	if d == nil {
-		return
-	}
-	d.parent = parent
-}
-
-// decl_info_is_nested checks if decl is nested in procedure
-// C++ Reference: check_decl.cpp:210-220
-decl_info_is_nested :: proc(d: ^Decl_Info) -> bool {
-	// C++ Reference: check_decl.cpp:210-220
-	// Returns true if this declaration is nested within a procedure.
-	// This is determined by checking if it has a parent declaration.
-	if d == nil {
-		return false
-	}
-	return d.parent != nil
-}
-
-// decl_info_get_entity retrieves entity from decl info
-// C++ Reference: check_decl.cpp:230-240
-decl_info_get_entity :: proc(d: ^Decl_Info) -> ^Entity {
-	// C++ Reference: check_decl.cpp:230-240
-	// Safely retrieves the entity associated with a declaration info.
-	// Returns nil if the decl info is nil.
-	if d == nil {
-		return nil
-	}
-	return d.entity
-}
-
-// ======================================================================================
-// Variable Declaration Helpers
-// ======================================================================================
-
-// check_init_variable_internal checks variable with initializer
-// C++ Reference: check_decl.cpp:300-350
-check_init_variable_internal :: proc(ctx: ^Checker_Context, entity: ^Entity, operand: ^Operand, init: ^ast.Expr) -> bool {
-	// C++ Reference: check_decl.cpp:300-350
-	// Internal helper for variable initialization checking.
-	// This validates that an initializer expression is compatible with the variable type.
-	// Returns true if initialization is valid, false otherwise.
-
-	if entity == nil || init == nil {
-		return false
-	}
-
-	// Check initializer expression with type hint for compound literals
-	// C++ Reference: check_decl.cpp uses check_expr_with_type_hint to pass entity->type
-	if entity.type != nil && entity.type != t_invalid {
-		check_expr_with_type_hint(ctx, operand, init, entity.type)
-	} else {
-		check_expr(ctx, operand, init)
-	}
-
-	if operand.mode == .Invalid {
-		return false
-	}
-
-	// Set entity type from initializer if not specified
-	if entity.type == nil || entity.type == t_invalid {
-		entity.type = operand.type
-	}
-
-	// Check assignment compatibility
-	if !check_is_assignable_to(ctx, operand, entity.type) {
-		t1_str := type_to_string(operand.type)
-		t2_str := type_to_string(entity.type)
-		error(init, "Cannot assign value of type '%s' to variable of type '%s'", t1_str, t2_str)
-		return false
-	}
-
-	return true
-}
-
-// check_variable_type validates variable type annotation
-// C++ Reference: check_decl.cpp:380-410
-check_variable_type :: proc(ctx: ^Checker_Context, entity: ^Entity, type_expr: ^ast.Expr) -> bool {
-	// C++ Reference: check_decl.cpp:1660
-	// Validates that a type expression is valid for a variable declaration.
-	// Sets the entity type if valid.
-	// Returns true if type is valid, false otherwise.
-
-	if entity == nil || type_expr == nil {
-		return false
-	}
-
-	// Check the type expression and capture the result
-	// C++ equivalent: e->type = check_type(ctx, type_expr);
-	result_type := check_type_expr(ctx, type_expr, nil)
-
-	// Validate the type is valid before assigning
-	if result_type == nil || result_type == t_invalid {
-		error(type_expr, "Expected a type")
-		return false
-	}
-
-	// Assign the validated type to the entity
-	entity.type = result_type
-	return true
-}
-
-// check_variable_foreign validates foreign variable declaration
-// C++ Reference: check_decl.cpp:430-460
-check_variable_foreign :: proc(ctx: ^Checker_Context, entity: ^Entity) -> bool {
-	// C++ Reference: check_decl.cpp:430-460
-	// Validates that a foreign variable declaration has the required properties.
-	// Foreign variables must have an explicit type and cannot have initializers.
-	// Returns true if valid, false otherwise.
-
-	if entity == nil {
-		return false
-	}
-
-	if var_ent, ok := &entity.variant.(Entity_Variable); ok {
-		// Foreign variables must have type
-		if entity.type == nil || entity.type == t_invalid {
-			error(entity.token, "Foreign variable must have explicit type")
-			return false
-		}
-
-		// Mark as foreign
-		var_ent.is_foreign = true
-		return true
-	}
-
-	return false
-}
-
-// ======================================================================================
-// Constant Declaration Helpers
-// ======================================================================================
-
-// check_const_value validates constant value
-// C++ Reference: check_decl.cpp:550-590
-check_const_value :: proc(ctx: ^Checker_Context, entity: ^Entity, value_expr: ^ast.Expr) -> bool {
-	// C++ Reference: check_decl.cpp:550-590
-	// Validates that a constant declaration has a compile-time constant value.
-	// This ensures the value expression can be evaluated at compile time.
-	// Returns true if the value is a valid constant, false otherwise.
-
-	if entity == nil || value_expr == nil {
-		return false
-	}
-
-	operand: Operand
-	check_expr(ctx, &operand, value_expr)
-
-	if operand.mode == .Invalid {
-		return false
-	}
-
-	// Constants must be compile-time constant
-	if operand.mode != .Constant {
-		error(value_expr, "Constant declaration must have constant value")
-		return false
-	}
-
-	// Set entity type and value
-	if entity.type == nil || entity.type == t_invalid {
-		entity.type = operand.type
-	}
-
-	if const_ent, ok := &entity.variant.(Entity_Constant); ok {
-		const_ent.value = operand.value
-	}
-
-	return true
-}
-
-// ======================================================================================
-// Scope Management Helpers
-// ======================================================================================
-
-// open_scope_with_flags creates and pushes new scope with flags
-// C++ Reference: check_decl.cpp:670-690
-open_scope_with_flags :: proc(ctx: ^Checker_Context, flags: Scope_Flag) -> ^Scope {
-	// C++ Reference: check_decl.cpp:670-690
-	// Creates a new scope with the specified flags and pushes it onto the context stack.
-	// This is used when entering a new lexical scope (e.g., function body, block).
-	// Returns the newly created scope.
-
-	if ctx == nil {
-		return nil
-	}
-
-	// C++ uses permanent_allocator() for scopes (checker.cpp:217)
-	// In native checker, this corresponds to ctx.checker.allocator
-	// This ensures scopes persist for the lifetime of the checker
-	s := create_scope(ctx.scope, ctx.checker.allocator)
-	s.flags = flags
-	ctx.scope = s
-	return s
-}
-
-// close_scope pops scope from context
-// C++ Reference: check_decl.cpp:700-710
-close_scope :: proc(ctx: ^Checker_Context) {
-	// C++ Reference: check_decl.cpp:700-710
-	// Pops the current scope from the context, returning to the parent scope.
-	// This is called when exiting a lexical scope.
-
-	if ctx == nil || ctx.scope == nil {
-		return
-	}
-
-	ctx.scope = ctx.scope.parent
-}
-
-// scope_set_flags sets flags on current scope
-// C++ Reference: check_decl.cpp:720-730
-scope_set_flags :: proc(ctx: ^Checker_Context, flags: Scope_Flag) {
-	// C++ Reference: check_decl.cpp:720-730
-	// Sets additional flags on the current scope.
-	// This is used to mark scope properties after creation.
-
-	if ctx == nil || ctx.scope == nil {
-		return
-	}
-
-	ctx.scope.flags += flags
-}
 
 // ======================================================================================
 // PROCEDURE DECLARATION HELPERS

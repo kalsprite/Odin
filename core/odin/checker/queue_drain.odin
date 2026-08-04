@@ -424,7 +424,12 @@ worker_thread_proc :: proc(t: ^thread.Thread) {
 
 	my_deque := &pool.threads[thread_idx].deque
 
-	for intrinsics.atomic_load(&pool.running) {
+	// C++ Reference: thread_pool.cpp:199-259. The C++ loop body ends with a
+	// `main_loop_continue:` label placed AFTER the sleep, and the steal switch jumps to it
+	// with `goto main_loop_continue`. `main_loop` here is that label: `continue main_loop`
+	// re-tests `running` and re-enters the body at the top, skipping the sleep, which is
+	// exactly what the goto does. See the steal switch below for why that matters.
+	main_loop: for intrinsics.atomic_load(&pool.running) {
 		finished := 0
 
 		// Process own queue (LIFO for cache locality)
@@ -452,13 +457,46 @@ worker_thread_proc :: proc(t: ^thread.Thread) {
 				victim_deque := &pool.threads[victim].deque
 
 				task, result := task_deque_steal(victim_deque)
-				if result == .Success {
+
+				// C++ Reference: thread_pool.cpp -- the three-way switch on GrabState:
+				//     case Grab_Empty:   continue;                 // try the next victim
+				//     case Grab_Success: ...work...; /*fallthrough*/
+				//     case Grab_Failed:  goto main_loop_continue;  // restart the OUTER loop
+				//
+				// The port previously did `continue steal_loop` after a Success and treated
+				// Failed like Empty, so a worker kept scanning victims and then fell straight
+				// into the sleep below WITHOUT re-draining its own deque. A stolen task's
+				// do_work can PUSH new tasks onto the stealing worker's own deque (the checker
+				// submits nested tasks), so that worker could park on `tasks_available` while
+				// still holding work.
+				//
+				// That is a permanent deadlock, not a slowdown: the stranded tasks keep
+				// `tasks_left` above zero, and the ONLY futex_signal(&tasks_left) in the pool
+				// is guarded by `tasks_left == 0`, so it can never fire again. Meanwhile
+				// thread_pool_wait is already blocked inside futex_wait(&tasks_left, N) -- a
+				// futex compares its expected value only at ENTRY, so later changes to
+				// tasks_left do not wake it. Workers only wake on `tasks_available`, which only
+				// thread_pool_add_task broadcasts, and nothing is adding tasks.
+				//
+				// MEASURED (LEDGER #299), gdb on a caught hang of core/sys/darwin/Foundation:
+				//   tasks_left = 37 (0x25, so NOT a u32 underflow)
+				//   deque[12]: top=1842 bottom=1879 size=37   <-- the only non-empty deque
+				//   total queued across all deques = 37 == tasks_left
+				//   all 31 workers in worker_thread_proc -> futex_wait, main in
+				//   thread_pool_wait -> futex_wait
+				// i.e. every outstanding task was sitting in one sleeping worker's own deque.
+				switch result {
+				case .Success:
 					task.do_work(task.data)
 					sync.atomic_sub_explicit(&pool.tasks_left, 1, .Release)
 
 					if sync.atomic_load_explicit(&pool.tasks_left, .Acquire) == 0 {
 						sync.futex_signal(&pool.tasks_left)
 					}
+					continue main_loop
+				case .Failed:
+					continue main_loop
+				case .Empty:
 					continue steal_loop
 				}
 			}
@@ -552,13 +590,29 @@ thread_pool_add_task :: proc(task_proc: Worker_Task_Proc, data: rawptr) -> bool 
 // thread_pool_wait blocks until all submitted tasks complete
 // C++ Reference: thread_pool.cpp:163-184, main.cpp:24-26
 //
-// Main thread participates in work processing while waiting:
-// 1. Take tasks from own deque (LIFO)
-// 2. Process tasks and decrement tasks_left
-// 3. Check tasks_left with acquire ordering
-// 4. If zero, return; otherwise futex_wait
+// The waiter drains its OWN deque and then sleeps. It does NOT steal -- C++ has no steal
+// pass here, and the port used to (LEDGER #300). That extra pass was masking LEDGER #299:
+// with #299 present a worker could park holding queued work, and main's stealing could
+// still drain it -- unless main had already committed to futex_wait, which is exactly the
+// window the deadlock needed. #299 is now fixed at its source in worker_thread_proc, so
+// there is nothing left for the steal pass to hide and it is removed as a divergence.
 //
-// Critical memory ordering ensures wake happens if tasks added during check
+// C++ Reference: thread_pool.cpp:176-197 --
+//     while (pool->tasks_left.load(acquire)) {
+//         while (!thread_pool_queue_take(current_thread, &task)) {
+//             task.do_work(task.data);
+//             pool->tasks_left.fetch_sub(1, release);
+//         }
+//         Footex rem_tasks = pool->tasks_left.load(acquire);
+//         if (rem_tasks == 0) { return; }
+//         futex_wait(&pool->tasks_left, rem_tasks);
+//     }
+//
+// The load/check/wait ORDER is load-bearing and C++ says so in a comment at the site
+// ("This *must* be executed in this order, so the futex wakes immediately if rem_tasks has
+// changed since we checked last, otherwise the program will permanently sleep"): futex_wait
+// compares its expected value at entry, so passing the JUST-LOADED rem_tasks is what makes
+// a concurrent completion return immediately instead of sleeping forever.
 thread_pool_wait :: proc() {
 	pool := global_thread_pool
 	if pool == nil do return
@@ -566,7 +620,9 @@ thread_pool_wait :: proc() {
 	thread_idx := current_thread_index()
 	my_deque := &pool.threads[thread_idx].deque
 
-	for {
+	// C++ tests tasks_left as the LOOP CONDITION, so a wait with nothing outstanding
+	// returns without touching the deque at all.
+	for sync.atomic_load_explicit(&pool.tasks_left, .Acquire) != 0 {
 		// Process own queue
 		for {
 			task, result := task_deque_take(my_deque)
@@ -576,33 +632,9 @@ thread_pool_wait :: proc() {
 			sync.atomic_sub_explicit(&pool.tasks_left, 1, .Release)
 		}
 
-		// Check if all work is done
 		rem_tasks := sync.atomic_load_explicit(&pool.tasks_left, .Acquire)
 		if rem_tasks == 0 do return
 
-		// Try to steal work while waiting
-		stole := false
-		for victim_offset := 1; victim_offset < pool.thread_count; victim_offset += 1 {
-			victim := (thread_idx + victim_offset) % pool.thread_count
-			victim_deque := &pool.threads[victim].deque
-
-			task, result := task_deque_steal(victim_deque)
-			if result == .Success {
-				task.do_work(task.data)
-				sync.atomic_sub_explicit(&pool.tasks_left, 1, .Release)
-				stole = true
-				break
-			}
-		}
-
-		if stole do continue
-
-		// No work to steal, wait for signal on tasks_left
-		// C++ Reference: thread_pool.cpp:181 - futex_wait(&tasks_left, rem_tasks)
-		rem_tasks = sync.atomic_load_explicit(&pool.tasks_left, .Acquire)
-		if rem_tasks == 0 do return
-
-		// Wait on tasks_left - will wake when value changes (task completes)
 		sync.futex_wait(&pool.tasks_left, u32(rem_tasks))
 	}
 }

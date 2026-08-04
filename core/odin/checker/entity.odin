@@ -328,20 +328,31 @@ is_entity_kind_exported :: proc(kind: Entity_Kind, allow_builtin := false) -> bo
 }
 
 // entity_type returns the type of an entity
+//
+// C++ Reference: entity.cpp:170 -- `Type *type;` is a field of Entity itself, and no member of
+// the discriminated union at entity.cpp:196 declares a `type`. C++ therefore has exactly ONE
+// place an entity's type lives, and every read of `e->type` sees every write.
+//
+// The port duplicated that storage: Entity.type plus a `type` field on four of the variants.
+// Reads then split -- `e.type` and `entity_type(e)` could disagree -- and any write that
+// updated only one half was silently invisible to the other. Two such splits were already
+// found and fixed one site at a time (LEDGER 192, 162); instrumenting the disagreement
+// directly turned up a third across core/sys/darwin/Foundation, where the declaration-cycle
+// recovery writes t_invalid to the base field only, so entity_type kept handing out the stale
+// pre-cycle type that C++ discards.
+//
+// The variant `type` fields are now write-only duplicates: this reads the base field, which is
+// the one every direct `e.type = ...` site already writes. Kept behind the original kind gate --
+// C++ has no such gate, but widening it is a separate change with its own consequences for the
+// kinds that carry no type (Import_Name, Package_Name, Builtin, Label, Proc_Group).
 entity_type :: proc(e: ^Entity) -> ^Type {
 	if e == nil {
 		return nil
 	}
 
-	#partial switch v in e.variant {
-	case Entity_Constant:
-		return v.type
-	case Entity_Variable:
-		return v.type
-	case Entity_Type_Name:
-		return v.type
-	case Entity_Procedure:
-		return v.type
+	#partial switch _ in e.variant {
+	case Entity_Constant, Entity_Variable, Entity_Type_Name, Entity_Procedure:
+		return e.type
 	}
 
 	return nil

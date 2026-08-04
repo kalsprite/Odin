@@ -13,6 +13,51 @@ Type_And_Token :: struct {
 	token: tokenizer.Token,
 }
 
+// add_type_switch_case records a TYPE case in the seen map and reports duplicates.
+//
+// C++ Reference: check_expr.cpp:9650-9690. C++ reaches it via the one-line wrapper
+// add_type_to_seen_map (check_expr.cpp:9650), called from the case-clause Type branch
+// (check_stmt.cpp:1312).
+//
+// The port had NO counterpart, so duplicate TYPE cases in a typeid switch went undetected:
+//     f :: proc(tid: typeid) -> int { switch tid { case int: return 1; case int: return 2 }; ... }
+// reference: "Duplicate case 'int'"; port: nothing (probe dupty, #298).
+//
+// The seen map is C++'s SAME multimap as the value path -- one structure, two key functions:
+// hash_exact_value for constants, type_hash_canonical_type for types. Hence the shared
+// map[uintptr][dynamic]Type_And_Token rather than a second, type-only map.
+// The hash is a bucket, not an identity: entries in a colliding bucket are filtered with
+// are_types_identical, exactly as C++ does, so a hash collision cannot produce a false duplicate.
+add_type_switch_case :: proc(ctx: ^Checker_Context, seen: ^map[uintptr][dynamic]Type_And_Token, operand: Operand) {
+	if operand.mode != .Type || operand.type == nil {
+		return
+	}
+
+	key := uintptr(type_hash_canonical_type(operand.type))
+
+	if existing, found := &seen[key]; found {
+		for entry in existing {
+			if !are_types_identical(entry.type, operand.type) {
+				continue
+			}
+			expr_str := expr_to_string(operand.expr)
+			defer delete(expr_str)
+			error_node(
+				operand.expr,
+				"Duplicate case '%s'\n\tprevious case at %s",
+				expr_str,
+				token_pos_to_string(entry.token.pos),
+			)
+			return
+		}
+	}
+
+	if key not_in seen {
+		seen[key] = make([dynamic]Type_And_Token, context.temp_allocator)
+	}
+	append(&seen[key], Type_And_Token{type = operand.type, token = ast_token(operand.expr)})
+}
+
 // Constants for inline range loop unrolling
 // C++ Reference: checker.hpp line 64
 MAX_INLINE_FOR_DEPTH :: 1024 // Maximum total unroll depth (nested loops multiply)
@@ -414,9 +459,24 @@ check_has_break :: proc(ctx: ^Checker_Context, stmt: ^ast.Stmt, label: string, i
 		return check_has_break_list(ctx, s.body, label, implicit)
 
 	case ^ast.Switch_Stmt:
-		// Note: C++ code calls check_has_break_expr on init, but init is a statement
-		// This appears to be a typo in the C++ code. Using check_has_break instead.
-		if s.init != nil && check_has_break(ctx, s.init, label, implicit) {
+		// C++ Reference: check_stmt.cpp:226 --
+		//     if (stmt->SwitchStmt.init && check_has_break_expr(stmt->SwitchStmt.init, label))
+		//
+		// This site previously read "This appears to be a typo in the C++ code. Using
+		// check_has_break instead." THAT WAS WRONG, and the reasoning behind it is worth keeping.
+		// check_has_break_expr does NOT inspect expression kinds (check_stmt.cpp:172-177):
+		//     if (expr && expr->viral_state_flags & ViralStateFlag_ContainsOrBreak) return true;
+		// viral_state_flags lives on the BASE Ast node, shared by statements and expressions, so
+		// passing an init STATEMENT is entirely meaningful -- it asks "does this subtree contain
+		// an or_break?". Only the function's name suggests otherwise.
+		//
+		// C++ deliberately uses DIFFERENT functions for the two inits: check_has_break for
+		// IfStmt.init (:209) but check_has_break_expr for SwitchStmt.init (:226). The port had
+		// normalised that asymmetry away, which is a real behavioural divergence: the structural
+		// walker looks for break STATEMENTS, the viral flag records or_break EXPRESSIONS.
+		// Restored to C++'s form. The port's check_has_break_expr is typed ^ast.Expr, so the flag
+		// is read directly here rather than reshaping that signature.
+		if s.init != nil && .Contains_Or_Break in s.init.viral_state_flags {
 			return true
 		}
 		if label != "" && check_has_break(ctx, s.body, label, false) {
@@ -1170,16 +1230,20 @@ check_assign_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 		rhs_count := len(rhs_operands)
 		max := min(lhs_count, rhs_count)
 		for i in 0 ..< max {
-			// Skip blank identifiers
-			is_blank := false
-			if expr_node := lhs_operands[i].expr; expr_node != nil {
-				if ident, ok := expr_node.derived.(^ast.Ident); ok {
-					is_blank = is_blank_ident(ident.name)
-				}
-			}
-			if is_blank {
-				continue
-			}
+			// LEDGER #315. The `if is_blank { continue }` that stood here was INVENTED.
+			// C++ check_stmt.cpp:2547 calls check_assignment_variable for EVERY pair and
+			// handles the blank identifier INSIDE it (check_stmt.cpp:433-440), where it runs
+			// `check_assignment(rhs, nullptr, "assignment to '_' identifier")` -- and passing
+			// a nil type is exactly what triggers the default-type conversion and its range
+			// check.
+			//
+			// So the port had blank handling in TWO places and the outer one short-circuited
+			// the inner, leaving check_assignment_variable's blank branch DEAD. Instrumenting
+			// it proved that: the branch was never entered, not even for a plain `_ = y`.
+			//
+			// Visible as: `X :: <2^200>; _ = X` was silently accepted, while `x: int = <2^200>`
+			// and `f(X)` both reported correctly -- the check was fine, this path just never
+			// reached it. Probe c15_blank.
 			check_assignment_variable(ctx, &lhs_operands[i], &rhs_operands[i], "assignment")
 		}
 
@@ -1799,7 +1863,13 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 			if len(case_clause.list) == 0 {
 				// This is a default clause
 				if first_default != nil {
-					error_node(case_stmt, "Multiple default clauses (first at line %d)", first_default.pos.line)
+					// C++ Reference: check_stmt.cpp:1198-1202. TWO LINES, and the first word is
+					// LOWERCASE here -- C++'s type-switch twin at :1475-1479 capitalises it. The
+					// port had capitalised BOTH and replaced C++'s "\n\tfirst at <pos>"
+					// continuation with an inline "(first at line N)" of its own invention.
+					// Reproduced verbatim, inconsistent capitalisation included: same class as
+					// #189, where the port had "corrected" an upstream slip. LEDGER #287.
+					error_node(case_stmt, "multiple default clauses\n\tfirst at %s", token_pos_to_string(first_default.pos))
 				} else {
 					first_default = case_stmt
 				}
@@ -2115,10 +2185,34 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 				update_untyped_expr_type(ctx, z.expr, x.type, !is_type_untyped(x.type))
 			}
 
-			// Ensure case value is not a type (except for typeid switches)
-			if y.mode == .Type && !is_typeid_switch {
-				error_node(case_expr, "Cannot use type '%s' as a case value", type_to_string(y.type))
-				continue
+			// C++ Reference: check_stmt.cpp:1303-1313 -- when the case expression resolves to a
+			// TYPE, the type itself is validated before anything else happens to it:
+			//     if (y.mode == Addressing_Type) {
+			//         Type *t = y.type;
+			//         if (t == nullptr || t == t_invalid || is_type_polymorphic(t)) {
+			//             error(y.expr, "Invalid type for case clause");
+			//             continue;
+			//         }
+			//         t = default_type(t);
+			//         add_type_info_type(ctx, t);
+			//         add_type_to_seen_map(ctx, &seen, y);
+			//     }
+			// The port had NO counterpart, so a non-specialized polymorphic record used as a case
+			// in a typeid switch was accepted silently. Repro (scratchpad/casepoly), which the
+			// reference rejects and the port accepted:
+			//     P :: struct($T: typeid) { x: T }
+			//     f :: proc(tid: typeid) -> int { switch tid { case P: return 1 }; return 0 }
+			//
+			if y.mode == .Type {
+				t := y.type
+				if t == nil || t == t_invalid || is_type_polymorphic(t) {
+					error_node(case_expr, "Invalid type for case clause")
+					continue
+				}
+				t = default_type(t)
+				add_type_info_type(ctx, t)
+				// C++ check_stmt.cpp:1312 -- record the type for duplicate detection (#298).
+				add_type_switch_case(ctx, &seen_cases, y)
 			}
 
 			// C++ lines 8995-9038: Duplicate case value detection
@@ -2364,7 +2458,9 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 		if case_clause, is_case := case_stmt.derived.(^ast.Case_Clause); is_case {
 			if len(case_clause.list) == 0 {
 				if first_default != nil {
-					error_node(case_stmt, "Multiple default clauses (first at line %d)", first_default.pos.line)
+					// C++ Reference: check_stmt.cpp:1475-1479 -- capital "Multiple" here, unlike
+					// the value-switch twin above. See #287.
+					error_node(case_stmt, "Multiple default clauses\n\tfirst at %s", token_pos_to_string(first_default.pos))
 				} else {
 					first_default = case_stmt
 				}
@@ -2460,15 +2556,24 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 				add_type_info_type(ctx, y.type)
 			}
 
-			// C++ lines 1527-1537: Track seen types for duplicate detection
-			if prev_expr, found := seen_types[y.type]; found {
+			// C++ Reference: check_stmt.cpp:1571-1581. Three corrections here:
+			//
+			//   * C++ names the offending EXPRESSION (expr_to_string(y.expr)), not the resolved
+			//     type. These coincide for `case f32:` and diverge for anything aliased.
+			//   * The trailing position is `cc->token.pos` -- the CURRENT case clause's own `case`
+			//     keyword, NOT where the type was first seen. The label reads "previous type case
+			//     at" and points at the duplicate itself; that is an upstream oddity, but parity
+			//     means reproducing it. The port had implemented the intuitive meaning.
+			//   * C++ breaks out of the type-expression loop; the port continued it.
+			if _, found := seen_types[y.type]; found {
 				begin_error_block()
 				defer end_error_block()
 
-				type_str := type_to_string(y.type)
-				error_node(type_expr, "Duplicate type case '%s'", type_str)
-				error_line("\tprevious type case at %s", token_pos_to_string(prev_expr.pos))
-				continue
+				expr_str := expr_to_string(y.expr)
+				defer delete(expr_str)
+				error_node(type_expr, "Duplicate type case '%s'", expr_str)
+				error_line("\tprevious type case at %s", token_pos_to_string(case_clause.case_pos))
+				break
 			}
 			seen_types[y.type] = type_expr
 
@@ -4611,8 +4716,29 @@ check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flag
 			expr_str := expr_to_string(operand.expr)
 			type_str := type_to_string(operand.type)
 			defer delete(expr_str)
+			begin_error_block()
 			error_node(operand.expr, "Cannot iterate over '%s' of type '%s' in an '#unroll for' statement", expr_str, type_str)
-		} else if operand.mode != .Constant && unroll_count <= 0 {
+			// C++ check_stmt.cpp:1059-1061 follows the error with a Suggestion, but ONLY for the
+			// three runtime-length kinds -- it is conditional, not unconditional. The port emitted
+			// the error and never the Suggestion. Probe n9_unroll.
+			if is_type_slice(operand.type) ||
+			   is_type_dynamic_array(operand.type) ||
+			   is_type_fixed_capacity_dynamic_array(operand.type) {
+				error_line("\tSuggestion: An unroll count `#unroll(N)` must be specified with an array of a runtime-known length\n")
+			}
+			end_error_block()
+		} else if operand.mode != .Constant &&
+		          unroll_count <= 0 &&
+		          compare_exact_values(.Cmp_Eq, inline_for_depth, exact_value_i64(0)) {
+			// C++ check_stmt.cpp:1063-1065 has THREE conjuncts; the port had the first two and
+			// dropped the inline_for_depth test, so `#unroll for x in a` over a fixed [3]int was
+			// rejected as "not known at compile time" although the reference accepts it (probe
+			// n9_unrollctl).
+			//
+			// The name misleads: inline_for_depth is NOT a nesting depth, it is the ITERATION
+			// COUNT, set from the array/enum/string length just above (Array arm, tv.count). For
+			// [3]int it is 3, so the guard is false and no error is due. Everything needed was
+			// already computed here -- only the conjunct was missing.
 			error_node(operand.expr, "An '#unroll for' expression must be known at compile time")
 		}
 	}

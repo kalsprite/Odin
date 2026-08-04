@@ -1134,27 +1134,66 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 	if ac.test {
 		e.flags += {.Test}
 	}
+	// C++ Reference: check_decl.cpp:1337-1339, `-disable-init-fini`.
+	//
+	// ORDERING, and why this sits BEFORE the chain rather than after it as C++ does.
+	// C++ emits this at declaration time, but emits the init/fini VALIDATION (signature,
+	// "contextless", file-scope, blank-ident) later, from generate_minimum_dependency_set_internal
+	// at checker.cpp:3001-3045. Both land on e.token, and the same-position merge (#219) keeps the
+	// FIRST -- so under the flag C++ shows only this message and the validation is invisible.
+	// Measured, not assumed: with the flag, the oracle's "must have a signature type with no
+	// parameters nor results" DISAPPEARS. It is not a phase bail -- an unrelated decl-stage error
+	// at a DIFFERENT position (probe nd_ifgate2) leaves the validation visible.
+	// The port relocated that validation to declaration time (#286), so both messages are now
+	// emitted from this one function and source order alone decides the winner. Placed first to
+	// reproduce C++'s precedence.
+	//
+	// Tests ac rather than e.flags (C++ tests the flags) because the flags are not set yet here.
+	// Equivalent: the chain below sets .Init/.Fini in exactly the arms this condition selects, and
+	// the both-init-and-fini arm sets NEITHER -- so that case reports only the contradiction, in
+	// both compilers.
+	if ctx.info.build_context != nil && ctx.info.build_context.disable_init_fini &&
+	   (ac.init || ac.fini) && !(ac.init && ac.fini) {
+		error(e.token, "@(init) and @(fini) have been disabled with '-disable-init-fini'")
+	}
 	if ac.init && ac.fini {
 		error(e.token, "A procedure cannot be both declared as @(init) and @(fini)")
 	} else if ac.init {
 		// C++ Reference: checker.cpp:3001-3040, inside generate_minimum_dependency_set_internal.
-		// The port validates at declaration time instead (the pass in #42 does not exist here);
+		// The port validates at declaration time instead (generate_minimum_dependency_set does not
+		// exist here -- task #272, scoped out);
 		// every one of these is a property of the entity and its type, so the placement is
 		// equivalent. The port previously had ONLY the signature check of the five.
+		sig_ok := true
 		if pt.param_count != 0 || pt.result_count != 0 {
 			type_str := type_to_string(proc_type)
 			error(e.token, "@(init) procedures must have a signature type with no parameters nor results, got %s", type_str)
+			// C++ Reference: checker.cpp:3007-3012 -- clears is_init.
+			sig_ok = false
 		}
-		check_init_fini_common(ctx, e, d, pt, "init", ac.disabled_proc)
+		eligible := check_init_fini_common(ctx, e, d, pt, "init", ac.disabled_proc)
 		e.flags += {.Init}
+		// C++ Reference: checker.cpp:3037-3040. The port allocated info.init_procedures, sorted
+		// it and de-duplicated it, but NEVER appended to it -- so the whole sort phase ran on a
+		// permanently empty array. LEDGER #286.
+		if sig_ok && eligible {
+			append(&ctx.checker.info.init_procedures, e)
+		}
 	} else if ac.fini {
 		// C++ Reference: checker.cpp:3042-3080 - the @(fini) arm, identical in shape.
+		sig_ok := true
 		if pt.param_count != 0 || pt.result_count != 0 {
 			type_str := type_to_string(proc_type)
 			error(e.token, "@(fini) procedures must have a signature type with no parameters nor results, got %s", type_str)
+			// C++ Reference: checker.cpp:3047-3052 -- clears is_fini.
+			sig_ok = false
 		}
-		check_init_fini_common(ctx, e, d, pt, "fini", ac.disabled_proc)
+		eligible := check_init_fini_common(ctx, e, d, pt, "fini", ac.disabled_proc)
 		e.flags += {.Fini}
+		// C++ Reference: checker.cpp:3072-3075. See #286.
+		if sig_ok && eligible {
+			append(&ctx.checker.info.fini_procedures, e)
+		}
 	}
 
 	// C++ Reference: check_decl.cpp:1295-1298
@@ -1372,10 +1411,25 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 					str := type_to_string(proc_type)
 					error(e.token, "Procedure type of 'main' was expected to be 'proc()', got %s", str)
 				}
-				if pt.calling_convention != default_calling_convention() {
-					error(e.token, "Procedure 'main' cannot have a custom calling convention")
+				// C++ Reference: check_decl.cpp:1537-1556. The port had ONLY the `else` arm --
+				// under `-bedrock` it applied the non-bedrock rule, which is both the wrong
+				// message and the wrong RULE: bedrock accepts "odin" OR "contextless", where
+				// default_calling_convention() is a single value.
+				if ctx.info.build_context != nil && ctx.info.build_context.bedrock {
+					#partial switch pt.calling_convention {
+					case .Odin, .Contextless:
+						// Okay
+					case:
+						error(e.token, "Procedure 'main' cannot have a custom calling convention beyond \"odin\" and \"contextless\" with '-bedrock'")
+						// C++ recovers to Odin, NOT to default_calling_convention().
+						pt.calling_convention = .Odin
+					}
+				} else {
+					if pt.calling_convention != default_calling_convention() {
+						error(e.token, "Procedure 'main' cannot have a custom calling convention")
+					}
+					pt.calling_convention = default_calling_convention()
 				}
-				pt.calling_convention = default_calling_convention()
 				if e.pkg.kind == .Init {
 					if ctx.info.entry_point != nil {
 						error(e.token, "Redeclaration of the entry pointer procedure 'main'")
@@ -1409,9 +1463,11 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		if is_foreign {
 			error(pl.body, "A foreign procedure cannot have a body")
 		}
-		if pt.c_vararg {
-			error(pl.body, "A procedure with a '#c_vararg' field cannot have a body and must be foreign")
-		}
+		// NO c_vararg body check here. C++ check_decl.cpp:1587-1589 has that error COMMENTED OUT,
+		// so the reference accepts a `#c_vararg` procedure with a body and reports at the USE
+		// instead (check_expr.cpp:2004, ported into check_expr's Ident arm). The port had it live,
+		// which rejected code the reference compiles. Third instance of this family after #171
+		// and #333 -- the port faithfully reproducing something C++ disabled.
 
 		d.scope = ctx.scope
 
@@ -1804,9 +1860,14 @@ clear_ast_state_flag :: proc(info: ^Checker_Info, node: ^ast.Node, flag: State_F
 // C++ Reference: checker.cpp:3015-3038 (@(init)) and :3056-3080 (@(fini)). The two arms are
 // literal duplicates in C++ apart from the attribute name in each message, so they are
 // factored here and the name is passed in.
-check_init_fini_common :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, pt: ^Type_Proc, kind: string, is_disabled: bool) {
+// RETURNS whether the entity is still eligible for registration in info.init_procedures /
+// info.fini_procedures -- C++'s `is_init` / `is_fini` local. C++ clears it on the signature
+// error (raised at the CALL SITE here), on the file-scope error, and -- for @(init) only -- when
+// the procedure is disabled. The blank-identifier error does NOT clear it. LEDGER #286.
+check_init_fini_common :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, pt: ^Type_Proc, kind: string, is_disabled: bool) -> (eligible: bool) {
+	eligible = true
 	if e == nil || pt == nil {
-		return
+		return false
 	}
 
 	// "contextless" is required unless the file opted into `#+feature global-context`.
@@ -1828,22 +1889,39 @@ check_init_fini_common :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info,
 	}
 
 	// C++ Reference: checker.cpp:3023-3026
+	// C++ Reference: checker.cpp:3023-3026 -- reports AND clears is_init.
 	if e.scope != nil && .File not_in e.scope.flags && .Pkg not_in e.scope.flags {
 		error(e.token, "@(%s) procedures must be declared at the file scope", kind)
+		eligible = false
 	}
 
-	// C++ Reference: checker.cpp:3028-3031.
+	// C++ Reference: checker.cpp:3028-3031. INIT ONLY -- this is the one place the two arms
+	// differ. C++'s @(init) arm has this block; the @(fini) arm (checker.cpp:3042-3075) has no
+	// disabled handling whatsoever. Sharing it unconditionally made the port emit
+	// "This @(fini) procedure is disabled; you must call it manually" on valid code the oracle
+	// accepts silently -- a genuine OVER-WARNING. Probe finidis. LEDGER #282.
+	//
 	// Read from the attribute context, NOT from e.flags: C++ runs this in a later pass where
 	// the flag is already set, but at declaration time `e.flags += {.Disabled}` has not
 	// happened yet (it is set further down this same procedure).
-	if is_disabled {
+	//
+	// C++ also sets `is_init = false` here, keeping a disabled @(init) out of
+	// info.init_procedures (checker.cpp:3037-3039). That is now modelled: it was previously
+	// left out because no instrument could observe registration, which triage_doc fixed.
+	// LEDGER #286. Note this clearing is INIT-ONLY, like the warning -- C++'s fini arm has no
+	// disabled handling at all, so a disabled @(fini) IS still registered.
+	if is_disabled && kind == "init" {
 		warning(e.token, "This @(%s) procedure is disabled; you must call it manually", kind)
+		eligible = false
 	}
 
-	// C++ Reference: checker.cpp:3033-3035
+	// C++ Reference: checker.cpp:3033-3035. Reports but does NOT clear is_init -- a blank-named
+	// @(init) is still registered in C++.
 	if is_blank_ident(e.token.text) {
 		error(e.token, "An @(%s) procedure must not use a blank identifier as its name", kind)
 	}
+
+	return eligible
 }
 
 is_blank_ident :: proc(name: string) -> bool {

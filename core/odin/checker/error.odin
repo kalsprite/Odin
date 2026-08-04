@@ -519,17 +519,114 @@ token_pos_to_string :: proc(pos: tokenizer.Pos) -> string {
 // Source Line Extraction
 // ============================================================================
 
+
+// ============================================================================
+// GLOBAL SOURCE-FILE REGISTRY  (LEDGER #279 part 2)
+// ============================================================================
+//
+// C++ Reference: parser.cpp:57-58 --
+//     gbString get_file_line_as_string(TokenPos const &pos, i32 *offset_) {
+//         AstFile *file = thread_safe_get_ast_file_from_id(pos.file_id);
+//
+// C++ resolves the source line through a GLOBAL, parser-owned file table, NOT through the
+// checker's Info. That is precisely why parse-stage positions render their source line in C++
+// regardless of checker state. The port routed the same lookup through Checker_Info.files,
+// which is populated only at check_collect.odin:340 during COLLECTION -- long after parsing --
+// so every syntax diagnostic found nothing, get_file_line_as_string returned "", and
+// show_error_on_line fell into C++'s genuine empty-line branch (faithful to error.cpp:294).
+// That is the whole of #279 part 2, and it is why wiring set_error_collector_info previously
+// regressed the corpus 55/0 -> 53/2 on the syntax probes matcnt2 and p_cte3.
+//
+// KEYED BY PATH, NEVER BY FILE ID. C++ keys on pos.file_id, but core:odin/parser assigns
+// neither ast.File.id nor ast.Node.file_id (file_helpers.odin:26-42), so an id-keyed table
+// collapses to a single entry under key 0 and resolves every node to one arbitrary file. That
+// is not hypothetical: it previously made check_intrinsics_entry_point_usage report
+// `usage of intrinsics.__entry_point will be a no-op` against base/runtime/entry_unix.odin in
+// every package that transitively pulls in the runtime. The tokenizer stamps every position
+// with the owning file's fullpath (parser.odin:150), so the path is an equivalent and
+// actually-populated identity.
+//
+// MUTEX-GUARDED: the loader runs under the threaded checker. LEDGER #141 was exactly an
+// unguarded shared-container write whose readers took the lock and whose sole writer did not.
+@(private)
+global_source_files_mutex: sync.Mutex
+@(private)
+global_source_files: map[string]^ast.File
+
+// register_source_file publishes a file for source-line rendering as soon as its source is
+// read, BEFORE it is parsed -- which is the ordering syntax diagnostics require, since
+// error_va renders the source line INLINE at emit time (error.odin, show_error_on_line call),
+// not at collector flush.
+register_source_file :: proc(file: ^ast.File) {
+	if file == nil || file.fullpath == "" {
+		return
+	}
+	sync.lock(&global_source_files_mutex)
+	defer sync.unlock(&global_source_files_mutex)
+	if global_source_files == nil {
+		// default_allocator, NOT context.allocator. This registry is process-wide, so its own
+		// storage has to outlive whatever allocator the CALLER happened to install. A host that
+		// checks a package under `context.allocator = context.temp_allocator` behind a TEMP_GUARD
+		// -- which every test in core/odin/checker/tests does -- otherwise builds the map inside
+		// that call's arena, and the next registration walks freed memory. Reproduced
+		// deterministically by probe `regprobe` (two guarded check_package_from_path calls): core
+		// dump inside __map_get before this line, clean after. LEDGER #356.
+		global_source_files = make(map[string]^ast.File, runtime.default_allocator())
+	}
+	// The key is cloned for the same reason: file.fullpath is owned by the LOADER's allocator, so
+	// a caller-arena path would leave a dangling key in a process-lifetime map. One string per
+	// file, freed by destroy_source_file_registry.
+	if _, exists := global_source_files[file.fullpath]; !exists {
+		key := strings.clone(file.fullpath, runtime.default_allocator())
+		global_source_files[key] = file
+		return
+	}
+	global_source_files[file.fullpath] = file
+}
+
+// lookup_source_file resolves a path to its file for rendering only.
+@(private)
+lookup_source_file :: proc(path: string) -> ^ast.File {
+	sync.lock(&global_source_files_mutex)
+	defer sync.unlock(&global_source_files_mutex)
+	if global_source_files == nil {
+		return nil
+	}
+	if f, ok := global_source_files[path]; ok {
+		return f
+	}
+	return nil
+}
+
+// destroy_source_file_registry releases the registry's map. The FILES are owned by the AST
+// allocator, so only the map itself is freed here.
+destroy_source_file_registry :: proc() {
+	sync.lock(&global_source_files_mutex)
+	defer sync.unlock(&global_source_files_mutex)
+	if global_source_files != nil {
+		delete(global_source_files)
+		global_source_files = nil
+	}
+}
+
 // get_file_line_as_string extracts the line containing the error position
 // C++ Reference: parser.cpp:57-130
 // Returns the line text and sets error_start_index to the column offset within that line
 get_file_line_as_string :: proc(info: ^Checker_Info, pos: tokenizer.Pos, error_start_index: ^int) -> string {
-	if info == nil {
-		return ""
+	// Resolve through the checker first (unchanged behaviour for check-stage positions), then
+	// fall back to the global registry, which is what makes PARSE-stage positions resolvable.
+	// C++ only ever consults its global table; the port keeps info.files first so that nothing
+	// about check-stage rendering changes.
+	file: ^ast.File
+	if info != nil {
+		if f, ok := info.files[pos.file]; ok {
+			file = f
+		}
 	}
-
-	// Look up file from info.files map using file path
-	file, ok := info.files[pos.file]
-	if !ok || file == nil {
+	if file == nil {
+		file = lookup_source_file(pos.file)
+	}
+	if file == nil {
 		return ""
 	}
 
@@ -740,8 +837,18 @@ show_error_on_line :: proc(pos: tokenizer.Pos, end: tokenizer.Pos) -> int {
 	}
 
 	// Calculate squiggle padding from grapheme widths
-	// C++ Reference: error.cpp:154-159
-	for i := error_start_index_graphemes - 1; i >= 0; i -= 1 {
+	// C++ Reference: error.cpp:435-440 --
+	//     for (i32 i = error_start_index_graphemes; i > 0; i -= 1) {
+	//         if (graphemes[i].byte_index == window_open_bytes) break;
+	//         squiggle_padding += graphemes[i].width;
+	//     }
+	// C++ walks indices N, N-1, ..., 1 -- it INCLUDES grapheme N (the error-start cluster) and
+	// EXCLUDES grapheme 0. The port walked N-1 .. 0, i.e. the mirror image: it excluded N and
+	// included 0. Both sum N widths, so they agree whenever every cluster has the same width,
+	// which is why this stayed invisible until a TAB-indented line rendered (LEDGER #302).
+	// The upper index is clamped because graphemes has exactly line_length_graphemes entries and
+	// error_start_index_graphemes can equal that count when the error sits at end-of-line.
+	for i := min(error_start_index_graphemes, line_length_graphemes - 1); i > 0; i -= 1 {
 		if graphemes[i].byte_index == window_open_bytes {
 			break
 		}
@@ -1085,8 +1192,14 @@ warning_pos :: proc(pos: tokenizer.Pos, format: string, args: ..any) {
 }
 
 warning_node :: proc(node: ^ast.Node, format: string, args: ..any) {
-	pos := node.pos if node != nil else tokenizer.Pos{}
-	warning_va(pos, {}, format, ..args)
+	// #302 fixed error_node to pass the parser-recorded end so the caret spans the node, and
+	// MISSED THIS SIBLING: warning_node still passed `{}`, so every node-anchored WARNING drew a
+	// single `^` where the reference draws a range. Found by probe n7_sizeof, where the oracle
+	// underlines `&x` with `^^` and the port produced `^`.
+	//
+	// C++ makes no distinction here -- warning(Ast*) and error(Ast*) both go through
+	// ast_token/ast_end_pos (parser.cpp:505-515). Same shape as error_node, deliberately.
+	warning_va(ast_token_pos(node), node_end_pos(node), format, ..args)
 }
 
 // error reports an error at a token/position/node
@@ -1145,7 +1258,37 @@ ast_token_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
 }
 
 error_node :: proc(node: ^ast.Node, format: string, args: ..any) {
-	error_va(ast_token_pos(node), {}, format, ..args)
+	// C++ Reference: parser.cpp:505-515 --
+	//     void error(Ast *node, char const *fmt, ...) {
+	//         Token token = {}; TokenPos end_pos = {};
+	//         if (node != nullptr) { token = ast_token(node); end_pos = ast_end_pos(node); }
+	//         error_va(token.pos, end_pos, fmt, va);
+	//
+	// The port passed `{}` for end. An empty end has end.file == "", so the
+	// `end.file == pos.file` test in show_error_on_line fails and squiggle_length falls to the
+	// "error is at one spot; no range known" branch (error.odin, faithful to error.cpp:479),
+	// which emits exactly one `^`. That collapsed the caret for EVERY node-based diagnostic in
+	// the checker -- invisible until #279 turned the source-line display on, at which point
+	// p_cte showed `^` where the reference draws `^~^`. LEDGER #302.
+	//
+	// C++ recomputes the end on demand via ast_end_pos -> ast_end_token, a 239-line switch over
+	// every node kind. The port does NOT need that: core:odin/ast.Node already carries an `end`
+	// field which the parser fills at construction (ast.new(T, pos, end_pos(tok))), including
+	// the same structural propagation C++'s switch performs -- e.g. parser.odin `end = else_stmt.end`,
+	// `end = body.end`, `end = results[len(results)-1].end`, `end = default_value.end`. Porting
+	// ast_end_token would reimplement work the parser has already done, which is exactly the
+	// finding LEDGER #239 made for ast_token/node.pos.
+	error_va(ast_token_pos(node), node_end_pos(node), format, ..args)
+}
+
+// node_end_pos is the port's ast_end_pos: it reads the end the PARSER recorded rather than
+// recomputing it from the node kind. Nil-guarded because error_node accepts a nil node
+// (ast_token_pos does the same), in which case C++ leaves end_pos zeroed too.
+node_end_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
+	if node == nil {
+		return tokenizer.Pos{}
+	}
+	return node.end
 }
 
 // error_line outputs a continuation line for a multi-line error

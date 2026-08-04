@@ -1063,10 +1063,28 @@ check_vet_flags_from_context :: proc(ctx: ^Checker_Context) -> Vet_Flag {
 // C++ Reference: checker.cpp:554-557
 // Note: In Odin AST, nodes don't store their file, so this always returns empty flags
 // Callers should use check_vet_flags_from_context instead
-check_vet_flags_from_node :: proc(node: ^ast.Node) -> Vet_Flag {
-	// In Odin AST, nodes don't have a file() method like C++
-	// We would need to track this separately via Checker_Info
-	return {} // Empty bit_set = no vet flags
+// C++ Reference: checker.cpp:560-563.
+//
+//	gb_internal u64 check_vet_flags(Ast *node) {
+//		AstFile *file = node->file();
+//		return ast_file_vet_flags(file);
+//	}
+//
+// This previously returned `{}` unconditionally, on the stated grounds that "nodes don't have a
+// file() method like C++". They effectively do: get_file_from_node resolves the owning file
+// through node.pos.file, which the tokenizer stamps on every position (see file_helpers.odin for
+// why that is the correct identity and node.file_id is not). Returning an empty set here did not
+// merely lose per-file `#+vet` precision -- it disabled the ENTIRE proc-body vet surface, because
+// the sole caller (check_proc.odin, after check_close_scope) passes the result straight to
+// check_scope_usage as its only vet gate. Every unused variable, unused procedure, shadowed
+// declaration and using-shadow inside any procedure body went unreported tree-wide.
+//
+// Resolving to nil is not a failure mode that needs guarding here: ast_file_vet_flags(nil) falls
+// through to in_vet_packages(nil), which returns true, yielding build_context.vet_flags -- exactly
+// what C++ does when node->file() yields null.
+check_vet_flags_from_node :: proc(info: ^Checker_Info, node: ^ast.Node) -> Vet_Flag {
+	file := get_file_from_node(info, node)
+	return ast_file_vet_flags(file)
 }
 
 // check_vet_flags is overloaded to accept context or node
@@ -1520,9 +1538,28 @@ check_scope_usage_internal :: proc(c: ^Checker, scope: ^Scope, vet_flags_param: 
 				// Warn about allocations >256 KiB
 				// C++ Reference: checker.cpp:789-791
 				if sz > (1 << 18) {
+					// C++ Reference: checker.cpp:800-808. C++ derives is_ref from TWO
+					// entity flags, not one:
+					//
+					//	if ((e->flags & EntityFlag_ForValue) != 0) {
+					//		is_ref = type_deref(e->Variable.for_loop_parent_type) != NULL;
+					//	} else if ((e->flags & EntityFlag_SwitchValue) != 0) {
+					//		is_ref = !(e->flags & EntityFlag_Value);
+					//	}
+					//
+					// The SwitchValue arm was never ported, so a BY-REFERENCE type-switch
+					// binding (`switch &v in u`) over a >256KiB variant was treated as a
+					// by-value declaration and drew a spurious stack-overflow warning that
+					// the oracle does not emit. Probe swval covers both forms.
+					//
+					// The flags this reads are already set correctly: check_stmt.odin:2508
+					// adds .Switch_Value unconditionally and .Value only when the binding is
+					// not addressed, mirroring check_stmt.cpp:1603.
 					is_ref := false
 					if .For_Value in e.flags {
 						is_ref = type_deref(e_var.for_loop_parent_type) != nil
+					} else if .Switch_Value in e.flags {
+						is_ref = .Value not_in e.flags
 					}
 					if !is_ref {
 						type_str := type_to_string(e.type)
@@ -1872,7 +1909,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 
 	// Check for unused variables and shadowing
 	// C++ Reference: check_decl.cpp:2184
-	check_scope_usage(ctx.checker, ctx.scope, check_vet_flags(body))
+	check_scope_usage(ctx.checker, ctx.scope, check_vet_flags(&ctx.checker.info, &body.node))
 
 	// Propagate dependencies from nested proc to parent
 	// C++ Reference: check_decl.cpp:2186
@@ -2635,3 +2672,4 @@ check_all_scope_usages :: proc(c: ^Checker) {
 	// C++ Reference: checker.cpp:7241
 	thread_pool_wait()
 }
+

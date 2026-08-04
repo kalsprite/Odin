@@ -10,6 +10,38 @@ import "core:strconv"
 Warning_Handler :: #type proc(pos: tokenizer.Pos, fmt: string, args: ..any)
 Error_Handler   :: #type proc(pos: tokenizer.Pos, fmt: string, args: ..any)
 
+// Error_Line_Handler emits an unpositioned continuation line beneath the diagnostic just
+// reported -- C++'s error_line, used to attach Suggestion/Note text.
+//
+// It is a SEPARATE type from Error_Handler because a continuation line has no position of its
+// own; giving it one would sort it away from the diagnostic it belongs to.
+Error_Line_Handler :: #type proc(fmt: string, args: ..any)
+
+// Error_Block_Handler brackets a diagnostic and its continuation lines, so that the
+// continuations attach to it instead of being flushed on their own.
+//
+// C++ Reference: ERROR_BLOCK() in src/error.cpp -- a scoped begin/end pair. The port's
+// error_line only appends while an error value is live, and its syntax_error pops one
+// immediately, so WITHOUT this bracket a parse-stage Suggestion fell through to a direct
+// stderr write and came out ahead of everything else, unsorted. LEDGER #307.
+Error_Block_Handler :: #type proc()
+
+// Error_Range_Handler reports a diagnostic that SPANS a node, so the caret can underline the
+// whole construct rather than marking a single column.
+//
+// LEDGER #322. C++'s `syntax_error` is overloaded, and the `Ast *` overload carries the node's
+// range. The port's `error` takes a bare Pos and is used at all 174 parser call sites, so every
+// diagnostic C++ anchors to a NODE rendered one column wide. Measured across src/parser.cpp's
+// syntax_error first arguments, roughly 27 of ~150 sites are node-anchored (type/stmt/node/expr);
+// the rest pass tokens and already matched, which is why the corpus sat at 124 FULL-MATCH with
+// this outstanding.
+//
+// This is a SEPARATE handler rather than a wider Error_Handler because Error_Handler is declared
+// in the TOKENIZER package and shared with the tokenizer's own diagnostics; widening it would
+// churn three packages to serve the parser. The same reasoning, and the same shape, as the
+// err_line / err_block pair added in #307.
+Error_Range_Handler :: #type proc(pos, end: tokenizer.Pos, fmt: string, args: ..any)
+
 Flag :: enum u32 {
 	Optional_Semicolons,
 }
@@ -27,6 +59,13 @@ Parser :: struct {
 
 	warn: Warning_Handler,
 	err:  Error_Handler,
+	// Continuation lines, and the bracket that makes them attach. Supplied by the driver like
+	// `err` and the build-level inputs below; all nil means continuations are simply not
+	// emitted, which is what every pre-existing consumer of this package gets. #307.
+	err_line:        Error_Line_Handler,
+	err_block_begin: Error_Block_Handler,
+	err_block_end:   Error_Block_Handler,
+	err_range:       Error_Range_Handler, // LEDGER #322
 
 	prev_tok: tokenizer.Token,
 	curr_tok: tokenizer.Token,
@@ -98,6 +137,25 @@ warn :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: ..any) {
 error :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: ..any) {
 	if p.err != nil {
 		p.err(pos, msg, ..args)
+	}
+	p.file.syntax_error_count += 1
+	p.error_count += 1
+}
+
+// error_node reports a diagnostic spanning `node`, matching C++'s `syntax_error(Ast *, ...)`.
+// LEDGER #322 -- see Error_Range_Handler.
+//
+// FALLS BACK to the position-only handler when err_range is unset, so a host that has not wired
+// the new handler still gets the diagnostic, just with the old single-column caret. Silently
+// dropping it would be far worse than a narrow caret.
+error_node :: proc(p: ^Parser, node: ^ast.Node, msg: string, args: ..any) {
+	if node == nil {
+		return
+	}
+	if p.err_range != nil {
+		p.err_range(node.pos, node.end, msg, ..args)
+	} else if p.err != nil {
+		p.err(node.pos, msg, ..args)
 	}
 	p.file.syntax_error_count += 1
 	p.error_count += 1
@@ -186,7 +244,35 @@ parse_file :: proc(p: ^Parser, file: ^ast.File) -> bool {
 
 	if p.curr_tok.kind != .Package {
 		t := invalid_pre_package_token.? or_else p.curr_tok
-		error(p, t.pos, "Expected a package declaration at the start of the file")
+		// C++ opens an ERROR_BLOCK here (parser.cpp:6857) so the Suggestion below attaches to
+		// the diagnostic rather than being flushed on its own.
+		if p.err_block_begin != nil {
+			p.err_block_begin()
+		}
+		defer if p.err_block_end != nil {
+			p.err_block_end()
+		}
+		// C++ Reference: src/parser.cpp:6856-6868. "beginning", not "start" -- the port's
+		// wording was its own (LEDGER #307).
+		error(p, t.pos, "Expected a package declaration at the beginning of the file")
+		// C++ Reference: src/parser.cpp:6864-6867, inside the same ERROR_BLOCK.
+		//
+		// THE ORACLE IS NONDETERMINISTIC HERE, and C++ says so itself at 6863: "this is
+		// technically a race condition with the suggestion, but it's only a suggestion so in
+		// practice it should be 'fine'". pkg->name is written by whichever file finishes
+		// parsing first, and C++ parses a package's files in parallel. Measured over 20 oracle
+		// runs each:
+		//     vt_nopkg   (the only file, package-less)          --  0/20 emit the Suggestion
+		//     vt_nopkg2  (package-less a.odin, valid b.odin)    --  3/20
+		//     vt_nopkg3  (valid a.odin, package-less z.odin)    -- 19/20
+		// The port parses a package's files sequentially in sorted order, so `pkg.name != ""`
+		// resolves deterministically to "a valid file sorts earlier" -- which is the MAJORITY
+		// oracle answer in all three shapes (0/20 no, 3/20 no, 19/20 yes). Same disposition as
+		// LEDGER #197: where the reference itself is order-dependent, reproduce the dominant
+		// order rather than the coin flip.
+		if p.err_line != nil && p.file != nil && p.file.pkg != nil && p.file.pkg.name != "" {
+			p.err_line("\tSuggestion: Add 'package %s' to the top of the file\n", p.file.pkg.name)
+		}
 		return false
 	}
 	
@@ -231,14 +317,167 @@ parse_file :: proc(p: ^Parser, file: ^ast.File) -> bool {
 				append(&p.file.decls, stmt)
 				if es, es_ok := stmt.derived.(^ast.Expr_Stmt); es_ok && es.expr != nil {
 					if _, pl_ok := es.expr.derived.(^ast.Proc_Lit); pl_ok {
-						error(p, stmt.pos, "Procedure literal evaluated but not used")
+						error_node(p, stmt, "Procedure literal evaluated but not used")
 					}
 				}
 			}
 		}
 	}
 
+	// C++ parser.cpp:6930 -- the post-parse file-scope walk, run once f->decls is complete.
+	parse_setup_file_decls(p, p.file.decls[:])
+
 	return true
+}
+
+// C++ parser.hpp:923 is_ast_decl -- gb_is_between(kind, Ast__DeclBegin+1, Ast__DeclEnd-1).
+//
+// The C++ range is BadDecl, ForeignBlockDecl, Label, ValueDecl, PackageDecl, ImportDecl,
+// ForeignImportDecl. Label has no node in this port (see the note at ast.odin:1269, from #250),
+// so it is absent here for that reason and not by oversight.
+is_ast_decl :: proc(node: ^ast.Node) -> bool {
+	#partial switch _ in node.derived {
+	case ^ast.Bad_Decl, ^ast.Foreign_Block_Decl, ^ast.Value_Decl,
+	     ^ast.Package_Decl, ^ast.Import_Decl, ^ast.Foreign_Import_Decl:
+		return true
+	}
+	return false
+}
+
+// C++ parser.cpp:6267-6285 -- parse_setup_file_when_stmt.
+//
+// This recursion is load-bearing, not decoration: a file-scope `when` body is a Block_Stmt whose
+// statements never appear in f->decls, so without it the file-scope gate below simply does not see
+// them. Probe c26_when (`f()` inside `when true { }`) is the case that distinguishes the two.
+parse_setup_file_when_stmt :: proc(p: ^Parser, ws: ^ast.When_Stmt) {
+	if ws.body != nil {
+		if bs, ok := ws.body.derived.(^ast.Block_Stmt); ok {
+			parse_setup_file_decls(p, bs.stmts)
+		}
+	}
+
+	if ws.else_stmt != nil {
+		#partial switch e in ws.else_stmt.derived {
+		case ^ast.Block_Stmt:
+			parse_setup_file_decls(p, e.stmts)
+		case ^ast.When_Stmt:
+			parse_setup_file_when_stmt(p, e)
+		}
+	}
+}
+
+// C++ parser.cpp:6286-6368 -- parse_setup_file_decls.
+//
+// NOTE ON SCOPE. C++'s version also resolves import and foreign-import paths, via
+// determine_path_from_string / try_add_import_path, and rewrites offending decls to ast_bad_decl.
+// This port resolves import paths in the CHECKER instead (package_resolver.odin), so that half is
+// deliberately NOT reproduced here -- moving resolution into the parser is a separate change with
+// its own risk. What IS reproduced is the file-scope declaration gate, the #directive exemption
+// that feeds file.directive_count, and the `when` recursion. The remaining path VALIDATION
+// ("Invalid import path", "No foreign paths found") is still outstanding; see the ledger.
+//
+// The sibling diagnostic in the checker (check_collect.odin, "Only declarations are allowed at
+// file scope" with no ", got %s" suffix) is C++'s checker.cpp:5241 and is faithful -- the two are
+// separate messages in separate stages, not duplicates.
+parse_setup_file_decls :: proc(p: ^Parser, decls: []^ast.Stmt) {
+	for node in decls {
+		if node == nil {
+			continue
+		}
+
+		is_gate_exempt := is_ast_decl(node)
+		if !is_gate_exempt {
+			#partial switch _ in node.derived {
+			case ^ast.When_Stmt, ^ast.Bad_Stmt, ^ast.Empty_Stmt:
+				is_gate_exempt = true
+			}
+		}
+
+		if !is_gate_exempt {
+			// NOTE(bill): Sanity check
+			if es, ok := node.derived.(^ast.Expr_Stmt); ok && es.expr != nil {
+				if ce, ce_ok := es.expr.derived.(^ast.Call_Expr); ce_ok && ce.expr != nil {
+					if _, bd_ok := ce.expr.derived.(^ast.Basic_Directive); bd_ok {
+						p.file.directive_count += 1
+						continue
+					}
+				}
+			}
+
+			error_node(p, node, "Only declarations are allowed at file scope, got %s", ast.node_kind_string(node))
+		} else if id, id_ok := node.derived.(^ast.Import_Decl); id_ok {
+			// C++ parser.cpp:6305-6312. This runs BEFORE determine_path_from_string, on the raw
+			// token text, which is why it can live here even though this port resolves import
+			// paths in the checker rather than the parser.
+			original_string := path_string_from_token(id.relpath)
+			if is_import_path_absolute(original_string) {
+				error_node(p, node, "Invalid import path: '%s'", original_string)
+			}
+		} else if fl, fl_ok := node.derived.(^ast.Foreign_Import_Decl); fl_ok {
+			// C++ parser.cpp:6315-6331.
+			if len(fl.fullpaths) == 0 {
+				error_node(p, node, "No foreign paths found")
+			} else if !fl.multiple_filepaths && len(fl.fullpaths) == 1 {
+				if bl, bl_ok := fl.fullpaths[0].derived.(^ast.Basic_Lit); bl_ok {
+					file_str := path_string_from_token(bl.tok)
+					if is_import_path_absolute(file_str) {
+						error_node(p, node, "Invalid import path: '%s'", file_str)
+					}
+				}
+			}
+		} else if ws, ws_ok := node.derived.(^ast.When_Stmt); ws_ok {
+			parse_setup_file_when_stmt(p, ws)
+		}
+	}
+}
+
+// C++ parser.cpp:6057 -- is_import_path_absolute.
+//
+// Both rules apply unconditionally; neither is gated on the host platform. The reference compiler
+// rejects a Windows-style drive path while running on Linux, which probe c27_winimp verifies
+// against the oracle rather than against this reading.
+is_import_path_absolute :: proc(path: string) -> bool {
+	if len(path) > 0 && path[0] == '/' {
+		return true
+	}
+	if len(path) > 2 &&
+	   ((path[0] >= 'a' && path[0] <= 'z') || (path[0] >= 'A' && path[0] <= 'Z')) &&
+	   path[1] == ':' &&
+	   (path[2] == '/' || path[2] == '\\') {
+		return true
+	}
+	return false
+}
+
+// The path text as the two call sites above need it: delimiters removed, then whitespace trimmed,
+// matching C++'s string_trim_whitespace(string_value_from_token(...)).
+//
+// NOT a full equivalent of string_value_from_token, which routes through exact_value_from_token and
+// therefore processes escape sequences. Only the delimiters are stripped here. That is sufficient
+// for both callers -- the absolute-path test reads at most the first three bytes, and the message
+// prints the path as written -- but an import path containing escapes would print differently from
+// the reference. No such path exists in the corpus; recorded rather than papered over.
+path_string_from_token :: proc(tok: tokenizer.Token) -> string {
+	s := tok.text
+	if len(s) >= 2 && (s[0] == '"' || s[0] == '`') && s[len(s) - 1] == s[0] {
+		s = s[1:len(s) - 1]
+	}
+	// Trimmed inline rather than via core:strings, to leave this package's import set alone --
+	// core:odin/parser is a tooling dependency and this is the only site that would need it.
+	is_space :: proc(c: byte) -> bool {
+		switch c {
+		case ' ', '\t', '\r', '\n', '\v', '\f':
+			return true
+		}
+		return false
+	}
+	for len(s) > 0 && is_space(s[0]) {
+		s = s[1:]
+	}
+	for len(s) > 0 && is_space(s[len(s) - 1]) {
+		s = s[:len(s) - 1]
+	}
+	return s
 }
 
 peek_token_kind :: proc(p: ^Parser, kind: tokenizer.Token_Kind, lookahead := 0) -> (ok: bool) {
@@ -599,6 +838,98 @@ expect_closing :: proc(p: ^Parser, kind: tokenizer.Token_Kind, context_name: str
 	return expect_token(p, kind)
 }
 
+
+// parse_check_directive_for_statement is C++ src/parser.cpp:2226-2300. It had NEVER been ported
+// (LEDGER #304): neither of its statement-list messages appeared anywhere in core/odin/parser.
+//
+// C++ routes FOUR directives through it from the Token_Hash arm of parse_operand (2492-2504) --
+// bounds_check, no_bounds_check, type_assert, no_type_assert -- each as
+//     Ast *operand = parse_expr(f, lhs);
+//     return parse_check_directive_for_statement(operand, name, StateFlag_...);
+// The port had arms for the two bounds_check names that set the state flag and checked the
+// conflict pair, but performed NO statement-kind validation, and had no arms at all for
+// type_assert / no_type_assert.
+//
+// Consequences measured before the fix:
+//   `v := #bounds_check x.(int)`   oracle 1 diagnostic, port 0   <-- UNDER-REJECTION
+//   `v := #type_assert  x.(int)`   oracle "may only be applied to the following statements: ...",
+//                                  port "Expected ';', got identifier" at a different column
+//
+// The conflict-pair check the port already had IS C++'s (2246/2251), not invented -- verified
+// before preserving it, since #252 and #266 are precedents for invented extras.
+@(private="file")
+parse_check_directive_for_statement :: proc(p: ^Parser, s: ^ast.Node, tag_token: tokenizer.Token, state_flag: Maybe(ast.Node_State_Flag)) -> ^ast.Node {
+	name := tag_token.text
+	if s == nil {
+		error(p, tag_token.pos, "Invalid operand for #%s", name)
+		return nil
+	}
+
+	// C++ 2234-2240: an empty statement gets its own two messages, and the newline form is
+	// distinguished from an explicit ';'. ast.Empty_Stmt now retains its token so this is
+	// reproducible -- it previously stored only the position.
+	if es, is_empty := s.derived.(^ast.Empty_Stmt); is_empty {
+		if es.token.text == "\n" {
+			error(p, tag_token.pos, "#%s cannot be followed by a newline", name)
+		} else {
+			error(p, tag_token.pos, "#%s cannot be applied to an empty statement \';\'", name)
+		}
+	}
+
+	// C++ 2242-2245: applying the same directive twice is an error, and the flag is set
+	// regardless so the conflict test below sees it.
+	// C++ passes state_flag == 0 from the #partial EmptyStmt case (parser.cpp:5528). With 0,
+	// `s->state_flags & 0` is false, `|= 0` is a no-op, and neither the conflict switch nor the
+	// statement-kind switch has a matching case -- so ONLY the empty-statement message above
+	// fires. Maybe(...) reproduces that: nil skips everything below.
+	flag, has_flag := state_flag.?
+	if !has_flag {
+		return s
+	}
+
+	if flag in s.state_flags {
+		error(p, tag_token.pos, "#%s has been applied multiple times", name)
+	}
+	s.state_flags += {flag}
+
+	// C++ 2246-2266: the two mutually exclusive pairs.
+	#partial switch flag {
+	case .Bounds_Check:
+		if .No_Bounds_Check in s.state_flags {
+			error(p, tag_token.pos, "#bounds_check and #no_bounds_check cannot be applied together")
+		}
+	case .No_Bounds_Check:
+		if .Bounds_Check in s.state_flags {
+			error(p, tag_token.pos, "#bounds_check and #no_bounds_check cannot be applied together")
+		}
+	case .Type_Assert:
+		if .No_Type_Assert in s.state_flags {
+			error(p, tag_token.pos, "#type_assert and #no_type_assert cannot be applied together")
+		}
+	case .No_Type_Assert:
+		if .Type_Assert in s.state_flags {
+			error(p, tag_token.pos, "#type_assert and #no_type_assert cannot be applied together")
+		}
+	}
+
+	// C++ 2268-2298: the statement-kind whitelist. Ported in FULL -- an omitted kind would
+	// wrongly REJECT valid code, which is worse than the silent acceptance this replaces.
+	#partial switch d in s.derived {
+	case ^ast.Block_Stmt, ^ast.If_Stmt, ^ast.When_Stmt, ^ast.For_Stmt, ^ast.Range_Stmt,
+	     ^ast.Unroll_Range_Stmt, ^ast.Switch_Stmt, ^ast.Type_Switch_Stmt, ^ast.Return_Stmt,
+	     ^ast.Defer_Stmt, ^ast.Assign_Stmt:
+		// Okay
+	case ^ast.Value_Decl:
+		if !d.is_mutable {
+			error(p, tag_token.pos, "#%s may only be applied to a variable declaration, and not a constant value declaration", name)
+		}
+	case:
+		error(p, tag_token.pos, "#%s may only be applied to the following statements: \'{{}}\', \'if\', \'when\', \'for\', \'switch\', \'return\', \'defer\', assignment, variable declaration", name)
+	}
+
+	return s
+}
+
 expect_closing_brace_of_field_list :: proc(p: ^Parser) -> tokenizer.Token {
 	return expect_closing_token_of_field_list(p, .Close_Brace, "field list")
 }
@@ -622,16 +953,16 @@ expect_closing_token_of_field_list :: proc(p: ^Parser, closing_kind: tokenizer.T
 		str := tokenizer.token_to_string(token)
 		error(p, end_of_line_pos(p, p.prev_tok), "Expected a comma, got a %s", str)
 	}
-	expect_closing := expect_token_after(p, closing_kind, msg)
-
-	if expect_closing.kind != closing_kind {
-		for p.curr_tok.kind != closing_kind && p.curr_tok.kind != .EOF && !is_non_inserted_semicolon(p.curr_tok) {
-			advance_token(p)
-		}
-		return p.curr_tok
-	} 
-
-	return expect_closing
+	// C++ Reference: src/parser.cpp:1734 -- the function ends with a bare
+	//     return expect_token(f, Token_CloseBrace);
+	// i.e. "Expected '}'", with NO trailing context and NO recovery scan. The port used
+	// expect_token_after(..., "field list"), producing "Expected '}' after field list", and
+	// then ran a token-skipping loop that C++ does not have. Two symptoms, one site (LEDGER
+	// #251): the wrong message, and one fewer diagnostic line -- the loop consumed tokens up
+	// to the next closer/EOF/semicolon, swallowing whatever C++ would have gone on to report.
+	// Note the port's own comment at parser.odin:573 already recorded C++ as "then
+	// expect_token"; the code had drifted from its own citation.
+	return expect_token(p, closing_kind)
 }
 
 // C++ Reference: src/parser.cpp:4155-4160 (parse_proc_type) and 4026-4030 (parse_results).
@@ -866,7 +1197,7 @@ parse_stmt_list :: proc(p: ^Parser) -> []^ast.Stmt {
 				append(&list, stmt)
 				if es, es_ok := stmt.derived.(^ast.Expr_Stmt); es_ok && es.expr != nil {
 					if _, pl_ok := es.expr.derived.(^ast.Proc_Lit); pl_ok {
-						error(p, stmt.pos, "Procedure literal evaluated but not used")
+						error_node(p, stmt, "Procedure literal evaluated but not used")
 					}
 				}
 			}
@@ -947,7 +1278,12 @@ convert_stmt_to_expr :: proc(p: ^Parser, stmt: ^ast.Stmt, kind: string) -> ^ast.
 	if es, ok := stmt.derived.(^ast.Expr_Stmt); ok {
 		return es.expr
 	}
-	error(p, stmt.pos, "Expected '%s', found a simple statement.", kind)
+	// C++ parser.cpp:2120 anchors at f->curr_token, NOT at the statement. The port used stmt.pos,
+	// which points at where the simple statement STARTED rather than where the parser gave up.
+	// For `for x := 0 x < 3 {` the reference reports at the closing brace and the port reported at
+	// the init -- same text, same count, different anchor (probe nb_forsemi). Note the Bad_Expr
+	// below already used p.curr_tok, so the two were inconsistent with each other as well.
+	error(p, p.curr_tok.pos, "Expected '%s', found a simple statement.", kind)
 	return ast.new(ast.Bad_Expr, p.curr_tok.pos, end_pos(p.curr_tok))
 }
 
@@ -1103,7 +1439,9 @@ parse_for_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 
 
 			if p.curr_tok.kind == .Open_Brace || p.curr_tok.kind == .Do {
-				error(p, p.curr_tok.pos, "Expected ';', followed by a condition expression and post statement, got %s", tokenizer.tokens[p.curr_tok.kind])
+				// C++ parser.cpp:4970 names the `x in y` alternative; the port's wording dropped
+				// that clause, which is the part that tells the reader what else is allowed here.
+				error(p, p.curr_tok.pos, "Expected ';', followed by a condition expression and post statement, or 'x in y' style loop, got %s", tokenizer.tokens[p.curr_tok.kind])
 			} else {
 				if p.curr_tok.kind != .Semicolon {
 					if p.curr_tok.kind == .Ident {
@@ -1163,6 +1501,16 @@ parse_for_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 	}
 
 	cond_expr := convert_stmt_to_expr(p, cond, "boolean expression")
+	// C++ parser.cpp:5022-5026. `for init; ; { }` -- an init with neither condition nor post
+	// statement -- is rejected with a suggested rewrite. The port had no equivalent and accepted
+	// it silently (probe nd_forsemi2). Anchored at `init`, as C++ does, NOT at the `for` keyword.
+	if init != nil && cond_expr == nil && post == nil {
+		// Braces are DOUBLED: this string goes through Odin's fmt, where `{` opens a format verb.
+		// Left single they print "%!(MISSING ARGUMENT)%!(MISSING CLOSE BRACE)" -- exactly the
+		// mangling #211 fixed in four other messages, and it caught me again here. Both `{` in
+		// this text are literal.
+		error(p, init.pos, "'for init; ; {{' without an explicit condition nor post statement is not allowed, please prefer something like 'for init; true; /**/{{'")
+	}
 	for_stmt := ast.new(ast.For_Stmt, tok.pos, body)
 	for_stmt.for_pos = tok.pos
 	for_stmt.init = init
@@ -1413,7 +1761,9 @@ parse_foreign_decl :: proc(p: ^Parser) -> ^ast.Decl {
 		}
 
 		fullpaths: [dynamic]^ast.Expr
+		multiple_filepaths := false
 		if allow_token(p, .Open_Brace) {
+			multiple_filepaths = true
 			for p.curr_tok.kind != .Close_Brace &&
 				p.curr_tok.kind != .EOF {
 				path := parse_expr(p, false)
@@ -1430,8 +1780,34 @@ parse_foreign_decl :: proc(p: ^Parser) -> ^ast.Decl {
 			append(&fullpaths, bl)
 		}
 
+		// C++ anchors both of the diagnostics below at lib_name, NOT at the `import` keyword.
+		// lib_name is the identifier when one is present, and otherwise carries the pos of the
+		// `foreign` token itself (parser.cpp:5200-5207) -- not `import`. The port previously used
+		// import_tok.pos, which put `foreign import lib {}` at 2:9 where the reference gives 2:16.
+		// Probes c27_fgnzero and c27_fgnproc.
+		lib_name_pos := tok.pos
+		if name != nil {
+			lib_name_pos = name.pos
+		}
+
 		if len(fullpaths) == 0 {
-			error(p, import_tok.pos, "foreign import without any paths")
+			error(p, lib_name_pos, "foreign import without any paths")
+			// C++ parser.cpp:5239 returns a BAD DECL here, and that matters beyond recovery
+			// shape: parse_setup_file_decls only reaches its "No foreign paths found" branch for
+			// a real ForeignImportDecl, so C++'s zero-path case reports exactly once. Returning
+			// the real node made the port report twice (probe c27_fgnzero). It also explains why
+			// C++ 6318's arm indexes filepaths[0] on an empty slice without ever crashing --
+			// that branch is unreachable from this parser.
+			bad := ast.new(ast.Bad_Decl, lib_name_pos, end_pos(p.curr_tok))
+			expect_semicolon(p, bad)
+			return bad
+		} else if p.curr_proc != nil {
+			// C++ parser.cpp:5241. Absent from the port entirely -- a foreign import inside a
+			// procedure body was silently accepted.
+			error(p, lib_name_pos, "You cannot use foreign import within a procedure. This must be done at the file scope")
+			bad := ast.new(ast.Bad_Decl, lib_name_pos, end_pos(p.curr_tok))
+			expect_semicolon(p, bad)
+			return bad
 		}
 
 		decl := ast.new(ast.Foreign_Import_Decl, tok.pos, end_pos(p.prev_tok))
@@ -1440,6 +1816,7 @@ parse_foreign_decl :: proc(p: ^Parser) -> ^ast.Decl {
 		decl.import_tok      = import_tok
 		decl.name            = name
 		decl.fullpaths       = fullpaths[:]
+		decl.multiple_filepaths = multiple_filepaths
 		expect_semicolon(p, decl)
 		decl.comment = p.line_comment
 		return decl
@@ -1583,13 +1960,19 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 		tok := advance_token(p)
 		stmt := parse_stmt(p)
 		#partial switch s in stmt.derived_stmt {
+		// C++ Reference: parser.cpp:5127-5136. All three of these report at `token` -- the
+		// `defer` keyword itself -- not at the offending statement. The port passed `s.pos`,
+		// the deferred statement, so every one of them landed a few columns to the right of
+		// where C++ puts it (probe .claude/probes/defer_bad: oracle 3:2, port 3:8). Message
+		// text was already correct; only the position node was wrong.
 		case ^ast.Empty_Stmt:
-			error(p, s.pos, "Empty statement after defer (e.g. ';')")
+			error(p, tok.pos, "Empty statement after defer (e.g. ';')")
 		case ^ast.Defer_Stmt:
-			error(p, s.pos, "You cannot defer a defer statement")
+			error(p, tok.pos, "You cannot defer a defer statement")
 			stmt = s.stmt
 		case ^ast.Return_Stmt:
-			error(p, s.pos, "You cannot defer a return statement")
+			_ = s
+			error(p, tok.pos, "You cannot defer a return statement")
 		}
 		ds := ast.new(ast.Defer_Stmt, tok.pos, stmt)
 		ds.stmt = stmt
@@ -1681,30 +2064,43 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 		name := tag.text
 
 		switch name {
-		case "bounds_check", "no_bounds_check":
+		case "bounds_check", "no_bounds_check", "type_assert", "no_type_assert":
+			// C++ Reference: src/parser.cpp:5500-5511 -- the STATEMENT path routes the same four
+			// names through parse_check_directive_for_statement, exactly as the expression path
+			// does. The port set the state flag directly with NO validation, so
+			// `#bounds_check ;` was accepted silently (oracle 1 diagnostic, port 0). LEDGER #304
+			// residual.
 			stmt := parse_stmt(p)
+			flag: ast.Node_State_Flag
 			switch name {
-			case "bounds_check":
-				stmt.state_flags += {.Bounds_Check}
-			case "no_bounds_check":
-				stmt.state_flags += {.No_Bounds_Check}
+			case "bounds_check":    flag = .Bounds_Check
+			case "no_bounds_check": flag = .No_Bounds_Check
+			case "type_assert":     flag = .Type_Assert
+			case "no_type_assert":  flag = .No_Type_Assert
+			case: unimplemented()
 			}
-			return stmt
-		case "type_assert", "no_type_assert":
-			stmt := parse_stmt(p)
-			switch name {
-			case "type_assert":
-				stmt.state_flags += {.Type_Assert}
-			case "no_type_assert":
-				stmt.state_flags += {.No_Type_Assert}
-			}
-			return stmt
+			return cast(^ast.Stmt)parse_check_directive_for_statement(p, cast(^ast.Node)stmt, tag, flag)
 		case "partial":
 			stmt := parse_stmt(p)
-			#partial switch s in stmt.derived_stmt {
-			case ^ast.Switch_Stmt:      s.partial = true
-			case ^ast.Type_Switch_Stmt: s.partial = true
-			case: error(p, stmt.pos, "#partial can only be applied to a switch statement")
+			// C++ Reference: src/parser.cpp:5512-5530. Two things the port lacked: the
+			// "already applied" guard on each switch arm, and the EmptyStmt arm, which defers
+			// to the validator with NO state flag so that `#partial ;` gets the
+			// empty-statement message rather than "can only be applied to a switch statement".
+			#partial switch v in stmt.derived_stmt {
+			case ^ast.Switch_Stmt:
+				if v.partial {
+					error(p, tok.pos, "#partial already applied to a switch statement")
+				}
+				v.partial = true
+			case ^ast.Type_Switch_Stmt:
+				if v.partial {
+					error(p, tok.pos, "#partial already applied to a switch statement")
+				}
+				v.partial = true
+			case ^ast.Empty_Stmt:
+				return cast(^ast.Stmt)parse_check_directive_for_statement(p, cast(^ast.Node)stmt, tag, nil)
+			case:
+				error(p, tok.pos, "#partial can only be applied to a switch statement")
 			}
 			return stmt
 		case "assert", "panic":
@@ -1755,6 +2151,7 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 	case .Semicolon:
 		tok := advance_token(p)
 		s := ast.new(ast.Empty_Stmt, tok.pos, end_pos(tok))
+		s.token = tok
 		return s
 	}
 
@@ -1777,7 +2174,7 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 			expect_token(p, .Do)
 			stmt := parse_do_body(p, {}, "the for statement")
 			if p.disallow_do {
-				error(p, stmt.pos, "'do' has been disallowed")
+				error_node(p, stmt, "'do' has been disallowed")
 			}
 			return stmt
 		case:
@@ -1881,7 +2278,7 @@ parse_type :: proc(p: ^Parser) -> ^ast.Expr {
 			empty = true
 		}
 		if empty {
-			error(p, type.pos, "Expected a type within the parentheses")
+			error_node(p, type, "Expected a type within the parentheses")
 			return ast.new(ast.Bad_Expr, pe.open, pe.close)
 		}
 	}
@@ -1953,10 +2350,10 @@ parse_do_body :: proc(p: ^Parser, token: tokenizer.Token, msg: string) -> ^ast.S
 convert_stmt_to_body :: proc(p: ^Parser, stmt: ^ast.Stmt) -> ^ast.Stmt {
 	#partial switch s in stmt.derived_stmt {
 	case ^ast.Block_Stmt:
-		error(p, stmt.pos, "Expected a normal statement rather than a block statement")
+		error_node(p, stmt, "Expected a normal statement rather than a block statement")
 		return stmt
 	case ^ast.Empty_Stmt:
-		error(p, stmt.pos, "Expected a non-empty statement")
+		error_node(p, stmt, "Expected a non-empty statement")
 	}
 
 	bs := ast.new(ast.Block_Stmt, stmt.pos, stmt)
@@ -2144,7 +2541,18 @@ parse_var_type :: proc(p: ^Parser, flags: ast.Field_Flags) -> ^ast.Expr {
 			error(p, tok.pos, "variadic field missing type after '..'")
 			type = ast.new(ast.Bad_Expr, tok.pos, end_pos(tok))
 		}
-		e := ast.new(ast.Ellipsis, type.pos, type)
+		// LEDGER #323. The node's position is the `..` TOKEN, not the inner type. C++
+		// ast_ellipsis (parser.cpp:859) stores the whole token and ast_token() reads it back,
+		// so `b: ..int` anchors at the `..`; the port anchored at `int`, two columns right.
+		//
+		// Note `e.tok` keeps only the token KIND, so the position was not recoverable from the
+		// node afterwards -- this constructor was the only place it existed.
+		//
+		// Invisible until #322 gave parser diagnostics a caret SPAN: a one-column caret at the
+		// wrong column looks much like a one-column caret at the right one. The span made the
+		// off-by-two obvious. Third arg is `type`, so the node still ends where the inner type
+		// ends -- C++'s span is `..int` entire.
+		e := ast.new(ast.Ellipsis, tok.pos, type)
 		e.tok = tok.kind
 		e.expr = type
 		return e
@@ -2210,7 +2618,7 @@ parse_ident_list :: proc(p: ^Parser, allow_poly_names: bool) -> []^ast.Expr {
 			tok := expect_token(p, .Dollar)
 			ident := parse_ident(p)
 			if is_blank_ident(ident) {
-				error(p, ident.pos, "Invalid polymorphic type definition with a blank identifier")
+				error_node(p, ident, "Invalid polymorphic type definition with a blank identifier")
 			}
 			poly_name := ast.new(ast.Poly_Type, tok.pos, ident)
 			poly_name.type = ident
@@ -2278,7 +2686,7 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 			tt := ast.unparen_expr(type)
 			if is_signature && !any_polymorphic_names {
 				if ti, ok := tt.derived.(^ast.Typeid_Type); ok && ti.specialization != nil {
-					error(p, tt.pos, "Specialization of typeid is not allowed without polymorphic names")
+					error_node(p, type, "Specialization of typeid is not allowed without polymorphic names")
 				}
 			}
 		}
@@ -2302,11 +2710,11 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 
 		if is_type_ellipsis(type) {
 			if seen_ellipsis^ {
-				error(p, type.pos, "Extra variadic parameter after ellipsis")
+				error_node(p, type, "Extra variadic parameter after ellipsis")
 			}
 			seen_ellipsis^ = true
 			if len(names) != 1 {
-				error(p, type.pos, "Variadic parameters can only have one field name")
+				error_node(p, type, "Variadic parameters can only have one field name")
 			}
 		} else if seen_ellipsis^ && default_value == nil {
 			error(p, p.curr_tok.pos, "Extra parameter after ellipsis without a default value")
@@ -2410,15 +2818,41 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 			set_flags = list[0].flags
 		}
 		total_name_count += len(names)
-		handle_field(p, &seen_ellipsis, &fields, docs, names, allowed_flags, set_flags)
 
-		for p.curr_tok.kind != follow && p.curr_tok.kind != .EOF {
-			docs = p.lead_comment
-			set_flags = parse_field_prefixes(p)
-			names = parse_ident_list(p, allow_poly_names)
+		// C++ Reference: src/parser.cpp:4585-4600 --
+		//     bool more_fields = allow_field_separator(f);
+		//     ... build and add the param ...
+		//     if (!more_fields) { ...; return ast_field_list(f, start_token, params); }
+		//     while (f->curr_token.kind != follow &&
+		//            f->curr_token.kind != Token_EOF &&
+		//            f->curr_token.kind != Token_Semicolon) { ... }
+		//
+		// LEDGER #303: the port DISCARDED handle_field's result here. handle_field ends in
+		// allow_field_separator and returns whether a separator was actually consumed, so
+		// dropping it meant a field with NO separator after its type still fell into the loop
+		// below, which then read the next token as the start of another field's NAME LIST.
+		// `a: int int, b: int` therefore parsed as `a: int` plus a two-name field `int, b: int`
+		// and the port reported errors=0 where the reference reports three syntax errors --
+		// an UNDER-REJECTION, confirmed by dumping the AST (names=2 on the second field).
+		// The trailing call at the bottom of the loop already had `or_break`; only this first
+		// one was missing the check, which is why it needed a field list of at least two
+		// entries to show.
+		more_fields := handle_field(p, &seen_ellipsis, &fields, docs, names, allowed_flags, set_flags)
 
-			total_name_count += len(names)
-			handle_field(p, &seen_ellipsis, &fields, docs, names, allowed_flags, set_flags) or_break
+		// C++ returns the list outright when the first field had no separator. Guarding the
+		// loop is the same thing here, since the field list is constructed after it.
+		if more_fields {
+			// The `.Semicolon` guard is C++'s too (parser.cpp:4596) and was likewise absent.
+			for p.curr_tok.kind != follow &&
+			    p.curr_tok.kind != .EOF &&
+			    p.curr_tok.kind != .Semicolon {
+				docs = p.lead_comment
+				set_flags = parse_field_prefixes(p)
+				names = parse_ident_list(p, allow_poly_names)
+
+				total_name_count += len(names)
+				handle_field(p, &seen_ellipsis, &fields, docs, names, allowed_flags, set_flags) or_break
+			}
 		}
 	}
 
@@ -2668,30 +3102,53 @@ parse_inlining_or_tailing_operand :: proc(p: ^Parser, lhs: bool, tok: tokenizer.
 		}
 	}
 
-	if expr != nil {
-		#partial switch e in ast.strip_or_return_expr(expr).derived_expr {
-		case ^ast.Proc_Lit:
-			if e.inlining != .None && e.inlining != pi {
-				error(p, expr.pos, "both 'inline' and 'no_inline' cannot be applied to a procedure literal")
-			}
-			if pt != .None {
-				error(p, expr.pos, "'#must_tail' can only be applied to a procedure call, not the procedure literal")
-			}
-
-			e.inlining = pi
-			e.tailing  = pt
-			return expr
-		case ^ast.Call_Expr:
-			if e.inlining != .None && e.inlining != pi {
-				error(p, expr.pos, "both 'inline' and 'no_inline' cannot be applied to a procedure call")
-			}
-			e.inlining = pi
-			e.tailing  = pt
-			return expr
-		}
+	// LEDGER #321. Restructured to parser.cpp:2170-2217's shape. Four divergences fixed:
+	//
+	//  1. The ASSIGNMENTS WERE UNCONDITIONAL. C++ guards each with `if (pi != none)` /
+	//     `if (pt != none)`; the port wrote `e.inlining = pi; e.tailing = pt` on every path. So
+	//     in the stacked form `#force_no_inline #must_tail f()` the inner directive sets
+	//     tailing, then the OUTER one -- whose pt is None -- wrote it straight back to None.
+	//     A directive silently erasing its neighbour.
+	//  2. The kind check now happens FIRST and bails, as C++ does, instead of falling out of a
+	//     switch into a trailing error.
+	//  3. Three messages were reworded. C++'s are "Cannot apply both '#force_inline' and
+	//     '#force_no_inline' to a procedure literal/call", and the bail names the node kind it
+	//     actually got and reports at `expr`, not at the directive token.
+	//  4. C++'s must-tail-on-a-literal message says **'#must_call'**, not '#must_tail'. That is
+	//     an upstream naming slip, and the port had "corrected" it. Parity means reproducing it
+	//     -- same reasoning as #131. Do not re-fix it here; fix it upstream or not at all.
+	stripped := expr != nil ? ast.strip_or_return_expr(expr) : nil
+	if stripped == nil {
+		return expr
 	}
 
-	error(p, tok.pos, "'%s' must be followed by a procedure literal or call", tok.text)
+	#partial switch e in stripped.derived_expr {
+	case ^ast.Proc_Lit:
+		if pi != .None {
+			if e.inlining != .None && e.inlining != pi {
+				error_node(p, expr, "Cannot apply both '#force_inline' and '#force_no_inline' to a procedure literal")
+			}
+			e.inlining = pi
+		}
+		if pt != .None {
+			error_node(p, expr, "'#must_call' can only be applied to a procedure call, not the procedure literal")
+			e.tailing = pt
+		}
+		return expr
+	case ^ast.Call_Expr:
+		if pi != .None {
+			if e.inlining != .None && e.inlining != pi {
+				error_node(p, expr, "Cannot apply both '#force_inline' and '#force_no_inline' to a procedure call")
+			}
+			e.inlining = pi
+		}
+		if pt != .None {
+			e.tailing = pt
+		}
+		return expr
+	}
+
+	error_node(p, expr, "%s must be followed by a procedure literal or call, got %s", tok.text, ast.node_kind_string(stripped))
 	return ast.new(ast.Bad_Expr, tok.pos, expr)
 }
 
@@ -3033,13 +3490,13 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			return hp
 
 		case "file", "directory", "line", "procedure", "caller_location":
-			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
+			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(tok))
 			bd.tok  = tok
 			bd.name = name.text
 			return bd
 
 		case "caller_expression":
-			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
+			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(tok))
 			bd.tok  = tok
 			bd.name = name.text
 
@@ -3058,7 +3515,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		// CHECKER reports "'#assert' must be used as a call". Probes bd1/bd2.
 
 		case "soa":
-			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
+			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(tok))
 			bd.tok  = tok
 			bd.name = name.text
 			original_type := parse_type(p)
@@ -3077,7 +3534,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 				//
 				// C++ reports at `type` (the unparenthesised type), not `original_type`:
 				// identical for a bare type, different for `#soa (T)`.
-				error(p, type.pos, "Expected an array or pointer type after #%s, got %s", name.text, ast.node_kind_string(type))
+				error_node(p, type, "Expected an array or pointer type after #%s, got %s", name.text, ast.node_kind_string(type))
 			}
 			return original_type
 
@@ -3093,12 +3550,12 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			case ^ast.Matrix_Type:
 				t.is_row_major = name.text == "row_major"
 			case:
-				error(p, type.pos, "Expected a matrix type after #%s, got %s", name.text, ast.node_kind_string(type))
+				error_node(p, type, "Expected a matrix type after #%s, got %s", name.text, ast.node_kind_string(type))
 			}
 			return original_type
 
 		case "simd":
-			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
+			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(tok))
 			bd.tok  = tok
 			bd.name = name.text
 			original_type := parse_type(p)
@@ -3106,12 +3563,12 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			#partial switch t in type.derived_expr {
 			case ^ast.Array_Type:         t.tag = bd
 			case:
-				error(p, type.pos, "Expected a fixed array type after #%s, got %s", name.text, ast.node_kind_string(type))
+				error_node(p, type, "Expected a fixed array type after #%s, got %s", name.text, ast.node_kind_string(type))
 			}
 			return original_type
 
 		case "partial":
-			tag := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
+			tag := ast.new(ast.Basic_Directive, tok.pos, end_pos(tok))
 			tag.tok = tok
 			tag.name = name.text
 			original_expr := parse_expr(p, lhs)
@@ -3133,13 +3590,13 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			case:
 				// C++ Reference: src/parser.cpp:2477 -- reports at `expr`, not the tag token,
 				// and carries the ", got %s" tail the port dropped.
-				error(p, expr.pos, "Expected a compound literal after #%s, got %s", name.text, ast.node_kind_string(expr))
+				error_node(p, expr, "Expected a compound literal after #%s, got %s", name.text, ast.node_kind_string(expr))
 
 			}
 			return original_expr
 
 		case "sparse":
-			tag := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
+			tag := ast.new(ast.Basic_Directive, tok.pos, end_pos(tok))
 			tag.tok = tok
 			tag.name = name.text
 			original_type := parse_type(p)
@@ -3148,28 +3605,25 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			case ^ast.Array_Type:
 				t.tag = tag
 			case:
-				error(p, type.pos, "Expected an enumerated array type after #%s, got %s", name.text, ast.node_kind_string(type))
+				error_node(p, type, "Expected an enumerated array type after #%s, got %s", name.text, ast.node_kind_string(type))
 
 			}
 			return original_type
 
-		case "bounds_check", "no_bounds_check":
+		case "bounds_check", "no_bounds_check", "type_assert", "no_type_assert":
+			// C++ Reference: src/parser.cpp:2492-2504 -- all four names parse an expression and
+			// hand it to parse_check_directive_for_statement, which owns the flag write, the
+			// duplicate check, the conflict pair and the statement-kind validation. LEDGER #304.
 			operand := parse_expr(p, lhs)
-
+			flag: ast.Node_State_Flag
 			switch name.text {
-			case "bounds_check":
-				operand.state_flags += {.Bounds_Check}
-				if .No_Bounds_Check in operand.state_flags {
-					error(p, name.pos, "#bounds_check and #no_bounds_check cannot be applied together")
-				}
-			case "no_bounds_check":
-				operand.state_flags += {.No_Bounds_Check}
-				if .Bounds_Check in operand.state_flags {
-					error(p, name.pos, "#bounds_check and #no_bounds_check cannot be applied together")
-				}
+			case "bounds_check":    flag = .Bounds_Check
+			case "no_bounds_check": flag = .No_Bounds_Check
+			case "type_assert":     flag = .Type_Assert
+			case "no_type_assert":  flag = .No_Type_Assert
 			case: unimplemented()
 			}
-			return operand
+			return cast(^ast.Expr)parse_check_directive_for_statement(p, cast(^ast.Node)operand, name, flag)
 
 		case "relative":
 			// C++ Reference: parser.cpp:2504-2513. #relative types have been REMOVED from
@@ -3179,7 +3633,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			// Both diagnostics anchor at the tag, so when the paren is missing they land on
 			// the same position and the existing same-position merge keeps only the first --
 			// which is exactly what the oracle prints.
-			tag := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
+			tag := ast.new(ast.Basic_Directive, tok.pos, end_pos(tok))
 			tag.tok = tok
 			tag.name = name.text
 
@@ -3197,7 +3651,13 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			rt.type = type
 			return rt
 
-		case "force_inline", "force_no_inline":
+		// "must_tail" belongs here too -- C++ parser.cpp:2514-2516 lists all THREE names at the
+		// operand level, and the port had only two. LEDGER #321: that omission is why
+		// `return #must_tail f()` (directive in EXPRESSION position) fell through to
+		// ast_basic_directive and died with "Expected ';', got identifier", rejecting code the
+		// reference accepts. The statement-level site (line ~1880) already had all three, which
+		// is what made this look like a checker gap rather than a parser one.
+		case "force_inline", "force_no_inline", "must_tail":
 			return parse_inlining_or_tailing_operand(p, lhs, name)
 		// C++ Reference: src/parser.cpp:2519 -- the Token_Hash arm ends with a bare
 		// `return ast_basic_directive(f, token, name)`.
@@ -3214,7 +3674,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		// producer anywhere and the node kind is now unreachable. It is left declared: it is
 		// part of the public core:odin/ast surface and C++ keeps its counterpart too.
 		case:
-			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(name))
+			bd := ast.new(ast.Basic_Directive, tok.pos, end_pos(tok))
 			bd.tok  = tok
 			bd.name = name.text
 			return bd
@@ -3254,7 +3714,14 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			close := expect_closing_brace_of_field_list(p)
 
 			if len(args) == 0 {
-				error(p, tok.pos, "expected at least 1 argument in procedure group")
+				// C++ parser.cpp:2550, reproduced VERBATIM including the "a least" typo and the
+				// capital E. The port had silently corrected it to "expected at least 1 argument
+				// in procedure group" -- three divergences at once (case, the typo, and a dropped
+				// "a" before "procedure group"). Correcting upstream's prose is still a parity
+				// break: the reference compiler's text IS the specification here (#171, #185).
+				// Found by the spec suite, not by parity.sh -- no swept package contains an empty
+				// procedure group, so the sweeps could never have reached this line. LEDGER #347.
+				error(p, tok.pos, "Expected a least 1 argument in a procedure group")
 			}
 
 			pg := ast.new(ast.Proc_Group, tok.pos, end_pos(close))
@@ -3369,6 +3836,11 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		ptr.elem = elem
 		return ptr
 
+	case .Mul:
+		// C++ Reference: parser.cpp:2668-2669. Deliberate: a leading `*` in TYPE position is
+		// parsed as a unary expression so that check_type_expr can reject it by name and offer
+		// '^T'. Without this arm the parser bailed first and the suggestion was unreachable.
+		return parse_unary_expr(p, true)
 
 	case .Open_Bracket:
 		open := expect_token(p, .Open_Bracket)
@@ -3802,33 +4274,45 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		for allow_token(p, .Hash) {
 			if p.curr_tok.kind == .Ident {
 				name := advance_token(p)
+				// LEDGER #319. Two divergences from parser.cpp:3115-3147, both fixed here.
+				//
+				// ANCHOR: C++ reports at `token` -- the DIRECTIVE's own identifier. Every one of
+				// these five reported at `tok.pos`, the `asm` keyword, so on
+				// `asm(...) -> i32 #side_effects #side_effects {...}` the port pointed at column 7
+				// where C++ points at column 43, the second directive. Same shape as #179, where a
+				// wrong anchor accounted for 88/88 of the vet-mode divergences.
+				//
+				// MISSING DEFAULT: the `case:` arm below did not exist, so `#bogus` on an inline
+				// asm expression was accepted in silence -- a real under-rejection. Probe n7_asmbad.
 				switch name.text {
 				case "side_effects":
 					if has_side_effects {
-						error(p, tok.pos, "Duplicate directive on inline asm expression: '#side_effects'")
+						error(p, name.pos, "Duplicate directive on inline asm expression: '#side_effects'")
 					}
 					has_side_effects = true
 				case "align_stack":
 					if is_align_stack {
-						error(p, tok.pos, "Duplicate directive on inline asm expression: '#align_stack'")
+						error(p, name.pos, "Duplicate directive on inline asm expression: '#align_stack'")
 					}
 					is_align_stack = true
 				case "att":
 					if dialect == .ATT {
-						error(p, tok.pos, "Duplicate directive on inline asm expression: '#att'")
+						error(p, name.pos, "Duplicate directive on inline asm expression: '#att'")
 					} else if dialect != .Default {
-						error(p, tok.pos, "Conflicting asm dialects")
+						error(p, name.pos, "Conflicting asm dialects")
 					} else {
 						dialect = .ATT
 					}
 				case "intel":
 					if dialect == .Intel {
-						error(p, tok.pos, "Duplicate directive on inline asm expression: '#intel'")
+						error(p, name.pos, "Duplicate directive on inline asm expression: '#intel'")
 					} else if dialect != .Default {
-						error(p, tok.pos, "Conflicting asm dialects")
+						error(p, name.pos, "Conflicting asm dialects")
 					} else {
 						dialect = .Intel
 					}
+				case:
+					error(p, name.pos, "Invalid directive on inline asm expression: '#%s'", name.text)
 				}
 
 			} else {
@@ -4306,10 +4790,19 @@ parse_unary_expr :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 	case .Add, .Sub,
 	     .Not, .Xor,
 	     .And,
-	     .Mul_Mul:
+	     .Mul_Mul,
+	     .Mul: // C++ Reference: parser.cpp:3483 -- "Used for error handling when people do
+	           // C-like things". `*T` must PARSE so the checker can reject it with the
+	           // "Did you mean '^T'?" suggestion; the port omitted .Mul here and in
+	           // parse_operand, so `b: *int` died in the parser with two syntax errors
+	           // where C++ emits one checker diagnostic plus the suggestion.
 		op := advance_token(p)
+		if op.kind == .Not {
+			// C++ Reference: parser.cpp:3486-3488.
+			skip_possible_newline(p)
+		}
 		expr := parse_unary_expr(p, lhs)
-		
+
 		ue := ast.new(ast.Unary_Expr, op.pos, expr)
 		ue.op   = op
 		ue.expr = expr
@@ -4481,10 +4974,23 @@ parse_simple_stmt :: proc(p: ^Parser, flags: Stmt_Allow_Flags) -> ^ast.Stmt {
 	op := p.curr_tok
 	switch {
 	case tokenizer.is_assignment_operator(op.kind):
-		// if p.curr_proc == nil {
-		// 	error(p, p.curr_tok.pos, "simple statements are not allowed at the file scope");
-		// 	return ast.new(ast.Bad_Stmt, start_tok.pos, end_pos(p.curr_tok));
-		// }
+		// LEDGER #325. C++ parser.cpp:3859-3862 has this guard LIVE. The port had it
+		// COMMENTED OUT, and with a reworded message ("simple statements are not allowed at
+		// the file scope" for C++'s "You cannot use a simple statement in the file scope").
+		//
+		// That is the mirror image of #171, where the port had LIVE a bail C++ has commented
+		// out. The rule is the same in both directions: the reference decides, not the
+		// comment. Commented-out code is not a neutral state -- here it silently disabled a
+		// real rejection.
+		//
+		// Without it, `x = 2` at file scope was accepted in SILENCE -- errors=0, raw_diags=0
+		// -- where C++ reports two diagnostics. Probe c25_filescope. Note the port already
+		// had this exact shape LIVE in parse_for_stmt ("You cannot use a for statement in the
+		// file scope"), so the pattern was never in doubt, only this instance of it.
+		if p.curr_proc == nil {
+			error(p, p.curr_tok.pos, "You cannot use a simple statement in the file scope")
+			return ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
+		}
 		advance_token(p)
 		rhs := parse_rhs_expr_list(p)
 		if len(rhs) == 0 {

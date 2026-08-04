@@ -24,18 +24,37 @@ import "core:sync"
 // check_builtin_procedure is the central dispatcher for builtin checking
 // C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2396-2506
 check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id, type_hint: ^Type) -> bool {
+	// C++ Reference: check_builtin.cpp:2779-2782. This guard did not exist in the port at all, so
+	// `#force_inline len(x)` was silently accepted. It is NOT an early return in C++ either -- the
+	// diagnostic is emitted and checking continues.
+	if call.inlining != .None {
+		error_node(call, "Inlining operators are not allowed on built-in procedures")
+	}
+
 	// Step 1: Get builtin metadata
 	info := builtin_proc_infos[id]
 
 	// Step 2: Validate argument count
-	// C++ ref: check_builtin.cpp:2402-2419
+	// C++ Reference: check_builtin.cpp:2784-2801. Two divergences were fixed here:
+	//
+	//   * C++ reports at `ce->close` -- the closing parenthesis -- not at the call node. The port
+	//     pointed at the start of the call expression, which is a different column on every probe
+	//     that has ever exercised this path.
+	//   * C++ names the procedure with `expr_to_string(ce->proc)`, i.e. the SOURCE expression, so an
+	//     intrinsic reads as 'intrinsics.type_is_integer'. The port substituted the builtin's own
+	//     `info.name`, dropping the package qualifier the user actually wrote.
 	arg_count := len(call.args)
+	err_kind := ""
 	if arg_count < info.arg_count {
-		error_node(call, "Too few arguments for '%s', expected %d, got %d", info.name, info.arg_count, arg_count)
-		return false
+		err_kind = "Too few"
+	} else if arg_count > info.arg_count && !info.variadic {
+		err_kind = "Too many"
 	}
-	if arg_count > info.arg_count && !info.variadic {
-		error_node(call, "Too many arguments for '%s', expected %d, got %d", info.name, info.arg_count, arg_count)
+	if err_kind != "" {
+		expr_str := expr_to_string(call.expr)
+		defer delete(expr_str)
+		error_pos(call.close, "%s arguments for '%s', expected %d, got %d",
+		          err_kind, expr_str, info.arg_count, arg_count)
 		return false
 	}
 
@@ -792,8 +811,26 @@ check_builtin_len_cap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 			mode = .Value
 		}
 
-	} else {
-		// Unsupported type
+	}
+	// No `else` arm: an unmatched type simply leaves `mode` at its initial `.Invalid` (line 687),
+	// exactly as C++ does. The diagnostic belongs to the single mode==Invalid test below.
+
+	// C++ Reference: check_builtin.cpp:3018-3020. A TYPE operand is only legal when the result is
+	// compile-time constant -- `len([4]int)` is, `len(SomeStruct)` is not.
+	if operand.mode == .Type && mode != .Constant {
+		mode = .Invalid
+	}
+
+	// C++ Reference: check_builtin.cpp:3022-3029. The error is emitted HERE, after the chain and
+	// after the Type guard -- not inside an `else` on the chain.
+	//
+	// The port previously had the message in the chain's final `else` and made this branch a
+	// SILENT `return false`. That split meant a type which MATCHED an arm but left `mode` Invalid
+	// was rejected without any diagnostic: `len(Foo)` and `cap(Foo)` on a struct hit the
+	// is_type_struct arm, whose soa_kind switch sets nothing for a plain struct, so the port
+	// accepted them where the oracle reports "'len' is not supported for 'Foo'".
+	// Same silent-bail class as #232/#252.
+	if mode == .Invalid {
 		builtin_name := builtin_proc_infos[id].name
 		type_str := type_to_string(op_type)
 		if is_type_bit_set(op_type) && id == .Len {
@@ -801,15 +838,6 @@ check_builtin_len_cap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 		} else {
 			error_node(call, "'%s' is not supported for '%s'", builtin_name, type_str)
 		}
-		return false
-	}
-
-	// Type operand must result in constant
-	if operand.mode == .Type && mode != .Constant {
-		mode = .Invalid
-	}
-
-	if mode == .Invalid {
 		return false
 	}
 
@@ -822,6 +850,21 @@ check_builtin_len_cap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 // check_builtin_size_of handles size_of() builtin
 // C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2639-2658
 check_builtin_size_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
+	// `size_of(&x)` measures the POINTER, which is almost never what was meant.
+	//
+	// C++ Reference: check_builtin.cpp:3041-3048. A warning, not an error, and it fires before
+	// the argument is checked at all -- so it is reported even when the argument turns out to be
+	// invalid. Added since the port's snapshot (LEDGER #7, probe n7_sizeof, which the port
+	// answered with complete silence).
+	if unary, is_unary := call.args[0].derived.(^ast.Unary_Expr); is_unary {
+		if unary.op.kind == .And {
+			begin_error_block()
+			warning_node(call.args[0], "'size_of(&x)' returns the size of a pointer, not the size of x")
+			error_line("\tSuggestion: Use 'size_of(rawptr)' if you want the size of the pointer")
+			end_error_block()
+		}
+	}
+
 	// Check argument (type or expression)
 	o: Operand
 	check_expr_or_type(ctx, &o, call.args[0])
@@ -1467,23 +1510,43 @@ check_builtin_objc_send :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 
 	if self.mode == .Type {
 		// Class method: Type.selector()
+		//
+		// All four messages below carry C++'s `, got ...` suffix. The port dropped it from every
+		// one of them, which made the diagnostics strictly less useful AND textually divergent --
+		// the oracle names the offending type, we did not. Two of C++'s spellings look like slips
+		// and are reproduced VERBATIM anyway, same rule as #287's inconsistent capitalisation and
+		// #185's faithful truncation: `@(obj_class=` (missing the 'c', plus a space before the
+		// comma) at check_builtin.cpp:331/357, and "pointer OF a value" at :347 where we had
+		// written "pointer to". Parity is the goal, not prose. LEDGER #378.
 		if !is_type_objc_object(self.type) {
-			error_node(self.expr, "'objc_send' expected a type derived from intrinsics.objc_object")
+			// C++ ref: check_builtin.cpp:323-327
+			type_str := type_to_string(self.type)
+			error_node(self.expr, "'%s' expected a type or value derived from intrinsics.objc_object, got type %s", builtin_name, type_str)
 			return false
 		}
 		if !has_type_got_objc_class_attribute(self.type) {
-			error_node(self.expr, "'objc_send' expected a named type with the attribute @(objc_class=<string>)")
+			// C++ ref: check_builtin.cpp:329-334
+			type_str := type_to_string(self.type)
+			error_node(self.expr, "'%s' expected a named type with the attribute @(obj_class=<string>) , got type %s", builtin_name, type_str)
 			return false
 		}
 		sel_type = t_objc_Class
-	} else if !is_operand_value(self) {
-		error_node(self.expr, "'objc_send' expected a type or value derived from intrinsics.objc_object")
-		return false
-	} else if !check_is_assignable_to(ctx, &self, t_objc_id) {
-		error_node(self.expr, "'objc_send' expected a value assignable to objc_id")
+	} else if !is_operand_value(self) || !check_is_assignable_to(ctx, &self, t_objc_id) {
+		// ONE branch, as C++ has it (check_builtin.cpp:337-343). The port had SPLIT this into two,
+		// and the second half's "expected a value assignable to objc_id" was INVENTED -- C++ has no
+		// such message anywhere. Splitting an `||` into two arms is only safe when both arms say
+		// the same thing; here it manufactured a diagnostic the reference never emits.
+		expr_str := expr_to_string(self.expr)
+		defer delete(expr_str)
+		type_str := type_to_string(self.type)
+		error_node(self.expr, "'%s' expected a type or value derived from intrinsics.objc_object, got '%s' of type %s", builtin_name, expr_str, type_str)
 		return false
 	} else if !is_type_pointer(self.type) {
-		error_node(self.expr, "'objc_send' expected a pointer to a value derived from intrinsics.objc_object")
+		// C++ ref: check_builtin.cpp:344-350
+		expr_str := expr_to_string(self.expr)
+		defer delete(expr_str)
+		type_str := type_to_string(self.type)
+		error_node(self.expr, "'%s' expected a pointer of a value derived from intrinsics.objc_object, got '%s' of type %s", builtin_name, expr_str, type_str)
 		return false
 	} else {
 		// Instance method: check pointer element is objc_object with class attribute
@@ -3262,25 +3325,39 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			error(call_expr.args[0], "'#location' expects either 0 or 1 arguments, got %d", len(call_expr.args))
 		}
 
-		// Check argument if present
+		// C++ Reference: check_builtin.cpp:2422-2435. The argument must NAME AN ENTITY, and only
+		// two node kinds can: an identifier and a selector. C++ routes each to the helper that
+		// returns an ^Entity and errors when neither yields one -- it never calls plain check_expr
+		// here, so `#location(1)` is rejected. The port did call check_expr and dropped the result,
+		// which accepted it silently. LEDGER #354.
 		if len(call_expr.args) > 0 {
 			arg := call_expr.args[0]
-			arg_op: Operand
-			check_expr(ctx, &arg_op, arg)
-			// Argument should be an entity reference
+			e: ^Entity
+			o: Operand
+			#partial switch _ in arg.derived {
+			case ^ast.Ident:
+				e = check_ident(ctx, &o, arg, nil, nil, true)
+			case ^ast.Selector_Expr:
+				e = check_selector(ctx, &o, arg, nil)
+			}
+			if e == nil {
+				error(call_expr.args[0], "'#location' expected a valid entity name")
+			}
 		}
 
-		// Return Source_Code_Location type
-		loc_type := ctx.info.cached_source_code_location
-		if loc_type != nil {
-			operand.type = loc_type
-			operand.mode = .Value
-			return true
-		}
-
-		// Fallback if type not loaded
-		error(call_expr.expr, "'#location' requires core:runtime to be imported")
-		return false
+		// Return Source_Code_Location type (C++ check_builtin.cpp:2437-2438)
+		//
+		// The GLOBAL, not info.cached_source_code_location. C++ reads t_source_code_location at
+		// every one of these sites and has no "requires core:runtime to be imported" error at all
+		// -- that error and the cached_ read were both invented. They are not equivalent: the
+		// cached_ field is per-Checker while init_core_source_code_location guards on the global
+		// (matching C++, see init_mem_allocator), so any second checker in a process finds the
+		// global set, returns early, and leaves its own cached_ field nil -- and then this arm
+		// rejected code both compilers accept. LEDGER #354.
+		init_core_source_code_location(ctx.checker)
+		operand.type = t_source_code_location
+		operand.mode = .Value
+		return true
 	}
 
 	if name == "exists" {
@@ -3553,7 +3630,9 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 				if is_valid_type_for_load(load_type) {
 					result_type = load_type
 				} else {
-					error(call_expr.args[1], "'#load' invalid type, expected a string or slice of simple types")
+					// C++ Reference: check_builtin.cpp:2191. Note the comma after "string" and the
+					// ", got %s" clause -- both were missing here (a #149-family truncation).
+					error(call_expr.args[1], "'#load' invalid type, expected a string, or slice of simple types, got %s", type_to_string(load_type))
 				}
 			}
 		}
@@ -3983,27 +4062,39 @@ report_load_file_error :: proc(proc_node: ^ast.Node, file_error: File_Error, pat
 }
 
 // is_valid_type_for_load checks if a type is valid for #load
-// C++ Reference: check_builtin.cpp:1772-1814
+// C++ Reference: check_builtin.cpp:2116-2136
+//
+// The element test MUST delegate to is_type_load_safe (types.odin). That predicate is recursive
+// and already faithful: it accepts bool/numeric/RUNE basics, bit_sets (via their underlying),
+// structs whose fields are all load-safe with size > 0, and unions likewise, while rejecting
+// pointer/multipointer/slice/dynamic-array/proc/soa-pointer elements.
+//
+// This procedure previously inlined `is_type_integer || is_type_float || is_type_boolean`, which
+// rejected every slice-of-struct, slice-of-enum, slice-of-rune and slice-of-bit_set. That single
+// substitution produced ~34 cascading diagnostics in each of the 22 core/rexcode/isa packages
+// (`#load("...", []Encoding)` failed, the operand kept the []u8 default, and every downstream use
+// then mismatched against the real element type).
+//
+// The nil guard is not in C++; both call sites already check for nil exactly as C++ does, so it
+// never fires. It is retained only because a nil deref here would abort the whole checker.
 is_valid_type_for_load :: proc(type: ^Type) -> bool {
 	if type == nil || type == t_invalid {
 		return false
-	}
-
-	// String is valid
-	if is_type_string(type) {
+	} else if is_type_string(type) {
 		return true
-	}
-
-	// Slice of simple types is valid
-	if is_type_slice(type) {
+	} else if is_type_slice(type) {
+		elem: ^Type
 		bt := base_type(type)
-		if slice, is_slice := bt.variant.(Type_Slice); is_slice {
-			elem := slice.elem
-			// Must be a basic type with known size
-			if is_type_integer(elem) || is_type_float(elem) || is_type_boolean(elem) {
-				return true
-			}
+		#partial switch v in bt.variant {
+		case Type_Slice:
+			elem = v.elem
+		case Type_Array:
+			elem = v.elem
+		case Type_Enumerated_Array:
+			elem = v.elem
 		}
+		assert(elem != nil)
+		return is_type_load_safe(elem)
 	}
 
 	return false
@@ -4587,18 +4678,17 @@ check_builtin_raw_data :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^
 // type_core_type(T) returns the core underlying type
 // C++ Reference: check_builtin.cpp (type intrinsics)
 check_builtin_type_base_core :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
-	if len(call.args) != 1 {
-		name := id == .Type_Base_Type ? "type_base_type" : "type_core_type"
-		error_node(call, "'%s' requires exactly 1 argument, got %d", name, len(call.args))
-		return false
-	}
+	name := id == .Type_Base_Type ? "type_base_type" : "type_core_type"
 
-	// Argument must be a type
+	// C++ Reference: check_builtin.cpp:6771-6785. Unlike the type_is_* family C++ prints no "got"
+	// clause here, and it recovers by leaving `operand->type` untouched and forcing the mode to
+	// Type -- the enclosing type expression then fails on its own terms. The port returned false,
+	// which turned C++'s "Invalid type definition of untyped integer" into a different cascade.
 	check_expr_or_type(ctx, operand, call.args[0])
 	if operand.mode != .Type {
-		name := id == .Type_Base_Type ? "type_base_type" : "type_core_type"
-		error_node(call.args[0], "'%s' requires a type argument", name)
-		return false
+		error_node(operand.expr, "Expected a type for '%s'", name)
+		operand.mode = .Type
+		return true
 	}
 
 	input_type := operand.type
@@ -4624,16 +4714,13 @@ check_builtin_type_base_core :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 // type_elem_type(T) returns the element type of arrays, slices, pointers, etc.
 // C++ Reference: check_builtin.cpp (type intrinsics)
 check_builtin_type_elem :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
-	if len(call.args) != 1 {
-		error_node(call, "'type_elem_type' requires exactly 1 argument, got %d", len(call.args))
-		return false
-	}
-
-	// Argument must be a type
+	// C++ Reference: check_builtin.cpp:6786-6790. Same shape as type_base_type/type_core_type:
+	// no "got" clause, and the operand is forced to Type rather than abandoned.
 	check_expr_or_type(ctx, operand, call.args[0])
 	if operand.mode != .Type {
-		error_node(call.args[0], "'type_elem_type' requires a type argument")
-		return false
+		error_node(operand.expr, "Expected a type for 'type_elem_type'")
+		operand.mode = .Type
+		return true
 	}
 
 	// C++ Reference: check_builtin.cpp:6787-6812
@@ -4691,18 +4778,25 @@ check_builtin_type_elem :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 // These return a compile-time boolean indicating whether the type matches the predicate
 // C++ Reference: check_builtin.cpp (type intrinsics)
 check_builtin_type_is_predicate :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
-	if len(call.args) != 1 {
-		info := builtin_proc_infos[id]
-		error_node(call, "'%s' requires exactly 1 argument, got %d", info.name, len(call.args))
-		return false
-	}
+	// NOTE: the arity is already enforced by check_builtin_procedure's prologue against
+	// `info.arg_count`, which returns false before dispatch. The per-builtin arity check that used
+	// to sit here was unreachable AND worded differently from C++'s single generic one.
 
-	// Argument must be a type
+	// C++ Reference: check_builtin.cpp:7071-7088. The whole type_simple_boolean family shares one
+	// arm. On a non-type argument C++ names the offending EXPRESSION and, crucially, does NOT
+	// abandon the operand: the result is the constant `false` of type untyped bool, so the
+	// enclosing expression keeps checking. The port returned false, invalidating the operand and
+	// producing a cascade C++ never emits.
 	check_expr_or_type(ctx, operand, call.args[0])
 	if operand.mode != .Type {
 		info := builtin_proc_infos[id]
-		error_node(call.args[0], "'%s' requires a type argument", info.name)
-		return false
+		arg_str := expr_to_string(call.args[0])
+		defer delete(arg_str)
+		error_node(operand.expr, "Expected a type for '%s', got '%s'", info.name, arg_str)
+		operand.mode = .Constant
+		operand.type = t_untyped_bool
+		operand.value = false
+		return true
 	}
 
 	input_type := operand.type
@@ -4853,16 +4947,18 @@ check_builtin_type_is_subtype_of :: proc(ctx: ^Checker_Context, operand: ^Operan
 // Returns true if the type can hold a nil value
 // C++ Reference: check_builtin.cpp (type intrinsics)
 check_builtin_type_has_nil :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
-	if len(call.args) != 1 {
-		error_node(call, "'type_has_nil' requires exactly 1 argument, got %d", len(call.args))
-		return false
-	}
-
-	// Argument must be a type
+	// C++ Reference: check_builtin.cpp:7071-7088. type_has_nil is the last member of the
+	// type_simple_boolean family and shares its arm -- same message, same non-abandoning recovery.
+	// See check_builtin_type_is_predicate. Arity is the prologue's job.
 	check_expr_or_type(ctx, operand, call.args[0])
 	if operand.mode != .Type {
-		error_node(call.args[0], "'type_has_nil' requires a type argument")
-		return false
+		arg_str := expr_to_string(call.args[0])
+		defer delete(arg_str)
+		error_node(operand.expr, "Expected a type for 'type_has_nil', got '%s'", arg_str)
+		operand.mode = .Constant
+		operand.type = t_untyped_bool
+		operand.value = false
+		return true
 	}
 
 	result := type_has_nil(operand.type)
@@ -5884,7 +5980,10 @@ check_builtin_fixed_point :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 	}
 
 	if !is_type_integer(x.type) || is_type_untyped(x.type) {
-		error_node(x.expr, "Expected an integer type for '%s'", builtin_name)
+		// C++ Reference: check_builtin.cpp:6518-6522. All THREE C++ sites for this message carry
+		// ", got %s" -- there is no bare variant upstream. The port had one correct site
+		// (check_builtin.odin:1316) and this one, which stopped at the category.
+		error_node(x.expr, "Expected an integer type for '%s', got %s", builtin_name, type_to_string(x.type))
 		return false
 	}
 
@@ -6451,29 +6550,56 @@ check_builtin_expect :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^as
 check_builtin_syscall :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
 	builtin_name := id == .Syscall ? "syscall" : "syscall_bsd"
 
-	if len(call.args) < 1 {
-		error_node(call, "'%s' expects at least 1 argument (the syscall number)", builtin_name)
-		return false
+	// C++ Reference: check_builtin.cpp:6669-6716 (syscall) and 6720-6766 (syscall_bsd).
+	//
+	// Structure notes, all of which the previous reimplementation got wrong:
+	//  - There is NO minimum-argument check here. builtin_proc_infos has arg_count=1,
+	//    variadic=true, so the shared prologue already enforces it (cf. #260's unreachable
+	//    per-builtin arity checks).
+	//  - Argument 0 is ALREADY in `operand`, checked by the caller; C++'s loop starts at 1.
+	//  - C++ REPORTS AND CONTINUES throughout. No error path returns early, and mode/type are
+	//    always set at the end. Early returns suppressed later diagnostics C++ emits.
+	//  - The element test is convert_to_typed + is_type_uintptr, not check_assignment, which
+	//    produces an entirely different message.
+	convert_to_typed(ctx, operand, t_uintptr)
+	if !is_type_uintptr(operand.type) {
+		error(operand.expr, "Argument 0 must be of type 'uintptr', got %s", type_to_string(operand.type))
 	}
-
-	if len(call.args) > 7 {
-		error_node(call, "'%s' expects at most 7 arguments", builtin_name)
-		return false
-	}
-
-	// Check all arguments are uintptr
-	for arg in call.args {
+	for i in 1 ..< len(call.args) {
 		x: Operand
-		check_expr(ctx, &x, arg)
-
-		if x.mode == .Invalid {
-			return false
+		check_expr(ctx, &x, call.args[i])
+		if x.mode != .Invalid {
+			convert_to_typed(ctx, &x, t_uintptr)
 		}
-
-		check_assignment(ctx, &x, t_uintptr, builtin_name)
-		if x.mode == .Invalid {
-			return false
+		// C++ calls convert_to_typed a second time, unconditionally (check_builtin.cpp:6683).
+		// Reproduced rather than folded: the first call is guarded, this one is not.
+		convert_to_typed(ctx, &x, t_uintptr)
+		if !is_type_uintptr(x.type) {
+			error(x.expr, "Argument %d must be of type 'uintptr', got %s", i, type_to_string(x.type))
 		}
+	}
+
+	// C++ Reference: check_builtin.cpp:6690-6706 / 6741-6757. The default cap is 32; it narrows
+	// to 7 only on a supported OS+arch pair. An unsupported OS gets the platform error AND keeps
+	// the 32 cap -- the error does not abandon the call.
+	max_arg_count := 32
+	os := build_context.metrics.os
+	arch := build_context.metrics.arch
+	supported_os := id == .Syscall ? (os == .Darwin || os == .Linux) : (os == .Freebsd || os == .Netbsd || os == .Openbsd)
+	if supported_os {
+		// `syscall` additionally allows i386; `syscall_bsd` does not.
+		if arch == .Amd64 || arch == .Arm64 || (id == .Syscall && arch == .I386) {
+			max_arg_count = 7
+		}
+	} else {
+		error_node(call, "'%s' is not supported on this platform (%s)", builtin_name, target_os_names[os])
+	}
+
+	if len(call.args) > max_arg_count {
+		// C++ reports at ast_end_token(call); the port's equivalent is the closing paren
+		// (same convention as #260's arity prologue).
+		error_pos(call.close, "'%s' has a maximum of %d arguments on this platform (%s), got %d",
+			builtin_name, max_arg_count, target_os_names[os], len(call.args))
 	}
 
 	operand.mode = .Value
@@ -8335,7 +8461,12 @@ check_builtin_c_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 		}
 
 		args: Operand
+		// C++ check_builtin.cpp:768-771 brackets THIS check_expr with allow_c_vararg_param.
+		// c_va_start's second argument is the one context in which naming a `#c_vararg`
+		// parameter is legal; check_expr's Ident arm rejects it everywhere else.
+		ctx.allow_c_vararg_param = true
 		check_expr(ctx, &args, call.args[1])
+		ctx.allow_c_vararg_param = false
 		if args.mode == .Invalid {
 			return false
 		}

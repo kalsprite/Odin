@@ -31,6 +31,8 @@ init_checker_info :: proc(info: ^Checker_Info, allocator := context.allocator) {
 	info.package_scopes = make(map[^ast.Package]^Scope, allocator)
 	info.file_scopes = make(map[^ast.File]^Scope, allocator)
 	info.files_by_id = make(map[i32]^ast.File, allocator)
+	// C++ Reference: checker.hpp obcj_class_name_set -- guarded by objc_class_name_mutex.
+	info.objc_class_names = make(map[string]bool, allocator)
 
 	// AST state flags map for tracking node state during checking
 	info.ast_state_flags = make(map[rawptr]ast.Node_State_Flags, allocator)
@@ -100,6 +102,7 @@ destroy_checker_info :: proc(info: ^Checker_Info) {
 	delete(info.package_scopes)
 	delete(info.file_scopes)
 	delete(info.files_by_id)
+	delete(info.objc_class_names)
 	delete(info.ast_state_flags)
 
 	// ast_entity_map deleted - no cleanup needed
@@ -138,7 +141,18 @@ destroy_checker_info :: proc(info: ^Checker_Info) {
 	queue.mpsc_destroy(&info.foreign_decls_to_check)
 	queue.mpsc_destroy(&info.raddbg_type_views_queue)
 	queue.mpsc_destroy(&info.intrinsics_entry_point_usage)
-	queue.mpsc_destroy(&info.objc_class_implementations)
+	// C++ Reference: checker.cpp:1678 -- `// mpsc_destroy(&i->objc_class_implementations);`
+	// is COMMENTED OUT upstream, deliberately. The queue's consumer lives in the BACKEND
+	// (llvm_backend.cpp:1571 dequeues it), which runs after checking, so the queue is
+	// legitimately non-empty when the checker finishes and must not be torn down here.
+	//
+	// The port destroyed it, and this port's mpsc_destroy asserts the queue is EMPTY (LEDGER
+	// #16), so the first program to enqueue anything aborted the checker with SIGILL at
+	// teardown -- after checking succeeded, which is why the diagnostics never reached the
+	// output. Latent until now only because the @(objc_implement) gate was dead (wrong
+	// attribute name, LEDGER #283), so nothing was ever enqueued. This is LEDGER #21, and it
+	// is NOT darwin-specific: it aborts on any target once the queue is populated.
+	// queue.mpsc_destroy(&info.objc_class_implementations)
 	queue.mpsc_destroy(&info.all_procedures_queue)
 
 	// Clean up dynamic arrays
@@ -197,6 +211,22 @@ init_checker :: proc(c: ^Checker, allocator := context.allocator) {
 	// Initialize Checker_Info
 	init_checker_info(&c.info, allocator)
 	c.info.checker = c
+
+	// LEDGER #329. This field was declared (checker.odin:1148) and NEVER assigned, so it was nil
+	// for the whole life of every Checker and all 28 of its nil-guarded read sites silently took
+	// the nil branch -- among them the entire entry-point block in check_decl.odin (the 'proc()'
+	// type check, the custom-calling-convention check, the entry_point registration and its
+	// redeclaration diagnostic) and the is-darwin predicate in check_decl_helpers.odin.
+	//
+	// C++ keeps build_context as a global; the port ALSO has that global (build_settings.odin:478)
+	// and most of the checker reads it directly. The Checker_Info copy was introduced "for better
+	// encapsulation", threaded through 28 sites, and then never connected to anything. Pointing it
+	// at the same global is what makes those readers agree with the direct readers.
+	//
+	// Taking the address here is safe before ensure_build_context_initialized() runs: the global is
+	// a package-level variable and always addressable, and every reader dereferences it during
+	// checking, long after the target has been filled in.
+	c.info.build_context = &build_context
 
 	// Initialize the builtin context the same way C++ init_checker_context does, so that
 	// anything reached through it has a valid type path to push onto.
@@ -455,13 +485,21 @@ init_objc_intrinsics_types :: proc(intrinsics_scope: ^Scope, alloc: mem.Allocato
 		return
 	}
 
-	t_objc_object   = add_global_type_name(intrinsics_scope, "objc_object",   alloc_type_struct(nil), alloc)
-	t_objc_selector = add_global_type_name(intrinsics_scope, "objc_selector", alloc_type_struct(nil), alloc)
-	t_objc_class    = add_global_type_name(intrinsics_scope, "objc_class",    alloc_type_struct(nil), alloc)
+	t_objc_object   = add_global_type_name(intrinsics_scope, "objc_object",   alloc_type_struct_complete(), alloc)
+	t_objc_selector = add_global_type_name(intrinsics_scope, "objc_selector", alloc_type_struct_complete(), alloc)
+	t_objc_class    = add_global_type_name(intrinsics_scope, "objc_class",    alloc_type_struct_complete(), alloc)
+	t_objc_ivar     = add_global_type_name(intrinsics_scope, "objc_ivar",     alloc_type_struct_complete(), alloc)
 
 	t_objc_id    = alloc_type_pointer(t_objc_object)
 	t_objc_SEL   = alloc_type_pointer(t_objc_selector)
 	t_objc_Class = alloc_type_pointer(t_objc_class)
+	t_objc_Ivar  = alloc_type_pointer(t_objc_ivar)
+
+	// C++ line 1524. Unlike the four above, this is an ALIAS: its backing type is t_objc_id
+	// (i.e. ^objc_object), not a fresh struct. Probes oi_ivar/oi_inst confirmed both names were
+	// simply absent from the port -- `'objc_ivar' is not declared by 'intrinsics'` where the
+	// reference resolves them silently (#295).
+	t_objc_instancetype = add_global_type_name(intrinsics_scope, "objc_instancetype", t_objc_id, alloc)
 }
 
 // init_c_va_list_type synthesises `intrinsics.c_va_list` and registers it.
@@ -523,7 +561,7 @@ init_c_va_list_type :: proc(intrinsics_scope: ^Scope, alloc: mem.Allocator) {
 		add_field(&fields, scope, t_rawptr, 0, "_", alloc)
 	}
 
-	va_list_struct := alloc_type_struct(nil)
+	va_list_struct := alloc_type_struct_complete()
 	st := &va_list_struct.variant.(Type_Struct)
 	st.scope = scope
 	st.fields = fields
@@ -581,7 +619,8 @@ add_global_enum_type :: proc(
 //
 // DEVIATION: C++ calls GB_PANIC when no member matches. The port cannot: the port's own
 // target tables are a superset of the C++ ones (Target_Os_Kind still carries the retired
-// Essence and Haiku entries - see the note in package_resolver.odin and open task #5), so a
+// Essence and Haiku entries - see the note in package_resolver.odin; task #5 is CLOSED and
+// left these deliberately, so the superset is permanent), so a
 // build context naming one of those has no member to select. Registering nothing leaves the
 // name undeclared, which is a diagnostic rather than a crash.
 @(private = "file")
@@ -639,7 +678,8 @@ odin_os_enum_value :: proc(os: Target_Os_Kind) -> i64 {
 // odin_subtarget_enum_value maps a subtarget onto the C++ Subtarget ordinal.
 // C++ Reference: build_settings.cpp:169-178
 //
-// The port has no Playdate subtarget yet (open task #5) and carries an `Invalid` sentinel
+// The port has no Playdate subtarget (task #5 is CLOSED; this was left as-is) and carries an
+// `Invalid` sentinel
 // where C++ puts Playdate; `Invalid` is never a selected subtarget, so it maps to Default.
 @(private = "file")
 odin_subtarget_enum_value :: proc(st: Subtarget) -> i64 {

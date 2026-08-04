@@ -73,15 +73,54 @@ parse_package :: proc(pkg: ^ast.Package, p: ^Parser = nil) -> bool {
 	slice.sort(files)
 
 	for file in files {
+		// LEDGER #307: the package-name block below is reachable ONLY when parse_file
+		// succeeded.
+		//
+		// C++ Reference: src/parser.cpp:7009-7026 -- the whole block, name comparison and all,
+		// is the body of `if (parse_file(p, file))`. The port ran it unconditionally, and
+		// parse_file returns false precisely when it never consumed a package clause, which
+		// leaves file.pkg_decl nil. `pkg.name = file.pkg_decl.name` then dereferenced nil:
+		// a single file whose contents are `#+vet bogusname` with no `package` line
+		// SEGFAULTED the checker, 20/20 runs, deterministically, before it printed anything.
+		//
+		// SCOPE NOTE: C++ also only does `array_add(&pkg->files, file)` on success, so a file
+		// that failed to parse is not a member of its package at all. The port's pkg.files map
+		// is populated earlier, by collect_package, and is not pruned here. That difference is
+		// left alone deliberately: check_package_from_path bails on error_count() > 0 before
+		// any checking runs, so a failed file's continued membership cannot reach output.
 		if !parse_file(p, file) {
 			ok = false
+			continue
 		}
 		if pkg.name == "" {
 			pkg.name = file.pkg_decl.name
 		} else if pkg.name != file.pkg_decl.name {
-			// C++ Reference: src/parser.cpp:7023 -- "Different" is capitalised there. Only
-			// visible once #180 routed parser diagnostics through the collector.
-			error(p, file.pkg_decl.pos, "Different package name, expected '%s', got '%s'", pkg.name, file.pkg_decl.name)
+			// C++ Reference: src/parser.cpp:7017-7024 --
+			//     if (file->tokens.count > 0 && file->tokens[0].kind != Token_EOF) {
+			//         Token tok = file->package_token;
+			//         tok.pos.file_id = file->id;
+			//         tok.pos.line   = gb_max(tok.pos.line, 1);
+			//         tok.pos.column = gb_max(tok.pos.column, 1);
+			//         syntax_error(tok, "Different package name, expected '%.*s', got '%.*s'", ...);
+			//     }
+			// "Different" is capitalised there. Only visible once #180 routed parser
+			// diagnostics through the collector.
+			//
+			// ANCHOR (LEDGER #197): C++ reports at file->package_token -- the `package`
+			// KEYWORD, column 1. The port used file.pkg_decl.pos, which the parser sets to
+			// the package NAME (parser.odin:211 passes pkg_name.pos), i.e. column 9 for
+			// `package lib`. Package_Decl.token already holds the keyword token
+			// (parser.odin:213 assigns p.file.pkg_token), so the fix is which field is read.
+			//
+			// GUARD: C++ suppresses this entirely for a file with no tokens, or whose first
+			// token is EOF -- an empty or unreadable file should not also be blamed for the
+			// package name. The clamps to >= 1 cover a synthesised zero position.
+			if len(file.pkg_decl.name) > 0 {
+				pos := file.pkg_decl.token.pos
+				pos.line   = max(pos.line, 1)
+				pos.column = max(pos.column, 1)
+				error(p, pos, "Different package name, expected '%s', got '%s'", pkg.name, file.pkg_decl.name)
+			}
 		}
 	}
 
