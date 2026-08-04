@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Read(//home/kalsprite/dev/**)",
+      "Bash(timeout 120 curl -sL https://raw.githubusercontent.com/C2SP/x509-limbo/main/limbo.json -o /tmp/limbo.json)",
+      "Read(//tmp/**)",
+      "Bash(timeout 300 python3 extract_limbo_cases.py)",
+      "Read(//tmp/limbo_cases/**)",
+      "Bash(/home/kalsprite/dev/odin/odin build *)",
+      "Bash(timeout 300 ./limbo_bin)",
+      "Bash(sed -n '/=== x509-limbo/,/DANGEROUS/p' /tmp/limbo_run.txt)",
+      "Bash(sed -n '/--- WE_ACCEPT_THEY_REJECT/,/we-reject\\\\/they-accept ids withheld/p' /tmp/limbo_run.txt)"
+    ],
+    "additionalDirectories": [
+      "/home/kalsprite/dev/opm/odin/vendor/pg_pool/verify/limbo",
+      "/tmp",
+      "/home/kalsprite/dev/test-assets"
+    ]
+  }
+}
