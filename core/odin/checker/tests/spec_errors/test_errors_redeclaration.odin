@@ -183,7 +183,9 @@ Color :: enum {
 }
 `,
 			expect_error = true,
-			error_substr = "Redeclaration",
+			// Duplicate ENUM fields get their own message, not the generic redeclaration one:
+			// "'Red' is already declared in this enumeration". Oracle-verified; port matches.
+			error_substr = "already declared in this enumeration",
 		},
 		// Union variant redeclaration
 		{
@@ -303,7 +305,7 @@ test_err_redecl_import_shadows_builtin_neg :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// This might be allowed with a warning - test that at least parsing works
-	result := helpers.check_source_capture_errors(`package test
+	result := helpers.check_source_capture_errors(t, `package test
 int :: 42  // shadows builtin type
 `)
 	defer helpers.destroy_test_result(&result)

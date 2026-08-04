@@ -16,6 +16,7 @@ import "core:odin/ast"
 import "core:odin/parser"
 import "core:odin/tokenizer"
 import "core:path/filepath"
+import "core:strings"
 import "core:sync"
 import "core:testing"
 
@@ -666,6 +667,7 @@ if_with_init :: proc() {
 	if x := get_value(); x > 0 {
 		// x is available here
 		y := x * 2
+		_ = y
 	}
 }
 `)
@@ -689,6 +691,7 @@ maybe_get :: proc() -> (int, bool) {
 if_ok_idiom :: proc() {
 	if val, ok := maybe_get(); ok {
 		x := val * 2
+		_ = x
 	}
 }
 `)
@@ -854,6 +857,7 @@ nil_check :: proc() {
 
 	if p != nil {
 		x := p^
+		_ = x
 	}
 
 	if p == nil {
@@ -1382,7 +1386,10 @@ update_particles :: proc(ps: ^Particles) {
 // Real package testing - testing with a simpler package first
 @(test)
 test_check_real_package :: proc(t: ^testing.T) {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here. This test drives the package
+	// machinery, which fans out to a 32-thread pool, and a per-thread scratch arena cannot be
+	// the shared allocator of a thread pool -- objects cross threads and get freed through the
+	// wrong allocator. Proven by control probes regprobe/regprobe2. LEDGER #356.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Serialize access to global error collector
@@ -1417,7 +1424,10 @@ test_check_real_package :: proc(t: ^testing.T) {
 // Test checking the parser package (more complex, has imports)
 @(test)
 test_check_parser_package :: proc(t: ^testing.T) {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here. This test drives the package
+	// machinery, which fans out to a 32-thread pool, and a per-thread scratch arena cannot be
+	// the shared allocator of a thread pool -- objects cross threads and get freed through the
+	// wrong allocator. Proven by control probes regprobe/regprobe2. LEDGER #356.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Serialize access to global error collector
@@ -1453,7 +1463,10 @@ test_check_parser_package :: proc(t: ^testing.T) {
 // Test checking the ast package (complex types, many definitions)
 @(test)
 test_check_ast_package :: proc(t: ^testing.T) {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here. This test drives the package
+	// machinery, which fans out to a 32-thread pool, and a per-thread scratch arena cannot be
+	// the shared allocator of a thread pool -- objects cross threads and get freed through the
+	// wrong allocator. Proven by control probes regprobe/regprobe2. LEDGER #356.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Serialize access to global error collector
@@ -1484,7 +1497,10 @@ test_check_ast_package :: proc(t: ^testing.T) {
 // Test checking the checker package itself (self-hosting test)
 @(test)
 test_check_checker_package :: proc(t: ^testing.T) {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here. This test drives the package
+	// machinery, which fans out to a 32-thread pool, and a per-thread scratch arena cannot be
+	// the shared allocator of a thread pool -- objects cross threads and get freed through the
+	// wrong allocator. Proven by control probes regprobe/regprobe2. LEDGER #356.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Serialize access to global error collector
@@ -1530,7 +1546,10 @@ test_check_checker_package :: proc(t: ^testing.T) {
 // So there is nothing for init_checker to make, and the assertions below are about the loader.
 @(test)
 test_runtime_package_is_seeded_by_loader :: proc(t: ^testing.T) {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here. This test drives the package
+	// machinery, which fans out to a 32-thread pool, and a per-thread scratch arena cannot be
+	// the shared allocator of a thread pool -- objects cross threads and get freed through the
+	// wrong allocator. Proven by control probes regprobe/regprobe2. LEDGER #356.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Serialize access to global error collector
@@ -1623,7 +1642,10 @@ get_allocator :: proc() -> runtime.Allocator {
 // Test checking core:fmt package (imports base:runtime)
 @(test)
 test_check_core_fmt :: proc(t: ^testing.T) {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here. This test drives the package
+	// machinery, which fans out to a 32-thread pool, and a per-thread scratch arena cannot be
+	// the shared allocator of a thread pool -- objects cross threads and get freed through the
+	// wrong allocator. Proven by control probes regprobe/regprobe2. LEDGER #356.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	checker_globals_ticket := lock_checker_globals(t)
@@ -1646,7 +1668,10 @@ test_check_core_fmt :: proc(t: ^testing.T) {
 // Test checking core:strings package
 @(test)
 test_check_core_strings :: proc(t: ^testing.T) {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here. This test drives the package
+	// machinery, which fans out to a 32-thread pool, and a per-thread scratch arena cannot be
+	// the shared allocator of a thread pool -- objects cross threads and get freed through the
+	// wrong allocator. Proven by control probes regprobe/regprobe2. LEDGER #356.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	checker_globals_ticket := lock_checker_globals(t)
@@ -1669,7 +1694,10 @@ test_check_core_strings :: proc(t: ^testing.T) {
 // This walks the core directory and attempts to check each package
 @(test)
 test_check_all_core_packages :: proc(t: ^testing.T) {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here. This test drives the package
+	// machinery, which fans out to a 32-thread pool, and a per-thread scratch arena cannot be
+	// the shared allocator of a thread pool -- objects cross threads and get freed through the
+	// wrong allocator. Proven by control probes regprobe/regprobe2. LEDGER #356.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	checker_globals_ticket := lock_checker_globals(t)
@@ -1802,11 +1830,48 @@ test_check_all_core_packages :: proc(t: ^testing.T) {
 		append(&paths, vendor_pkg(rel))
 	}
 
+	// Packages that BOTH compilers report diagnostics on, with the count the reference compiler
+	// produces. These are not port defects: each was compared against `odin check` on
+	// 2026-08-04 and the diagnostics matched byte for byte, TEXTS not just counts (LEDGER #367).
+	//
+	// The suffix is matched against the end of the path, so the entries stay valid whatever
+	// ODIN_ROOT is.
+	//
+	// This is an ALLOWLIST WITH COUNTS, not a skip-list, and the difference is the point: a
+	// package here still FAILS if its count moves. Before this existed the test demanded zero
+	// diagnostics from all 86, which is not true of the language -- so it failed permanently and
+	// told you nothing about whether anything had regressed.
+	Expected_Diag :: struct { suffix: string, count: int }
+	oracle_agrees := []Expected_Diag{
+		{"core/path",            1},
+		{"vendor/box2d",         1},
+		{"vendor/cgltf",         1},
+		{"vendor/fontstash",     2},
+		{"vendor/libc",          1},
+		{"vendor/miniaudio",     1},
+		{"vendor/nanovg",        5},
+		{"vendor/stb/image",     3},
+		{"vendor/stb/rect_pack", 1},
+		{"vendor/stb/sprintf",   1},
+		{"vendor/stb/truetype",  2},
+		{"vendor/stb/vorbis",    1},
+		{"vendor/wgpu",          1},
+	}
+	expected_for :: proc(list: []Expected_Diag, path: string) -> (count: int, found: bool) {
+		for e in list {
+			if strings.has_suffix(path, e.suffix) {
+				return e.count, true
+			}
+		}
+		return 0, false
+	}
+
 	passed := 0
 	check_failed := 0
 	parse_failed := 0
 	load_failed := 0
 	limit_reached := 0
+	as_expected := 0
 
 	for path in paths {
 		res := checker.check_package_from_path(path)
@@ -1833,17 +1898,29 @@ test_check_all_core_packages :: proc(t: ^testing.T) {
 			limit_reached += 1
 			log.errorf("LIMIT REACHED: %s (abandoned after %d recorded errors)", path, res.check_errors)
 		case res.check_errors > 0 || !res.check_ok:
+			if want, ok := expected_for(oracle_agrees, path); ok && want == res.check_errors {
+				// Matches the reference compiler's own count. Counted separately so the summary
+				// still SHOWS it rather than quietly folding it into "passed".
+				as_expected += 1
+				break
+			}
 			check_failed += 1
-			// Don't log each failure - just count them
+			// NAME the package. This used to be "don't log each failure - just count them", which
+			// turned the result into an unactionable "14/86 packages have check errors": no way to
+			// tell whether those 14 are real divergences or expectations this test gets wrong,
+			// without re-deriving the list by hand. The count is the summary; the list is the
+			// worklist. LEDGER #359.
+			log.errorf("CHECK FAIL: %s (%d errors, check_ok=%v)", path, res.check_errors, res.check_ok)
 		case:
 			passed += 1
 		}
 	}
 
 	log.infof(
-		"Core package check results: %d/%d passed, %d with check errors, %d hit the error limit, "+
+		"Core package check results: %d/%d passed, %d matched the reference compiler's own "+
+		"diagnostics, %d with check errors, %d hit the error limit, "+
 		"%d with parse errors, %d failed to load",
-		passed, total, check_failed, limit_reached, parse_failed, load_failed,
+		passed, total, as_expected, check_failed, limit_reached, parse_failed, load_failed,
 	)
 
 	// A package that never loaded is a harness failure, not a checker result: it has to be

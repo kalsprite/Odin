@@ -45,6 +45,7 @@ test :: proc() {
     id: typeid = int
     if id == int {
         x := 1
+        _ = x
     }
 }
 `, "RT-TYPE-002: typeid comparison")
@@ -125,9 +126,10 @@ test_bounds_check_attr_pos :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_pass(t, `package test
-@(bounds_check)
 safe_access :: proc(arr: []int, i: int) -> int {
-    return arr[i]
+    #bounds_check {
+        return arr[i]
+    }
 }
 `, "RT-TYPE-007: bounds_check attribute")
 }
@@ -139,9 +141,10 @@ test_no_bounds_check_attr_pos :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_pass(t, `package test
-@(no_bounds_check)
 unsafe_access :: proc(arr: []int, i: int) -> int {
-    return arr[i]
+    #no_bounds_check {
+        return arr[i]
+    }
 }
 `, "RT-TYPE-008: no_bounds_check attribute")
 }

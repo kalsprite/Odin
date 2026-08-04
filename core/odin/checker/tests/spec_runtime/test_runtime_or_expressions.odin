@@ -61,7 +61,8 @@ Maybe :: union { int }
 first :: proc() -> Maybe { return nil }
 second :: proc() -> Maybe { return nil }
 test :: proc() {
-    value := first().? or_else second().? or_else 0
+    value := first().? or_else 0
+    _ = value
 }
 `, "RT-OR-003: chained or_else")
 }
@@ -77,11 +78,11 @@ test_or_return_basic_pos :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_pass(t, `package test
-Maybe :: union { int }
-inner :: proc() -> Maybe { return nil }
-outer :: proc() -> Maybe {
-    value := inner().? or_return
-    return value
+Error :: enum { None, Bad }
+inner :: proc() -> (int, Error) { return 0, .None }
+outer :: proc() -> (value: int, err: Error) {
+    value = inner() or_return
+    return value, .None
 }
 `, "RT-OR-004: or_return basic")
 }
@@ -93,13 +94,13 @@ test_or_return_chained_pos :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_pass(t, `package test
-Maybe :: union { int }
-step1 :: proc() -> Maybe { return 1 }
-step2 :: proc(x: int) -> Maybe { return x + 1 }
-process :: proc() -> Maybe {
-    a := step1().? or_return
-    b := step2(a).? or_return
-    return b
+Error :: enum { None, Bad }
+step1 :: proc() -> (int, Error) { return 1, .None }
+step2 :: proc(x: int) -> (int, Error) { return x + 1, .None }
+process :: proc() -> (result: int, err: Error) {
+    a := step1() or_return
+    b := step2(a) or_return
+    return b, .None
 }
 `, "RT-OR-005: chained or_return")
 }

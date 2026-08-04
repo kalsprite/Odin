@@ -10,7 +10,7 @@ test_debug_poly_struct :: proc(t: ^testing.T) {
     context.allocator = context.temp_allocator
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-    result := helpers.check_source_capture_errors(`package test
+    result := helpers.check_source_capture_errors(t, `package test
 Container :: struct($T: typeid) {
     value: T,
 }
@@ -27,7 +27,7 @@ test :: proc() {
     }
 
     // Test const + type param
-    result2 := helpers.check_source_capture_errors(`package test
+    result2 := helpers.check_source_capture_errors(t, `package test
 Fixed_Array :: struct($N: int, $T: typeid) {
     data: [N]T,
 }
@@ -50,7 +50,7 @@ test_debug_poly_proc :: proc(t: ^testing.T) {
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
     // Test polymorphic procedure instantiation
-    result := helpers.check_source_capture_errors(`package test
+    result := helpers.check_source_capture_errors(t, `package test
 zero :: proc($T: typeid) -> T {
     return T{}
 }
@@ -71,7 +71,7 @@ test_debug_proc_group :: proc(t: ^testing.T) {
     context.allocator = context.temp_allocator
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-    result := helpers.check_source_capture_errors(`package test
+    result := helpers.check_source_capture_errors(t, `package test
 add_int :: proc(a, b: int) -> int { return a + b }
 add_f32 :: proc(a, b: f32) -> f32 { return a + b }
 add :: proc { add_int, add_f32 }
@@ -88,7 +88,7 @@ test :: proc() {
     }
 
     // Test proc group with polymorphic procedure
-    result2 := helpers.check_source_capture_errors(`package test
+    result2 := helpers.check_source_capture_errors(t, `package test
 show_specific :: proc(x: int) {}
 show_generic :: proc(x: $T) {}
 show :: proc { show_specific, show_generic }
@@ -111,7 +111,7 @@ test_debug_simple_proc_call :: proc(t: ^testing.T) {
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
     // Test simple procedure call without proc group
-    result := helpers.check_source_capture_errors(`package test
+    result := helpers.check_source_capture_errors(t, `package test
 add :: proc(a, b: int) -> int { return a + b }
 test :: proc() {
     x := add(1, 2)
@@ -132,7 +132,7 @@ test_debug_no_alias :: proc(t: ^testing.T) {
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
     // Test #no_alias parameter flag
-    result := helpers.check_source_capture_errors(`package test
+    result := helpers.check_source_capture_errors(t, `package test
 copy :: proc(#no_alias dst: ^int, src: ^int) {
     dst^ = src^
 }
@@ -145,7 +145,7 @@ copy :: proc(#no_alias dst: ^int, src: ^int) {
     }
 
     // Test #any_int parameter flag
-    result2 := helpers.check_source_capture_errors(`package test
+    result2 := helpers.check_source_capture_errors(t, `package test
 shift :: proc(x: int, #any_int amount: int) -> int {
     return x << uint(amount)
 }
@@ -158,7 +158,7 @@ shift :: proc(x: int, #any_int amount: int) -> int {
     }
 
     // Test #by_ptr parameter flag
-    result3 := helpers.check_source_capture_errors(`package test
+    result3 := helpers.check_source_capture_errors(t, `package test
 BigStruct :: struct {
     data: [1000]int,
 }

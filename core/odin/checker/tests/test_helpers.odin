@@ -70,7 +70,13 @@ destroy_test_result :: proc(result: ^Test_Check_Result) {
 // check_should_pass verifies that source code compiles without errors
 // Returns true if no errors occurred
 check_should_pass :: proc(t: ^testing.T, src: string, msg := "") -> bool {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here -- the TEMP_GUARD stays, the install
+	// does not. #357 removed the same pair from the eight package-driving tests; these five
+	// helpers are the rest of the same defect. The checker's type constructors take no
+	// allocator and spend context.allocator (LEDGER #354), so with the install in place every
+	// type a check builds lands in this test's scratch arena and dies at the guard. What
+	// survives is the process-global type state that pointed at them, which the NEXT test then
+	// reads. That is the order-dependence #321 has been chasing. LEDGER #368.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	result := check_source_internal(t, src)
@@ -112,9 +118,46 @@ check_should_pass_multi :: proc(t: ^testing.T, sources: []string) -> bool {
 
 // check_should_fail verifies that source code produces at least one error
 // Returns true if errors were detected
+// source_parses reports whether the parser accepts src at all, with diagnostics silenced.
+//
+// Needed because check_expects_error (test_checker_errors.odin:34-37) deliberately returns
+// has_errors=false on a PARSE failure -- its contract is "type errors", and ~20 callers rely on
+// that. check_should_fail asks a broader question: does the compiler reject this source? A syntax
+// rejection is still a rejection. LEDGER #351.
+@(private="file")
+source_parses :: proc(src: string) -> bool {
+	file := new(ast.File)
+	file.fullpath = "parse_probe.odin"
+	file.src = src
+	p := parser.default_parser()
+	p.err  = proc(pos: tokenizer.Pos, format: string, args: ..any) {}
+	p.warn = proc(pos: tokenizer.Pos, format: string, args: ..any) {}
+	ok := parser.parse_file(&p, file)
+	// BOTH conditions. parse_file's return value is not the whole story: a source can be reported
+	// as syntactically wrong via the error handler and STILL return true, because the parser
+	// recovers and produces a tree. `empty :: proc { }` is exactly that -- it draws
+	// "Expected a least 1 argument in a procedure group" and then parses. Relying on the return
+	// value alone is why my first attempt at this left ADV-PG-009 failing. p.error_count
+	// (parser.odin:95, bumped at :142) is the actual record of whether anything was reported.
+	return ok && p.error_count == 0
+}
+
 check_should_fail :: proc(t: ^testing.T, src: string, msg := "") -> bool {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here -- the TEMP_GUARD stays, the install
+	// does not. #357 removed the same pair from the eight package-driving tests; these five
+	// helpers are the rest of the same defect. The checker's type constructors take no
+	// allocator and spend context.allocator (LEDGER #354), so with the install in place every
+	// type a check builds lands in this test's scratch arena and dies at the guard. What
+	// survives is the process-global type state that pointed at them, which the NEXT test then
+	// reads. That is the order-dependence #321 has been chasing. LEDGER #368.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+
+	// Syntax rejection counts. ADV-PG-009 (`empty :: proc { }`) is rejected by BOTH compilers with
+	// "Expected a least 1 argument in a procedure group", yet reported as "Expected error but got
+	// none" because the type-error helper never sees a file that failed to parse.
+	if !source_parses(src) {
+		return true
+	}
 
 	has_error, _ := check_expects_error(t, src)
 
@@ -137,7 +180,13 @@ check_expects_error_containing :: proc(
 	expected_substr: string,
 	msg := "",
 ) -> bool {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here -- the TEMP_GUARD stays, the install
+	// does not. #357 removed the same pair from the eight package-driving tests; these five
+	// helpers are the rest of the same defect. The checker's type constructors take no
+	// allocator and spend context.allocator (LEDGER #354), so with the install in place every
+	// type a check builds lands in this test's scratch arena and dies at the guard. What
+	// survives is the process-global type state that pointed at them, which the NEXT test then
+	// reads. That is the order-dependence #321 has been chasing. LEDGER #368.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	result := check_source_capture_errors(t, src)
@@ -183,7 +232,13 @@ check_expects_error_containing :: proc(
 
 // check_expects_error_at_line verifies an error occurs on the specified line
 check_expects_error_at_line :: proc(t: ^testing.T, src: string, expected_line: int) -> bool {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here -- the TEMP_GUARD stays, the install
+	// does not. #357 removed the same pair from the eight package-driving tests; these five
+	// helpers are the rest of the same defect. The checker's type constructors take no
+	// allocator and spend context.allocator (LEDGER #354), so with the install in place every
+	// type a check builds lands in this test's scratch arena and dies at the guard. What
+	// survives is the process-global type state that pointed at them, which the NEXT test then
+	// reads. That is the order-dependence #321 has been chasing. LEDGER #368.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	result := check_source_capture_errors(t, src)
@@ -213,7 +268,13 @@ check_expects_error_at_line :: proc(t: ^testing.T, src: string, expected_line: i
 
 // check_expects_n_errors verifies exactly N errors occur
 check_expects_n_errors :: proc(t: ^testing.T, src: string, expected_count: int) -> bool {
-	context.allocator = context.temp_allocator
+	// NO `context.allocator = context.temp_allocator` here -- the TEMP_GUARD stays, the install
+	// does not. #357 removed the same pair from the eight package-driving tests; these five
+	// helpers are the rest of the same defect. The checker's type constructors take no
+	// allocator and spend context.allocator (LEDGER #354), so with the install in place every
+	// type a check builds lands in this test's scratch arena and dies at the guard. What
+	// survives is the process-global type state that pointed at them, which the NEXT test then
+	// reads. That is the order-dependence #321 has been chasing. LEDGER #368.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	_, count := check_expects_error(t, src)
@@ -291,11 +352,25 @@ check_source_capture_errors :: proc(
 	checker_globals_ticket := lock_checker_globals(t)
 	defer unlock_checker_globals(checker_globals_ticket)
 
+	// One base:runtime load for the whole test binary. Inside the globals lock because acquiring
+	// runs a real check, which writes the same runtime type globals every other test reads.
+	// Idempotent, so every call after the first is a mutex and a pointer compare. LEDGER #354.
+	checker.acquire_runtime_session()
+
+	// context.allocator, not just the argument below. Passing default_allocator to
+	// init_checker says nothing about what the code it calls SPENDS: the checker's type
+	// constructors take no allocator and spend context.allocator (LEDGER #354). Nearly every
+	// caller of these helpers -- all ~580 spec test procs -- installs
+	// `context.allocator = context.temp_allocator` in its own frame first, so without this
+	// line the types this check builds land in that test's scratch arena and die at its
+	// TEMP_GUARD, while the process-global state pointing at them survives. Owning the
+	// checker means owning the allocator context for its lifetime. LEDGER #368.
+	context.allocator = runtime.default_allocator()
+
 	c := &checker.Checker{}
-	// Use default_allocator for the checker to ensure types persist
-	// beyond the temp_allocator's lifetime set by the test
 	checker.init_checker(c, runtime.default_allocator())
 	defer checker.destroy_checker(c)
+	checker.adopt_runtime_session(c)
 
 	checker.init_error_collector(100)
 	defer checker.destroy_error_collector()
@@ -352,11 +427,23 @@ check_source_internal :: proc(t: ^testing.T, src: string, filename := "test.odin
 	checker_globals_ticket := lock_checker_globals(t)
 	defer unlock_checker_globals(checker_globals_ticket)
 
+	// See check_source_capture_errors for why this pair is here.
+	checker.acquire_runtime_session()
+
+	// context.allocator, not just the argument below. Passing default_allocator to
+	// init_checker says nothing about what the code it calls SPENDS: the checker's type
+	// constructors take no allocator and spend context.allocator (LEDGER #354). Nearly every
+	// caller of these helpers -- all ~580 spec test procs -- installs
+	// `context.allocator = context.temp_allocator` in its own frame first, so without this
+	// line the types this check builds land in that test's scratch arena and die at its
+	// TEMP_GUARD, while the process-global state pointing at them survives. Owning the
+	// checker means owning the allocator context for its lifetime. LEDGER #368.
+	context.allocator = runtime.default_allocator()
+
 	c := &checker.Checker{}
-	// Use default_allocator for the checker to ensure types persist
-	// beyond the temp_allocator's lifetime set by the test
 	checker.init_checker(c, runtime.default_allocator())
 	defer checker.destroy_checker(c)
+	checker.adopt_runtime_session(c)
 
 	checker.init_error_collector(100)
 	defer checker.destroy_error_collector()

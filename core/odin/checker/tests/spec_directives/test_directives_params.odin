@@ -59,7 +59,7 @@ test_param_by_ptr_pos :: proc(t: ^testing.T) {
 BigStruct :: struct {
     data: [1000]int,
 }
-process :: proc(s: #by_ptr BigStruct) {
+process :: proc(#by_ptr s: BigStruct) {
     _ = s.data[0]
 }
 `, "DIR-PARAM-003: #by_ptr parameter")
@@ -87,11 +87,12 @@ test_param_const_pos :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_pass(t, `package test
-make_array :: proc(#const $N: int) -> [N]int {
-    return [N]int{}
+scaled :: proc(x: int, #const scale: uint) -> int {
+    return x << scale
 }
 test :: proc() {
-    arr := make_array(5)
+    r := scaled(4, 2)
+    _ = r
 }
 `, "DIR-PARAM-005: #const parameter")
 }
@@ -104,7 +105,7 @@ test_param_no_broadcast_pos :: proc(t: ^testing.T) {
 
 	helpers.check_should_pass(t, `package test
 Vec4 :: [4]f32
-add :: proc(a: Vec4, b: #no_broadcast Vec4) -> Vec4 {
+add :: proc(a: Vec4, #no_broadcast b: Vec4) -> Vec4 {
     return a + b
 }
 `, "DIR-PARAM-006: #no_broadcast parameter")

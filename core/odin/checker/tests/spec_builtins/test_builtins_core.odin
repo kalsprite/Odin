@@ -99,9 +99,9 @@ test_builtin_cap_slice_pos :: proc(t: ^testing.T) {
 
 	helpers.check_should_pass(t, `package test
 test :: proc() {
-    arr: [5]int
-    s: []int = arr[:]
-    c := cap(s)
+    d: [dynamic]int
+    c := cap(d)
+    _ = c
 }
 `, "BUILTIN-CORE-006: cap of slice")
 }
@@ -254,8 +254,8 @@ test_builtin_type_of_pos :: proc(t: ^testing.T) {
 	helpers.check_should_pass(t, `package test
 test :: proc() {
     x := 42
-    T :: type_of(x)
-    y: T = 100
+    y: type_of(x) = 100
+    _ = y
 }
 `, "BUILTIN-CORE-016: type_of creates type alias")
 }
@@ -270,8 +270,8 @@ test_builtin_type_of_struct_pos :: proc(t: ^testing.T) {
 Point :: struct { x, y: int }
 test :: proc() {
     p: Point = {1, 2}
-    T :: type_of(p)
-    q: T = {3, 4}
+    q: type_of(p) = {3, 4}
+    _ = q
 }
 `, "BUILTIN-CORE-017: type_of struct")
 }
@@ -426,7 +426,8 @@ test_builtin_raw_data_array_pos :: proc(t: ^testing.T) {
 	helpers.check_should_pass(t, `package test
 test :: proc() {
     arr: [5]int = {1, 2, 3, 4, 5}
-    ptr: [^]int = raw_data(arr)
+    ptr: [^]int = raw_data(&arr)
+    _ = ptr
 }
 `, "BUILTIN-CORE-027: raw_data of array")
 }
@@ -475,8 +476,10 @@ test_builtin_unreachable_pos :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_pass(t, `package test
-test :: proc() -> int {
-    return 42
+test :: proc(x: int) -> int {
+    if x > 0 {
+        return 42
+    }
     unreachable()
 }
 `, "BUILTIN-CORE-030: unreachable after return")

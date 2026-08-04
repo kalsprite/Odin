@@ -10,7 +10,7 @@ test_debug_cstring_to_string :: proc(t: ^testing.T) {
     context.allocator = context.temp_allocator
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-    result := helpers.check_source_capture_errors(`package test
+    result := helpers.check_source_capture_errors(t, `package test
 test :: proc() {
     c: cstring = "hello"
     s := string(c)
@@ -30,7 +30,7 @@ test_debug_typeid_switch :: proc(t: ^testing.T) {
     context.allocator = context.temp_allocator
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-    result := helpers.check_source_capture_errors(`package test
+    result := helpers.check_source_capture_errors(t, `package test
 test :: proc() {
     id: typeid = int
     switch id {

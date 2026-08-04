@@ -41,9 +41,13 @@ check_expects_error :: proc(t: ^testing.T, src: string) -> (has_errors: bool, er
 	checker_globals_ticket := lock_checker_globals(t)
 	defer unlock_checker_globals(checker_globals_ticket)
 
+	// See check_source_capture_errors (test_helpers.odin) -- one base:runtime load per binary.
+	checker.acquire_runtime_session()
+
 	c := &checker.Checker{}
 	checker.init_checker(c)
 	defer checker.destroy_checker(c)
+	checker.adopt_runtime_session(c)
 
 	checker.init_error_collector(100)
 	defer checker.destroy_error_collector()

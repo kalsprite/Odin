@@ -15,7 +15,7 @@ test_debug :: proc(t: ^testing.T) {
 	fmt.println("=== Testing runtime symbol access ===")
 
 	// Test Context type
-	result1 := helpers.check_source_capture_errors(`package test
+	result1 := helpers.check_source_capture_errors(t, `package test
 import "base:runtime"
 test :: proc() {
     ctx: runtime.Context
@@ -26,7 +26,7 @@ test :: proc() {
 	fmt.println("runtime.Context:", result1.error_count == 0 ? "OK" : "FAIL")
 
 	// Test Source_Code_Location type
-	result2 := helpers.check_source_capture_errors(`package test
+	result2 := helpers.check_source_capture_errors(t, `package test
 import "base:runtime"
 test :: proc() {
     loc: runtime.Source_Code_Location
@@ -37,7 +37,7 @@ test :: proc() {
 	fmt.println("runtime.Source_Code_Location:", result2.error_count == 0 ? "OK" : "FAIL")
 
 	// Test Allocator type
-	result3 := helpers.check_source_capture_errors(`package test
+	result3 := helpers.check_source_capture_errors(t, `package test
 import "base:runtime"
 test :: proc() {
     a: runtime.Allocator
@@ -48,7 +48,7 @@ test :: proc() {
 	fmt.println("runtime.Allocator:", result3.error_count == 0 ? "OK" : "FAIL")
 
 	// Test DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD procedure
-	result4 := helpers.check_source_capture_errors(`package test
+	result4 := helpers.check_source_capture_errors(t, `package test
 import "base:runtime"
 test :: proc() {
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()

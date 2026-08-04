@@ -19,6 +19,15 @@ import checker ".."
 @(test)
 test_init_destroy_checker :: proc(t: ^testing.T) {
 	// Test that we can create and destroy a checker without errors
+	// init_checker / destroy_checker are NOT lock-free: destroy_checker calls
+	// reset_runtime_type_globals, which nils the process-global runtime type state, and
+	// init_checker repopulates it. Without the mutex these four lifecycle tests do that
+	// concurrently with whatever package check holds it -- and a t_atomic_memory_order
+	// nilled mid-check is exactly the 37 "Cannot determine type for implicit selector
+	// expression" errors in core/sync that #321 kept seeing move between tests. LEDGER #368.
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
+
 	c := &checker.Checker{}
 	checker.init_checker(c)
 	defer checker.destroy_checker(c)
@@ -44,6 +53,15 @@ test_init_destroy_error_collector :: proc(t: ^testing.T) {
 
 @(test)
 test_checker_context_creation :: proc(t: ^testing.T) {
+	// init_checker / destroy_checker are NOT lock-free: destroy_checker calls
+	// reset_runtime_type_globals, which nils the process-global runtime type state, and
+	// init_checker repopulates it. Without the mutex these four lifecycle tests do that
+	// concurrently with whatever package check holds it -- and a t_atomic_memory_order
+	// nilled mid-check is exactly the 37 "Cannot determine type for implicit selector
+	// expression" errors in core/sync that #321 kept seeing move between tests. LEDGER #368.
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
+
 	c := &checker.Checker{}
 	checker.init_checker(c)
 	defer checker.destroy_checker(c)
@@ -62,6 +80,15 @@ test_checker_context_creation :: proc(t: ^testing.T) {
 
 @(test)
 test_create_scope :: proc(t: ^testing.T) {
+	// init_checker / destroy_checker are NOT lock-free: destroy_checker calls
+	// reset_runtime_type_globals, which nils the process-global runtime type state, and
+	// init_checker repopulates it. Without the mutex these four lifecycle tests do that
+	// concurrently with whatever package check holds it -- and a t_atomic_memory_order
+	// nilled mid-check is exactly the 37 "Cannot determine type for implicit selector
+	// expression" errors in core/sync that #321 kept seeing move between tests. LEDGER #368.
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
+
 	c := &checker.Checker{}
 	checker.init_checker(c)
 	defer checker.destroy_checker(c)
@@ -76,6 +103,15 @@ test_create_scope :: proc(t: ^testing.T) {
 
 @(test)
 test_scope_hierarchy :: proc(t: ^testing.T) {
+	// init_checker / destroy_checker are NOT lock-free: destroy_checker calls
+	// reset_runtime_type_globals, which nils the process-global runtime type state, and
+	// init_checker repopulates it. Without the mutex these four lifecycle tests do that
+	// concurrently with whatever package check holds it -- and a t_atomic_memory_order
+	// nilled mid-check is exactly the 37 "Cannot determine type for implicit selector
+	// expression" errors in core/sync that #321 kept seeing move between tests. LEDGER #368.
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
+
 	c := &checker.Checker{}
 	checker.init_checker(c)
 	defer checker.destroy_checker(c)

@@ -37,7 +37,9 @@ bar :: proc() {
 }
 `,
 			expect_error = true,
-			error_substr = "argument",
+			// Verified against the REFERENCE compiler: it emits "Parameter 'y' of type 'int' is
+			// missing in procedure call", which contains no "argument". The port matches it exactly.
+			error_substr = "is missing in procedure call",
 		},
 		{
 			id           = "ERR-PROC-002",
@@ -343,7 +345,7 @@ test_err_proc_contextless_accessing_context_neg :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Note: This requires checker to track contextless attribute
-	result := helpers.check_source_capture_errors(`package test
+	result := helpers.check_source_capture_errors(t, `package test
 foo :: proc() #contextless {
     _ = context.allocator
 }
@@ -404,7 +406,7 @@ test_err_proc_ambiguous_overload_neg :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	// Odin may error on ambiguous overloads
-	result := helpers.check_source_capture_errors(`package test
+	result := helpers.check_source_capture_errors(t, `package test
 foo :: proc(x: int) {}
 foo :: proc(y: int) {}
 bar :: proc() {

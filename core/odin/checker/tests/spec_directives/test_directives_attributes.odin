@@ -28,7 +28,7 @@ test_attr_init_pos :: proc(t: ^testing.T) {
 
 	helpers.check_should_pass(t, `package test
 @(init)
-init :: proc() {
+init :: proc "contextless" () {
     // Runs at startup
 }
 `, "DIR-ATTR-001: @(init) attribute")
@@ -42,7 +42,7 @@ test_attr_fini_pos :: proc(t: ^testing.T) {
 
 	helpers.check_should_pass(t, `package test
 @(fini)
-cleanup :: proc() {
+cleanup :: proc "contextless" () {
     // Runs at shutdown
 }
 `, "DIR-ATTR-002: @(fini) attribute")
@@ -168,7 +168,7 @@ test_attr_disabled_pos :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_pass(t, `package test
-@(disabled)
+@(disabled=true)
 old_code :: proc() {
 }
 `, "DIR-ATTR-011: @(disabled) attribute")

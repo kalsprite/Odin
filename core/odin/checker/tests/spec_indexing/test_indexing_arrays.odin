@@ -71,6 +71,7 @@ test :: proc() {
     s := get_slice()
     if len(s) > 0 {
         x := s[0]
+        _ = x
     }
 }
 `, "IDX-ARR-004: slice indexing")

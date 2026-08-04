@@ -201,11 +201,11 @@ test_or_return_pos :: proc(t: ^testing.T) {
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
 	helpers.check_should_pass(t, `package test
-Maybe :: union { int }
-inner :: proc() -> Maybe { return nil }
-outer :: proc() -> Maybe {
-    value := inner().? or_return
-    return value
+Error :: enum { None, Bad }
+inner :: proc() -> (int, Error) { return 0, .None }
+outer :: proc() -> (value: int, err: Error) {
+    value = inner() or_return
+    return value, .None
 }
 `, "SEM-DEFER-011: or_return")
 }

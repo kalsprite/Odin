@@ -257,7 +257,13 @@ foo :: proc() {
 }
 `,
 			expect_error = true,
-			error_substr = "not declared",
+			// Oracle, re-run on exactly this source:
+			//   a.odin(4:9) Error: 'NonExistent' is not declared by 'runtime'
+			// The earlier "Undeclared name" expectation was recorded when the test harness never
+			// loaded base:runtime, so `runtime` resolved to nothing and the port reported the
+			// generic undeclared-name error. With the runtime session the import resolves and both
+			// compilers give the specific message. LEDGER #354.
+			error_substr = "is not declared by",
 		},
 		// TODO: Implicit context access - needs checker implementation
 		// {

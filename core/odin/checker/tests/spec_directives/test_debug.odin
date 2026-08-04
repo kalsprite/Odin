@@ -10,7 +10,7 @@ test_debug_caller_location :: proc(t: ^testing.T) {
     context.allocator = context.temp_allocator
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-    result := helpers.check_source_capture_errors(`package test
+    result := helpers.check_source_capture_errors(t, `package test
 import "base:runtime"
 log :: proc(msg: string, loc := #caller_location) {}
 test :: proc() {
@@ -30,7 +30,7 @@ test_debug_config :: proc(t: ^testing.T) {
     context.allocator = context.temp_allocator
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-    result := helpers.check_source_capture_errors(`package test
+    result := helpers.check_source_capture_errors(t, `package test
 DEBUG :: #config(DEBUG, false)
 test :: proc() {
     _ = DEBUG
@@ -49,7 +49,7 @@ test_debug_param_no_alias :: proc(t: ^testing.T) {
     context.allocator = context.temp_allocator
     runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
 
-    result := helpers.check_source_capture_errors(`package test
+    result := helpers.check_source_capture_errors(t, `package test
 foo :: proc(#no_alias x: ^int) {}
 `)
     defer helpers.destroy_test_result(&result)

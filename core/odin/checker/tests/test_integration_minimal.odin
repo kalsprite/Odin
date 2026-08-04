@@ -30,8 +30,17 @@ test_parse_only :: proc(t: ^testing.T) {
 
 @(test)
 test_checker_init_only :: proc(t: ^testing.T) {
-	context.allocator = context.temp_allocator
+	// The fifth instance of #368's defect, and the one the per-FILE count missed: this file's
+	// other test does take the lock, so the file looked covered. Only a per-TEST-PROC scan found
+	// it. destroy_checker nils the process-global runtime type state, so without the lock this
+	// test does that at an arbitrary moment -- including inside a package check on another thread.
+	// The temp-allocator install goes for the same reason it went from the other twelve sites:
+	// type constructors spend context.allocator, so the types init_checker builds would die at the
+	// guard while the globals pointing at them survive. LEDGER #368.
 	runtime.DEFAULT_TEMP_ALLOCATOR_TEMP_GUARD()
+
+	checker_globals_ticket := lock_checker_globals(t)
+	defer unlock_checker_globals(checker_globals_ticket)
 
 	c := &checker.Checker{}
 	checker.init_checker(c)
