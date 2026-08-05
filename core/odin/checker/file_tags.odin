@@ -176,10 +176,15 @@ parse_vet_tag :: proc(token_for_pos: tokenizer.Token, str: string, base_vet_flag
 			error_line("\tusing-stmt\n")
 			error_line("\tusing-param\n")
 			error_line("\tstyle\n")
-			// "extra" is listed by C++ but is NOT accepted by get_vet_flag_from_name
-			// (src/build_settings.cpp:328-357), and "semicolon" and "deprecated", which ARE
-			// accepted, are missing from the list. Reproduced verbatim: the list is output.
+			// "extra" is listed by C++ but is still NOT accepted by get_vet_flag_from_name
+			// (src/build_settings.cpp:328-357). Reproduced verbatim: the list is output.
+			//
+			// "semicolon" and "deprecated" used to be missing here too -- accepted by the
+			// name lookup but absent from the list. Upstream added them (parser.cpp:6589-6590)
+			// and the port follows. LEDGER #385.
 			error_line("\textra\n")
+			error_line("\tsemicolon\n")
+			error_line("\tdeprecated\n")
 			error_line("\tcast\n")
 			error_line("\ttabs\n")
 			error_line("\texplicit-allocators\n")

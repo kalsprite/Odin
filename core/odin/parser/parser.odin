@@ -2524,7 +2524,10 @@ check_field_flag_prefixes :: proc(p: ^Parser, name_count: int, allowed_flags, se
 				// NOTE(parity): C++ writes "in not allowed" (src/parser.cpp:4320) -- "in" where "is"
 				// was meant. Reproduced verbatim because the objective is byte-identical
 				// diagnostics; reported upstream rather than silently corrected here.
-				error(p, p.curr_tok.pos, "'%s' in not allowed within this field list", ast.field_flag_strings[flag])
+				// "is", not "in". Same story as the matrix column message: the port reproduced
+				// C++'s typo verbatim (parser.cpp:4320), it was filed as #195, fixed upstream and
+				// merged as PR #7225. The reference now reads "is not allowed". LEDGER #385.
+				error(p, p.curr_tok.pos, "'%s' is not allowed within this field list", ast.field_flag_strings[flag])
 			}
 			flags -= {flag}
 		}
@@ -3256,26 +3259,50 @@ check_basic_literal_value :: proc(p: ^Parser, tok: tokenizer.Token) {
 			return true
 		}
 
-		// Inside the exponent, a non-digit sets *success = false and then
-		// big_int_exp_u64 immediately overwrites it with its own result, so the ONLY
-		// surviving failure is the 308 bound. `1e` and `1eff` are therefore valid.
+		// The exponent branch mirrors big_int.cpp:250-309. It used to be guarded by two
+		// GB_ASSERTs (`base == 10`, `text[i] != '-'`) that ABORTED the compiler, so there was
+		// no oracle behaviour to mirror and this predicate accepted everything the digit loop
+		// survived. That was filed as #225, fixed upstream and merged: each impossible case
+		// now sets success = false and RETURNS, which surfaces here as a syntax error.
+		// LEDGER #385.
 		i += 1
-		if i < len(text) && text[i] == '+' {
+		if base != 10 {
+			// An exponent is only meaningful for a base 10 literal.
+			return false
+		}
+		if i >= len(text) {
+			// Nothing follows the exponent marker.
+			return false
+		}
+		if text[i] == '-' {
+			// A negative exponent is never an integer.
+			return false
+		}
+		if text[i] == '+' {
 			i += 1
 		}
 		exp := 0
+		exp_digits := 0
 		for ; i < len(text); i += 1 {
 			r := text[i]
 			if r == '_' {
 				continue
 			}
 			if r < '0' || r > '9' {
+				// A non-digit here sets *success = false and then big_int_exp_u64
+				// immediately overwrites it with its own result, so this alone is NOT a
+				// failure -- `1e5ff` is still accepted. The #225 fix works by returning
+				// early, and this path does not return, so the clobber survives it.
 				break
 			}
 			exp = exp * 10 + int(r - '0')
+			exp_digits += 1
 			if exp > 308 {
 				return false
 			}
+		}
+		if exp_digits == 0 {
+			return false
 		}
 		return true
 	}

@@ -1707,28 +1707,26 @@ u64_digit_value :: proc(r: u8) -> u64 {
 // four separate points, each of which is a real literal the oracle and the port disagreed
 // about. LEDGER #368.
 //
-//  1. THE EXPONENT IS IN THE LITERAL'S OWN BASE, not base 10. C++ builds `b` from the
-//     detected base and calls big_int_exp_u64(&tmp, &b, exp), so the scale factor is
-//     base^exp. The port hardcoded 10. This is only reachable for base 10 in practice:
-//     C++ guards the exponent branch with GB_ASSERT(base == 10) and that assertion DOES
-//     fire -- `x := 0b101e5` and `x := 0o17e2` abort the oracle with
-//     "src/big_int.cpp(252): Assertion Failure: `base == 10`". So there is no oracle
-//     behaviour to match for those spellings; the port computes base^exp rather than
-//     dying, which is strictly more defined. Filed upstream as #225.
+//  1. THE EXPONENT REQUIRES BASE 10. C++ used to guard this with GB_ASSERT(base == 10),
+//     which FIRED: `x := 0b101e5` and `x := 0o17e2` aborted the oracle outright with
+//     "src/big_int.cpp(252): Assertion Failure: `base == 10`". There was no oracle
+//     behaviour to match, so the port computed base^exp rather than dying. Filed as #225,
+//     fixed upstream and merged: the four impossible cases -- non-decimal base, nothing
+//     after the marker, a '-' exponent, and an exponent with no digits -- now each set
+//     success = false and return, which surfaces as "Invalid integer literal". The port
+//     follows, and its old accept-silently behaviour was a real under-rejection once the
+//     assertions went away (`0b1e5` and `0d1e-5` were accepted). LEDGER #385.
 //  2. A DIGIT OUT OF RANGE IS ONLY AN ERROR IF IT IS NOT 'e'/'E'. C++'s own comment:
 //         // NOTE(Jeroen): Can still be a valid integer if the next character is an `e` or `E`.
-//     That is what lets a prefixed literal carry an exponent at all.
-//  3. AN EMPTY OR MALFORMED EXPONENT IS NOT AN ERROR. If the digit loop breaks on a
-//     non-digit it sets success = false -- and then big_int_exp_u64 assigns
-//     `*success = err == MP_OKAY`, OVERWRITING it. So `1e` and `1eff` both parse as 1 and
-//     are accepted silently. This is an upstream bug (the failure flag is clobbered), but
-//     it is observable behaviour and the port must reproduce it to match; see the note at
-//     the assignment below.
-//  4. '-' IS ACCEPTED ANYWHERE and negates once; a second '-' fails.
-//
-// C++ has GB_ASSERT(base == 10) and GB_ASSERT(text[i] != '-') at the head of the exponent
-// branch. They are live in the shipped compiler (see point 1); reproducing them would mean
-// aborting the checker on valid-looking input, so they are deliberately not ported.
+//     That is what lets a decimal literal carry an exponent at all.
+//  3. A MALFORMED EXPONENT TAIL IS STILL NOT AN ERROR. If the digit loop breaks on a
+//     non-digit AFTER at least one digit, it sets success = false -- and then
+//     big_int_exp_u64 assigns `*success = err == MP_OKAY`, OVERWRITING it. So `1e5ff`
+//     parses as 100000 and is accepted silently. The clobber survived the #225 fix
+//     because that fix works by returning early, and this path does not return. It is
+//     observable behaviour, so the port reproduces it; see the note at the assignment.
+//  4. '-' IS ACCEPTED ANYWHERE IN THE MANTISSA and negates once; a second '-' fails.
+//     (In the EXPONENT a '-' is now rejected outright -- see point 1.)
 @(private = "file")
 big_int_from_string :: proc(s: string) -> (dst: big.Int, success: bool) {
 	success = true
@@ -1811,11 +1809,25 @@ big_int_from_string :: proc(s: string) -> (dst: big.Int, success: bool) {
 	}
 	if i < len(text) && (text[i] == 'e' || text[i] == 'E') {
 		i += 1
-		if i < len(text) && text[i] == '+' {
+		if base != 10 {
+			// An exponent is only meaningful for a base 10 literal.
+			return dst, false
+		}
+		if i >= len(text) {
+			// Nothing follows the exponent marker.
+			return dst, false
+		}
+		if text[i] == '-' {
+			// A negative exponent is never an integer.
+			// The caller is expected to parse the value as a float instead.
+			return dst, false
+		}
+		if text[i] == '+' {
 			i += 1
 		}
 
 		exp := u64(0)
+		exp_digits := 0
 		for ; i < len(text); i += 1 {
 			r := text[i]
 			if r == '_' {
@@ -1823,10 +1835,14 @@ big_int_from_string :: proc(s: string) -> (dst: big.Int, success: bool) {
 			}
 			if r >= '0' && r <= '9' {
 				exp = exp * 10 + u64(r - '0')
+				exp_digits += 1
 			} else {
 				success = false
 				break
 			}
+		}
+		if exp_digits == 0 {
+			return dst, false
 		}
 
 		// NOTE(Jeroen): A valid integer can never have an exponent larger than 308 (per

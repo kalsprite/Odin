@@ -1476,9 +1476,12 @@ check_cast_error_suggestion :: proc(ctx: ^Checker_Context, operand: ^Operand, ta
 	// rawptr", "Use explicit enum member") appear anywhere in C++, and it used independent
 	// `if`s where C++ has one else-if chain.
 	//
-	// NOTE: C++'s uintptr-source arm writes `"\tSuggestion: %a may be directly casted to %s\n"`
-	// -- `%a` is a format-specifier slip in the original. Reproduced here as a plain string so
-	// the port prints the expression, which is evidently what was meant.
+	// NOTE: C++'s uintptr-source arm USED TO write `"\tSuggestion: %a may be directly casted to
+	// %s\n"`. `%a` is gb's unimplemented hex-float case, which consumes no vararg, so the
+	// following `%s` printed the wrong argument. The port deliberately used `%s` here -- printing
+	// what was evidently meant rather than reproducing a garbled line -- and that judgement is now
+	// vindicated: filed as #206, fixed upstream and merged, and C++ reads `%s` too. The port needs
+	// no change; only this note was stale. LEDGER #385.
 	if operand == nil || target_type == nil || operand.type == nil {
 		return
 	}

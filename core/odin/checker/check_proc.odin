@@ -952,7 +952,14 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 							// C++ Reference: check_expr.cpp:6751-6758
 							// Note: The C++ comment says to print header only on first entity,
 							// but then doesn't actually use that check (line 6752 is commented out)
-							// We'll print without the header for consistency with C++
+							// The header fires from THIS arm too now. It used to be commented out
+							// in C++'s Entity_TypeName case while still bumping print_count, so a
+							// type name printed first suppressed the header for the whole block --
+							// filed as #174, fixed upstream and merged (PR #7222). Both arms now
+							// carry it. LEDGER #385.
+							if print_count == 0 {
+								error_line("  \n\tWith the following definitions:\n")
+							}
 							type_str := type_to_string(e.type)
 							error_line("\t\t%s :: %s;\n", e.token.text, type_str)
 							print_count += 1
@@ -960,30 +967,26 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 						case .Constant:
 							// Display constant definitions
 							// C++ Reference: check_expr.cpp:6760-6774
-							// C++ Reference: check_expr.cpp:7134. KEEP THIS. It looks like a
-							// port-only artifact and is not.
+							// C++ Reference: check_expr.cpp:7149.
 							//
-							// MECHANISM (LEDGER 334, which #185 measured but could not explain):
-							// this header begins with "\n", so it puts a BLANK LINE in the
-							// message. print_errors_standard breaks on the first empty line --
-							// faithfully, C++ error.cpp:1017 does exactly the same. So emitting
-							// the header TRUNCATES the rest of the block: the binding lines and
-							// "at caller location" are built and then discarded at print time.
+							// THE TWO LEADING SPACES ARE LOAD-BEARING, and they are the whole of
+							// the upstream fix. The old header began with "\n", which put a BLANK
+							// LINE in the message; print_errors_standard breaks on the first empty
+							// line -- faithfully, C++ error.cpp:1017 does the same -- so emitting
+							// the header TRUNCATED the rest of the block. The binding lines and
+							// "at caller location" were built and then discarded at print time.
+							// LEDGER 334 measured that and #185 could not explain it.
 							//
-							// C++ has the identical line, identically guarded, but walks
-							// scope->elements in HASH order, so whether a Constant is printed
-							// first -- and therefore whether the header fires and the output
-							// truncates -- varies per program. Both behaviours occur in the
-							// oracle: s21/s22/wc/s20 print their bindings, s02/s11/s12/wc2/wc4/
-							// wvA/wvB truncate exactly like this.
-							//
-							// The port sorts by name for determinism (LEDGER 277) and so cannot
-							// track C++'s hash order. MEASURED both ways: keeping the header
-							// matches 8 probes and misses 4-5; removing it matches 4-5 and
-							// misses 8 (451 -> 443 MATCH). Keeping is the better approximation
-							// of an irreducibly hash-dependent behaviour.
+							// Upstream now writes "  \n\tWith the following definitions:\n". Two
+							// spaces before the newline mean the line is NOT empty, so the break
+							// never fires and the block survives intact. That also retires the
+							// trade-off this comment used to record: the port sorts scope elements
+							// by name for determinism (LEDGER 277) and could not track C++'s hash
+							// order, so keeping the header matched 8 probes and missed 4-5. With
+							// truncation gone the hash order no longer decides what SURVIVES, only
+							// what comes first. LEDGER #385.
 							if print_count == 0 {
-								error_line("\n\tWith the following definitions:\n")
+								error_line("  \n\tWith the following definitions:\n")
 							}
 
 							// Get the constant value as a string

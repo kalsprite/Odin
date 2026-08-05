@@ -3758,7 +3758,11 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 		} else {
 			cc_str := expr_to_string(mt.column_count)
 			defer delete(cc_str)
-			error_node(mt.column_count, "Invalid matrix column count, expected %d+ rows, got %s", MATRIX_ELEMENT_COUNT_MIN, cc_str)
+			// "columns", not "rows". The port faithfully reproduced C++'s copy-paste slip here
+			// (check_type.cpp:3124 said "rows" in the COLUMN branch), which was correct parity at
+			// the time and is now stale: the slip was reported as #189, fixed upstream, and merged.
+			// The reference now reads "expected %d+ columns". LEDGER #385.
+			error_node(mt.column_count, "Invalid matrix column count, expected %d+ columns, got %s", MATRIX_ELEMENT_COUNT_MIN, cc_str)
 		}
 	}
 

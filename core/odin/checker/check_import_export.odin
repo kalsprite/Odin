@@ -248,12 +248,16 @@ check_add_import_decl :: proc(ctx: ^Checker_Context, import_decl: ^ast.Import_De
 		begin_error_block()
 		defer end_error_block()
 
-		// NOTE(parity): C++ (checker.cpp:5650) reads "cannot be use as an import name" - a
-		// grammatical slip upstream. The port had silently corrected it to "cannot be used",
-		// which is a divergence: this text is compared byte-for-byte. Reproduced as-is and
-		// flagged upstream (task #187).
+		// C++ (checker.cpp:5650) used to read "cannot be use as an import name as it is not a
+		// valid identifier" -- a grammatical slip the port reproduced verbatim, because this text
+		// is compared byte-for-byte. It was filed as #187, fixed upstream and merged, and the
+		// reference now uses the SAME message in both branches:
+		//     error(token,     "Import name '%.*s' is not a valid identifier", ...)
+		//     error(id->token, "Import name '%.*s' is not a valid identifier", ...)
+		// So the two arms differ only in which token they anchor on and whether the Suggestion
+		// follows. LEDGER #385.
 		if len(import_decl.name.text) > 0 {
-			error_node(import_decl, "Import name '%s' cannot be use as an import name as it is not a valid identifier", import_decl.name.text)
+			error_node(import_decl, "Import name '%s' is not a valid identifier", import_decl.name.text)
 		} else {
 			error_node(import_decl, "Import name '%s' is not a valid identifier", invalid_name)
 			// C++ line 5320: Add suggestion for how to fix the error

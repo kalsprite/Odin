@@ -58,6 +58,21 @@ CORPUS=(
   #             this segfaulted 15/15 on three pre-change binaries
   #   bt_dbg    two malformed tags in one file, so the pass is proven not to stop at the first
   bt_space bt_bang bt_comma bt_subt bt_plat bt_projb bt_dbg
+  # #385. The two named-argument LABEL sites in check_call_arguments_proc_group. Both used to
+  # index split_args.named with a counter that did not track the operand -- one never incremented
+  # at all, one shared with the comma counter -- reproducing C++ faithfully at the time (#156).
+  # Upstream rewrote the lambda; these probes pin the corrected labelling so it cannot drift back.
+  #   nameidx   the "Given argument types:" block -- must print `alpha =` then `beta =`
+  #   nameidx2  the try_addr "Suggestion:" line -- same, with a leading positional and an `&`
+  nameidx nameidx2
+  # #385/#225. The integer-literal exponent branch, one line per rejected form in a.odin and
+  # the accepted contrast set in b.odin. Upstream replaced two GB_ASSERTs (`base == 10`,
+  # `text[i] != '-'`) that ABORTED the compiler with early `success = false` returns, so forms
+  # like `0b1e5` and `0d1e-5` went from "no oracle behaviour to match" to a syntax error. The
+  # port had accepted them silently, which became a real under-rejection the moment the
+  # assertions went away. The predicate lives in TWO places -- the parser's
+  # integer_value_is_valid and the checker's big_int_from_string -- so this probe pins both.
+  intlit
   # #308 tag ORDER. C++ walks a file's tags in source order and stops at the first EXCLUDING one.
   #   bt_order   `#+build windows` then `#+vet bogusname` -- excluded first, so silent
   #   bt_order2  `#+vet bogusname` then `#+build windows` -- vet reported, THEN excluded

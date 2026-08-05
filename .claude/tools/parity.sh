@@ -26,7 +26,22 @@
 # Excluded packages are PRINTED, never silently dropped: an exclusion is an unmeasured package, not
 # a clean one.
 cd /home/kalsprite/dev/odin
-PORT="$1"; LIST="$2"; TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+PORT="${1:-}"; LIST="${2:-}"; TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
+
+# ARGUMENT GUARD (LEDGER #385). Omitting the LIST argument used to make `done < "$LIST"` fail with
+# "No such file or directory", the loop body never run, and the script still print
+#   PARITY-DONE packages=0 compared=0 excluded=0 count_mismatches=0 text_mismatches=0 ...
+# -- three zeroes that read exactly like a clean sweep. That is #380's failure mode (a summariser
+# that cannot tell "nothing was wrong" from "nothing ran") reappearing in a second instrument.
+# Abort loudly instead: a harness that measured nothing must never emit a DONE line.
+if [ -z "$PORT" ] || [ ! -x "$PORT" ]; then
+  echo "PARITY-ABORTED: port binary '$PORT' missing or not executable. usage: parity.sh <PORT_BIN> <PKGLIST>" >&2
+  exit 2
+fi
+if [ -z "$LIST" ] || [ ! -r "$LIST" ]; then
+  echo "PARITY-ABORTED: package list '$LIST' missing or unreadable. usage: parity.sh <PORT_BIN> <PKGLIST>" >&2
+  exit 2
+fi
 
 # CONCURRENCY GUARD (lockfile, not pgrep).
 # Running two full parities at once makes slow packages exceed their per-package timeout, and a

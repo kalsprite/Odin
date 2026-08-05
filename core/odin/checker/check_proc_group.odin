@@ -1170,21 +1170,21 @@ check_call_arguments_single :: proc(
 
 // print_call_argument_types renders C++'s "Given argument types:" block.
 //
-// C++ Reference: check_expr.cpp:7651-7675 (the `print_argument_types` lambda inside
+// C++ Reference: check_expr.cpp:7666-7689 (the `print_argument_types` lambda inside
 // check_call_arguments_proc_group).
 //
-// NOTE(parity): C++ declares `isize i = 0` in that lambda and NEVER increments it, so
-// every named argument is labelled with the FIRST named field's name. That is a bug in
-// C++, but it is reproduced verbatim here: the objective is byte-identical diagnostics,
-// and silently "fixing" it in the port would be a divergence no test could justify.
-// Recorded as an upstream candidate instead.
+// This used to carry an `i := 0` that was never incremented, mirroring a C++ lambda that
+// declared `isize i = 0` and never advanced it -- so every named argument was labelled with
+// the FIRST named field's name. That was correct parity at the time and was filed as #156.
+// Upstream has since rewritten the lambda: the buggy version survives only as a comment
+// block at check_expr.cpp:7636-7664, and the live one iterates with `for_array(i, ...)`,
+// so the index now tracks the operand. The port follows. LEDGER #385.
 print_call_argument_types :: proc(positional_operands: []Operand, named_operands: []Operand, args_split: Split_Args) {
 	error_line("\tGiven argument types:\n")
 	for o in positional_operands {
 		error_line("\t • %s\n", type_to_string(o.type))
 	}
-	i := 0 // NOTE(parity): never incremented, mirroring C++ exactly. See above.
-	for o in named_operands {
+	for o, i in named_operands {
 		type_str := type_to_string(o.type)
 		labelled := false
 		if i < len(args_split.named) {
@@ -1371,15 +1371,20 @@ print_procedure_group_overloads :: proc(
 			error_line("%s", expr)
 			delete(expr)
 		}
-		for o in named_operands {
+		// C++ walks this loop with its OWN index (`for_array(named_idx, named_operands)`,
+		// check_expr.cpp:7847) and uses the shared `i` only to decide the comma. The port used
+		// to index args_split.named with `i`, which was parity with the pre-fix C++ and is now
+		// stale -- same #156 rewrite that retired the never-incremented counter above.
+		// LEDGER #385.
+		for o, named_idx in named_operands {
 			if i > 0 {
 				error_line(", ")
 			}
 			i += 1
 			expr := expr_to_string(o.expr)
 			labelled := false
-			if i < len(args_split.named) {
-				if fv, ok := args_split.named[i].derived.(^ast.Field_Value); ok {
+			if named_idx < len(args_split.named) {
+				if fv, ok := args_split.named[named_idx].derived.(^ast.Field_Value); ok {
 					field := expr_to_string(fv.field)
 					error_line("%s = %s", field, expr)
 					delete(field)

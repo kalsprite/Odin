@@ -7488,3 +7488,89 @@ where those probes ARE measured rather than only that they are not measured here
 
 MEASURED COVERAGE: 176 plain + 4 vet = 180 probes, up from 176, with 8 remaining exclusions --
 all of them either oracle-broken, oracle-nondeterministic, or genuinely open.
+
+## #385 catch-up after the master merge -- ten upstream fixes landed, and the port had gone stale at ten sites
+
+The port is deliberately bug-compatible with C++. That is correct while a C++ bug is live and
+becomes a DEFECT the moment upstream fixes it. Master was merged carrying fixes for ten of the
+fourteen findings written up in UPSTREAM-*.md -- so ten sites in the port were now wrong, each one
+with a comment explaining, persuasively and stalely, why it had to be that way.
+
+REBUILT THE ORACLE FIRST. The tree's ./odin was 19:55, src/types.cpp 20:17, still emitting the old
+"expected 1+ rows". Every comparison run before that rebuild would have measured the old reference
+against the old port and reported agreement.
+
+WHAT WAS STALE, and how each was caught:
+
+  #189 matrix column msg  check_type.odin       "rows" -> "columns"
+  #195 field-list msg     parser.odin           "in not allowed" -> "is not allowed"
+  #187 import name        check_import_export.odin  both C++ branches now share one text
+  #174 definitions header check_proc.odin       BOTH arms, and the two leading spaces are the fix
+  vet flag list           file_tags.odin        upstream added "semicolon"/"deprecated" to the print
+  #156 named-arg labels   check_proc_group.odin TWO sites, neither reached by any probe
+  #225 literal exponent   parser.odin +         TWO sites, neither reached by any probe
+                          exact_value.odin
+
+The first five were caught by corpus/parity. The last two were not -- no probe reached them -- and
+are the whole lesson of this entry.
+
+#174 IS WORTH THE SPACE. LEDGER 334/#185/#201 measured, correctly, that emitting the header
+TRUNCATED the rest of the block, and concluded the truncation was faithful and load-bearing.
+It was. The header began "\n", which puts a BLANK line in the message, and print_errors_standard
+breaks on the first empty line. Upstream's fix is two characters: "  \n". The line is no longer
+empty, so the break never fires, the header appears AND the block survives. C++ even says so at
+check_expr.cpp:7869 -- "extra spaces to prevent newlines being consumed by the error handling
+syste,". A trade-off three ledger entries had reasoned about carefully was dissolved by two spaces.
+
+#225 WAS A REAL UNDER-REJECTION, not a wording drift. C++ used to guard the exponent branch with
+GB_ASSERT(base == 10) and GB_ASSERT(text[i] != '-'), and they FIRED -- `0b1e5` aborted the compiler.
+There was no oracle behaviour to match, so the port chose to accept silently. Upstream replaced both
+with early `success = false` returns. The reference now REJECTS `0b1e5`, `0b1E5`, `0b1e`, `0o1e0`,
+`0z1e1`, `0d1e-5`, `0d1e`, `0d1e+5`, `1e` -- and the port accepted every one of them. Fixed in both
+implementations of the predicate (parser integer_value_is_valid, checker big_int_from_string);
+enumerated the input space from the C++ source rather than guessing, 20 literals, all MATCH.
+
+THE INSTRUMENT DEFECT THIS TURN. Invoking parity.sh without its package-list argument produced:
+
+    parity.sh: line 113: : No such file or directory
+    PARITY-DONE packages=0 compared=0 excluded=0 count_mismatches=0 text_mismatches=0 ...
+
+Three zeroes that read exactly like a clean sweep. `done < "$LIST"` failed, the loop body never ran,
+and the summary printed anyway. That is #380's failure mode -- a summariser that cannot distinguish
+"nothing was wrong" from "nothing ran" -- reappearing in a second instrument, and it is now the
+seventh member of that family (#275, #367, #369, #370, #380, #384, this). Both parity scripts now
+abort with PARITY-ABORTED / PARITY-VET-ABORTED rc=2 on a missing or unreadable PORT or LIST;
+verified by invoking them wrong on purpose.
+
+NEW PROBES, because the two sites the gates missed must not be missable again:
+  nameidx   the "Given argument types:" block -- alpha then beta, not alpha twice
+  nameidx2  the try_addr "Suggestion:" line -- same, with a leading positional and an `&`
+  intlit    the literal-exponent input space, rejected forms in a.odin, accepted set in b.odin
+Both nameidx probes first read FULL-DIFFER on a line the port never emits -- "Undefined entry point
+procedure 'main'". cmpfull.py runs the oracle as `odin build`; the probes had no main. Added one.
+That is the #379 harness mismatch, caught this time before it was written up as a port defect.
+
+UPSTREAM WRITE-UPS RE-VERIFIED RATHER THAN REMEMBERED. Ten moved to upstream-merged/, each confirmed
+by fresh measurement -- crash claims re-run from their recorded inputs, text claims re-grepped at
+their cited lines. #119 is why that mattered: `intrinicss.byte_swap` WAS fixed in
+random_generator_chacha8_simd128.odin and an identical typo survives in
+random_generator_chacha8_ref.odin:26. A status edit made from memory would have closed a live bug.
+Four remain open: #119 (relocated), #263, and the two objc crashes (#161, #285), which are someone
+else's work and were deliberately not re-measured.
+
+GATES, all after the last edit:
+    vet (checker, tests, parser, ast)  0 lines each
+    corpus                             179 FULL-MATCH / 0 FULL-DIFFER / 12 excluded
+    corpus_vet                         4/4
+    parity plain                       224/224 compared, 0 excluded, 0/0/0
+    parity vet                         224/224 compared, 0 excluded, 0/0/0
+    spec suite                         432 tests, 0 failures
+    root suite                         146 tests, 0 failures
+
+One ATTRIB event appeared in an intermediate vet-parity run (core/rexcode/isa/rsp/tools,
+"Redeclaration of 'main'" blamed on a different file). Run alone, oracle and port BOTH say
+gen_mnemonic_builders.odin(72:1), 5/5 each -- the sweep-time oracle picked the other file. That is
+the file-order nondeterminism parity.sh's own header documents, on the ORACLE's side, and it did
+not recur in the final run.
+
+MEASURED COVERAGE: 179 plain + 4 vet = 183 probes, up from 180.
