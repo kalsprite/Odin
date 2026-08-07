@@ -16713,3 +16713,333 @@ treated as undercounts until it is green again.
 
 Both counters remain UNGATED and noisy (#569: spread 2 each), so nothing asserts on them either
 way. This closes the reporting ambiguity without pretending the numbers carry more than they do.
+
+---
+
+## #570 — THIRD merge catch-up: two of our own upstream findings landed, and the ORACLE WAS STALE
+
+`git merge master into checker` (1ad0336cb). Seven src/ files changed; two touch semantic analysis.
+
+### Both changes are OUR OWN upstream reports coming back
+
+    check_expr.cpp:4085   `big_int_cmp(&v, &smax) >= 0`  ->  `> 0`
+                          = #557 exactly, merged as PR #7244 (kalsprite/constant_transmute).
+    big_int.cpp:697       upstream took its own digit_count fix, identical in effect to the LOCAL
+                          INSTRUMENT PATCH we had been carrying for #548. The patch is now
+                          redundant and was dropped when the reference snapshot was refreshed.
+
+PORT FOLLOWED on #557. The port had faithfully reproduced the buggy `>=` -- deliberately, with a
+comment saying so -- because parity with the compiler that EXISTS was the objective. Upstream has
+the fix, so the faithful bound is now `>`.
+
+### THE ORACLE WAS STALE, AND THE FIRST GATE RUN WAS MEASURED AGAINST IT
+
+This is the part worth remembering. After the merge I rebuilt the instrumented reference and ran
+parity: 323/323 0/0/0. Clean. It was also close to meaningless, because ./odin had NOT been
+rebuilt -- mtime 11:17:47 against a merge commit of 12:10:56, i.e. the oracle predated the merge
+by ~53 minutes.
+
+It was caught by a DISCRIMINATING PROBE, not by the sweep:
+
+    V :: transmute(i32)u32(0x7FFFFFFF)   // == smax exactly
+    #assert(V == max(i32))
+
+    fresh port (fixed)              silent
+    ./odin BEFORE rebuild           FAILS      <- oracle still had the bug
+    odin_ref570 (from merged src)   silent     <- so merged SOURCE was fine; the BINARY was stale
+
+Parity could not see it: the corpus contains no transmute at exactly smax. A whole-corpus sweep
+passing tells you nothing about a boundary the corpus never exercises -- and a stale oracle makes
+every such gap invisible rather than red. #49 and #569's lesson in a new place: green from an
+instrument you have not re-validated is not evidence.
+
+Oracle rebuilt from merged source under explicit authorisation (the standing rule forbids running
+build_odin.sh casually because it hardcodes `-o odin`; that rule exists to stop an INSTRUMENTED
+build silently becoming the oracle, which is not this case). Old oracle backed up first;
+checksum moved d902491a -> 3bed1eda; GIT_SHA=1ad0336cb confirms provenance.
+
+### One upstream change we already had right
+
+docs_writer.cpp:268 relaxed `GB_ASSERT(file_index_found != nullptr)` into a fallback, because a
+documented entity may hold a position in a file belonging to an IMPORTED package -- present in
+file_cache only under -all-packages. The port never modelled that assert: docs_writer.odin:1392
+already reads `if file_index, found := w.file_cache[e.file]; found`. Upstream converged onto the
+port's behaviour. No work.
+
+### FULL GATE SET, all against the MERGED reference
+
+    parity         323/323  0/0/0        (fresh oracle)
+    parity_vet     323/323  0/0/0        (vet harness, per #511)
+    corpus         198 members, 0 missing, 12 excluded
+    modelsweep     gated 0/0/0; ungated 137/186/27, all inside #569's measured floor
+    doccmp         10/10 STATE-MATCH
+    depnames       missing=0 port_only=0 req_diff=0 tol_diff=0
+
+### Instrument housekeeping worth recording
+
+Refreshing $S/ref/src by copying live src/ DESTROYED the 37-site -dump-model instrumentation,
+which lives only in the scratchpad copy and is never committed (build_ref.sh's whole design). It
+was recovered properly rather than by hand: `git show <merge>^1:src/main.cpp` gives the pre-merge
+baseline, diffing that against the OLD snapshot yields the instrumentation as a 271-line patch,
+and it applied clean to upstream's new main.cpp. Keep src.old until the rebuild is verified.
+
+---
+
+## #571 — 3,641 C++ citations, an unknown fraction STALE, and the detector is gone
+
+Found while testing mir's #567 argument. I looked up two citations the port makes into
+checker.cpp and BOTH landed in unrelated functions:
+
+    port cites checker.cpp:2359-2363  "the all_procedures enqueue"   -> actually 2557-2560   (+201)
+    port cites checker.cpp:6343-6359  "the recovery drain"           -> actually 6669-6693   (+334)
+
+At :2359 the merged source has `add_type_info_type_internal(c, t_u8_ptr)`. At :6343 it has
+`bool made_visited = false` inside find_entity_path. Neither is what the comment claims.
+
+NOT CAUSED BY TODAY'S MERGE. checker.cpp is not among the seven files this merge touched; it last
+changed 2026-08-04. So the drift accumulated across EARLIER merges and has been sitting there.
+The two offsets differ (+201 vs +334), which is the signature of cumulative insertions rather than
+a single shift -- so a constant correction cannot fix it and each citation must be re-anchored to
+its CONTENT.
+
+SCALE: 3,641 `<file>.cpp:<line>` citations across checker/, ast/ and parser/ --
+
+    checker.cpp 846   check_expr.cpp 761   types.cpp 329   check_builtin.cpp 326
+    check_decl.cpp 315   check_type.cpp 212   parser.cpp 182   build_settings.cpp 107
+    check_stmt.cpp 106   error.cpp 74   ...
+
+WHY THIS MATTERS MORE THAN IT LOOKS. These citations are the port's primary evidence link to the
+reference. Every investigation in this LEDGER begins by reading one and opening the C++ at that
+line. A stale citation does not fail loudly -- it silently shows you the WRONG function, and the
+reader has no signal that anything is off. It misled me TWICE inside this single session: I read
+checker.cpp:2352 and :6338 expecting the enqueue and the recovery pass, got type-info walking and
+path-finding, and only caught it because the content was obviously unrelated. A drift that lands
+on plausible-looking code would not have been caught at all.
+
+#134 audited citations and cleared them ("all 30 remaining citefn suspects now explainable
+artefacts"), so they WERE correct at that point. The tool that did it, citefn.py, is NOT in
+.claude/tools -- it is referenced by commit 16138e9c4 ("teaching citefn.py macro forms") but did
+not survive; most likely lost when .claude was cleaned during the branch switch, alongside the
+LEDGER (which was recovered, the tool was not).
+
+RECOMMENDED ORDER: this outranks both #566 and #567, because both are investigations that begin
+by reading C++ through these citations. Doing either first means doing it on an unreliable map.
+Rebuild citefn.py, measure what fraction is stale, re-anchor by content.
+
+---
+
+## #567 MEASURED, AND MISCHARACTERISED — the safety net loses nothing; its INPUT varies
+
+Filed as "all_procedures is a DEBUG safety-net, not an enumeration -- and it loses ~12% under
+threading", on a figure reported by the mir agent that I never reproduced. mir argued it should be
+sequenced ahead of #566 because a recovery pass walking a short list is an instrument that cannot
+go dirty. Measured properly, that is not what is happening.
+
+### The loss is REAL and BIGGER than filed
+
+    package             -no-threads        threaded            loss
+    core/strings        1575 1575 1575     1342 .. 1406        10.7% .. 14.8%
+    core/math/linalg    2446 x3            2306 .. 2382         2.6% ..  5.7%
+    core/odin/parser    8184 x3            6584 .. 6755        17.5% .. 19.6%
+
+Single-threaded is perfectly stable; threaded varies run to run. So the phenomenon is real, up to
+~1 in 5 on core/odin/parser, and it is threading-driven.
+
+### BUT IT IS NOT A QUEUE DEFECT. My hypothesis was wrong.
+
+The run-to-run variance looked exactly like a lossy concurrent enqueue -- #141 was precisely that
+shape (nested_proc_lits appended without the mutex its readers took). So I instrumented BOTH ends:
+an atomic counter at the enqueue, and the drained length.
+
+    core/strings        -no-threads  enqueued=1575 drained=1575
+                        threaded     enqueued=1318 drained=1318
+                                     enqueued=1422 drained=1422
+                                     enqueued=1393 drained=1393
+    core/odin/parser    -no-threads  enqueued=8184 drained=8184
+                        threaded     enqueued=6655 drained=6655
+                                     enqueued=6784 drained=6784
+                                     enqueued=6656 drained=6656
+
+ENQUEUED == DRAINED IN EVERY RUN. The MPSC queue loses nothing. The recovery pass receives exactly
+what was produced, and recovers from exactly what it received.
+
+The variation is entirely UPSTREAM: under threading, check_procedure_later is CALLED FEWER TIMES.
+Fewer procedures are queued for checking at all -- so there is nothing missing for the net to
+catch.
+
+### What it actually is: a restatement of #468
+
+#468 established that polymorphic instantiation identity varies by winning call site under
+threading. Fewer distinct instantiations -> fewer check_procedure_later calls -> a smaller
+all_procedures. That is the same phenomenon measured from a different end, not a second defect.
+
+And it is diagnostically inert: parity is 323/323 0/0/0 corpus-wide against the merged oracle, so
+whatever instantiation multiplicity differs, the DIAGNOSTICS are identical. Which is what #468
+already said.
+
+### Consequences for sequencing
+
+mir's argument was that #567 might be a correctness finding about the checker's own verification,
+and that this would invert the order against #566. It is not: the verification pass is intact and
+faithful (C++ has the same structure, DEBUG_CHECK_ALL_PROCEDURES is 1 there and true here). So
+#566 keeps its place.
+
+### Consequence for the mir API contract -- THIS part still stands
+
+The advice attached to deleting Entity_Procedure.body was "walk info.all_procedures instead". That
+advice is still wrong for a threaded consumer, but for a different reason than filed: not because
+the list is lossy, but because the SET OF INSTANTIATIONS CHECKED is itself threading-dependent.
+A backend enumerating procedures that way gets a different set per run. Enumerate package scopes,
+as mir already does.
+
+Two corrections recorded: mine (predicted a queue race -- refuted by the enqueue counter) and the
+task title's (the net does not lose anything).
+
+---
+
+## S-004 — asked "did we fix this?"; the crash yes, but a MISSING NOTE LINE was still live
+
+Probe from the S-004 write-up: `Bad: i64 = 1e100`, an out-of-range float assigned to an integer,
+reported as crashing and as capable of poisoning array bounds / bit-field sizes.
+
+NO CRASH in either implementation, and both reject correctly with the right big value -- including
+the array-count form `a: [1e100]int`. Whatever the original crash was, it is gone from both.
+
+BUT AN EXACT DIFF FOUND A LIVE DIVERGENCE, one line:
+
+    ORACLE   Error: Cannot cast '1e100' as 'i64' from 'untyped integer'
+             '1000...' cannot be represented as the type 'i64'
+             The maximum value that can be represented by 'i64' is '9223372036854775807'   <-- port missing
+    PORT     (same, minus the last line)
+
+The ASSIGNMENT form printed both lines; only the CAST form was short.
+
+ROOT CAUSE: C++ calls check_integer_exceed_suggestion from TWO places --
+check_assignment_error_suggestion and check_cast_error_suggestion -- as the final `else if` arm of
+each. The port had the assignment call and not the cast one; its cast chain simply ended one arm
+early, at the string-to-[]u8 case. One arm added, C++'s structure restored.
+
+WHY NO GATE CAUGHT IT: the missing text is a diagnostic CONTINUATION line, and #155 established
+that the comparator cannot see those. Corpus-wide parity was 0/0/0 with this defect live -- and is
+0/0/0 after the fix too, because the gate is blind to the difference either way. It was found only
+by diffing full output on a hand-written probe.
+
+THAT IS THE REUSABLE POINT. #155 is a known measurement limit that has been sitting open, and this
+is the first demonstration of it hiding a REAL defect rather than being a theoretical gap. Every
+"parity 0/0/0" claim in this LEDGER is silent about continuation lines. A comparator extension
+that hashes the full diagnostic block, not just the anchor line, would close it -- and would
+retroactively re-measure everything.
+
+    oracle vs port on the probe: byte-IDENTICAL after the fix
+
+---
+
+## #573 DONE — blockcmp.py closes #155's blind spot, and found 3 packages on its first sweep
+
+parity.sh extracts diagnostics with a grep that keeps ONLY the anchor line, so every tab-indented
+continuation -- source echo, caret, `Suggestion:`, `Note:`, value explanations -- was discarded
+BEFORE comparison. #155 recorded that as a known limit; S-004 proved it hides real defects.
+
+blockcmp.py compares WHOLE BLOCKS: anchor plus everything up to the next anchor, as a sorted
+multiset (matching parity's deliberate choice so pure ordering stays swdiff/flake.sh's job).
+
+### THE POSITIVE CONTROL CAUGHT MY OWN TOOL FIRST
+
+Version 1 reported a clean match on the S-004 probe using the PRE-FIX port -- a false green. Two
+defects, both mine:
+
+  1. I copied parity.sh's `(?<=/odin/)` path lookbehind into the anchor regex. That lookbehind is
+     a display normalisation for IN-REPO packages; the scratchpad probe path has no `/odin/`
+     component, so the regex matched NOTHING and the tool compared two empty lists as equal.
+  2. A stray `out.append_line = None` that would have raised AttributeError on any input that
+     actually had diagnostics -- never reached, because (1) meant the branch never ran.
+
+Both found only because the positive control ran BEFORE the corpus sweep. This is #483 applied to
+my own instrument, and it is the second time in two days that a comparator's first version was
+vacuous (#509 was the first).
+
+    AFTER the fix:  positive (pre-fix port st570)  -> BLOCK-DIFFER, rc=1, diff isolates the exact
+                                                      missing line
+                    negative (post-fix port)       -> match, rc=0
+
+### FIRST FULL SWEEP: 320 match, 3 DIFFER -- and all three are ONE defect
+
+    core/odin/format, core/odin/printer, core/path
+
+    ORACLE  #panic("The format package has been deprecated. Please  ...
+            ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ...
+    PORT    #panic("The format package has been deprecated. Please  ...
+            ^~~~~^
+
+The port anchors the caret to the `#panic(` TOKEN; C++ spans the whole expression, which then
+truncates with a trailing " ...". In core/path the port additionally omits the " ..." truncation
+marker on the echo line itself.
+
+This is #302's family ("error_node passes the parser-recorded end") in a case #302 could not have
+covered -- the anchor-only comparator never compared caret lines, so the whole caret surface has
+been unmeasured across the corpus until now. Filed as #574.
+
+NOT oracle flake: deterministic, identical shape in all three packages. The #197/#341 Suggestion
+nondeterminism the tool's header warns about did NOT appear in this sweep -- worth noting, because
+it means the 3 findings need no majority-vote handling.
+
+    BLOCKCMP-DONE packages=323 block_match=320 block_differ=3
+
+---
+
+## #574 DONE: `#panic` errors anchored on the CALLEE, not the call — and #575 fell out of verifying it
+
+Three errors in the port's `#panic` arm passed `call_expr.expr` where C++ passes `call`. `.expr` is
+the **callee** subexpression; `ast.Call_Expr` has `using node: Expr`, so `call_expr` itself is the
+node C++ means, and `check_builtin_simd.odin` already used `error(call, ...)` that way. The caret
+therefore spanned only `#panic` instead of the whole call, and the width logic that appends the
+trailing `" ..."` truncation marker never saw enough span to fire — which is why `core/path` showed
+*two* symptoms from one defect, not two defects.
+
+Fixed in `core/odin/checker/check_builtin.odin`, three sites:
+`"'#panic' expects 1 argument, got %d"`, `"'%s' is not a constant string"`, `"Compile time panic: %s"`.
+
+A pre-existing comment at the site read *"C++ also errors at the CALL, not at its closing paren"* —
+right intent, wrong node. Rewritten to name the callee-vs-call distinction, since the old wording
+would not have stopped anyone re-introducing `.expr`.
+
+**Verification.** Three affected packages `block_match=3 block_differ=0`; positive control on the
+pre-fix binary `block_match=0 block_differ=3`; anchor parity `323/323, 0/0/0`. The `core/path`
+truncation marker is gone with the caret fix, confirming the single-defect reading.
+
+**Full-corpus sweep: `block_match=321 block_differ=2`** — the original 3 fixed, and TWO NEW packages
+appeared that had been clean in the first sweep (`core/rexcode/isa/mips/tools`,
+`core/rexcode/isa/mos65816/tools`). Not a regression: both are `Redeclaration of 'main'` blocks
+where the anchor and the `at` continuation are SWAPPED between the two compilers. Re-ran the pair
+6/6 clean. Root-caused rather than waved off — see #575.
+
+**Correction to #573's entry.** It closed with "the #197/#341 Suggestion nondeterminism ... did NOT
+appear in this sweep". True of that sweep, and I let it read as a property of the tool. The very
+next sweep produced flake — and *not* on a Suggestion line, which is the form the note anticipated.
+blockcmp's header now says to re-run ANY single-package difference, not only Suggestion-only ones.
+
+## #575 FILED UPSTREAM: `redeclaration_error` anchors on whichever file won a race
+
+`src/checker.cpp:2027`. The emitter anchors on `prev->token` — the entity **already in the scope** —
+and names the incoming one via `token_pos_to_string(pos)`. So the anchor is decided by *collection
+order*, and file-scope collection runs concurrently.
+
+| configuration | runs | result |
+|---|---|---|
+| oracle, threaded | 30 | 28 `gen_mnemonic_builders`, **2 `dump_verify_input`** |
+| oracle, `-thread-count:1` | 20 | 20 `gen_mnemonic_builders`, 0 flips |
+| port, threaded | 30 | 30 `gen_mnemonic_builders`, 0 flips |
+
+The single-threaded column is the control that places the cause in concurrent collection rather than
+hash order or ASLR; the port column shows it is not a property of the shared algorithm — the port
+orders its scope insertions and has no race to lose. The *symptom* is reproduced; the *mechanism* is
+inferred from the emitter's source, not instrumented, and the write-up says so.
+
+Suggested fix uses only APIs verified to exist: order the two positions with `operator<` on
+`TokenPos` (`tokenizer.cpp:225`) and emit through the `error(TokenPos, ...)` overload
+(`error.cpp:756`), anchoring on the earlier declaration. The `using` branch at `:2036-2047` needs the
+same treatment. `UPSTREAM-575-*.md`, registered in `UPSTREAM-STATUS.md`.
+
+**Port change: none.** The port is already the deterministic side. This is one more member of the
+#197/#341 class where port-vs-oracle cannot converge because the oracle has no single answer — but
+unlike its predecessors it has a named site, a clean control and a two-line fix.
