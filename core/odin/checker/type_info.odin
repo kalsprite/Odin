@@ -7,8 +7,8 @@ This module implements the type information system that powers `type_info_of()`
 and `typeid_of()` builtins. It generates compile-time type metadata tables for
 runtime reflection.
 
-C++ Reference: /mnt/c/odin/src/checker.cpp:3253-3395
-               /mnt/c/odin/src/checker.cpp:2085-2335
+C++ Reference: checker.cpp:3253-3395
+               checker.cpp:2085-2335
 
 */
 
@@ -19,11 +19,11 @@ import "core:sync"
 
 // ======================================================================================
 // INITIALIZATION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3253-3388
+// C++ Reference: checker.cpp:3253-3388
 // ======================================================================================
 
 // init_core_type_info initializes the RTTI system
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3253-3319
+// C++ Reference: checker.cpp:3253-3319
 //
 // This function:
 // 1. Looks up Type_Info struct from core:runtime
@@ -130,11 +130,11 @@ init_core_type_info :: proc(c: ^Checker) {
 
 // ======================================================================================
 // DEPENDENCY TRACKING
-// C++ Reference: /mnt/c/odin/src/checker.cpp:871-884, 2085-2335
+// C++ Reference: checker.cpp:871-884, 2085-2335
 // ======================================================================================
 
 // add_type_info_dependency tracks that a declaration depends on a type's RTTI
-// C++ Reference: /mnt/c/odin/src/checker.cpp:871-884
+// C++ Reference: checker.cpp:871-884
 //
 // This is used to track which types need RTTI generation. When a type is used
 // in type_info_of() or typeid_of(), we record that dependency for later codegen.
@@ -177,7 +177,7 @@ add_type_info_dependency :: proc(info: ^Checker_Info, decl: ^Decl_Info, t: ^Type
 }
 
 // add_type_info_type registers a type for RTTI generation
-// C++ Reference: /mnt/c/odin/src/checker.cpp:2086-2102
+// C++ Reference: checker.cpp:2086-2102
 //
 // This is the public entry point for type registration. It:
 // 1. Validates the type is eligible for RTTI
@@ -217,7 +217,11 @@ add_type_info_type :: proc(ctx: ^Checker_Context, t: ^Type) {
 }
 
 // add_comparison_procedures_for_fields adds runtime dependencies for comparison operations
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:2853-2909
+// C++ Reference: check_expr.cpp:3109-3169
+//
+// Called from THREE places in C++: its own Struct recursion (3164), check_comparison's accepted
+// branch (3278) and add_type_info_type_internal's Struct arm (checker.cpp:2483). All three are
+// wired here; the check_comparison one was missing until #547 PART 5.
 //
 // This function registers runtime procedure dependencies for types that require
 // special comparison procedures (complex, quaternion, string types). When a type
@@ -290,7 +294,7 @@ add_comparison_procedures_for_fields_checker :: proc(c: ^Checker, t: ^Type) {
 }
 
 // add_type_info_type_internal recursively registers types and their dependencies
-// C++ Reference: /mnt/c/odin/src/checker.cpp:2104-2335
+// C++ Reference: checker.cpp:2104-2335
 //
 // This function:
 // 1. Records the type dependency for the current declaration
@@ -301,258 +305,25 @@ add_type_info_type_internal :: proc(ctx: ^Checker_Context, t: ^Type) {
 		return
 	}
 
-	// Check if type has already been processed to avoid infinite recursion
-	// This can happen with cyclic type references (e.g., union containing a procedure
-	// that takes the union as a parameter)
-	if ctx.decl != nil {
-		if t in ctx.decl.type_info_deps {
-			return // Already processed this type
-		}
-	}
-
-	// Record dependency for current declaration (C++ line 2109)
 	add_type_info_dependency(ctx.info, ctx.decl, t)
 
-	// The C++ version has a disabled type_info_map tracking block (C++ line 2110-2147)
-	// We skip this #if 0 block as it's not active in the reference
-
-	// Process nested types based on kind (C++ line 2148-2334)
-
-	// Handle named types - register base type (C++ line 2151-2155)
-	if t.kind == .Named {
-		named := t.variant.(Type_Named)
-		add_type_info_type_internal(ctx, named.base)
-		return
-	}
-
-	// Get base type and register it (C++ line 2157-2158)
-	bt := base_type(t)
-	// Avoid infinite recursion if base_type returns the same type
-	// This happens for types that are already base types (Enum, Basic, etc.)
-	if bt != t && bt != nil {
-		add_type_info_type_internal(ctx, bt)
-	}
-
-	// Recursively register nested types based on base type kind
-	#partial switch bt.kind {
-	case .Invalid:
-	// Nothing to do
-
-	case .Basic:
-		// Register component types for composite basics (C++ line 2163-2195)
-		basic := bt.variant.(Type_Basic)
-		#partial switch basic.kind {
-		case .Cstring:
-			// cstring is implemented as ^u8 (C++ line 2165-2167)
-			add_type_info_type_internal(ctx, t_u8_ptr)
-
-		case .String:
-			// string is {^u8, int} (C++ line 2168-2171)
-			add_type_info_type_internal(ctx, t_u8_ptr)
-			add_type_info_type_internal(ctx, t_int)
-
-		case .Any:
-			// any is {^Type_Info, rawptr} (C++ line 2172-2175)
-			add_type_info_type_internal(ctx, t_type_info_ptr)
-			add_type_info_type_internal(ctx, t_rawptr)
-
-		case .Typeid:
-		// typeid is a basic type, no dependencies
-
-		case .Complex64:
-			// complex64 is {float32, float32} (C++ line 2179-2182)
-			add_type_info_type_internal(ctx, t_type_info_float)
-			add_type_info_type_internal(ctx, t_f32)
-
-		case .Complex128:
-			// complex128 is {float64, float64} (C++ line 2183-2186)
-			add_type_info_type_internal(ctx, t_type_info_float)
-			add_type_info_type_internal(ctx, t_f64)
-
-		// Note: Quaternion types would be here in full implementation
-		// case .Quaternion128, .Quaternion256: ...
-		}
-
-	case .Bit_Set:
-		// Register element and underlying types (C++ line 2198-2201)
-		bs := bt.variant.(Type_Bit_Set)
-		add_type_info_type_internal(ctx, bs.elem)
-		add_type_info_type_internal(ctx, bs.underlying)
-
-	case .Pointer:
-		// Register pointer element type (C++ line 2203-2205)
-		pointer := bt.variant.(Type_Pointer)
-		add_type_info_type_internal(ctx, pointer.elem)
-
-	case .Multi_Pointer:
-		// Register multi-pointer element type (C++ line 2207-2209)
-		multi_ptr := bt.variant.(Type_Multi_Pointer)
-		add_type_info_type_internal(ctx, multi_ptr.elem)
-
-	case .Array:
-		// Register array element and pointer type (C++ line 2211-2215)
-		array := bt.variant.(Type_Array)
-		add_type_info_type_internal(ctx, array.elem)
-		add_type_info_type_internal(ctx, alloc_type_pointer(array.elem))
-		add_type_info_type_internal(ctx, t_int)
-
-	case .Enumerated_Array:
-		// Register enumerated array types (C++ line 2217-2222)
-		enum_array := bt.variant.(Type_Enumerated_Array)
-		add_type_info_type_internal(ctx, enum_array.index)
-		add_type_info_type_internal(ctx, t_int)
-		add_type_info_type_internal(ctx, enum_array.elem)
-		add_type_info_type_internal(ctx, alloc_type_pointer(enum_array.elem))
-
-	case .Dynamic_Array:
-		// Register dynamic array element and allocator (C++ line 2224-2229)
-		dyn_array := bt.variant.(Type_Dynamic_Array)
-		add_type_info_type_internal(ctx, dyn_array.elem)
-		add_type_info_type_internal(ctx, alloc_type_pointer(dyn_array.elem))
-		add_type_info_type_internal(ctx, t_int)
-		add_type_info_type_internal(ctx, t_allocator)
-
-	case .Slice:
-		// Register slice element type (C++ line 2230-2234)
-		slice := bt.variant.(Type_Slice)
-		add_type_info_type_internal(ctx, slice.elem)
-		add_type_info_type_internal(ctx, alloc_type_pointer(slice.elem))
-		add_type_info_type_internal(ctx, t_int)
-
-	case .Enum:
-		// Register enum base type (C++ line 2236-2238)
-		enum_type := bt.variant.(Type_Enum)
-		add_type_info_type_internal(ctx, enum_type.base_type)
-
-	case .Union:
-		// Register union tag and variant types (C++ line 2240-2256)
-		union_type := bt.variant.(Type_Union)
-
-		// Register tag type (C++ line 2241-2245)
-		if union_tag_size(bt) > 0 {
-			add_type_info_type_internal(ctx, union_tag_type(bt))
-		} else {
-			add_type_info_type_internal(ctx, t_type_info_ptr)
-		}
-
-		// Register polymorphic params (C++ line 2246)
-		if union_type.polymorphic_params != nil {
-			add_type_info_type_internal(ctx, union_type.polymorphic_params)
-		}
-
-		// Register all variant types (C++ line 2247-2249)
-		for variant in union_type.variants {
-			add_type_info_type_internal(ctx, variant)
-		}
-
-		// Register scope entities (C++ line 2250-2255)
-		if union_type.scope != nil {
-			for _, e in union_type.scope.elements {
-				add_type_info_type_internal(ctx, e.type)
-			}
-		}
-
-	case .Struct:
-		// Register struct field types (C++ line 2258-2286)
-		struct_type_ptr := &bt.variant.(Type_Struct)
-
-		// Wait for struct fields to be computed (C++ line 2259-2260)
-		// In parallel type checking, we need to ensure struct fields are fully computed
-		// before accessing them. The wait_group_wait blocks until fields are ready.
-		// C++ Reference: if (bt->Struct.fields_wait_signal.futex.load() == 0) return;
-		sync.wait_group_wait(&struct_type_ptr.fields_wait_signal)
-
-		// Dereference for convenience after waiting
-		struct_type := struct_type_ptr^
-
-		// Register scope entities for SOA types (C++ line 2261-2277)
-		if struct_type.scope != nil {
-			for _, e in struct_type.scope.elements {
-				#partial switch struct_type.soa_kind {
-				case .Dynamic:
-					// StructSoa_Dynamic (C++ line 2265-2266)
-					add_type_info_type_internal(ctx, t_allocator)
-					fallthrough
-				case .Fixed, .Slice:
-					// StructSoa_Fixed, StructSoa_Slice (C++ line 2268-2270)
-					add_type_info_type_internal(ctx, alloc_type_pointer(e.type))
-				case .None:
-					// StructSoa_None (default case, C++ line 2272-2273)
-					add_type_info_type_internal(ctx, e.type)
-				}
-			}
-		}
-
-		// Register polymorphic params (C++ line 2278)
-		if struct_type.polymorphic_params != nil {
-			add_type_info_type_internal(ctx, struct_type.polymorphic_params)
-		}
-
-		// Register field types (C++ line 2279-2284)
-		for field in struct_type.fields {
-			if field != nil && field.type != nil {
-				add_type_info_type_internal(ctx, field.type)
-			}
-		}
-
-		// Register comparison procedure dependencies (C++ line 2285)
-		add_comparison_procedures_for_fields(ctx, bt)
-
-	case .Map:
-		// Register map key, value, and allocator types (C++ line 2288-2294)
-		map_type := bt.variant.(Type_Map)
-		init_map_internal_types(bt)
-		add_type_info_type_internal(ctx, map_type.key)
-		add_type_info_type_internal(ctx, map_type.value)
-		add_type_info_type_internal(ctx, t_uintptr) // hash value
-		add_type_info_type_internal(ctx, t_allocator)
-
-	case .Tuple:
-		// Register tuple element types (C++ line 2296-2301)
-		tuple := bt.variant.(Type_Tuple)
-		for v in tuple.variables {
-			if v != nil {
-				add_type_info_type_internal(ctx, v.type)
-			}
-		}
-
-	case .Proc:
-		// Register procedure params and results (C++ line 2303-2306)
-		proc_type := bt.variant.(Type_Proc)
-		add_type_info_type_internal(ctx, proc_type.params)
-		add_type_info_type_internal(ctx, proc_type.results)
-
-	case .Simd_Vector:
-		// Register SIMD element type (C++ line 2308-2310)
-		simd := bt.variant.(Type_Simd_Vector)
-		add_type_info_type_internal(ctx, simd.elem)
-
-	case .Matrix:
-		// Register matrix element type (C++ line 2312-2314)
-		mat := bt.variant.(Type_Matrix)
-		add_type_info_type_internal(ctx, mat.elem)
-
-	case .Soa_Pointer:
-		// Register SOA pointer element type (C++ line 2316-2318)
-		soa_ptr := bt.variant.(Type_Soa_Pointer)
-		add_type_info_type_internal(ctx, soa_ptr.elem)
-
-	case .Bit_Field:
-		// Register bit field backing type and field types (C++ line 2320-2325)
-		bf := bt.variant.(Type_Bit_Field)
-		add_type_info_type_internal(ctx, bf.backing_type)
-		for field in bf.fields {
-			add_type_info_type_internal(ctx, field.type)
-		}
-
-	case .Generic:
-	// Generic types don't have RTTI (C++ line 2327-2328)
-	// Nothing to do
-
-	case:
-		// Unhandled type kind (C++ line 2330-2332)
-		panic(fmt.tprintf("add_type_info_type_internal: unhandled type kind: %v", bt.kind))
-	}
+	// THAT IS THE WHOLE LIVE FUNCTION. C++ Reference: checker.cpp:2297-2533.
+	//
+	// C++ opens `#if 0` on the line AFTER add_type_info_dependency (checker.cpp:2303) and closes
+	// it at :2532 -- the `#endif` is the last line before the function's closing brace. So the
+	// type_info_set update, the type_info_map lookup, the entire per-kind recursive walk over
+	// Named/Pointer/Slice/.../Generic, and the trailing default GB_PANIC are ALL DEAD.
+	//
+	// The port previously implemented 269 lines here. Its own comment records the misreading:
+	// it took the `#if 0` to cover only the map block and then ported the walk that follows as
+	// though it were live. It also added an early return on `t in ctx.decl.type_info_deps`
+	// ("avoid infinite recursion") which has no counterpart in the live C++ at all -- an
+	// invention needed only to make the dead recursion terminate.
+	//
+	// Consequence of the old code: every nested type reachable from `t` got a type-info
+	// dependency C++ never registers. Deleting it is what makes the port faithful, not a
+	// simplification. #23 (BAD ENUM VALUE / use-after-free in this function) was a crash inside
+	// code that should never have existed.
 }
 
 // ======================================================================================
@@ -593,7 +364,7 @@ set_package_scope :: proc(info: ^Checker_Info, pkg: ^ast.Package, scope: ^Scope)
 }
 
 // find_core_entity looks up an entity from core:runtime package
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3161-3169
+// C++ Reference: checker.cpp:3161-3169
 // Returns nil if runtime package is not loaded (e.g., in tests without runtime)
 find_core_entity :: proc(c: ^Checker, name: string) -> ^Entity {
 	// Get runtime package (C++ line 3162)
@@ -622,7 +393,7 @@ find_core_entity :: proc(c: ^Checker, name: string) -> ^Entity {
 }
 
 // find_core_type looks up a type from core:runtime package and ensures it's checked
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3171-3183
+// C++ Reference: checker.cpp:3171-3183
 // Returns nil if runtime package is not loaded or entity not found
 find_core_type :: proc(c: ^Checker, name: string) -> ^Type {
 	// Look up entity from runtime package (C++ line 3172)
@@ -642,7 +413,7 @@ find_core_type :: proc(c: ^Checker, name: string) -> ^Type {
 }
 
 // find_intrinsics_entity looks up an entity from base:intrinsics package
-// C++ Reference: /mnt/c/odin/src/checker.cpp (similar to find_core_entity)
+// C++ Reference: checker.cpp (similar to find_core_entity)
 find_intrinsics_entity :: proc(c: ^Checker, name: string) -> ^Entity {
 	// Get intrinsics package
 	intrinsics_pkg := c.info.intrinsics_package
@@ -660,7 +431,7 @@ find_intrinsics_entity :: proc(c: ^Checker, name: string) -> ^Entity {
 }
 
 // find_intrinsics_type looks up a type from base:intrinsics package and ensures it's checked
-// C++ Reference: /mnt/c/odin/src/checker.cpp (similar to find_core_type)
+// C++ Reference: checker.cpp (similar to find_core_type)
 find_intrinsics_type :: proc(c: ^Checker, name: string) -> ^Type {
 	e := find_intrinsics_entity(c, name)
 	if e == nil {
@@ -716,7 +487,7 @@ init_c_va_list_types :: proc(c: ^Checker) {
 }
 
 // check_single_global_entity ensures a global entity is fully checked
-// C++ Reference: /mnt/c/odin/src/checker.cpp:4938-4969
+// C++ Reference: checker.cpp:4938-4969
 //
 // This function validates and type-checks a single global entity.
 // Used for on-demand checking of entities from core:runtime during RTTI initialization.
@@ -774,11 +545,11 @@ check_single_global_entity :: proc(c: ^Checker, e: ^Entity, d: ^Decl_Info) {
 
 // ======================================================================================
 // MINIMUM DEPENDENCY TYPE INFO TRACKING
-// C++ Reference: /mnt/c/odin/src/checker.cpp:2378-2600
+// C++ Reference: checker.cpp:2378-2600
 // ======================================================================================
 
 // add_min_dep_type_info registers a type for minimum dependency RTTI generation
-// C++ Reference: /mnt/c/odin/src/checker.cpp:2378-2600
+// C++ Reference: checker.cpp:2378-2600
 //
 // This function tracks the minimal set of types that actually need RTTI in the final binary.
 // Unlike add_type_info_type_internal which tracks per-declaration dependencies,
@@ -991,8 +762,11 @@ add_min_dep_type_info :: proc(c: ^Checker, t: ^Type) {
 			add_min_dep_type_info(c, field.type)
 		}
 
-		// Register comparison procedure dependencies (C++ line 2537-2538)
-		add_comparison_procedures_for_fields(c, bt)
+		// NO comparison-procedure registration here either, and this one was INVENTED outright:
+		// the cited "C++ line 2537-2538" is not in add_min_dep_type_info at all (that function
+		// starts at checker.cpp:2576) -- it points into the `#if 0` block of a DIFFERENT
+		// function. The live add_min_dep_type_info Struct arm registers field types and
+		// polymorphic params and stops. Removed in #547 PART 5; same over-marking as above.
 
 	case .Map:
 		// Register map key, value, and allocator types (C++ lines 2542-2548)
@@ -1047,7 +821,7 @@ add_min_dep_type_info :: proc(c: ^Checker, t: ^Type) {
 
 // ======================================================================================
 // TYPE INFO FLAGS
-// C++ Reference: /mnt/c/odin/src/types.cpp:400-414
+// C++ Reference: types.cpp:400-414
 // ======================================================================================
 
 // Type_Info_Flag represents runtime type info flags
@@ -1061,7 +835,7 @@ Type_Info_Flag :: enum u32 {
 Type_Info_Flags :: bit_set[Type_Info_Flag;u32]
 
 // type_info_flags_of_type computes the runtime type info flags for a type
-// C++ Reference: /mnt/c/odin/src/types.cpp:404-414
+// C++ Reference: types.cpp:404-414
 //
 // Returns flags indicating type capabilities:
 // - Comparable: Type supports == and != operators
@@ -1093,11 +867,11 @@ type_info_flags_of_type :: proc(t: ^Type) -> Type_Info_Flags {
 
 // ======================================================================================
 // TYPE INFO INDEX LOOKUP
-// C++ Reference: /mnt/c/odin/src/checker.cpp:1726-1752
+// C++ Reference: checker.cpp:1726-1752
 // ======================================================================================
 
 // type_info_index returns the index of a type in the final type info table
-// C++ Reference: /mnt/c/odin/src/checker.cpp:1726-1752
+// C++ Reference: checker.cpp:1726-1752
 //
 // This function looks up the index of a type in the minimum dependency type info set.
 // The index is used for:
@@ -1134,7 +908,7 @@ type_info_index_pair :: proc(info: ^Checker_Info, pair: Type_Info_Pair, error_on
 }
 
 // type_info_index returns the index of a type in the final type info table
-// C++ Reference: /mnt/c/odin/src/checker.cpp:1744-1752
+// C++ Reference: checker.cpp:1744-1752
 //
 // Convenience wrapper that computes the canonical hash and calls type_info_index_pair
 type_info_index :: proc(info: ^Checker_Info, t: ^Type, error_on_failure: bool) -> i64 {
@@ -1155,11 +929,11 @@ type_info_index :: proc(info: ^Checker_Info, t: ^Type, error_on_failure: bool) -
 
 // ====================================================================================
 // TYPE INFO SORTING AND COMPARISON
-// C++ Reference: /mnt/c/odin/src/name_canonicalization.cpp:3-10
+// C++ Reference: name_canonicalization.cpp:3-10
 // ======================================================================================
 
 // type_info_pair_cmp compares two Type_Info_Pair values by their hash
-// C++ Reference: /mnt/c/odin/src/name_canonicalization.cpp:3-10
+// C++ Reference: name_canonicalization.cpp:3-10
 //
 // This comparison function is used to sort the type info array by hash value.
 // The sorted array enables efficient lookup and collision detection.
@@ -1181,11 +955,11 @@ type_info_pair_cmp :: proc(x, y: Type_Info_Pair) -> int {
 
 // ======================================================================================
 // TYPE INFO FINALIZATION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:7467-7517
+// C++ Reference: checker.cpp:7467-7517
 // ======================================================================================
 
 // finalize_minimum_dependency_type_info builds the final type info index
-// C++ Reference: /mnt/c/odin/src/checker.cpp:7467-7517
+// C++ Reference: checker.cpp:7467-7517
 //
 // This function is called after type checking completes. It:
 // 1. Extracts all types from min_dep_type_info_set
@@ -1272,11 +1046,11 @@ finalize_minimum_dependency_type_info :: proc(c: ^Checker) {
 
 // ======================================================================================
 // TYPE INFO COLLECTION FOR DEFINITIONS
-// C++ Reference: /mnt/c/odin/src/checker.cpp:7136-7151
+// C++ Reference: checker.cpp:7136-7151
 // ======================================================================================
 
 // add_type_info_for_type_definitions registers RTTI for all defined types
-// C++ Reference: /mnt/c/odin/src/checker.cpp:7136-7151
+// C++ Reference: checker.cpp:7136-7151
 //
 // This function is called after type checking to collect all type definitions
 // that need RTTI. A type definition needs RTTI if:
@@ -1317,4 +1091,4 @@ add_type_info_for_type_definitions :: proc(c: ^Checker) {
 
 // NOTE: type_hash_canonical_type and type_to_canonical_string are implemented
 // in name_canonicalization.odin.
-// C++ Reference: /mnt/c/odin/src/name_canonicalization.cpp:372-399
+// C++ Reference: name_canonicalization.cpp:372-399

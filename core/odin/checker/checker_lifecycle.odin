@@ -464,7 +464,7 @@ add_global_bool_constant :: proc(scope: ^Scope, name: string, value: bool, alloc
 // the name visible (intrinsics.Atomic_Memory_Order) insert the returned entity themselves.
 @(private = "file")
 // add_global_type_name creates a named type entity and registers it in `scope`.
-// C++ Reference: /mnt/c/odin/src/checker.cpp `add_global_type_name`.
+// C++ Reference: checker.cpp `add_global_type_name`.
 add_global_type_name :: proc(scope: ^Scope, name: string, base: ^Type, alloc: mem.Allocator) -> ^Type {
 	entity := alloc_entity_type_name(scope, make_token_ident(name), nil, .Resolved, alloc)
 	named_type := alloc_type_named(name, base, entity)
@@ -476,7 +476,7 @@ add_global_type_name :: proc(scope: ^Scope, name: string, base: ^Type, alloc: me
 }
 
 // init_objc_intrinsics_types synthesises the Objective-C opaque types and registers them.
-// C++ Reference: /mnt/c/odin/src/checker.cpp:1513-1525. Same reasoning as
+// C++ Reference: checker.cpp:1513-1525. Same reasoning as
 // init_c_va_list_type: base:intrinsics is never parsed, so these must be synthesised rather
 // than looked up. They are opaque — no field of them is ever named by user code — so an
 // empty struct is the whole definition, exactly as in C++.
@@ -504,7 +504,7 @@ init_objc_intrinsics_types :: proc(intrinsics_scope: ^Scope, alloc: mem.Allocato
 
 // init_c_va_list_type synthesises `intrinsics.c_va_list` and registers it.
 //
-// C++ Reference: /mnt/c/odin/src/checker.cpp:1528-1591. C++ builds this struct itself in
+// C++ Reference: checker.cpp:1528-1591. C++ builds this struct itself in
 // init_universal and registers it into the intrinsics package's scope, because
 // base:intrinsics is a RESERVED package whose source is never parsed.
 //
@@ -1275,7 +1275,7 @@ populate_builtin_package_scope :: proc(info: ^Checker_Info, allocator := context
 			continue
 		}
 
-		entity := alloc_entity_builtin(proc_info.name, id, proc_info.pkg, allocator)
+		entity := alloc_entity_builtin(proc_info.name, id, allocator)
 		entity.state = .Resolved
 
 		// Add to appropriate scope based on package
@@ -1290,7 +1290,7 @@ populate_builtin_package_scope :: proc(info: ^Checker_Info, allocator := context
 	// builtin entity with the same id.
 	// C++ Reference: checker.cpp:1510-1516
 	{
-		entity := alloc_entity_builtin("expand_to_tuple", .Expand_Values, .Builtin, allocator)
+		entity := alloc_entity_builtin("expand_to_tuple", .Expand_Values, allocator)
 		entity.state = .Resolved
 		scope_insert(builtin_scope, entity)
 	}

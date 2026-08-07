@@ -4,6 +4,8 @@ package odin_parser
 import "core:odin/ast"
 import "core:odin/tokenizer"
 
+import "base:runtime"
+
 import "core:fmt"
 import "core:strconv"
 
@@ -25,6 +27,23 @@ Error_Line_Handler :: #type proc(fmt: string, args: ..any)
 // immediately, so WITHOUT this bracket a parse-stage Suggestion fell through to a direct
 // stderr write and came out ahead of everything else, unsorted. LEDGER #307.
 Error_Block_Handler :: #type proc()
+
+// Expr_To_String_Handler renders a parsed expression back to source-like text, for the parser
+// diagnostics whose Suggestion quotes the user's own expression back at them.
+//
+// C++ Reference: expr_to_string, defined in src/check_expr.cpp and called freely from
+// src/parser.cpp -- C++ is one translation unit set, so the parser can reach the checker's
+// printer directly. The port cannot: `core:odin/parser` must not depend on `core:odin/checker`,
+// and the checker's write_expr_to_string is genuinely checker-coupled (its array-length and
+// type-assertion arms call check_expr, type_to_string, base_type and are_types_identical).
+//
+// So this follows the same injection the package already uses for `err`, `err_line` and
+// `err_range`: the driver installs the real printer, and the parser calls through the hook. It
+// is NOT a second, simplified printer -- there is exactly one expr_to_string in the port.
+//
+// Left nil, the Suggestion degrades to the Note branch (see the "define" arm). Every existing
+// standalone consumer of this package gets that, which is the same bargain err_line struck.
+Expr_To_String_Handler :: #type proc(expr: ^ast.Node, allocator: runtime.Allocator) -> string
 
 // Error_Range_Handler reports a diagnostic that SPANS a node, so the caret can underline the
 // whole construct rather than marking a single column.
@@ -66,6 +85,7 @@ Parser :: struct {
 	err_block_begin: Error_Block_Handler,
 	err_block_end:   Error_Block_Handler,
 	err_range:       Error_Range_Handler, // LEDGER #322
+	expr_str:        Expr_To_String_Handler, // LEDGER #390
 
 	prev_tok: tokenizer.Token,
 	curr_tok: tokenizer.Token,
@@ -139,6 +159,28 @@ error :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: ..any) {
 		p.err(pos, msg, ..args)
 	}
 	p.file.syntax_error_count += 1
+	p.error_count += 1
+}
+
+// error_no_file_count reports a diagnostic WITHOUT bumping the file's syntax_error_count.
+//
+// C++ Reference: error.cpp:773 `syntax_error(Token const &, ...)`. That overload takes no AstFile,
+// so it CANNOT touch f->error_count -- it only bumps the global collector (syntax_error_va,
+// error.cpp:638). Only parser.cpp's file-aware helpers increment the per-file count.
+//
+// That distinction is load-bearing, not incidental. parse_package gates the entire declaration
+// loop on `f->error_count == 0` (parser.cpp:6932), and the port has the same guard at
+// parser.odin:307. So an error raised through the file-UNAWARE form leaves the body parseable,
+// and one raised through the file-aware form suppresses the whole file.
+//
+// Measured, `package builtin` followed by a bare `typeid`: the oracle reports BOTH the reserved
+// name and "Expected a statement, got 'typeid'"; the port reported only the first, because its
+// package-name error went through the counting `error`. On base/builtin that was oracle 15 vs
+// port 1. LEDGER #388.
+error_no_file_count :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: ..any) {
+	if p.err != nil {
+		p.err(pos, msg, ..args)
+	}
 	p.error_count += 1
 }
 
@@ -286,10 +328,14 @@ parse_file :: proc(p: ^Parser, file: ^ast.File) -> bool {
 	pkg_name := expect_token_after(p, .Ident, "package")
 	if pkg_name.kind == .Ident {
 		switch name := pkg_name.text; {
+		// error_no_file_count, NOT error: C++ raises both of these through the file-unaware
+		// syntax_error(Token) overload (parser.cpp:6909/6911/6913 -> error.cpp:773), which cannot
+		// bump f->error_count. The decl loop below is gated on that count, so counting these here
+		// suppressed the entire file body. See error_no_file_count's note. LEDGER #388.
 		case is_blank_ident(name):
-			error(p, pkg_name.pos, "Invalid package name '_'")
+			error_no_file_count(p, pkg_name.pos, "Invalid package name '_'")
 		case is_package_name_reserved(name), file.pkg != nil && file.pkg.kind != .Runtime && name == "runtime":
-			error(p, pkg_name.pos, "Use of reserved package name '%s'", name)
+			error_no_file_count(p, pkg_name.pos, "Use of reserved package name '%s'", name)
 		}
 	}
 	p.file.pkg_name = pkg_name.text
@@ -1023,7 +1069,28 @@ fix_advance_to_next_stmt :: proc(p: ^Parser) {
 				p.fix_count += 1
 				return
 			}
-			if t.pos.offset < p.fix_prev_pos.offset {
+			// C++ Reference: parser.cpp fix_advance_to_next_stmt --
+			//     if (f->fix_prev_pos < t.pos) {
+			//         f->fix_prev_pos = t.pos;
+			//         f->fix_count = 0; // NOTE(bill): Reset
+			//         return;
+			//     }
+			//
+			// The comparison was INVERTED here: the port asked whether the token had moved
+			// BACKWARD (t < prev), C++ asks whether it has moved FORWARD past the last fix
+			// point (prev < t). Forward is the normal case -- it is what "we have recovered to
+			// a new statement boundary" means -- so C++ stops and lets parse_stmt handle the
+			// token, while the port fell out of the switch into advance_token and SKIPPED it.
+			//
+			// That silently ate any statement-start token recovery landed on. Measured on
+			// `soa_zip :: proc(slices: ...) -> #soa[]Struct ---` (base/builtin.odin:349): the
+			// oracle recovers onto `#soa` and reports "Unknown tag directive used: 'soa'",
+			// the port skipped straight past it. LEDGER #401.
+			//
+			// Offsets rather than whole positions: fix_prev_pos is per-Parser and a Parser
+			// handles one file at a time, so the file component cannot differ. C++ compares
+			// TokenPos, whose operator< orders by file first for the same reason.
+			if p.fix_prev_pos.offset < t.pos.offset {
 				p.fix_prev_pos = t.pos
 				p.fix_count = 0
 				return
@@ -2132,18 +2199,105 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 			}
 			return stmt
 		case "include":
-			error(p, tag.pos, "#include is not a valid import declaration kind. Did you meant 'import'?")
-			return ast.new(ast.Bad_Stmt, tok.pos, end_pos(tag))
-		case:
-			stmt := parse_stmt(p)
-			end := stmt.pos if stmt != nil else end_pos(tok)
-			te := ast.new(ast.Tag_Stmt, tok.pos, end)
-			te.op   = tok
-			te.name = name
-			te.stmt = stmt
+			// C++ Reference: parser.cpp:5581-5583.
+			//     syntax_error(token, "#include is not a valid import declaration kind. Did you mean 'import'?");
+			//     s = ast_bad_stmt(f, token, f->curr_token);
+			// then the shared `fix_advance_to_next_stmt(f)` at the bottom of the arm.
+			//
+			// THREE divergences here, all of them the port's own (LEDGER #390):
+			//   text    "Did you meant" -- a typo that was never in C++
+			//   anchor  C++ passes `token`, the '#'; the port passed the tag ident
+			//   end     C++'s bad stmt ends at curr_token, the port's ended at the tag
+			// and it returned WITHOUT fix_advance_to_next_stmt, which C++ reaches by falling
+			// out of the else-if chain.
+			error_no_file_count(p, tok.pos, "#include is not a valid import declaration kind. Did you mean 'import'?")
+			bs := ast.new(ast.Bad_Stmt, tok.pos, end_pos(p.curr_tok))
+			fix_advance_to_next_stmt(p)
+			return bs
+		case "define":
+			// C++ Reference: parser.cpp:5584-5613.
+			//
+			// The bad statement is built FIRST, so its range ends at the token the arm was
+			// entered on -- not at whatever the macro-body parse below consumes.
+			bs := ast.new(ast.Bad_Stmt, tok.pos, end_pos(p.curr_tok))
+
+			if tag.pos.line != p.curr_tok.pos.line {
+				// Nothing on the line after `#define`: no ident to anchor to and nothing to
+				// suggest, so C++ falls back to the '#' and emits the bare message.
+				error_no_file_count(p, tok.pos, "#define is not a valid declaration, Odin does not have a C-like preprocessor.")
+				fix_advance_to_next_stmt(p)
+				return bs
+			}
+
+			call_like := false
+			macro_expr: ^ast.Expr
+			// `ident` is read BEFORE allow_token, so it stays meaningful even when the next
+			// token is not an identifier -- that is the token C++ anchors the message to.
+			ident := p.curr_tok
+			if allow_token(p, .Ident) && tag.pos.line == p.curr_tok.pos.line {
+				// A function-like macro is detected by ADJACENCY, not by the paren alone:
+				// `FOO(x)` is call-like, `FOO (x)` is not. C++ compares the paren's column
+				// against the end of the identifier.
+				if p.curr_tok.kind == .Open_Paren && p.curr_tok.pos.column == ident.pos.column+len(ident.text) {
+					call_like = true
+					_ = parse_call_expr(p, nil)
+				}
+
+				if tag.pos.line == p.curr_tok.pos.line && p.curr_tok.kind != .Semicolon {
+					macro_expr = parse_expr(p, false)
+				}
+			}
+
+			if p.err_block_begin != nil {
+				p.err_block_begin()
+			}
+			error_no_file_count(p, ident.pos, "#define is not a valid declaration, Odin does not have a C-like preprocessor.")
+			if p.err_line != nil {
+				// C++ picks the Note whenever there is no body OR the macro was function-like:
+				// `FOO(x) x*2` cannot be rewritten as a constant, so suggesting one would be
+				// wrong. Only an object-like macro with a body gets the Suggestion.
+				//
+				// expr_str nil (a standalone parser, no driver) takes the Note branch too --
+				// stated rather than silently dropped.
+				if macro_expr == nil || call_like || p.expr_str == nil {
+					p.err_line("\tNote: Odin does not support macros\n")
+				} else {
+					s := p.expr_str(macro_expr, context.temp_allocator)
+					p.err_line("\tSuggestion: Did you mean '%s :: %s'?\n", ident.text, s)
+				}
+			}
+			if p.err_block_end != nil {
+				p.err_block_end()
+			}
 
 			fix_advance_to_next_stmt(p)
-			return te
+			return bs
+		case:
+			// C++ Reference: parser.cpp:5617-5620.
+			//     syntax_error(token, "Unknown tag directive used: '%.*s'", LIT(tag));
+			//     s = ast_bad_stmt(f, token, f->curr_token);
+			//   ...
+			//   fix_advance_to_next_stmt(f);
+			//
+			// The port used to build a Tag_Stmt wrapping whatever statement followed, SILENTLY.
+			// C++ has no such fallback -- an unrecognised statement-level tag is an error, and
+			// the node it produces is a bad stmt, not a wrapper. That made this the last
+			// producer of Tag_Stmt from parse_stmt, the same shape #216 found for Tag_Expr in
+			// parse_operand.
+			//
+			// Measured (probe unktag, `#bogus` at file scope):
+			//     oracle: Syntax Error: Unknown tag directive used: 'bogus'
+			//     port:   Syntax Error: Only declarations are allowed at file scope, got invalid node
+			// -- the port's Tag_Stmt reached the file-scope check and was rejected there instead.
+			//
+			// error_no_file_count, NOT error: C++ raises this through syntax_error(Token) --
+			// the file-unaware overload that cannot bump f->error_count (see #388). No
+			// behavioural difference here, since the decl loop re-reads that count only once
+			// before it starts, but the faithful form is the one C++ uses.
+			error_no_file_count(p, tok.pos, "Unknown tag directive used: '%s'", name)
+			bs := ast.new(ast.Bad_Stmt, tok.pos, end_pos(p.curr_tok))
+			fix_advance_to_next_stmt(p)
+			return bs
 		}
 	case .Open_Brace:
 		return parse_block_stmt(p, false)
@@ -2184,10 +2338,10 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 	}
 
 
-	tok := advance_token(p)
+	tok := p.curr_tok
 	error(p, tok.pos, "Expected a statement, got '%s'", tokenizer.token_to_string(tok))
 	fix_advance_to_next_stmt(p)
-	s := ast.new(ast.Bad_Stmt, tok.pos, end_pos(tok))
+	s := ast.new(ast.Bad_Stmt, tok.pos, end_pos(p.curr_tok))
 	return s
 }
 
@@ -4516,7 +4670,14 @@ parse_call_expr :: proc(p: ^Parser, operand: ^ast.Expr) -> ^ast.Expr {
 	// C++ Reference: src/parser.cpp:3244 uses expect_closing, not the field-list helper.
 	close := expect_closing(p, .Close_Paren, "argument list")
 
-	ce := ast.new(ast.Call_Expr, operand.pos, end_pos(close))
+	// A NIL operand is legal here: parser.cpp:5595 calls parse_call_expr(f, nullptr) to consume
+	// a function-like `#define FOO(x)` head, and C++ tolerates it throughout -- ast_call_expr
+	// only STORES proc (it never reads proc->pos, since C++ node positions come from the file's
+	// token machinery), and the selector unwrap below is guarded by an explicit `o &&` at
+	// parser.cpp:3271. The port dropped that guard and additionally read operand.pos here, so
+	// the nil operand was a SIGSEGV rather than a discarded node. LEDGER #390.
+	pos := open.pos if operand == nil else operand.pos
+	ce := ast.new(ast.Call_Expr, pos, end_pos(close))
 	ce.expr     = operand
 	ce.open     = open.pos
 	ce.args     = args[:]
@@ -4524,6 +4685,9 @@ parse_call_expr :: proc(p: ^Parser, operand: ^ast.Expr) -> ^ast.Expr {
 	ce.close    = close.pos
 
 	o := ast.unparen_expr(operand)
+	if o == nil {
+		return ce
+	}
 	if se, ok := o.derived.(^ast.Selector_Expr); ok && se.op.kind == .Arrow_Right {
 		sce := ast.new(ast.Selector_Call_Expr, ce.pos, ce)
 		sce.expr = o
@@ -4589,18 +4753,30 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 			// and then cascaded a second error ("Expected ']', got ';'") that C++ never emits.
 			// A recovery divergence, not a wording one.
 			if p.curr_tok.kind == .Close_Bracket {
+				// C++ Reference: parser.cpp:3364-3373. The ERROR_BLOCK opens BEFORE the
+				// primary diagnostic so the Suggestion attaches to it.
+				//
+				// This was declined twice for want of infrastructure: the comment here used to
+				// say the parser package had "NEITHER facility -- no continuation channel and
+				// no expression printer". #307 added the first (err_line/err_block) and #390
+				// added the second (expr_str, injected by the driver), so the reason no longer
+				// held and the Suggestion is now ported.
+				//
+				// NOTE the missing trailing newline: C++ writes "...'[]%s'?" with NO \n here,
+				// unlike the #define Suggestion a few arms away, which has one.
+				if p.err_block_begin != nil {
+					p.err_block_begin()
+				}
 				error(p, p.curr_tok.pos, "Expected an operand, got ]")
 				close := expect_token(p, .Close_Bracket)
 
-				// NOT PORTED, and stated rather than silently dropped: C++ wraps this in an
-				// ERROR_BLOCK and, when allow_type is set, appends
-				//   "\tSuggestion: If a type was wanted, did you mean '[]%s'?"
-				// using expr_to_string(operand) (parser.cpp:3347-3351). The port's parser
-				// package has NEITHER facility -- it exposes only error/warn, with no
-				// continuation channel and no expression printer; both live in the checker,
-				// which the parser must not depend on. Adding them is a package-structure
-				// change, not a one-liner. The primary diagnostic and, more importantly, the
-				// RECOVERY (consuming the ']') are faithful. Filed as #204.
+				if p.allow_type && p.err_line != nil && p.expr_str != nil {
+					s := p.expr_str(operand, context.temp_allocator)
+					p.err_line("\tSuggestion: If a type was wanted, did you mean '[]%s'?", s)
+				}
+				if p.err_block_end != nil {
+					p.err_block_end()
+				}
 
 				ie := ast.new(ast.Index_Expr, operand.pos, end_pos(close))
 				ie.expr  = operand

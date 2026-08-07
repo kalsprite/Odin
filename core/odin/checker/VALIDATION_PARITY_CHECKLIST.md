@@ -1,10 +1,27 @@
 # Odin Checker Validation Parity Checklist
 
 **Status:** `[x]` Done | `[~]` Partial | `[ ]` Missing
-**Progress:** 100% verified (~560 of ~560 functions)
-**Last updated:** 2026-01-11
+**Coverage:** ~560 of ~560 C++ functions have an Odin counterpart *by name*.
+**Last updated:** 2026-08-06
 
 For implementation details, see [CPP_PARITY_GAPS.md](CPP_PARITY_GAPS.md).
+
+> **What `[x]` does and does not assert.** It asserts that a counterpart EXISTS and its body
+> was read against C++. It does **not** assert that the function is CALLED from the same places,
+> or called at all. That gap is not hypothetical — it is where the two largest recent defects
+> lived:
+>
+> * `add_comparison_procedures_for_fields` was `[x]` with a faithful body while the live C++
+>   call site in `check_comparison` had never been wired, and two port-only call sites existed
+>   that C++ does not have (one of them modelling a `#if 0` block, one invented with a
+>   fabricated citation). #547 PART 5.
+> * `check_binary_expr_dependency` was `[x]` and did not exist at all. #547 PART 1.
+> * `add_map_*_dependencies` was `[x]` "(2 implemented)" while one of the two was dead code,
+>   a third helper was missing, and both took the wrong branch of a build-context test. #564.
+>
+> So: a row being `[x]` is not evidence. Before relying on one, check the call sites on BOTH
+> sides — `grep -rn '<name>' src/` against the port — and remember that a C++ occurrence inside
+> `#if 0` is not a call site. Rows corrected by measurement carry their task number.
 
 ---
 
@@ -167,8 +184,8 @@ For implementation details, see [CPP_PARITY_GAPS.md](CPP_PARITY_GAPS.md).
 | [x] | determine_swizzle_array_type | types.odin:2335 |
 | [x] | exact_bit_set_all_set_mask | check_expr_helpers.odin:973 |
 | [x] | make_soa_struct_* | check_type.odin:273-291 |
-| [x] | add_map_*_dependencies | entity_helpers.odin:723,732 (2 implemented) |
-| [x] | add_comparison_procedures_for_fields | type_info.odin:187 |
+| [ ] | add_map_*_dependencies | entity_helpers.odin:776,785 — **NOT DONE, see #564**. Both helpers take the `build_context.dynamic_map_calls` TRUE branch unconditionally; the default build takes the FALSE branch. add_map_set_dependencies has zero call sites. add_map_reserve_dependencies does not exist and its name is registered from the set-helper instead. |
+| [x] | add_comparison_procedures_for_fields | type_info.odin:234 — body faithful. **Call sites were the defect (#547 PART 5)**: the live C++ site in check_comparison (check_expr.cpp:3278) was never wired, and the port had two sites with no live C++ counterpart (one modelling `#if 0` code, one invented). Now: check_expr.odin comparison site + own Struct recursion, matching C++'s two live sites. |
 | [x] | compare_exact_values_compound_lit | exact_value.odin:1386 |
 | [x] | expr_to_string | check_expr_helpers.odin:142 |
 | [x] | write_expr_to_string | check_expr_helpers.odin:167 |

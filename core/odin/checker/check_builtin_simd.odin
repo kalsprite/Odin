@@ -1,13 +1,13 @@
 // check_builtin_simd.odin
 // SIMD builtin procedure handlers
-// Ported from /mnt/c/odin/src/check_builtin.cpp:720-1612
+// Ported from check_builtin.cpp:720-1612
 //
 // This file implements all 62 SIMD intrinsic builtins for the Odin checker.
 // Each handler validates operands, checks type constraints, and computes result types.
 //
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:720-1612
-// Enum Reference: /mnt/c/odin/src/checker_builtin_procs.hpp:140-220
-// Metadata Reference: /mnt/c/odin/src/checker_builtin_procs.hpp:507-586
+// C++ Reference: check_builtin.cpp:720-1612
+// Enum Reference: checker_builtin_procs.hpp:140-220
+// Metadata Reference: checker_builtin_procs.hpp:507-586
 
 package checker
 
@@ -18,7 +18,7 @@ import "core:math/big"
 // ============================================================================
 
 // base_array_type returns the element type of array-like types (array, simd_vector, matrix)
-// C++ Reference: /mnt/c/odin/src/types.cpp:1665-1677
+// C++ Reference: types.cpp:1665-1677
 base_array_type :: proc(t: ^Type) -> ^Type {
 	bt := base_type(t)
 	if bt == nil {
@@ -42,7 +42,7 @@ base_array_type :: proc(t: ^Type) -> ^Type {
 // base_any_array_type returns the element type of ANY array-like type, including the ones
 // base_array_type deliberately excludes: slice, dynamic array and fixed-capacity dynamic array.
 // C++ keeps both functions and they are not interchangeable.
-// C++ Reference: /mnt/c/odin/src/types.cpp:1816-1834
+// C++ Reference: types.cpp:1816-1834
 base_any_array_type :: proc(t: ^Type) -> ^Type {
 	bt := base_type(t)
 	if bt == nil {
@@ -68,7 +68,7 @@ base_any_array_type :: proc(t: ^Type) -> ^Type {
 }
 
 // get_array_type_count returns the element count of array-like types
-// C++ Reference: /mnt/c/odin/src/types.cpp:1783-1794
+// C++ Reference: types.cpp:1783-1794
 get_array_type_count :: proc(t: ^Type) -> i64 {
 	bt := base_type(t)
 	if bt == nil {
@@ -88,7 +88,7 @@ get_array_type_count :: proc(t: ^Type) -> i64 {
 }
 
 // alloc_type_simd_vector: see types.odin for the complete implementation with generic_count support
-// C++ Reference: /mnt/c/odin/src/types.cpp:1189-1195
+// C++ Reference: types.cpp:1189-1195
 
 // alloc_type_bit_set allocates a bit set type
 // Fields (elem, lower, upper) must be set by the caller
@@ -102,14 +102,14 @@ alloc_type_bit_set :: proc() -> ^Type {
 // is_power_of_two checks if a value is a power of two
 // Uses bit manipulation: a power of two has exactly one bit set,
 // so x & (x-1) equals zero if and only if x is a power of two
-// C++ Reference: /mnt/c/odin/src/common.hpp or gb.h
+// C++ Reference: common.hpp or gb.h
 is_power_of_two :: proc(x: i64) -> bool {
 	return x > 0 && (x & (x - 1)) == 0
 }
 
 // ============================================================================
 // SIMD Binary Numeric Operations (add, sub, mul, div, min, max)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:722-768
+// C++ Reference: check_builtin.cpp:722-768
 // ============================================================================
 
 check_builtin_simd_binary_numeric :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, id: Builtin_Proc_Id) -> bool {
@@ -182,7 +182,7 @@ check_builtin_simd_binary_numeric :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 // ============================================================================
 // SIMD Integer Binary Operations (saturating arithmetic, bitwise ops)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:770-824
+// C++ Reference: check_builtin.cpp:770-824
 // ============================================================================
 
 check_builtin_simd_binary_integer :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, id: Builtin_Proc_Id) -> bool {
@@ -256,7 +256,7 @@ check_builtin_simd_binary_integer :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 // ============================================================================
 // SIMD Shift Operations (shl, shr, shl_masked, shr_masked)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:826-872
+// C++ Reference: check_builtin.cpp:826-872
 // ============================================================================
 
 check_builtin_simd_shift :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, id: Builtin_Proc_Id) -> bool {
@@ -345,7 +345,7 @@ check_builtin_simd_shift :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 
 // ============================================================================
 // SIMD Unary Operations (neg, abs)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:874-897
+// C++ Reference: check_builtin.cpp:874-897
 // ============================================================================
 
 check_builtin_simd_unary :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, id: Builtin_Proc_Id) -> bool {
@@ -381,7 +381,7 @@ check_builtin_simd_unary :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 // ============================================================================
 // SIMD Comparison Operations (lanes_eq, lanes_ne, lanes_lt, lanes_le, lanes_gt, lanes_ge)
 // Returns integer masks where element size matches input element size
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:899-969
+// C++ Reference: check_builtin.cpp:899-969
 // ============================================================================
 
 check_builtin_simd_comparison :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, id: Builtin_Proc_Id) -> bool {
@@ -472,7 +472,7 @@ check_builtin_simd_comparison :: proc(ctx: ^Checker_Context, operand: ^Operand, 
 
 // ============================================================================
 // SIMD Memory Operations (gather, scatter, masked_load, masked_store, etc.)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:971-1054
+// C++ Reference: check_builtin.cpp:971-1054
 // ============================================================================
 
 check_builtin_simd_memory :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, id: Builtin_Proc_Id) -> bool {
@@ -579,7 +579,7 @@ check_builtin_simd_memory :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 
 // ============================================================================
 // SIMD Indices (returns constant index vector)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1056-1084
+// C++ Reference: check_builtin.cpp:1056-1084
 // ============================================================================
 
 check_builtin_simd_indices :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -618,7 +618,7 @@ check_builtin_simd_indices :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 
 // ============================================================================
 // SIMD Extract (get single lane by index)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1086-1110
+// C++ Reference: check_builtin.cpp:1086-1110
 // ============================================================================
 
 check_builtin_simd_extract :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -643,13 +643,19 @@ check_builtin_simd_extract :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	elem := base_array_type(x.type)
 	max_count := get_array_type_count(x.type)
 
-	// Validate index is constant and in range
+	// Validate index (C++ passes it to check_index_value, which does NOT require a constant)
 	value: i64 = -1
 	if !check_index_value(ctx, x.type, false, call.args[1], max_count, &value) {
 		return false
 	}
 
-	if value < 0 {
+	// C++ (check_builtin.cpp:1298 for extract, :1324 for replace) gates this on MAX_COUNT < 0 --
+	// the VECTOR's element count -- not on `value`, which stays -1 whenever the index is not a
+	// constant. C++ therefore ACCEPTS a runtime index and this message survives only to report a
+	// malformed vector. Testing `value < 0` made every non-constant index an error, a real
+	// over-rejection: it rejected core/hash/xxhash's `simd_replace(seedVec, j, ...)` where j is a
+	// loop variable. Invisible until #543 made that code reachable at all. LEDGER #543.
+	if max_count < 0 {
 		error(call.args[1], "'%s' expected a constant integer index, got '%d'", builtin_name, value)
 		return false
 	}
@@ -661,7 +667,7 @@ check_builtin_simd_extract :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 
 // ============================================================================
 // SIMD Replace (set single lane by index)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1111-1147
+// C++ Reference: check_builtin.cpp:1111-1147
 // ============================================================================
 
 check_builtin_simd_replace :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -692,7 +698,13 @@ check_builtin_simd_replace :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 		return false
 	}
 
-	if value < 0 {
+	// C++ (check_builtin.cpp:1298 for extract, :1324 for replace) gates this on MAX_COUNT < 0 --
+	// the VECTOR's element count -- not on `value`, which stays -1 whenever the index is not a
+	// constant. C++ therefore ACCEPTS a runtime index and this message survives only to report a
+	// malformed vector. Testing `value < 0` made every non-constant index an error, a real
+	// over-rejection: it rejected core/hash/xxhash's `simd_replace(seedVec, j, ...)` where j is a
+	// loop variable. Invisible until #543 made that code reachable at all. LEDGER #543.
+	if max_count < 0 {
 		error(call.args[1], "'%s' expected a constant integer index, got '%d'", builtin_name, value)
 		return false
 	}
@@ -710,7 +722,12 @@ check_builtin_simd_replace :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	}
 
 	if !are_types_identical(y.type, elem) {
-		error(call.args[2], "'%s' expected a type to insert that matches element type", builtin_name)
+		// C++ check_builtin.cpp:1333 names both types; the port's paraphrase was invented.
+		// NOT freed: type_to_string results are not caller-owned here -- LEDGER #142 records a
+		// crash from exactly that mistake, and I repeated it in this edit before catching it.
+		et := type_to_string(elem)
+		yt := type_to_string(y.type)
+		error(call.args[2], "'%s' expected a type of '%s' to insert, got '%s'", builtin_name, et, yt)
 		return false
 	}
 
@@ -721,7 +738,7 @@ check_builtin_simd_replace :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 
 // ============================================================================
 // SIMD Reduction Operations (reduce to scalar)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1149-1200
+// C++ Reference: check_builtin.cpp:1149-1200
 // ============================================================================
 
 check_builtin_simd_reduce_numeric :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, id: Builtin_Proc_Id) -> bool {
@@ -756,7 +773,7 @@ check_builtin_simd_reduce_numeric :: proc(ctx: ^Checker_Context, operand: ^Opera
 }
 
 // SIMD Reduction Bitwise (and, or, xor)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1178-1200
+// C++ Reference: check_builtin.cpp:1178-1200
 check_builtin_simd_reduce_bitwise :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, id: Builtin_Proc_Id) -> bool {
 	builtin_name := builtin_proc_infos[id].name
 
@@ -788,7 +805,7 @@ check_builtin_simd_reduce_bitwise :: proc(ctx: ^Checker_Context, operand: ^Opera
 }
 
 // SIMD Reduction Boolean (any, all)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1202-1223
+// C++ Reference: check_builtin.cpp:1202-1223
 check_builtin_simd_reduce_boolean :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, id: Builtin_Proc_Id) -> bool {
 	builtin_name := builtin_proc_infos[id].name
 
@@ -825,7 +842,7 @@ check_builtin_simd_reduce_boolean :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 // ============================================================================
 // SIMD Extract LSBs/MSBs (extract bits to bit set)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1225-1256
+// C++ Reference: check_builtin.cpp:1225-1256
 // ============================================================================
 
 check_builtin_simd_extract_bits :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, id: Builtin_Proc_Id) -> bool {
@@ -876,7 +893,7 @@ check_builtin_simd_extract_bits :: proc(ctx: ^Checker_Context, operand: ^Operand
 
 // ============================================================================
 // SIMD Shuffle (permute elements from two vectors)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1259-1332
+// C++ Reference: check_builtin.cpp:1259-1332
 // ============================================================================
 
 check_builtin_simd_shuffle :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -975,7 +992,7 @@ check_builtin_simd_shuffle :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 
 // ============================================================================
 // SIMD Select (ternary conditional)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1334-1385
+// C++ Reference: check_builtin.cpp:1334-1385
 // ============================================================================
 
 check_builtin_simd_select :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -1057,7 +1074,7 @@ check_builtin_simd_select :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 
 // ============================================================================
 // SIMD Runtime Swizzle (runtime lane permutation)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1387-1437
+// C++ Reference: check_builtin.cpp:1387-1437
 // ============================================================================
 
 check_builtin_simd_runtime_swizzle :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -1118,7 +1135,7 @@ check_builtin_simd_runtime_swizzle :: proc(ctx: ^Checker_Context, operand: ^Oper
 
 // ============================================================================
 // SIMD Rounding Operations (ceil, floor, trunc, nearest)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1439-1462
+// C++ Reference: check_builtin.cpp:1439-1462
 // ============================================================================
 
 check_builtin_simd_rounding :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, id: Builtin_Proc_Id) -> bool {
@@ -1154,7 +1171,7 @@ check_builtin_simd_rounding :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 
 // ============================================================================
 // SIMD Lanes Reverse (reverse lane order)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1464-1476
+// C++ Reference: check_builtin.cpp:1464-1476
 // ============================================================================
 
 check_builtin_simd_lanes_reverse :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -1183,7 +1200,7 @@ check_builtin_simd_lanes_reverse :: proc(ctx: ^Checker_Context, operand: ^Operan
 
 // ============================================================================
 // SIMD Lanes Rotate (rotate lanes left/right by constant offset)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1478-1499
+// C++ Reference: check_builtin.cpp:1478-1499
 // ============================================================================
 
 check_builtin_simd_lanes_rotate :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, id: Builtin_Proc_Id) -> bool {
@@ -1227,7 +1244,7 @@ check_builtin_simd_lanes_rotate :: proc(ctx: ^Checker_Context, operand: ^Operand
 
 // ============================================================================
 // SIMD Clamp (three-way min/max)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1501-1550
+// C++ Reference: check_builtin.cpp:1501-1550
 // ============================================================================
 
 check_builtin_simd_clamp :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -1304,7 +1321,7 @@ check_builtin_simd_clamp :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 
 // ============================================================================
 // SIMD To Bits (reinterpret as unsigned integer vector)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1552-1576
+// C++ Reference: check_builtin.cpp:1552-1576
 // ============================================================================
 
 check_builtin_simd_to_bits :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -1352,7 +1369,7 @@ check_builtin_simd_to_bits :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 
 // ============================================================================
 // SIMD x86 MM_SHUFFLE (compile-time shuffle constant generator)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1578-1606
+// C++ Reference: check_builtin.cpp:1578-1606
 // ============================================================================
 
 check_builtin_simd_x86_mm_shuffle :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -1395,7 +1412,7 @@ check_builtin_simd_x86_mm_shuffle :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 // ============================================================================
 // SIMD Odd/Even (interleave the odd lanes of one vector with the even of another)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp, `case BuiltinProc_simd_odd_even:`
+// C++ Reference: check_builtin.cpp, `case BuiltinProc_simd_odd_even:`
 // ============================================================================
 
 check_builtin_simd_odd_even :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -1448,7 +1465,7 @@ check_builtin_simd_odd_even :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 
 // ============================================================================
 // SIMD Sums Of N (horizontal sums over groups of N lanes)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp, `case BuiltinProc_simd_sums_of_n:`
+// C++ Reference: check_builtin.cpp, `case BuiltinProc_simd_sums_of_n:`
 // ============================================================================
 
 check_builtin_simd_sums_of_n :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -1522,7 +1539,7 @@ check_builtin_simd_sums_of_n :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 
 // ============================================================================
 // SIMD To Bits Signed (reinterpret as signed integer vector)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp, `case BuiltinProc_simd_to_bits_signed:`
+// C++ Reference: check_builtin.cpp, `case BuiltinProc_simd_to_bits_signed:`
 // ============================================================================
 
 check_builtin_simd_to_bits_signed :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -1570,7 +1587,7 @@ check_builtin_simd_to_bits_signed :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 // ============================================================================
 // SIMD Interleave (concatenate N vectors of the same type, lane-interleaved)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp, `case BuiltinProc_simd_interleave:`
+// C++ Reference: check_builtin.cpp, `case BuiltinProc_simd_interleave:`
 // ============================================================================
 
 check_builtin_simd_interleave :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
@@ -1627,7 +1644,7 @@ check_builtin_simd_interleave :: proc(ctx: ^Checker_Context, operand: ^Operand, 
 
 // ============================================================================
 // SIMD Deinterleave (split a vector into N equal sub-vectors)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp, `case BuiltinProc_simd_deinterleave:`
+// C++ Reference: check_builtin.cpp, `case BuiltinProc_simd_deinterleave:`
 // ============================================================================
 
 check_builtin_simd_deinterleave :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {

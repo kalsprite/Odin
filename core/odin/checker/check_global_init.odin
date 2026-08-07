@@ -14,16 +14,16 @@ Architecture:
 - Detect and report circular dependencies using DFS path finding
 - Handle uninitialized variables and validation
 
-C++ Reference: /mnt/c/odin/src/checker.cpp:6044-6110 (calculate_global_init_order)
-               /mnt/c/odin/src/checker.cpp:5995-6041 (find_entity_path)
-               /mnt/c/odin/src/checker.cpp:55-105 (entity_graph_node operations)
-               /mnt/c/odin/src/checker.cpp:4971-4995 (check_all_global_entities)
+C++ Reference: checker.cpp:6044-6110 (calculate_global_init_order)
+               checker.cpp:5995-6041 (find_entity_path)
+               checker.cpp:55-105 (entity_graph_node operations)
+               checker.cpp:4971-4995 (check_all_global_entities)
 */
 
 
 // ======================================================================================
 // ENTITY GRAPH NODE OPERATIONS
-// C++ Reference: /mnt/c/odin/src/checker.cpp:55-105
+// C++ Reference: checker.cpp:55-105
 // ======================================================================================
 
 // make_entity_graph_node creates a dependency graph node for an entity
@@ -91,7 +91,7 @@ is_entity_in_dependency_chain :: proc(entity: ^Entity, chain: []^Entity) -> bool
 
 // ======================================================================================
 // ENTITY DEPENDENCY GRAPH GENERATION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3018-3155
+// C++ Reference: checker.cpp:3018-3155
 // ======================================================================================
 
 // generate_entity_dependency_graph builds a dependency graph with procedure elimination
@@ -227,7 +227,7 @@ generate_entity_dependency_graph :: proc(info: ^Checker_Info, allocator := conte
 
 // ======================================================================================
 // ENTITY PATH FINDING (CYCLE DETECTION)
-// C++ Reference: /mnt/c/odin/src/checker.cpp:5995-6041
+// C++ Reference: checker.cpp:5995-6041
 // ======================================================================================
 
 // find_entity_path_tuple searches tuple type dependencies for a path to end entity
@@ -396,7 +396,7 @@ find_path_dfs :: proc(current: ^Entity, target: ^Entity, graph: map[^Entity]^Ent
 
 // ======================================================================================
 // GLOBAL INITIALIZATION ORDER CALCULATION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:6044-6110
+// C++ Reference: checker.cpp:6044-6110
 // ======================================================================================
 
 // calculate_global_init_order determines the initialization order for global variables
@@ -548,7 +548,7 @@ report_circular_dependency :: proc(start_entity: ^Entity, cycle_path: []^Entity)
 
 // ======================================================================================
 // GLOBAL ENTITY CHECKING
-// C++ Reference: /mnt/c/odin/src/checker.cpp:4938-4995
+// C++ Reference: checker.cpp:4938-4995
 // ======================================================================================
 
 // check_single_global_entity checks a single global entity (on-demand checking)

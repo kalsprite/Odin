@@ -19,15 +19,15 @@ This module handles procedure checking ORCHESTRATION, not signature validation.
 Procedure signature checking (check_procedure_type, check_get_params, check_get_results)
 belongs in check_type.odin per architectural separation.
 
-C++ Reference: /mnt/c/odin/src/checker.cpp:2344-2364 (check_procedure_later)
-               /mnt/c/odin/src/checker.cpp:6376-6436 (consume_proc_info, worker_proc)
-               /mnt/c/odin/src/checker.cpp:6438-6480 (init_worker_data, check_procedure_bodies)
+C++ Reference: checker.cpp:2344-2364 (check_procedure_later)
+               checker.cpp:6376-6436 (consume_proc_info, worker_proc)
+               checker.cpp:6438-6480 (init_worker_data, check_procedure_bodies)
 */
 
 
 // ======================================================================================
 // GLOBAL STATE
-// C++ Reference: /mnt/c/odin/src/checker.cpp:2337-2340
+// C++ Reference: checker.cpp:2337-2340
 // ======================================================================================
 
 // Debug flag to track all procedures for safety checks
@@ -50,7 +50,7 @@ total_bodies_checked: int = 0
 
 // ======================================================================================
 // WORKER DATA STRUCTURES
-// C++ Reference: /mnt/c/odin/src/checker.cpp:6405-6410
+// C++ Reference: checker.cpp:6405-6410
 // ======================================================================================
 
 // Check_Procedure_Body_Worker_Data stores per-worker thread state for parallel checking
@@ -68,7 +68,7 @@ check_procedure_bodies_worker_data: []Check_Procedure_Body_Worker_Data
 
 // ======================================================================================
 // PROCEDURE DEFERRAL
-// C++ Reference: /mnt/c/odin/src/checker.cpp:2344-2364
+// C++ Reference: checker.cpp:2344-2364
 // ======================================================================================
 
 // check_procedure_later queues a procedure for deferred checking
@@ -257,7 +257,7 @@ check_procedure_later_from_entity :: proc(c: ^Checker, e: ^Entity, from_msg: str
 
 // ======================================================================================
 // PROCEDURE CONSUMPTION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:6376-6403
+// C++ Reference: checker.cpp:6376-6403
 // ======================================================================================
 
 // consume_proc_info attempts to check a procedure, handling dependencies
@@ -333,7 +333,7 @@ consume_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^
 
 // ======================================================================================
 // WORKER THREAD INFRASTRUCTURE
-// C++ Reference: /mnt/c/odin/src/checker.cpp:6412-6436
+// C++ Reference: checker.cpp:6412-6436
 // ======================================================================================
 
 // check_proc_info_worker_proc is the worker thread entry point for parallel checking
@@ -408,7 +408,7 @@ check_proc_info_worker_proc :: proc(data: rawptr) -> int {
 
 // ======================================================================================
 // WORKER INITIALIZATION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:6438-6447
+// C++ Reference: checker.cpp:6438-6447
 // ======================================================================================
 
 // check_init_worker_data initializes per-worker thread data for parallel checking
@@ -442,7 +442,7 @@ check_init_worker_data :: proc(c: ^Checker) {
 
 // ======================================================================================
 // MAIN PROCEDURE CHECKING ENTRY POINT
-// C++ Reference: /mnt/c/odin/src/checker.cpp:6449-6480
+// C++ Reference: checker.cpp:6449-6480
 // ======================================================================================
 
 // check_procedure_bodies is the main entry point for checking all queued procedure bodies
@@ -525,7 +525,7 @@ check_procedure_bodies :: proc(c: ^Checker) {
 
 // ======================================================================================
 // CORE PROCEDURE CHECKING LOGIC
-// C++ Reference: /mnt/c/odin/src/checker.cpp:6167-6282
+// C++ Reference: checker.cpp:6167-6282
 // ======================================================================================
 
 // check_proc_info validates and checks a single procedure's body
@@ -826,7 +826,7 @@ add_untyped_expressions :: proc(info: ^Checker_Info, untyped: ^map[^ast.Expr]^Ex
 
 // ======================================================================================
 // PROCEDURE BODY CHECKING
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:2003-2198
+// C++ Reference: check_decl.cpp:2003-2198
 // ======================================================================================
 
 // Proc_Using_Var pairs a using parameter entity with its generated using variable
@@ -1096,40 +1096,62 @@ check_vet_flags :: proc {
 	check_vet_flags_from_node,
 }
 
-// in_vet_packages checks if a file's package should be vetted
-// C++ Reference: parser.cpp:5-15
+// in_vet_packages checks if a file's package is in the vet packages list.
 //
-// Returns true if the file's package should be included in vetting.
-// Logic:
-// - If file is nil → return true (vet it)
-// - If file's package is nil → return true (vet it)
-// - If vet_packages list is empty → return true (vet all packages)
-// - Otherwise → return true if package name is in vet_packages set
+// C++ Reference: parser.cpp:5-38.
 //
-// in_vet_packages checks if a file's package is in the vet packages list
-// C++ Reference: parser.cpp:6-15
+// Every bail returns TRUE, i.e. "vet it": an unknown package is vetted, not skipped.
+//
+// The NAME LOOKUP used to be just `file.pkg.name`, which is empty for a file whose package
+// has not been named yet -- and an empty name is never a member of the set, so
+// `-vet-packages:foo` silently skipped exactly those files. Upstream fixed it (the commit
+// is "Fix -vet-packages not working in certain cases") by falling back to the package
+// DECLARATION's own identifier token, and by treating a still-empty name as "vet it"
+// rather than as a failed lookup. The nil pkg_decl guard is new for the same reason.
+// LEDGER #386.
 in_vet_packages :: proc(file: ^ast.File) -> bool {
-	// Check if file is nil
 	// C++ Reference: parser.cpp:6-8
 	if file == nil {
 		return true
 	}
 
-	// Check if package is nil
-	// C++ Reference: parser.cpp:9-11
+	// C++ Reference: parser.cpp:10-12
 	if file.pkg == nil {
 		return true
 	}
 
-	// Check build_context.vet_packages
-	// C++ Reference: parser.cpp:12-15
-	if len(build_context.vet_packages) == 0 {
-		// Empty vet_packages means vet all packages
+	// C++ Reference: parser.cpp:14-16
+	if file.pkg_decl == nil {
 		return true
 	}
 
-	// Check if package name is in vet_packages set
-	return file.pkg.name in build_context.vet_packages
+	// C++ Reference: parser.cpp:18-20. Empty vet_packages means vet all packages.
+	if len(build_context.vet_packages) == 0 {
+		return true
+	}
+
+	// C++ Reference: parser.cpp:22-32.
+	//
+	// C++ tests `name_token.kind == Token_Ident` on the package declaration's NAME TOKEN.
+	// The port's Package_Decl keeps only the name TEXT (parser.odin:299 stores
+	// `pkg_name.text` whatever kind the token turned out to be), and its `token` field is
+	// the `package` keyword, so the kind is not recoverable here. is_string_an_identifier
+	// decides the same question from the text: on a malformed declaration the stored text
+	// is whatever token was found -- `123`, say -- which is not an identifier, so the name
+	// stays empty and the guard below vets the file, exactly as C++ does.
+	pkg_name := ""
+	if len(file.pkg.name) > 0 {
+		pkg_name = file.pkg.name
+	} else if is_string_an_identifier(file.pkg_decl.name) {
+		pkg_name = file.pkg_decl.name
+	}
+
+	// C++ Reference: parser.cpp:34-36
+	if len(pkg_name) == 0 {
+		return true
+	}
+
+	return pkg_name in build_context.vet_packages
 }
 
 // ast_file_vet_flags gets vet flags from a file
@@ -1753,9 +1775,46 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 				sync.rw_mutex_shared_lock(&struct_scope.mutex)
 				defer sync.rw_mutex_shared_unlock(&struct_scope.mutex)
 
-				// Create using variable for each struct field
-				// C++ Reference: check_decl.cpp:2086-2095
+				// Create using variable for each struct field, in SLOT order. LEDGER #500.
+				//
+				// C++ Reference: check_decl.cpp:2189-2205 (the old citation said 2086-2095, which
+				// is dependency propagation between decl->deps and decl->parent->deps -- a drifted
+				// reference of the #134 family, found by grepping for alloc_entity_using_variable
+				// rather than trusting the line number):
+				//     Scope *scope = t->Struct.scope;
+				//     for (auto const &entry : scope->elements) {
+				//         Entity *f = entry.value;
+				//         if (f->kind == Entity_Variable) { ... array_add(&using_entities, puv); }
+				//     }
+				// That range-for is a slot walk (ScopeMapIterator, checker.hpp:468-505).
+				//
+				// ORDER IS OBSERVABLE, and it took reading the CONSUMER to establish that -- the
+				// loop itself has no bail and no diagnostic, it only appends. But the first
+				// consumer (below, ~line 1817) inserts each using-variable into ctx.scope and
+				// BREAKS on the first collision, so the order of using_entities decides which
+				// "Namespace collision while 'using' procedure argument" is reported.
+				// Measured with four colliding parameters: the port printed alpha/beta/beta/alpha/
+				// gamma/delta/delta/beta across eight runs where the oracle printed delta every time.
+				ordered := make([dynamic]^Entity, 0, len(struct_scope.elements), context.temp_allocator)
 				for _, field in struct_scope.elements {
+					if field != nil {
+						append(&ordered, field)
+					}
+				}
+				slice.sort_by(ordered[:], proc(a, b: ^Entity) -> bool {
+					if a.token.pos.file != b.token.pos.file {
+						return a.token.pos.file < b.token.pos.file
+					}
+					if a.token.pos.offset != b.token.pos.offset {
+						return a.token.pos.offset < b.token.pos.offset
+					}
+					return a.token.text < b.token.text
+				})
+
+				for field in scope_map_slot_order(ordered[:], context.temp_allocator) {
+					if field == nil {
+						continue
+					}
 					if field.kind == .Variable {
 						// Allocate using variable entity
 						// C++ Reference: check_decl.cpp:2089
@@ -2078,6 +2137,17 @@ type_align_of :: proc(t: ^Type) -> int {
 	case .Map:
 		return 8 // Pointer alignment
 
+	// C++ Reference: types.cpp type_align_of_internal, case Type_BitField --
+	//     return type_align_of_internal(t->BitField.backing_type, path);
+	// This arm was MISSING, so bit_field fell through to the function's default of 8 and every
+	// bit_field reported align 8 regardless of backing width: u8 -> 8 (want 1), u16 -> 8 (want 2),
+	// u32 -> 8 (want 4). Only the u64-backed case was right, and only by coincidence. type_size_of
+	// already delegates to backing_type (types.odin, case .Bit_Field) -- this is its missing mirror,
+	// and the exact sibling of #113 (type_align_of ignored struct alignment directives).
+	case .Bit_Field:
+		bf := bt.variant.(Type_Bit_Field)
+		return type_align_of(bf.backing_type)
+
 	case .Struct:
 		struc := bt.variant.(Type_Struct)
 
@@ -2129,11 +2199,33 @@ type_align_of :: proc(t: ^Type) -> int {
 		return type_align_of(enum_type.base_type)
 
 	case .Bit_Set:
+		// C++ Reference: types.cpp:4506-4517. The `underlying` branch was ported; the BIT-COUNT
+		// LADDER under it was replaced with a bare `return 8`, so every bit_set without an
+		// explicit backing type reported align 8 regardless of width.
+		//
+		// LEDGER #475. Found by the first cross-implementation MODEL diff, not by any diagnostic
+		// gate -- align is not printed in any message, so all 323 parity packages were green with
+		// this present. It is the #416 shape exactly (that was type_align_of's missing Bit_Field
+		// arm; this is Bit_Set's truncated one) and the #268/#294 family: C++'s logic reduced to a
+		// constant that happens to be right for the common 64-bit case.
 		bs := bt.variant.(Type_Bit_Set)
 		if bs.underlying != nil {
 			return type_align_of(bs.underlying)
 		}
-		return 8 // Default
+		bits := bs.upper - bs.lower + 1
+		switch {
+		case bits <= 8:
+			return 1
+		case bits <= 16:
+			return 2
+		case bits <= 32:
+			return 4
+		case bits <= 64:
+			return 8
+		case bits <= 128:
+			return 16
+		}
+		return 8 // C++: "Could be an invalid range so limit it for now"
 
 	case .Simd_Vector:
 		sv := bt.variant.(Type_Simd_Vector)
@@ -2143,18 +2235,93 @@ type_align_of :: proc(t: ^Type) -> int {
 		// Round up to power of 2
 		return min(total_size, 64) if total_size > 0 else 1
 
+	case .Fixed_Capacity_Dynamic_Array:
+		// C++ Reference: types.cpp type_align_of_internal, case Type_FixedCapacityDynamicArray:
+		//     return gb_max(build_context.int_size, type_align_of_internal(elem, path));
+		//
+		// There was NO arm here at all, so `[dynamic; N]T` fell through to the default `return 8`
+		// and any element aligned more strictly than a word reported the word's alignment:
+		//     [dynamic; 4]Big            oracle 16   port 8    (Big is struct #align(16))
+		//     [dynamic; 2]matrix[4,4]f32 oracle 32   port 8
+		// The second only became visible after #514 fixed matrix alignment -- before that the
+		// element itself measured 4, so the wrong answer here was masked by a wrong answer
+		// underneath it. Worth noting as a general hazard of layout defects: they compose, and
+		// fixing one can be what makes the next one measurable.
+		fcda := bt.variant.(Type_Fixed_Capacity_Dynamic_Array)
+		return max(int(build_context.int_size), type_align_of(fcda.elem))
+
 	case .Matrix:
 		mat := bt.variant.(Type_Matrix)
-		return type_align_of(mat.elem)
+		return matrix_align_of(mat)
 
 	case:
 		return 8 // Default to pointer alignment
 	}
 }
 
+// matrix_align_of ports C++ matrix_align_of (src/types.cpp).
+//
+// The port had `return type_align_of(mat.elem)` -- the ELEMENT's alignment. That is wrong for every
+// matrix whose total size exceeds its element size, i.e. all of them, and it is the same shape of
+// defect as #416 (type_align_of missing its Bit_Field arm) and #475 (its Bit_Set arm truncated to a
+// constant). Found by modeldiff on core/math/linalg, where SIZES agreed on all six identity
+// constants and ALIGNMENTS diverged on all six:
+//
+//     matrix[2,2]f16   C++ 8    port 2        matrix[4,4]f16   C++ 32   port 2
+//     matrix[2,2]f32   C++ 16   port 4        matrix[4,4]f32   C++ 32   port 4
+//     matrix[2,2]f64   C++ 32   port 8        matrix[4,4]f64   C++ 32   port 8
+//
+// C++'s rule, and its own comment explains WHY it is not simply the element alignment: the strategy
+// is ZERO PADDING. Padding each column to its natural alignment would be faster, but Odin
+// deliberately trades that away so third-party libraries can assume a matrix is densely packed.
+// Alignment is therefore derived from the TOTAL size -- the largest power of two that divides it --
+// floored at the element's own alignment and capped at max_simd_align.
+//
+// The commented-out `prev_pow2(elem_align * row_count)` line is preserved in C++ as the rejected
+// alternative; it is not ported, and this note is here so that a future reader who finds it does
+// not mistake it for something the port dropped.
+@(private = "file")
+matrix_align_of :: proc(mat: Type_Matrix) -> int {
+	elem_align := type_align_of(mat.elem)
+	elem_size := type_size_of(mat.elem)
+
+	row_count := max(int(mat.row_count), 1)
+	column_count := max(int(mat.column_count), 1)
+
+	total_expected_size := row_count * column_count * elem_size
+
+	min_alignment := prev_pow2_int(total_expected_size)
+	// C++ divides by min_alignment unguarded; prev_pow2 of a positive value is >= 1, so it cannot
+	// be zero there. The extra `min_alignment > 0` test here is a division-by-zero guard for the
+	// total == 0 case (a zero-sized element), which in C++ skips the loop via its first condition
+	// and would trap in Odin only if the second were evaluated. Same result, no panic.
+	for total_expected_size != 0 && min_alignment > 0 && total_expected_size % min_alignment != 0 {
+		min_alignment >>= 1
+	}
+	min_alignment = max(min_alignment, elem_align)
+
+	return min(min_alignment, int(build_context.max_simd_align))
+}
+
+// prev_pow2_int ports C++ prev_pow2(i64) (src/common.cpp:535) -- the largest power of two <= n.
+@(private = "file")
+prev_pow2_int :: proc(v: int) -> int {
+	if v <= 0 {
+		return 0
+	}
+	n := v
+	n |= n >> 1
+	n |= n >> 2
+	n |= n >> 4
+	n |= n >> 8
+	n |= n >> 16
+	n |= n >> 32
+	return n - (n >> 1)
+}
+
 // ======================================================================================
 // PROCEDURE VALIDATION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:6288-6371, 7085-7134
+// C++ Reference: checker.cpp:6288-6371, 7085-7134
 // ======================================================================================
 
 // init_procedures_cmp_generic compares two entities for init procedure sorting
@@ -2454,11 +2621,11 @@ check_safety_all_procedures_for_unchecked :: proc(c: ^Checker) {
 
 // ======================================================================================
 // DEPENDENCY TREE UPDATES
-// C++ Reference: /mnt/c/odin/src/checker.cpp:7154-7212
+// C++ Reference: checker.cpp:7520-7580
 // ======================================================================================
 
 // check_walk_all_dependencies_worker_proc is the thread pool worker for dependency walking
-// C++ Reference: checker.cpp:7176-7197
+// C++ Reference: checker.cpp:7546-7558
 check_walk_all_dependencies_worker_proc :: proc(data: rawptr) -> int {
 	decl := cast(^Decl_Info)data
 	check_walk_all_dependencies(decl)
@@ -2466,7 +2633,7 @@ check_walk_all_dependencies_worker_proc :: proc(data: rawptr) -> int {
 }
 
 // check_walk_all_dependencies recursively walks a declaration's dependency tree
-// C++ Reference: checker.cpp:7154-7162 (single-threaded) or 7176-7197 (multithreaded)
+// C++ Reference: checker.cpp:7522-7530 (the #if 0 sequential form, which this mirrors)
 //
 // This function processes a declaration and all its children (nested procedures),
 // propagating dependencies from child declarations to parent declarations.
@@ -2477,18 +2644,18 @@ check_walk_all_dependencies :: proc(decl: ^Decl_Info) {
 	}
 
 	// Process all child declarations recursively
-	// C++ Reference: checker.cpp:7158-7159
+	// C++ Reference: checker.cpp:7526-7528
 	for child := decl.next_child; child != nil; child = child.next_sibling {
 		check_walk_all_dependencies(child)
 	}
 
 	// Propagate dependencies from this declaration to its parent
-	// C++ Reference: checker.cpp:7161
+	// C++ Reference: checker.cpp:7529
 	add_deps_from_child_to_parent(decl)
 }
 
 // check_update_dependency_tree_for_procedures walks all procedure dependency trees
-// C++ Reference: checker.cpp:7164-7212
+// C++ Reference: checker.cpp:7567-7579
 //
 // This function processes two sets of declarations:
 // 1. Nested procedure literals (from c.nested_proc_lits)
@@ -2502,7 +2669,7 @@ check_update_dependency_tree_for_procedures :: proc(c: ^Checker) {
 
 	if use_threading {
 		// Multithreaded mode: submit tasks to thread pool
-		// C++ Reference: checker.cpp:7200-7208
+		// C++ Reference: checker.cpp:7568-7576
 
 		// Process nested procedure literals
 		{
@@ -2523,11 +2690,11 @@ check_update_dependency_tree_for_procedures :: proc(c: ^Checker) {
 		}
 
 		// Wait for all workers to complete
-		// C++ Reference: checker.cpp:7210
+		// C++ Reference: checker.cpp:7578
 		thread_pool_wait()
 	} else {
 		// Sequential mode: process directly
-		// C++ Reference: checker.cpp:7165-7173
+		// C++ Reference: checker.cpp:7533-7541
 
 		// Process nested procedure literals
 		{
@@ -2549,7 +2716,7 @@ check_update_dependency_tree_for_procedures :: proc(c: ^Checker) {
 
 // ======================================================================================
 // SCOPE USAGE VALIDATION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:7214-7242
+// C++ Reference: checker.cpp:7214-7242
 // ======================================================================================
 
 // Scope_Check_Task holds data for a scope checking task

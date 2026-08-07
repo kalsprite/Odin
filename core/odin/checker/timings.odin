@@ -6,7 +6,7 @@ Performance profiling and timing infrastructure for the checker.
 This module provides high-resolution timing and performance profiling for compiler phases.
 It supports platform-specific timing mechanisms and provides detailed timing reports.
 
-C++ Reference: /mnt/c/odin/src/timings.cpp
+C++ Reference: timings.cpp
 */
 
 import "core:fmt"

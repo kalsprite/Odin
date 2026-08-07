@@ -62,6 +62,82 @@ echo $$ > "$PARITY_LOCK"
 trap 'rm -rf "$TMP"; rm -f "$PARITY_LOCK"' EXIT
 
 
+# THE ORACLE MUST EXIST. On 2026-08-05 the ./odin binary vanished mid-tick (cause unknown).
+# A missing oracle does not error here -- `timeout 180 ./odin check ...` just fails, the captured
+# output is empty, and every package reads as "oracle=0". Against a port that reports normally
+# that manufactures a mismatch on every package; against a port that also reports nothing it
+# manufactures a CLEAN SWEEP. Both readings are fiction, and the second is the dangerous one.
+#
+# This is the #275/#385 family again: an instrument reporting a result for work it did not do.
+# Guard it the same way -- abort loudly rather than print a number nobody can trust.
+if [ ! -x ./odin ]; then
+  echo "PARITY-ABORTED reason=oracle-missing: ./odin is absent or not executable." >&2
+  echo "         Rebuild it with ./build_odin.sh release before trusting any parity number." >&2
+  exit 2
+fi
+
+# HANG STATE CAPTURE (#301). parity.sh used to record THAT a package died and never WHY, so the
+# one timeout it has ever caught -- riscv/tools, 2026-08-05 -- was undiagnosable after the fact and
+# had to be closed by refuting hypotheses instead of by reading evidence. A bare rc=124 in a log is
+# not a bug report.
+#
+# `timeout` kills the process, which destroys exactly the state worth having. So the run is polled
+# instead, and if it overruns, per-thread state is dumped BEFORE the kill. /proc/<pid>/task/*/wchan
+# is the load-bearing field: it names the kernel function each thread is blocked in, which
+# distinguishes a futex deadlock (the #299/#25/#278 family) from a spin from real work. It needs no
+# ptrace, so it survives ptrace_scope=1 where gdb -p does not; eu-stack is attempted too but is
+# expected to fail under that setting and its failure is not an error.
+PARITY_HANGDIR="${PARITY_HANGDIR:-$TMP/hangs}"
+mkdir -p "$PARITY_HANGDIR"
+
+capture_hang() {
+  local pid="$1" label="$2" pkg="$3"
+  local f="$PARITY_HANGDIR/hang-$(echo "$pkg" | tr '/' '_')-$label.txt"
+  {
+    echo "=== $label pid=$pid pkg=$pkg -- still alive after ${PARITY_TIMEOUT}s ==="
+    date -u +"captured %Y-%m-%dT%H:%M:%SZ"
+    echo "--- process ---"
+    grep -E '^(State|Threads|VmRSS):' "/proc/$pid/status" 2>/dev/null
+    echo "--- threads (state, wchan = where it is blocked) ---"
+    for t in /proc/$pid/task/*; do
+      [ -d "$t" ] || continue
+      echo "  tid=${t##*/} state=$(awk '{print $3}' "$t/stat" 2>/dev/null)" \
+           "wchan=$(cat "$t/wchan" 2>/dev/null || echo '?')" \
+           "comm=$(cat "$t/comm" 2>/dev/null)"
+    done
+    echo "--- eu-stack (best effort; ptrace_scope=1 denies this, which is expected) ---"
+    eu-stack -p "$pid" 2>&1 | head -80
+  } > "$f" 2>&1
+  echo "         HANG STATE -> $f" >&2
+}
+
+# run_guarded <outfile> <label> <pkg> <cmd...> -- like `timeout`, but dumps thread state first.
+PARITY_TIMEOUT="${PARITY_TIMEOUT:-180}"
+run_guarded() {
+  local out="$1" label="$2" pkg="$3"; shift 3
+  "$@" > "$out" 2>&1 &
+  local pid=$! waited=0 fast=0
+  # ADAPTIVE POLL. A flat `sleep 1` would add a full second to EVERY package -- ~11 minutes over a
+  # 323-package sweep -- because almost every run finishes in well under a second. So poll at 50ms
+  # for the first 2 seconds (which covers essentially all real runs), then fall back to 1s for the
+  # long tail, where a second of granularity against a 180s budget costs nothing.
+  while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$PARITY_TIMEOUT" ]; do
+    if [ "$fast" -lt 40 ]; then
+      sleep 0.05; fast=$((fast+1))
+      [ "$fast" -eq 40 ] && waited=2
+    else
+      sleep 1; waited=$((waited+1))
+    fi
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    capture_hang "$pid" "$label" "$pkg"
+    kill -9 "$pid" 2>/dev/null
+    wait "$pid" 2>/dev/null
+    return 124
+  fi
+  wait "$pid"
+}
+
 # died <rc> -- true if the run did not complete (timeout or fatal signal), false otherwise.
 died() { [ "$1" -eq 124 ] || [ "$1" -ge 128 ]; }
 why()  { [ "$1" -eq 124 ] && echo "TIMEOUT" || echo "SIG$(($1-128))"; }
@@ -71,8 +147,8 @@ while read -r p; do
   [ -z "$p" ] && continue
   n=$((n+1))
 
-  timeout 180 ./odin check "$p" -no-entry-point > "$TMP/o.raw" 2>&1; orc=$?
-  timeout 180 "$PORT" "$p"                      > "$TMP/p.raw" 2>&1; prc=$?
+  run_guarded "$TMP/o.raw" oracle "$p" ./odin check "$p" -no-entry-point; orc=$?
+  run_guarded "$TMP/p.raw" port   "$p" "$PORT" "$p";                        prc=$?
 
   if died "$orc" || died "$prc"; then
     excluded=$((excluded+1))
@@ -108,6 +184,20 @@ while read -r p; do
     # was a REAL DEFECT -- the port anchored an unnamed import at the `import` keyword instead
     # of the path, and that accounted for 88/88 of the vet-mode divergences. This split exists
     # so the two classes are DISTINGUISHABLE at a glance, not so ATTRIB can be skipped. Both
+    #
+    # ONE KNOWN-NOISE CLASS, measured (LEDGER #407). A single ATTRIB on a core/rexcode/isa/*/tools
+    # package is ORACLE NONDETERMINISM, not a port defect. Those packages have two files that BOTH
+    # declare `main`, so "Redeclaration of 'main'" must pick one file to blame and one for the
+    # `at ...` continuation, and C++ does not pick stably under full-sweep load.
+    # Proven by running THIS SCRIPT with the oracle in the PORT slot (a wrapper doing
+    # `odin check "$1" -no-entry-point`), making every comparison oracle-vs-oracle:
+    #     oracle vs ITSELF   1 event / 6 sweeps   (rsp/tools)
+    #     #404 port build    2 events / 12 sweeps (mos65816/tools, mos6502/tools)
+    # -- an identical ~17% rate, so the port arm is fully accounted for by oracle noise.
+    # Do NOT revert a change over one of these, and do not re-run the A/B: it cannot separate
+    # anything, because line 88 re-runs the oracle every sweep rather than using a cached
+    # reference, so a mismatch never says WHICH SIDE moved. #197/#201/#173/#185 are the same
+    # family. A COUNT or TEXT mismatch here would be a different matter entirely.
     # still demand the #301/#313 discrimination: re-run the package in isolation, and against
     # the PREVIOUS binary, before attributing it to anything.
     #

@@ -8,8 +8,8 @@ type information, entities, and documentation into a compact binary format
 for use by documentation tools.
 
 C++ References:
-- /mnt/c/odin/src/docs_format.cpp (format definitions)
-- /mnt/c/odin/src/docs_writer.cpp (writer implementation)
+- docs_format.cpp (format definitions)
+- docs_writer.cpp (writer implementation)
 
 Format version: 0.3.1
 Magic string: "odindoc\0"
@@ -319,6 +319,24 @@ Doc_Writer :: struct {
 	file_cache:   map[^ast.File]Doc_File_Index,
 	pkg_cache:    map[^ast.Package]Doc_Pkg_Index,
 	entity_cache: map[^Entity]Doc_Entity_Index,
+
+	// INSERTION ORDER for entity_cache. LEDGER #490.
+	//
+	// C++ Reference: docs_writer.cpp:30-33 -- file_cache, pkg_cache, entity_cache and type_cache
+	// are all `OrderedInsertPtrMap`, i.e. iterating them yields INSERTION order. The port declared
+	// them as plain Odin maps, whose iteration order is unordered (and address-seeded), so
+	// iterating entity_cache gave a different order on the sizing pass than on the writing pass.
+	//
+	// That order decides which member of a canonical-hash COLLISION gets written: `untyped rune`
+	// and `rune` hash identically by design (the canonical writer resolves through default_type),
+	// so whichever is visited first wins and the other returns its index -- and the two write
+	// different NAME strings. Different winner between passes => the strings section needs a
+	// different byte count than was measured => overflow (#489).
+	//
+	// entity_cache is the only one of the four the port actually ITERATES, so it is the only one
+	// that needs the ordering today. Kept beside the map rather than replacing it so lookups stay
+	// O(1), which is what OrderedInsertPtrMap gives C++ too.
+	entity_order: [dynamic]^Entity,
 	type_cache:   map[u64]Doc_Type_Index, // Key is type hash
 
 	// Item trackers
@@ -344,6 +362,7 @@ doc_writer_init :: proc(w: ^Doc_Writer, info: ^Checker_Info) {
 	w.file_cache = make(map[^ast.File]Doc_File_Index)
 	w.pkg_cache = make(map[^ast.Package]Doc_Pkg_Index)
 	w.entity_cache = make(map[^Entity]Doc_Entity_Index)
+	w.entity_order = make([dynamic]^Entity)
 	w.type_cache = make(map[u64]Doc_Type_Index)
 
 	// Initialize trackers with capacity 1
@@ -364,6 +383,7 @@ doc_writer_destroy :: proc(w: ^Doc_Writer) {
 	delete(w.file_cache)
 	delete(w.pkg_cache)
 	delete(w.entity_cache)
+	delete(w.entity_order)
 	delete(w.type_cache)
 }
 
@@ -404,6 +424,7 @@ doc_writer_start_writing :: proc(w: ^Doc_Writer) {
 	clear(&w.file_cache)
 	clear(&w.pkg_cache)
 	clear(&w.entity_cache)
+	clear(&w.entity_order)
 	clear(&w.type_cache)
 
 	// Allocate output buffer
@@ -1226,15 +1247,48 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 	doc_entity: Doc_Entity
 	entity_index := doc_write_item(w, &w.entities, &doc_entity)
 	w.entity_cache[e] = entity_index
+	append(&w.entity_order, e)
 
 	// Determine entity kind
 	kind: Doc_Entity_Kind
 	flags: u64
+	// C++ zeroes pos for Entity_Builtin (docs_writer.cpp:897). Recorded here and applied below,
+	// because the port computes pos AFTER the kind switch rather than inside it.
+	is_builtin_entity := false
 	#partial switch e.kind {
 	case .Constant:
 		kind = .Constant
 	case .Variable:
 		kind = .Variable
+		// C++ Reference: docs_writer.cpp:871-872 --
+		//     if (e->Variable.is_foreign) { flags |= OdinDocEntityFlag_Foreign; }
+		//     if (e->Variable.is_export)  { flags |= OdinDocEntityFlag_Export;  }
+		// LEDGER #479. These were read from INVENTED entity FLAGS (.Foreign/.Export) in the
+		// "common flags" block below, and nothing ever set them, so both doc bits were
+		// unreachable. C++ keeps the fact on the VARIANT, and so does the port -- is_foreign is
+		// set at check_collect.odin:1100, is_export at check_decl.odin:249. The data was there;
+		// only the read was wrong. Note C++ does this PER VARIANT inside the kind switch, not as
+		// a common flag, because only Variable and Procedure carry the fields.
+		if var_v, var_ok := &e.variant.(ast.Entity_Variable); var_ok {
+			if var_v.is_foreign {
+				flags |= 1 << u64(Doc_Entity_Flag.Foreign)
+			}
+			if var_v.is_export {
+				flags |= 1 << u64(Doc_Entity_Flag.Export)
+			}
+		}
+		// C++ Reference: docs_writer.cpp:873-874 --
+		//     if (e->Variable.thread_local_model != "") {
+		//         flags |= OdinDocEntityFlag_Var_Thread_Local;
+		//     }
+		// LEDGER #480. Same shape as #479: the bit was DECLARED and never assigned anywhere in
+		// the port, so it was unreachable. thread_local_model has always been on the variant
+		// (ast.Entity_Variable), so this is a missing read, not missing data.
+		if var_tl, tl_ok := &e.variant.(ast.Entity_Variable); tl_ok {
+			if len(var_tl.thread_local_model) > 0 {
+				flags |= 1 << u64(Doc_Entity_Flag.Var_Thread_Local)
+			}
+		}
 		if .Static in e.flags {
 			flags |= 1 << u64(Doc_Entity_Flag.Var_Static)
 		}
@@ -1245,6 +1299,15 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 		}
 	case .Procedure:
 		kind = .Procedure
+		// C++ Reference: docs_writer.cpp:892-893 -- same pair, from the Procedure variant.
+		if proc_v, proc_ok := &e.variant.(ast.Entity_Procedure); proc_ok {
+			if proc_v.is_foreign {
+				flags |= 1 << u64(Doc_Entity_Flag.Foreign)
+			}
+			if proc_v.is_export {
+				flags |= 1 << u64(Doc_Entity_Flag.Export)
+			}
+		}
 	case .Proc_Group:
 		kind = .Proc_Group
 	case .Import_Name:
@@ -1253,15 +1316,39 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 		kind = .Library_Name
 	case .Builtin:
 		kind = .Builtin
+		// C++ Reference: docs_writer.cpp:895-910. The WHOLE arm, not just the flag -- C++ also
+		// zeroes the position and takes the name from the builtin PROC TABLE rather than the
+		// entity token. Porting only the flag would leave the same arm half-done, which is how
+		// #479 happened in the first place.
+		//
+		// LEDGER #480. Builtin_Pkg_Builtin and Builtin_Pkg_Intrinsics were both declared and
+		// assigned NOWHERE in the port -- two more unreachable bits. C++ recovers the package by
+		// looking up builtin_procs[e->Builtin.id]; the port's Entity_Builtin carries `pkg`
+		// directly, so the lookup is unnecessary and the field is read straight off the variant.
+		// The package must come from the TABLE, keyed by id, exactly as C++ does
+		// (`builtin_procs[e->Builtin.id].pkg`).
+		//
+		// LEDGER #348 CORRECTS THIS COMMENT. It previously said Entity_Builtin's `pkg` field was
+		// "never written, the sole constructor being entity.odin:102". Both halves were wrong:
+		// alloc_entity_builtin DID write it from proc_info.pkg, and there were three other
+		// construction sites. The field's real defect was that it was WRITE-ONLY (no reader made a
+		// decision on it) and that one path built `Entity_Builtin{id = ...}` without it, leaving
+		// the zero value `.Builtin` -- which is why reading it labelled intrinsics as Builtin.
+		// The field has since been DELETED (#348); the table is the only authority, as in C++.
+		if bi_v, bi_ok := &e.variant.(ast.Entity_Builtin); bi_ok {
+			switch builtin_proc_infos[bi_v.id].pkg {
+			case .Builtin:
+				flags |= 1 << u64(Doc_Entity_Flag.Builtin_Pkg_Builtin)
+			case .Intrinsics:
+				flags |= 1 << u64(Doc_Entity_Flag.Builtin_Pkg_Intrinsics)
+			}
+			is_builtin_entity = true
+		}
 	}
 
 	// Common flags
-	if .Foreign in e.flags {
-		flags |= 1 << u64(Doc_Entity_Flag.Foreign)
-	}
-	if .Export in e.flags {
-		flags |= 1 << u64(Doc_Entity_Flag.Export)
-	}
+	// NOTE: Foreign/Export are NOT here -- C++ reads them from the Variable and Procedure
+	// variants (docs_writer.cpp:871/892), which is where the port sets them too. See #479.
 	if .Not_Exported in e.flags {
 		flags |= 1 << u64(Doc_Entity_Flag.Private)
 	}
@@ -1273,9 +1360,11 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 	if .Const_Input in e.flags {
 		flags |= 1 << u64(Doc_Entity_Flag.Param_Const)
 	}
-	if .Auto_Cast in e.flags {
-		flags |= 1 << u64(Doc_Entity_Flag.Param_Auto_Cast)
-	}
+	// LEDGER #477. No Param_Auto_Cast assignment here, and that MATCHES C++: src/ has no
+	// EntityFlag_AutoCast and docs_writer.cpp has no corresponding `if` at all. The port had both
+	// an invented entity flag and an invented read of it, so the bit could never be set anyway --
+	// removing them changes no output and removes a divergence. The DOC bit itself stays declared,
+	// because C++ declares it too (docs_format.cpp:225); it is simply written by neither.
 	if .Ellipsis in e.flags {
 		flags |= 1 << u64(Doc_Entity_Flag.Param_Ellipsis)
 	}
@@ -1306,6 +1395,11 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 	pos.line = u32(e.token.pos.line)
 	pos.column = u32(e.token.pos.column)
 	pos.offset = u32(e.token.pos.offset)
+	// C++ Reference: docs_writer.cpp:897 `pos = {};` -- a builtin has no source location, so the
+	// whole position (file index included) is cleared, not just the line/column.
+	if is_builtin_entity {
+		pos = {}
+	}
 
 	// Write entity basic fields
 	doc_entity.kind = kind
@@ -1334,13 +1428,37 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 
 // doc_update_entities updates entity type references after all types are written
 doc_update_entities :: proc(w: ^Doc_Writer) {
+	// SNAPSHOT THE KEYS BEFORE ITERATING. LEDGER #487.
+	//
+	// C++ Reference: docs_writer.cpp:984-992 --
+	//     // NOTE(bill): Double pass, just in case entities are created on odin_doc_type
+	//     auto entities = array_make<Entity *>(heap_allocator(), 0, w->entity_cache.count);
+	//     for (auto const &entry : w->entity_cache) { array_add(&entities, entry.key); }
+	//     for (Entity *e : entities) { ... }
+	//
+	// The port used to iterate w.entity_cache LIVE, in both loops below. The second loop's body
+	// calls doc_write_entity (for foreign_library and for grouped entities), and doc_write_entity
+	// INSERTS into w.entity_cache -- so the map was being mutated while it was being iterated.
+	// That is undefined behaviour: an insert can rehash, after which entries are revisited or
+	// skipped, and the set actually walked stops being a function of the input.
+	//
+	// The visible cost was #484: the sizing pass and the writing pass walked DIFFERENT entity
+	// sets, so the capacity computed by pass 1 did not fit what pass 2 wrote, and the item
+	// tracker overflowed -- aborting ~80% of `-dump-doc` runs on core/c/libc. bill's comment
+	// names the same hazard from the other direction ("just in case entities are created"), which
+	// is why the reference implementation snapshots and the port must too.
+	entities := make([dynamic]^Entity, 0, len(w.entity_order))
+	defer delete(entities)
+	append(&entities, ..w.entity_order[:])
+
 	// First pass: ensure all entity types are written
-	for e, _ in w.entity_cache {
+	for e in entities {
 		doc_write_type(w, e.type)
 	}
 
 	// Second pass: update entity references
-	for e, entity_index in w.entity_cache {
+	for e in entities {
+		entity_index := w.entity_cache[e]
 		type_index := doc_write_type(w, e.type)
 
 		foreign_library: Doc_Entity_Index
@@ -1394,7 +1512,33 @@ doc_add_pkg_entries :: proc(w: ^Doc_Writer, pkg: ^ast.Package) -> Doc_Array(Doc_
 	entries := make([dynamic]Doc_Scope_Entry)
 	defer delete(entries)
 
+	// SLOT ORDER, not map order. LEDGER #494.
+	//
+	// C++ Reference: docs_writer.cpp:1065-1070 --
+	//     for (isize i = 0; i < pkg->scope->elements.cap; i++) {
+	//         if (!pkg->scope->elements.slots[i].hash) continue;
+	//         auto interned = pkg->scope->elements.keys[i];
+	//         Entity *e = pkg->scope->elements.slots[i].value;
+	//
+	// C++ walks its ScopeMap by SLOT INDEX. This was a raw `for name, e in scope.elements`, i.e.
+	// Odin map order, which is unordered and address-seeded. The order is OBSERVABLE: these
+	// entries become a Doc_Array(Doc_Scope_Entry) in the output, so walk order is output order.
+	// Measured before the fix, the first ten entry names differed on all four of four runs.
+	//
+	// scope_map_slot_order (scope.odin:965, from #214) reproduces C++'s slot layout, and three
+	// sites already use it this way (check_proc.odin:944, error.odin:2010, check_stmt.odin:230).
+	// The deterministic pre-sort is part of the pattern, not decoration: the slot simulation is
+	// only reproducible if its INPUT order is, and map order is not.
+	//
+	// The name comes from the map KEY in C++ (elements.keys[i]), so it is carried alongside rather
+	// than re-derived from e.token.text -- those are not guaranteed equal (see #31).
+	ordered := make([dynamic]^Entity, 0, len(scope.elements), context.temp_allocator)
+	names := make(map[^Entity]string, len(scope.elements), context.temp_allocator)
 	for name, e in scope.elements {
+		if e == nil {
+			continue
+		}
+
 		// Skip non-exportable entities
 		#partial switch e.kind {
 		case .Invalid, .Nil, .Label:
@@ -1413,8 +1557,25 @@ doc_add_pkg_entries :: proc(w: ^Doc_Writer, pkg: ^ast.Package) -> Doc_Array(Doc_
 			continue
 		}
 
+		append(&ordered, e)
+		names[e] = name
+	}
+	slice.sort_by(ordered[:], proc(a, b: ^Entity) -> bool {
+		if a.token.pos.file != b.token.pos.file {
+			return a.token.pos.file < b.token.pos.file
+		}
+		if a.token.pos.offset != b.token.pos.offset {
+			return a.token.pos.offset < b.token.pos.offset
+		}
+		return a.token.text < b.token.text
+	})
+
+	for e in scope_map_slot_order(ordered[:], context.temp_allocator) {
+		if e == nil {
+			continue
+		}
 		entry := Doc_Scope_Entry{
-			name = doc_write_string(w, name),
+			name = doc_write_string(w, names[e]),
 			entity = doc_write_entity(w, e),
 		}
 		append(&entries, entry)

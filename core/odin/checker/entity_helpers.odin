@@ -6,8 +6,8 @@ Entity helper functions for manipulation and queries.
 This module provides higher-level entity operations used throughout the checker,
 including entity creation with flags, entity queries, and entity state management.
 
-C++ Reference: /mnt/c/odin/src/checker.cpp (entity helper functions)
-               /mnt/c/odin/src/entity.cpp (entity allocation and queries)
+C++ Reference: checker.cpp (entity helper functions)
+               entity.cpp (entity allocation and queries)
 */
 
 import "core:unicode"
@@ -100,7 +100,7 @@ token_pos_cmp :: proc(a, b: tokenizer.Pos) -> int {
 
 // ======================================================================================
 // ENTITY CREATION HELPERS WITH FLAGS
-// C++ Reference: /mnt/c/odin/src/entity.cpp:363-478
+// C++ Reference: entity.cpp:363-478
 // ======================================================================================
 
 // alloc_entity_using_variable: see entity.odin for the authoritative implementation
@@ -116,7 +116,7 @@ token_pos_cmp :: proc(a, b: tokenizer.Pos) -> int {
 
 // ======================================================================================
 // ENTITY QUERIES
-// C++ Reference: /mnt/c/odin/src/entity.cpp:298-520
+// C++ Reference: entity.cpp:298-520
 // ======================================================================================
 
 // is_entity_exported: see entity.odin for the authoritative implementation
@@ -227,8 +227,8 @@ parent_proc_decl_of_entity :: proc(e: ^Entity) -> ^Decl_Info {
 
 // ======================================================================================
 // AST ENTITY MAPPING
-// C++ Reference: /mnt/c/odin/src/checker.cpp:1829, 2080
-//                /mnt/c/odin/src/check_expr.cpp:268
+// C++ Reference: checker.cpp:1829, 2080
+//                check_expr.cpp:268
 // ======================================================================================
 
 // set_ast_entity stores entity for an AST node
@@ -293,7 +293,7 @@ get_entity_for_node :: proc(info: ^Checker_Info, node: ^ast.Node) -> ^Entity {
 
 // ======================================================================================
 // ENTITY ADDITION AND REGISTRATION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:1819-2075
+// C++ Reference: checker.cpp:1819-2075
 // ======================================================================================
 
 // add_entity_definition registers an entity definition with the checker
@@ -772,21 +772,86 @@ add_package_dependency :: proc(ctx: ^Checker_Context, package_name: string, name
 }
 
 // add_map_get_dependencies adds runtime dependencies for map read operations
-// C++ Reference: check_expr.cpp:315-323
-add_map_get_dependencies :: proc(ctx: ^Checker_Context, t: ^Type) {
+// C++ Reference: check_expr.cpp:321-328
+//
+// THE BRANCH IS NOT OPTIONAL. build_context.dynamic_map_calls is zero-initialised and set only by
+// the -dynamic-map-calls flag, so the DEFAULT build takes the `else` arm. The port used to
+// register __dynamic_map_get unconditionally -- the wrong arm for every ordinary build.
+// try_to_add_package_dependency is C++'s TOLERANT variant (checker.cpp:969). The difference from
+// add_package_dependency is exactly one thing: a missing entity is a SILENT RETURN here and a
+// GB_ASSERT_MSG abort there. It also has no `required` parameter.
+//
+// The port previously had only one function, silently tolerant, so ~95 sites that C++ asserts on
+// could drop a dependency without a trace -- the #405 shape wired into the checker itself. The
+// eleven objc/blocks names are the ones that legitimately may be absent: base:runtime declares
+// them only on darwin, so on any other target the lookup MUST fail quietly.
+//
+// C++ Reference: checker.cpp:969-982
+try_to_add_package_dependency :: proc(ctx: ^Checker_Context, package_name: string, name: string) {
+	if ctx == nil || ctx.info == nil {
+		return
+	}
+	pkg := get_core_package(ctx.info, package_name)
+	if pkg == nil {
+		return
+	}
+	pkg_scope := get_package_scope(ctx.info, pkg)
+	if pkg_scope == nil {
+		return
+	}
+	entity := scope_lookup(pkg_scope, name)
+	// C++ :975 -- `if (e == nullptr) { return; }`. THIS is the defining difference.
+	if entity == nil {
+		return
+	}
 	if ctx.decl == nil {
 		return
 	}
-	add_package_dependency(ctx, "runtime", "__dynamic_map_get")
+	entity.flags += {.Used}
+	add_dependency(ctx.info, ctx.decl, entity)
+}
+
+add_map_get_dependencies :: proc(ctx: ^Checker_Context) {
+	// No decl guard: C++ has none here (check_expr.cpp:321), and add_package_dependency
+	// already handles a nil decl.
+	if build_context.dynamic_map_calls {
+		add_package_dependency(ctx, "runtime", "__dynamic_map_get")
+	} else {
+		add_package_dependency(ctx, "runtime", "map_desired_position")
+		add_package_dependency(ctx, "runtime", "map_probe_distance")
+	}
 }
 
 // add_map_set_dependencies adds runtime dependencies for map write operations
-// C++ Reference: check_expr.cpp:324-339
-add_map_set_dependencies :: proc(ctx: ^Checker_Context, t: ^Type) {
-	if ctx.decl == nil {
-		return
+// C++ Reference: check_expr.cpp:330-343
+//
+// __dynamic_map_reserve does NOT belong here -- it is add_map_reserve_dependencies' job (below).
+// The port had it folded in, which is why a roster audit keyed on NAMES could not see the defect:
+// the name was present, just registered from the wrong function and unconditionally.
+add_map_set_dependencies :: proc(ctx: ^Checker_Context) {
+	init_core_source_code_location(ctx.checker)
+
+	// C++ ALSO builds t_map_set_proc here (check_expr.cpp:333-336). DELIBERATELY NOT PORTED:
+	// it has exactly ONE reader in all of src/ -- llvm_backend.cpp:837, lb_create_dummy_procedure
+	// -- so it is backend-only state written by the checker for the backend's later use. The port
+	// has no LLVM backend, and allocating a proc type nothing reads would be invented state that
+	// could perturb the model dump. Grep t_map_set_proc in src/ to re-verify before changing this.
+	//
+	// NOTE: C++ has NO `c->decl == nullptr` guard on these helpers -- it asserts inside
+	// add_package_dependency instead. The port's old guard here returned BEFORE
+	// init_core_source_code_location, so a nil decl silently skipped loading Source_Code_Location.
+	if build_context.dynamic_map_calls {
+		add_package_dependency(ctx, "runtime", "__dynamic_map_set")
+	} else {
+		add_package_dependency(ctx, "runtime", "__dynamic_map_check_grow")
+		add_package_dependency(ctx, "runtime", "map_insert_hash_dynamic")
 	}
-	add_package_dependency(ctx, "runtime", "__dynamic_map_set")
+}
+
+// add_map_reserve_dependencies is C++'s THIRD map helper, which the port never had.
+// C++ Reference: check_expr.cpp:346-349. Unconditional -- no dynamic_map_calls branch.
+add_map_reserve_dependencies :: proc(ctx: ^Checker_Context) {
+	init_core_source_code_location(ctx.checker)
 	add_package_dependency(ctx, "runtime", "__dynamic_map_reserve")
 }
 
@@ -921,7 +986,7 @@ path_to_entity_name :: proc(name: string, fullpath: string, strip_extension := t
 
 // ======================================================================================
 // ENTITY COMPARISON AND SORTING
-// C++ Reference: /mnt/c/odin/src/checker.cpp:534-539
+// C++ Reference: checker.cpp:534-539
 // ======================================================================================
 
 // entity_variable_pos_cmp compares two entities by token position
@@ -933,7 +998,7 @@ entity_variable_pos_cmp :: proc(a: ^Entity, b: ^Entity) -> int {
 
 // ======================================================================================
 // ENTITY KIND PREDICATES
-// C++ Reference: /mnt/c/odin/src/entity.cpp
+// C++ Reference: entity.cpp
 // ======================================================================================
 
 // is_entity_kind checks if entity is of specific kind
@@ -977,7 +1042,7 @@ is_entity_import_name :: proc(e: ^Entity) -> bool {
 
 // ======================================================================================
 // ENTITY STATE PREDICATES
-// C++ Reference: /mnt/c/odin/src/entity.cpp, checker.cpp
+// C++ Reference: entity.cpp, checker.cpp
 // ======================================================================================
 
 // entity_has_code checks if entity generates code
@@ -1009,7 +1074,7 @@ entity_has_code :: proc(e: ^Entity) -> bool {
 
 // ======================================================================================
 // ENTITY SCOPE HELPERS
-// C++ Reference: /mnt/c/odin/src/checker.cpp
+// C++ Reference: checker.cpp
 // ======================================================================================
 
 // entity_scope_level returns the nesting level of entity's scope
@@ -1057,7 +1122,7 @@ entity_in_foreign_scope :: proc(e: ^Entity) -> bool {
 
 // ======================================================================================
 // ENTITY EXTRACTION FROM AST
-// C++ Reference: /mnt/c/odin/src/checker.cpp
+// C++ Reference: checker.cpp
 // ======================================================================================
 
 // implicit_entity_of_node extracts implicit entity from case clause
@@ -1100,7 +1165,7 @@ decl_info_of_entity :: proc(e: ^Entity) -> ^Decl_Info {
 
 // ======================================================================================
 // ENTITY LOOKUP AND SCOPE MANIPULATION HELPERS
-// C++ Reference: /mnt/c/odin/src/checker.cpp
+// C++ Reference: checker.cpp
 // ======================================================================================
 
 // lookup_entity searches for entity by name in scope chain
@@ -1159,7 +1224,7 @@ pop_scope :: proc(ctx: ^Checker_Context, prev: ^Scope) {
 
 // ======================================================================================
 // ENTITY PACKAGE LOOKUP
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3161-3205
+// C++ Reference: checker.cpp:3161-3205
 // ======================================================================================
 
 // get_runtime_package returns the base:runtime package, or nil if it was not loaded.
@@ -1289,7 +1354,7 @@ find_type_in_pkg :: proc(info: ^Checker_Info, pkg_name: string, type_name: strin
 
 // ======================================================================================
 // PROCEDURE GROUP ENTITY EXTRACTION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3230-3248
+// C++ Reference: checker.cpp:3230-3248
 // ======================================================================================
 
 // proc_group_entities extracts entities from a procedure group operand
@@ -1332,7 +1397,7 @@ proc_group_entities_cloned :: proc(ctx: ^Checker_Context, o: ^Operand, allocator
 
 // ======================================================================================
 // TYPE PATH MANAGEMENT
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3425-3453
+// C++ Reference: checker.cpp:3425-3453
 // ======================================================================================
 
 // Type path is used for cycle detection during type checking.
@@ -1413,7 +1478,7 @@ check_cycle :: proc(ctx: ^Checker_Context, curr: ^Entity, report: bool) -> bool 
 
 // ======================================================================================
 // ENTITY DEPENDENCY HELPERS
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3005-3016
+// C++ Reference: checker.cpp:3005-3016
 // ======================================================================================
 
 // is_entity_a_dependency checks if an entity should be included in dependency graphs
@@ -1440,7 +1505,7 @@ is_entity_a_dependency :: proc(e: ^Entity) -> bool {
 
 // ======================================================================================
 // ENTITY SELECTOR VALIDATION
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:5358-5371
+// C++ Reference: check_expr.cpp:5358-5371
 // ======================================================================================
 
 // is_entity_declared_for_selector validates if entity is properly declared for selector access

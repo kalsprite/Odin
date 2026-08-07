@@ -4,7 +4,7 @@ package checker
 RangeCache tracks which indices and ranges have been initialized in indexed array literals.
 Used to detect duplicate indices and overlapping ranges.
 
-Reference: /mnt/c/odin/src/range_cache.cpp
+Reference: range_cache.cpp
 */
 
 // Range_Value represents a contiguous range of indices [lo, hi] inclusive

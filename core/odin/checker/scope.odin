@@ -109,7 +109,7 @@ scope_reserve :: proc(s: ^Scope, count: int) {
 }
 
 // scope_lookup_current looks up identifier in current scope only (no parent chain)
-// C++ Reference: /mnt/c/odin/src/checker.cpp
+// C++ Reference: checker.cpp
 scope_lookup_current :: proc(s: ^Scope, name: string) -> ^Entity {
 	if s == nil {
 		return nil
@@ -124,7 +124,7 @@ scope_lookup_current :: proc(s: ^Scope, name: string) -> ^Entity {
 }
 
 // scope_lookup looks up an identifier in scope and parent scopes
-// C++ Reference: /mnt/c/odin/src/checker.cpp:436-440
+// C++ Reference: checker.cpp:436-440
 scope_lookup :: proc(s: ^Scope, name: string) -> ^Entity {
 	_, entity := scope_lookup_parent(s, name)
 	return entity
@@ -133,7 +133,7 @@ scope_lookup :: proc(s: ^Scope, name: string) -> ^Entity {
 // check_identifier_exists reports whether an identifier or selector expression
 // resolves, WITHOUT checking it and therefore without emitting any diagnostic.
 //
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:6304-6330
+// C++ Reference: check_expr.cpp:6304-6330
 //
 // This is what `#defined` must use. Resolving the argument with check_ident
 // instead makes the very case `#defined` exists to test - a name that is not

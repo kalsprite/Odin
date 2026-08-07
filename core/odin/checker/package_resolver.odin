@@ -19,6 +19,7 @@ import "core:fmt"
 import "core:os"
 import "core:path/filepath"
 import "core:strings"
+import "core:sync"
 import "core:odin/ast"
 import "core:odin/parser"
 import "core:odin/tokenizer"
@@ -685,6 +686,11 @@ load_package_with_dependencies :: proc(
 		// rather than a token. syntax_error_va already takes (pos, end) and renders the caret
 		// across the range -- the parser simply had no way to reach it.
 		syntax_parser.err_range       = syntax_error_va
+		// #390: the parser's `#define` Suggestion quotes the user's macro body back at them,
+		// which needs expr_to_string. C++'s parser calls the checker's printer directly; this
+		// package split forbids that, so the driver injects the same printer rather than the
+		// parser growing a second one.
+		syntax_parser.expr_str        = expr_to_string
 		// #209: file_allow_newline needs build_context.strict_style and the build-level vet
 		// flags. The parser package has no build context of its own, so the driver supplies
 		// them -- without this every file parses as if -strict-style were off.
@@ -736,7 +742,17 @@ load_package_with_dependencies :: proc(
 		}
 
 		// Find and queue all imports
-		for _, file in pkg.files {
+		//
+		// LEDGER #459 (task #335). This walk decides the order imports are QUEUED, hence the order
+		// packages are loaded and REGISTERED, hence pkg.id -- which #452 now assigns from
+		// registration order and topological_sort_packages uses as its tiebreak. pkg.files is a
+		// map (#345, an ARRAY in C++), so a raw walk here is address-seeded (#437) and injects that
+		// nondeterminism straight into package_order.
+		//
+		// LEDGER #429 SORTED THIS EXACT SITE AND MEASURED NOTHING -- correctly, at the time:
+		// nothing consumed registration order yet. #452 created the consumer, which made a filed
+		// null result stale. Re-tested and landed on that basis, not on the old reasoning.
+		for file in sorted_files(pkg.files) {
 			for decl in file.decls {
 				if import_decl, is_import := decl.derived.(^ast.Import_Decl); is_import {
 					child_import_path := import_decl.fullpath
@@ -960,7 +976,33 @@ print_package_diagnostics :: proc(result: ^Package_Check_Result) {
 //	if res.check_errors > 0 {
 //		checker.print_package_diagnostics(&res)
 //	}
+// check_package_from_path checks a package and returns ONLY diagnostics and counts. The checked
+// model is created and destroyed inside the call.
+//
+// Callers that need the model to outlive the call (a backend, a language server) want
+// session_check_package instead -- see the Session block at the end of this file. This proc is
+// now a thin wrapper over it, so the two can never drift.
 check_package_from_path :: proc(path: string, allocator := context.allocator) -> (result: Package_Check_Result) {
+	c: ^Checker
+	cf: []^ast.File
+	result, c, cf = _check_package(path, allocator)
+	// Ownership stays here, exactly as before: the model dies with the call.
+	destroy_checker(c)
+	free(c, allocator)
+	delete(cf, allocator)
+	return
+}
+
+// _check_package is the driving sequence, shared by check_package_from_path and
+// session_check_package. It does NOT destroy the checker -- the caller owns `c` and must call
+// destroy_checker + free on it.
+//
+// The error collector's lifetime stays wholly inside this proc: harvest_check_diagnostics
+// detaches the diagnostics onto `result` (take_error_values is a detach, not a copy) before
+// destroy_error_collector frees the collector, so a surviving checker does not need a surviving
+// collector.
+@(private = "file")
+_check_package :: proc(path: string, allocator := context.allocator) -> (result: Package_Check_Result, checker: ^Checker, checked_files: []^ast.File) {
 	// Initialize ODIN_ROOT from environment if needed
 	init_odin_root_from_env()
 
@@ -979,10 +1021,32 @@ check_package_from_path :: proc(path: string, allocator := context.allocator) ->
 	// `result.check_errors = ...` inside a defer compiles and is then silently discarded. Every
 	// return path calls harvest_check_diagnostics explicitly instead.
 
-	// Create checker
-	c := &Checker{}
+	// Create checker.
+	//
+	// HEAP, not stack. It used to be `c := &Checker{}`, and the comment on the dump-model defer
+	// below explained that this was why no pointer to it could be handed back. A session needs
+	// exactly that pointer, so the Checker is now allocated from the caller's allocator and
+	// returned. Ownership passes to the caller: destroy_checker + free.
+	c := new(Checker, allocator)
+	checker = c
 	init_checker(c, allocator)
-	defer destroy_checker(c)
+
+	// LEDGER #418. Emit the model dump if -dump-model was requested. It is a defer so that all
+	// three return paths are covered and a future early-return cannot silently skip it.
+	//
+	// This proc no longer destroys the checker, so the ordering hazard the original comment
+	// described (register after the destroy defer so it unwinds first) is gone -- the model is
+	// alive for the whole of this proc and beyond it. The model is now reachable from the caller
+	// too, via the returned `checker`; it is still NOT on Package_Check_Result, because that
+	// result is returned by value from a proc whose checker the wrapper immediately destroys.
+	defer if len(build_context.dump_model_path) > 0 {
+		dump_model(c, build_context.dump_model_path)
+	}
+	// LEDGER #480. Same hook, same reason -- see dump_doc's own header for why the doc FLAG BITS
+	// need a gate of their own.
+	defer if len(build_context.dump_doc_path) > 0 {
+		dump_doc(c, build_context.dump_doc_path)
+	}
 
 	// NOTE(#279 part 2): set_error_collector_info(&c.info) belongs here and is NOT yet wired.
 	// Wiring it was TRIED and MEASURED on 2026-08-03 and is net-negative as things stand:
@@ -1016,7 +1080,6 @@ check_package_from_path :: proc(path: string, allocator := context.allocator) ->
 
 	// Collect all files from all packages (even if some failed to parse)
 	files := make([dynamic]^ast.File, allocator)
-	defer delete(files)
 
 	// Packages come from load_result.packages, which is an ordered slice, but the files within
 	// each were iterated as a MAP - so the flat list handed to check_files was
@@ -1037,6 +1100,9 @@ check_package_from_path :: proc(path: string, allocator := context.allocator) ->
 			append(&files, file)
 		}
 	}
+	// Published here, after the list is complete, so every return path below carries it.
+	// Ownership passes to the caller along with `checker`.
+	checked_files = files[:]
 
 	result.load_ok = loader_ok && len(files) > 0
 
@@ -1104,4 +1170,125 @@ harvest_check_diagnostics :: proc(result: ^Package_Check_Result) {
 	// the package was never looked at.
 	result.ok = result.load_ok && result.check_ok && !result.limit_reached &&
 		result.check_errors == 0 && result.parse_errors == 0
+}
+
+// ======================================================================================
+// SESSION -- keep the checked model alive past the call
+// ======================================================================================
+//
+// WHY THIS EXISTS. check_package_from_path returns diagnostics and counts; the model it built
+// (entities, types, scopes) is destroyed inside the call. Both consumers now in view need the
+// model to outlive it: a backend walks every entity once, a language server queries it by
+// position and re-checks on edit. Before this, a consumer had to reproduce the driving sequence
+// itself -- every piece of it is exported -- which works but means the sequence exists in two
+// places and silently diverges when it changes.
+//
+// This is PHASE 1 of two. The API surface here is the one we want AFTER the process globals are
+// removed (task #566); only the PRECONDITIONS below differ. Phase 2 deletes preconditions, not
+// signatures, so nothing written against this needs revisiting.
+//
+// PRECONDITIONS -- all three are consequences of process-global state, and all three go away
+// with #566:
+//
+//   1. ONE LIVE SESSION PER PROCESS. destroy_checker calls reset_runtime_type_globals, which
+//      un-publishes the runtime type globals (t_type_info and ~40 siblings). Those are resolved
+//      out of the owning checker's scopes and allocated from its allocator, so the reset is
+//      mandatory -- but it means destroying session A nils the type universe session B is
+//      mid-check against. Enforced below, loudly, rather than left to corrupt silently.
+//
+//   2. ONE BUILD CONFIGURATION PER PROCESS. `build_context` is a package-level global
+//      (build_settings.odin:502, mirroring C++ build_settings.cpp:621). Two sessions cannot
+//      target different platforms or carry different -define / vet flags.
+//
+//   3. session_destroy INVALIDATES the shared runtime type globals, so any ^Type reached through
+//      a session must not be used after that session is destroyed.
+//
+// NOT a precondition: the error collector. Its lifetime is wholly inside _check_package --
+// diagnostics are DETACHED onto the result (take_error_values) before the collector is torn
+// down, so a live session does not hold it open.
+
+// Session owns a checked model. Create with session_check_package, release with session_destroy.
+Session :: struct {
+	// checker is the model: entities, types, scopes. Valid until session_destroy.
+	checker: ^Checker,
+
+	// result carries the same payload check_package_from_path returns -- diagnostics (owned) and
+	// the four-state outcome. Read `ok` / `load_ok` / `check_ok` / `limit_reached` together:
+	//
+	//   load_ok == false                     -> no model; read nothing else
+	//   check_ok && !limit_reached && ok     -> model present and clean
+	//   check_ok == false, limit_reached==false -> model present, contains errors; usable
+	//   limit_reached == true                -> model PARTIAL. Checking was abandoned at
+	//                                           max_error_count, so check_errors is a floor and
+	//                                           the ABSENCE of a diagnostic proves nothing. A
+	//                                           language server must not render this as a
+	//                                           complete diagnostic set; a backend must refuse.
+	result: Package_Check_Result,
+
+	// packages in load order (deterministic), files in the order check_files saw them:
+	// packages in load order, and within each package sorted by BASENAME -- which is what C++
+	// does (check_create_file_scopes, checker.cpp:6052). Do not re-sort by fullpath; that is a
+	// different order.
+	packages: []^ast.Package,
+	files:    []^ast.File,
+
+	allocator: runtime.Allocator,
+}
+
+// live_sessions guards precondition 1. It counts only EXPLICIT sessions --
+// check_package_from_path does not go through it, so the existing (possibly concurrent) callers
+// of that entry point are unaffected. Deleted by #566.
+@(private = "file")
+live_sessions: int
+@(private = "file")
+live_sessions_mutex: sync.Mutex
+
+// session_check_package checks a package and hands back the model, alive.
+//
+// Returns ok=false and a nil session if a session is already live (see precondition 1) -- it
+// does NOT panic, because a library must not kill its host (CPP_DEVIATIONS.md [EMBED-1]).
+// A false return here means "refused", not "the package is bad": a package that fails to load or
+// fails to check still returns a live session, and `result` says which.
+session_check_package :: proc(path: string, allocator := context.allocator) -> (s: ^Session, ok: bool) {
+	sync.lock(&live_sessions_mutex)
+	if live_sessions > 0 {
+		sync.unlock(&live_sessions_mutex)
+		return nil, false
+	}
+	live_sessions += 1
+	sync.unlock(&live_sessions_mutex)
+
+	result, c, cf := _check_package(path, allocator)
+
+	s = new(Session, allocator)
+	s.checker = c
+	s.result = result
+	s.files = cf
+	s.allocator = allocator
+	if c != nil {
+		s.packages = c.info.packages_ordered[:]
+	}
+	return s, true
+}
+
+// session_destroy releases the model. After this the session's entities, types and scopes are
+// gone, AND the shared runtime type globals have been reset (precondition 3).
+session_destroy :: proc(s: ^Session) {
+	if s == nil {
+		return
+	}
+	allocator := s.allocator
+	if s.checker != nil {
+		destroy_checker(s.checker)
+		free(s.checker, allocator)
+	}
+	destroy_package_check_result(&s.result)
+	delete(s.files, allocator)
+	free(s, allocator)
+
+	sync.lock(&live_sessions_mutex)
+	if live_sessions > 0 {
+		live_sessions -= 1
+	}
+	sync.unlock(&live_sessions_mutex)
 }

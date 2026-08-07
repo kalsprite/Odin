@@ -2,7 +2,7 @@ package checker
 
 /*
 Basic type flags table - maps each Basic_Kind to its type category flags.
-C++ Reference: /mnt/c/odin/src/types.cpp:473-547
+C++ Reference: types.cpp:473-547
 
 This table enables O(1) type category checks using bit flags instead of
 switch-based comparisons. Each Basic_Kind has an associated set of flags

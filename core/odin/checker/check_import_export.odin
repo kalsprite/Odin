@@ -6,15 +6,17 @@ Import/Export Processing for the Odin checker.
 This module handles import declarations, package dependency graph construction,
 and entity visibility management for cross-package type checking.
 
-C++ Reference: /mnt/c/odin/src/checker.cpp:5130-5926
+C++ Reference: checker.cpp:5130-5926
 
 */
 
 import "base:runtime"
+import "core:mem"
 import "core:odin/ast"
 import "core:odin/tokenizer"
 import "core:slice"
 import "core:strings"
+import "core:sync"
 import "core:unicode"
 
 // lookup_imported_package maps an import declaration's path to the package it names.
@@ -30,15 +32,39 @@ import "core:unicode"
 // Resolving the path against the importing package's directory and retrying under the resolved
 // key - which the loader always registers - restores the C++ property that a package is
 // identified by where it is, not by how it was spelled.
+// A RELATIVE path must be resolved BEFORE the literal key is consulted, because a relative
+// spelling only names a package relative to the file that wrote it. register_package
+// (build_infrastructure.odin:433) deliberately registers a package under more than one key --
+// "import path vs resolved path" -- so the literal spelling ".." is a live key pointing at
+// whichever package was FIRST imported that way. Two packages in a chain both spelling their
+// parent ".." then collide, and the second one silently resolves to the first one's target.
+//
+// Measured: leaf imports ".." (mid), mid imports ".." (top). Checked alone, mid and top are
+// both clean; checking leaf made mid's `top.Thing` report "'Thing' is not declared by 'top'",
+// because `top` bound to mid via the shared ".." key. That is the whole of the spec_* failure
+// (core/odin/checker/tests imports its parent as `checker ".."`, and each spec_* imports tests
+// as `helpers ".."`): oracle 0 errors, port ~30, across all ten packages. LEDGER #387.
+//
+// C++ does not have the bug because the parser stores the resolved ABSOLUTE path in
+// id->fullpath (determine_path_from_string, src/parser.cpp:6236), so its key is already unique.
 lookup_imported_package :: proc(info: ^Checker_Info, import_path: string, importer: ^ast.Package) -> (^ast.Package, bool) {
-	if pkg, ok := info.packages[import_path]; ok {
-		return pkg, true
-	}
+	is_relative := strings.has_prefix(import_path, "./") ||
+	               strings.has_prefix(import_path, "../") ||
+	               import_path == "." ||
+	               import_path == ".."
+
 	if importer != nil {
 		if resolved, res_ok := resolve_import_path(import_path, importer.fullpath, context.temp_allocator); res_ok {
 			if pkg, ok := info.packages[resolved]; ok {
 				return pkg, true
 			}
+		}
+	}
+	// The literal key is a valid identity only for a NON-relative path (a collection path such
+	// as "core:strings", which names the same package from anywhere).
+	if !is_relative {
+		if pkg, ok := info.packages[import_path]; ok {
+			return pkg, true
 		}
 	}
 	return nil, false
@@ -53,7 +79,7 @@ Import_Graph :: struct {
 }
 
 // Import_Path_Item tracks an import path for cycle detection
-// C++ Reference: struct ImportPathItem in /mnt/c/odin/src/checker.cpp:5170-5173
+// C++ Reference: struct ImportPathItem in checker.cpp:5170-5173
 Import_Path_Item :: struct {
 	pkg:  ^ast.Package, // C++ line 5171
 	decl: ^ast.Stmt, // C++ line 5172: Import declaration
@@ -419,6 +445,32 @@ topological_sort_packages :: proc(graph: ^Import_Graph, allocator: runtime.Alloc
 	for _, node in graph.nodes {
 		append(&nodes, node)
 	}
+
+	// LEDGER #446 (task #335). DETERMINISM HARDENING. Same shape as #271: C++'s comparator is
+	// ported faithfully but fed a nondeterministically ordered input where C++'s is deterministic.
+	//
+	// The selection loop below breaks ties by (dep_count, Global flag, pkg.id) -- but the pkg.id
+	// arm fires ONLY when both nodes are Global. For two NON-global packages, the ordinary case,
+	// it takes "first found wins", and "first found" is the order of `nodes` above: raw Odin map
+	// order, which is address-seeded (LEDGER #437). C++ builds its node array by walking packages
+	// rather than a hash map, so its "first found" is stable and its comparator never needed the
+	// tiebreak the port needs.
+	//
+	// Sorting by pkg.id reproduces that: ids are assigned in package LOAD order, which is the
+	// order C++'s array is built in. Nodes with no package sort last, deterministically.
+	//
+	// NO MEASURED EFFECT on core/odin/parser (moved_positions 1125/1125/1121 before,
+	// 1125/1125/1114 after -- inside the +-10 noise band of LEDGER #441), most likely because
+	// dep_count and the Global flag already give a total order over that package set, so the
+	// tiebreak is never reached. Landed anyway: this SPECIFIES an order that was previously
+	// undefined rather than changing a defined one, so there is nothing load-bearing to break, and
+	// it costs one sort of ~34 nodes once per run. Gated: parity 323/323 0/0/0, corpus 198/198.
+	slice.sort_by(nodes[:], proc(a, b: ^Import_Graph_Node) -> bool {
+		if a.pkg == nil || b.pkg == nil {
+			return b.pkg == nil && a.pkg != nil
+		}
+		return a.pkg.id < b.pkg.id
+	})
 
 	// Result array
 	result := make([dynamic]^Import_Graph_Node, 0, len(nodes), allocator)
@@ -834,26 +886,68 @@ set_ast_flag :: proc(ctx: ^Checker_Context, node: ^ast.Node, flag: State_Flag) {
 }
 
 // reset_checker_context resets the context for a new file
-// C++ Reference: checker.cpp:5888 (reset_checker_context)
-reset_checker_context :: proc(ctx: ^Checker_Context, file: ^ast.File) {
-	if ctx == nil || file == nil {
+// C++ Reference: checker.cpp:1709-1733 (reset_checker_context)
+//
+// LEDGER #463 (task #344). This was a 12-line reimplementation and diverged from C++ in five ways.
+// The one that mattered: it returned early when `file == nil`, where C++ bails only on a null
+// CONTEXT and then installs builtin-package defaults. C++'s ctx->pkg is therefore NEVER null; the
+// port's could be, and `e.pkg = ctx.pkg` (entity_helpers.odin:636) wrote that null straight onto
+// the entity.
+//
+// That is what made the model nondeterministic. An entity is created once, by whichever path
+// reaches it first. Under threading that is sometimes a body-checking worker (file set, so
+// pkg=the real package) and sometimes an on-demand resolution through a nil-file context (early
+// bail, so pkg=nil). Measured on base/runtime: 23 entities flipping between 'runtime' and nil
+// across 8 runs, with every other field -- type, size, align, flags, position -- identical.
+//
+// The `untyped` parameter is C++'s third argument. It defaults to nil here because NO caller in
+// the port passes one yet: Checker_Context.untyped is read in 12 places (check_expr's untyped
+// cache among them) and written in none, so that cache has never operated. Wiring the callers is
+// a real behavioural change to a live subsystem and is deliberately left to its own task rather
+// than smuggled in with a determinism fix.
+reset_checker_context :: proc(ctx: ^Checker_Context, file: ^ast.File, untyped: ^map[^ast.Expr]^Expr_Info = nil) {
+	// C++ guards the CONTEXT only. A nil file is a legitimate input that must still produce a
+	// well-formed context, which is precisely what the old early return got wrong.
+	if ctx == nil {
 		return
 	}
+	assert(ctx.checker != nil)
+
+	sync.lock(&ctx.mutex)
+	defer sync.unlock(&ctx.mutex)
 
 	// C++ Reference: checker.cpp:1716-1717, 1726-1727
 	// The type path object is retained across the reset, but emptied, so that a context
 	// reused for the next file does not inherit a stale (or leaked) cycle-detection path.
-	if ctx.type_path != nil {
-		clear(ctx.type_path)
+	type_path := ctx.type_path
+	if type_path != nil {
+		clear(type_path)
 	}
+
+	// C++ line 1719: gb_zero_size(&ctx->pkg, gb_size_of(CheckerContext) - gb_offset_of(CheckerContext, pkg))
+	// Every field from `pkg` onward is cleared; mutex, checker and info precede it and survive.
+	// Checker_Context declares its fields in the same order, so the tail zero transfers directly.
+	// Doing it field-by-field would silently rot the moment a field is added -- the memset does not.
+	tail_off := int(offset_of(Checker_Context, pkg))
+	mem.zero(rawptr(uintptr(ctx) + uintptr(tail_off)), size_of(Checker_Context) - tail_off)
+
+	// C++ lines 1721-1724. The builtin package is the FLOOR: after this, pkg and scope are
+	// non-nil whatever `file` turns out to be.
+	ctx.file = nil
+	if ctx.info != nil && ctx.info.builtin_package != nil {
+		ctx.scope = ctx.info.builtin_package.scope
+		ctx.pkg = ctx.info.builtin_package
+	}
+	ctx.decl = nil
+
+	ctx.type_path = type_path
 	ctx.type_level = 0
 
-	ctx.file = file
-	ctx.scope = ctx.info.file_scopes[file]
-	ctx.pkg = file.pkg
+	// C++ line 1729
+	add_curr_ast_file(ctx, file)
 
-	// In the C++ version, this also resets the untyped expressions map
-	// and updates other context state
+	// C++ line 1731
+	ctx.untyped = untyped
 }
 
 // make_checker_context is defined in check_collect.odin

@@ -96,6 +96,20 @@ echo $$ > "$PARITY_LOCK"
 trap 'rm -rf "$TMP"; rm -f "$PARITY_LOCK"' EXIT
 
 
+# THE ORACLE MUST EXIST. On 2026-08-05 the ./odin binary vanished mid-tick (cause unknown).
+# A missing oracle does not error here -- `timeout 180 ./odin check ...` just fails, the captured
+# output is empty, and every package reads as "oracle=0". Against a port that reports normally
+# that manufactures a mismatch on every package; against a port that also reports nothing it
+# manufactures a CLEAN SWEEP. Both readings are fiction, and the second is the dangerous one.
+#
+# This is the #275/#385 family again: an instrument reporting a result for work it did not do.
+# Guard it the same way -- abort loudly rather than print a number nobody can trust.
+if [ ! -x ./odin ]; then
+  echo "PARITY-VET-ABORTED reason=oracle-missing: ./odin is absent or not executable." >&2
+  echo "         Rebuild it with ./build_odin.sh release before trusting any parity number." >&2
+  exit 2
+fi
+
 # died <rc> -- true if the run did not complete (timeout or fatal signal), false otherwise.
 died() { [ "$1" -eq 124 ] || [ "$1" -ge 128 ]; }
 why()  { [ "$1" -eq 124 ] && echo "TIMEOUT" || echo "SIG$(($1-128))"; }

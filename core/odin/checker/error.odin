@@ -4,7 +4,7 @@ package checker
 Package error provides error reporting infrastructure for the type checker.
 
 This is a comprehensive port of the C++ error reporting system from:
-/mnt/c/odin/src/error.cpp
+error.cpp
 
 The error reporting system provides:
 - Error and warning collection with position tracking
@@ -30,7 +30,7 @@ Error blocks (begin_error_block/end_error_block) allow multiple error_out()
 calls to be accumulated before committing, useful for complex error messages
 with suggestions and context.
 
-C++ REFERENCE: /mnt/c/odin/src/error.cpp
+C++ REFERENCE: error.cpp
 */
 
 import "base:runtime"

@@ -442,6 +442,21 @@ register_package :: proc(info: ^Checker_Info, key: string, pkg: ^ast.Package) {
 				return
 			}
 		}
+		// LEDGER #452 (task #335). C++ Reference: parser.cpp:5842 --
+		//     pkg->id = p->packages.count+1;
+		// a 1-based sequence in package REGISTRATION order. The port declared ast.Package.id
+		// (ast.odin:130) and never assigned it, so every package carried id 0.
+		//
+		// That is not cosmetic. topological_sort_packages breaks ties by
+		// (dep_count, Global flag, pkg.id), and with every id equal to 0 the pkg.id arm can never
+		// discriminate -- so ties fell through to "first found wins", which is raw Odin map order,
+		// which is address-seeded (LEDGER #437). That is what made package_order vary per run,
+		// which decided whether core/c or core/sys/linux was walked first, which moved their
+		// arch-conditional `when` blocks as a unit (LEDGER #449/#450) -- the residue of #335.
+		//
+		// packages_ordered is appended exactly once per package (the loop above dedupes a package
+		// reachable under several keys), so its length before the append IS C++'s packages.count.
+		pkg.id = len(info.packages_ordered) + 1
 		append(&info.packages_ordered, pkg)
 	}
 }

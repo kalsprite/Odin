@@ -3,7 +3,7 @@ package checker
 /*
 Core compound literals (struct, array, slice).
 
-Reference: /mnt/c/odin/src/check_expr.cpp:9549-10728
+Reference: check_expr.cpp:9549-10728
 */
 
 import "core:math/big"
@@ -11,7 +11,7 @@ import "core:odin/ast"
 import "core:sync"
 
 // check_compound_literal_field_values checks named field values in struct literals
-// Reference: /mnt/c/odin/src/check_expr.cpp:9549-9702
+// Reference: check_expr.cpp:9549-9702
 //
 // Validates:
 // - All elements are Field_Value nodes
@@ -249,7 +249,7 @@ check_compound_literal_field_values :: proc(ctx: ^Checker_Context, elems: []^ast
 }
 
 // check_compound_literal checks compound literal expressions
-// Reference: /mnt/c/odin/src/check_expr.cpp:9763-10728
+// Reference: check_expr.cpp:9763-10728
 //
 // Implemented:
 // - Struct literals with named or positional fields
@@ -1001,8 +1001,19 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		// (check_expr.cpp:11009 for [dynamic]T, :11409 for map). Only reported for a
 		// NON-EMPTY literal. `check_for_dynamic_literals` already existed with zero call
 		// sites; the feature flags it reads are populated in check_files.odin.
+		//
+		// C++ Reference: check_expr.cpp:11423-11426. The RESULT is the gate:
+		//     if (check_for_dynamic_literals(c, node, cl)) {
+		//         add_map_reserve_dependencies(c);
+		//         add_map_set_dependencies(c);
+		//     }
+		// The port called the predicate for its DIAGNOSTIC only and discarded the bool, so a
+		// dynamic map literal registered neither helper. Same defect shape as #303.
 		if len(cl.elems) > 0 {
-			check_for_dynamic_literals(ctx, node)
+			if check_for_dynamic_literals(ctx, node) {
+				add_map_reserve_dependencies(ctx)
+				add_map_set_dependencies(ctx)
+			}
 		}
 		mp := variant
 		key_type := mp.key
@@ -1370,8 +1381,17 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		// (check_expr.cpp:11009 for [dynamic]T, :11409 for map). Only reported for a
 		// NON-EMPTY literal. `check_for_dynamic_literals` already existed with zero call
 		// sites; the feature flags it reads are populated in check_files.odin.
+		//
+		// C++ Reference: check_expr.cpp:11022-11027, same shape as the map case above:
+		//     if (check_for_dynamic_literals(c, node, cl)) {
+		//         add_package_dependency(c, "runtime", "__dynamic_array_reserve");
+		//         add_package_dependency(c, "runtime", "__dynamic_array_append");
+		//     }
 		if len(cl.elems) > 0 {
-			check_for_dynamic_literals(ctx, node)
+			if check_for_dynamic_literals(ctx, node) {
+				add_package_dependency(ctx, "runtime", "__dynamic_array_reserve")
+				add_package_dependency(ctx, "runtime", "__dynamic_array_append")
+			}
 		}
 		da := variant
 		elem_type := da.elem

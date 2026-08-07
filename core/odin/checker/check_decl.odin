@@ -4,9 +4,9 @@ package checker
 Declaration checking for variables and related entities.
 
 This module implements variable declaration validation, initialization checking,
-and type inference logic from the C++ implementation in /mnt/c/odin/src/check_decl.cpp.
+and type inference logic from the C++ implementation in check_decl.cpp.
 
-C++ Reference: /mnt/c/odin/src/check_decl.cpp
+C++ Reference: check_decl.cpp
 Lines: 4-152 (check_init_variable, check_init_variables)
 Lines: 1612-1758 (check_global_variable_decl)
 Lines: 1897-1969 (check_entity_decl)
@@ -21,7 +21,7 @@ import "core:path/filepath"
 import "core:strings"
 import "core:sync"
 
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:4-124
+// C++ Reference: check_decl.cpp:4-124
 // NOTE(bill): 'content_name' is for debugging and error messages
 check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand, context_name: string) -> ^Type {
 	// Handle invalid operands
@@ -179,7 +179,7 @@ check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 	return entity_type(e)
 }
 
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:126-152
+// C++ Reference: check_decl.cpp:126-152
 check_init_variables :: proc(ctx: ^Checker_Context, lhs: []^Entity, inits: []^ast.Expr, context_name: string) {
 	// C++ Reference: check_decl.cpp:127-129
 	if (lhs == nil || len(lhs) == 0) && len(inits) == 0 {
@@ -211,7 +211,7 @@ check_init_variables :: proc(ctx: ^Checker_Context, lhs: []^Entity, inits: []^as
 	}
 }
 
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:1612-1758
+// C++ Reference: check_decl.cpp:1612-1758
 check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr, init_expr: ^ast.Expr) {
 	// C++ Reference: check_decl.cpp:1613-1614
 	assert(entity_type(e) == nil)
@@ -391,7 +391,7 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 	check_rtti_type_disallowed(ctx, e.token, entity_type(e), "A variable declaration is using a type, %s, which has been disallowed")
 }
 
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:155-195
+// C++ Reference: check_decl.cpp:155-195
 override_entity_in_scope :: proc(original_entity: ^Entity, new_entity: ^Entity) {
 	// NOTE(bill): The original_entity's scope may not be same scope that it was inserted into
 	// e.g. file entity inserted into its package scope
@@ -445,7 +445,7 @@ override_entity_in_scope :: proc(original_entity: ^Entity, new_entity: ^Entity) 
 	original_entity.variant = new_entity.variant
 }
 
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:197-240
+// C++ Reference: check_decl.cpp:197-240
 // @TypeAliasingProblem
 check_override_as_type_due_to_aliasing :: proc(ctx: ^Checker_Context, e: ^Entity, entity: ^Entity, init: ^ast.Expr, named_type: ^Type) -> bool {
 	// C++ Reference: check_decl.cpp:198-239
@@ -494,7 +494,7 @@ check_override_as_type_due_to_aliasing :: proc(ctx: ^Checker_Context, e: ^Entity
 	return false
 }
 
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:244-306
+// C++ Reference: check_decl.cpp:244-306
 check_try_override_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, entity: ^Entity, init: ^ast.Expr, named_type: ^Type) -> bool {
 	// C++ Reference: check_decl.cpp:245-271
 	if entity == nil {
@@ -549,8 +549,7 @@ check_try_override_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, entity:
 		e.kind = .Builtin
 		if builtin, ok := entity.variant.(Entity_Builtin); ok {
 			e.variant = Entity_Builtin {
-				id  = builtin.id,
-				pkg = builtin.pkg,
+				id = builtin.id,
 			}
 		}
 		set_entity_type(e, t_invalid)
@@ -578,7 +577,7 @@ check_try_override_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, entity:
 	return false
 }
 
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:1897-1969
+// C++ Reference: check_decl.cpp:1897-1969
 check_entity_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, named_type: ^Type) {
 	// C++ Reference: check_decl.cpp:1898-1900
 	if e.state == .Resolved {
@@ -701,7 +700,7 @@ get_type_and_value :: proc(ctx: ^Checker_Context, expr: ^ast.Node) -> Type_And_V
 	return {}
 }
 
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:308-351
+// C++ Reference: check_decl.cpp:308-351
 check_init_constant :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand) {
 	// C++ Reference: check_decl.cpp:309-316
 	if operand.mode == .Invalid || operand.type == t_invalid || entity_type(e) == t_invalid {
@@ -756,7 +755,7 @@ check_init_constant :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 	}
 }
 
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:622-768
+// C++ Reference: check_decl.cpp:622-768
 check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr, init_expr: ^ast.Expr, named_type: ^Type) {
 	// C++ Reference: check_decl.cpp:623-630
 	assert(entity_type(e) == nil)
@@ -946,7 +945,7 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 	}
 }
 
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:5374-5471
+// C++ Reference: check_expr.cpp:5374-5471
 // NOTE(bill, 2022-02-03): see `check_const_decl` for why it exists reasoning
 check_entity_from_ident_or_selector :: proc(ctx: ^Checker_Context, node: ^ast.Expr, ident_only: bool) -> ^Entity {
 	if node == nil {
@@ -1356,10 +1355,18 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 	proc_variant.has_instrumentation = has_instrumentation
 	proc_variant.no_sanitize_address = ac.no_sanitize_address
 	proc_variant.no_sanitize_memory = ac.no_sanitize_memory
+	proc_variant.no_sanitize_thread = ac.no_sanitize_thread   // C++ check_decl.cpp:1485
+	proc_variant.fast_math_flags = ac.fast_math_flags          // C++ check_decl.cpp:1487
 
 	e.deprecated_message = ac.deprecated_message
 	e.warning_message = ac.warning_message
 	ac.link_name = handle_link_name(ctx, e.token, ac.link_name, ac.link_prefix, ac.link_suffix)
+
+	// C++ Reference: check_decl.cpp:1493-1495. The port stored link_section on VARIABLES only
+	// (check_decl.odin:311); procedures dropped it.
+	if len(ac.link_section) > 0 {
+		proc_variant.link_section = ac.link_section
+	}
 
 	// C++ Reference: check_decl.cpp:1443-1452
 	if ac.has_disabled_proc {
@@ -1574,7 +1581,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 	}
 }
 
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:1760-1895
+// C++ Reference: check_decl.cpp:1760-1895
 check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Decl_Info) {
 	// C++ Reference: check_decl.cpp:1761-1763
 	assert(pg_entity.kind == .Proc_Group)
@@ -1819,7 +1826,7 @@ check_feature_flags :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> Opt_In_Fe
 
 ///////////////////////////////////////////////////////////////////////////////
 // Foreign Import Validation
-// C++ Reference: /mnt/c/odin/src/checker.cpp:5490-5545, 5382-5488, 5068-5130
+// C++ Reference: checker.cpp:5490-5545, 5382-5488, 5068-5130
 ///////////////////////////////////////////////////////////////////////////////
 
 // AST State Flag Helpers
@@ -1943,7 +1950,7 @@ is_blank_ident_node :: proc(node: ^ast.Node) -> bool {
 is_blank_ident_string :: is_blank_ident
 
 // Helper: Validate if string is a valid Odin identifier
-// C++ Reference: is_string_an_identifier in /mnt/c/odin/src/checker.cpp:5022
+// C++ Reference: is_string_an_identifier in checker.cpp:5022
 is_valid_identifier :: proc(name: string) -> bool {
 	if len(name) == 0 {
 		return false
@@ -1967,7 +1974,7 @@ is_valid_identifier :: proc(name: string) -> bool {
 }
 
 // check_foreign_import_attributes processes attributes for foreign import declarations
-// C++ Reference: check_decl_attributes in /mnt/c/odin/src/checker.cpp:4227
+// C++ Reference: check_decl_attributes in checker.cpp:4227
 //                foreign_import_decl_attribute callback in checker.cpp:5513-5541
 check_foreign_import_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribute, ac: ^Attribute_Context) {
 	// This processes attributes specific to foreign import declarations
@@ -2047,7 +2054,7 @@ check_foreign_import_attributes :: proc(ctx: ^Checker_Context, attributes: []^as
 }
 
 // check_add_foreign_import_decl processes foreign import declarations
-// C++ Reference: /mnt/c/odin/src/checker.cpp:5490-5545
+// C++ Reference: checker.cpp:5490-5545
 //
 // Handles foreign library imports like:
 //   foreign import lib "system:library.lib"
@@ -2057,7 +2064,7 @@ check_foreign_import_attributes :: proc(ctx: ^Checker_Context, attributes: []^as
 // check_add_foreign_import_decl is defined in check_collect.odin
 
 // check_foreign_import_fullpaths resolves library paths for all queued foreign imports
-// C++ Reference: /mnt/c/odin/src/checker.cpp:5382-5488
+// C++ Reference: checker.cpp:5382-5488
 //
 // Processes the foreign_imports_to_check_fullpaths queue:
 // - Evaluates path expressions to constant strings
@@ -2311,7 +2318,7 @@ check_foreign_import_fullpaths :: proc(ctx: ^Checker_Context) {
 // Import_Graph_Node is defined in check_import_export.odin (kept the original authoritative version)
 
 // add_import_dependency_node adds import declarations to the dependency graph
-// C++ Reference: /mnt/c/odin/src/checker.cpp:5068-5130
+// C++ Reference: checker.cpp:5068-5130
 //
 // Builds the import dependency graph for:
 // - Topological sorting of packages
@@ -2402,7 +2409,7 @@ add_import_dependency_node :: proc(checker: ^Checker, decl: ^ast.Stmt, graph: ^m
 }
 
 // generate_import_dependency_graph builds complete import graph for all packages
-// C++ Reference: /mnt/c/odin/src/checker.cpp:5132-5167
+// C++ Reference: checker.cpp:5132-5167
 //
 // Returns import graph with nodes for all packages and their dependencies
 generate_import_dependency_graph :: proc(checker: ^Checker, allocator := context.allocator) -> Import_Graph {
@@ -2476,7 +2483,7 @@ generate_import_dependency_graph :: proc(checker: ^Checker, allocator := context
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// C++ Reference: /mnt/c/odin/src/checker.cpp and parser.cpp
+// C++ Reference: checker.cpp and parser.cpp
 ///////////////////////////////////////////////////////////////////////////////
 
 // ast_token extracts the primary token from any AST node
@@ -2507,7 +2514,7 @@ ast_token :: proc(node: ^ast.Node) -> tokenizer.Token {
 }
 
 // check_rtti_type_disallowed validates that a type is allowed for RTTI
-// C++ Reference: /mnt/c/odin/src/checker.cpp:39-49
+// C++ Reference: checker.cpp:39-49
 //
 // Some types cannot be used with runtime type information (RTTI).
 // When RTTI is disabled via -no-rtti build flag, the 'any' type is disallowed.

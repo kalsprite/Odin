@@ -7,7 +7,7 @@ import "core:strings"
 Build configuration and target platform settings for the checker.
 
 This module provides the build context, target metrics, and compiler flags
-that affect type checking behavior. Ported from /mnt/c/odin/src/build_settings.cpp.
+that affect type checking behavior. Ported from build_settings.cpp.
 
 SCOPE: This file contains ONLY checker-relevant portions of build_settings.cpp.
        Linker settings, LLVM backend config, and command-line parsing are EXCLUDED.
@@ -453,6 +453,10 @@ Build_Context :: struct {
 	json_errors:                        bool,
 	has_ansi_terminal_colours:          bool,
 	ignore_lazy:                        bool,
+	// dynamic_map_calls selects which runtime helpers a map get/set registers.
+	// C++: build_settings.cpp:603, set ONLY by -dynamic-map-calls (main.cpp:1589), so the DEFAULT
+	// (false) is the branch that uses map_desired_position / __dynamic_map_check_grow etc.
+	dynamic_map_calls:                  bool,
 	no_threaded_checker:                bool,
 	no_rtti:                            bool,
 	source_code_location_info:          Source_Code_Location_Info,
@@ -474,6 +478,27 @@ Build_Context :: struct {
 	// User-defined config values (from -define:NAME=VALUE command line)
 	// C++: build_settings.cpp:599
 	defined_values:                     map[string]ast.Exact_Value,
+
+	// PORT-ONLY, NOT IN C++ (LEDGER #418). When non-empty, the checker writes a canonical dump
+	// of its semantic model to this path just before the Checker is destroyed.
+	//
+	// This exists because parity.sh compares DIAGNOSTICS -- what the checker says is wrong -- and
+	// that does not prove the two checkers built the same TYPES. modelcmp.sh reaches part of the
+	// model, but only through the error-message channel, so it can express nothing that is not an
+	// array length; entity sets and scopes are unreachable that way. #416 (bit_field align 8 for
+	// every backing width) was exactly this blind spot: invisible to 323 packages of diagnostic
+	// parity because it produced no wrong message.
+	//
+	// It is a FLAG rather than an accessor on Package_Check_Result deliberately. That result
+	// cannot hand back the model: check_package_from_path holds the Checker as a stack local and
+	// destroys it with `defer`, so any escaping pointer would be a use-after-free -- the #19 /
+	// #218 / #358 class. Emitting from inside, while the model is alive, has no such hazard.
+	dump_model_path:                    string,
+
+	// LEDGER #480. -dump-doc:<path> writes the DOC-OUTPUT FLAG BITS per entity. Same lifetime
+	// reasoning as dump_model_path: the Checker is a stack local in check_package_from_path, so
+	// this cannot be an accessor handed back to the caller.
+	dump_doc_path:                      string,
 }
 
 // Global build context instance
@@ -1335,6 +1360,99 @@ target_features_list := [Target_Arch_Kind]string {
 	.Wasm32   = "atomics,bulk-memory,bulk-memory-opt,call-indirect-overlong,exception-handling,extended-const,fp16,multimemory,multivalue,mutable-globals,nontrapping-fptoint,reference-types,relaxed-simd,sign-ext,simd128,tail-call,wide-arithmetic",
 	.Wasm64p32= "atomics,bulk-memory,bulk-memory-opt,call-indirect-overlong,exception-handling,extended-const,fp16,multimemory,multivalue,mutable-globals,nontrapping-fptoint,reference-types,relaxed-simd,sign-ext,simd128,tail-call,wide-arithmetic",
 	.Riscv64  = "32bit,64bit,a,andes45,auipc-addi-fusion,b,c,conditional-cmv-fusion,d,disable-latency-sched-heuristic,dlen-factor-2,e,exact-asm,experimental,f,forced-atomics,h,i,ld-add-fusion,log-vrgather,lui-addi-fusion,m,mips-p8700,no-default-unroll,no-sink-splat-operands,no-trailing-seq-cst-fence,optimized-nf2-segment-load-store,optimized-nf3-segment-load-store,optimized-nf4-segment-load-store,optimized-nf5-segment-load-store,optimized-nf6-segment-load-store,optimized-nf7-segment-load-store,optimized-nf8-segment-load-store,optimized-zero-stride-load,predictable-select-expensive,prefer-vsetvli-over-read-vlenb,prefer-w-inst,q,relax,reserve-x1,reserve-x10,reserve-x11,reserve-x12,reserve-x13,reserve-x14,reserve-x15,reserve-x16,reserve-x17,reserve-x18,reserve-x19,reserve-x2,reserve-x20,reserve-x21,reserve-x22,reserve-x23,reserve-x24,reserve-x25,reserve-x26,reserve-x27,reserve-x28,reserve-x29,reserve-x3,reserve-x30,reserve-x31,reserve-x4,reserve-x5,reserve-x6,reserve-x7,reserve-x8,reserve-x9,rva20s64,rva20u64,rva22s64,rva22u64,rva23s64,rva23u64,rvb23s64,rvb23u64,rvi20u32,rvi20u64,save-restore,sdext,sdtrig,sha,shcounterenw,shgatpa,shifted-zextw-fusion,shlcofideleg,short-forward-branch-opt,shtvala,shvstvala,shvstvecd,sifive7,smaia,smcdeleg,smcntrpmf,smcsrind,smdbltrp,smepmp,smmpm,smnpm,smrnmi,smstateen,ssaia,ssccfg,ssccptr,sscofpmf,sscounterenw,sscsrind,ssdbltrp,ssnpm,sspm,ssqosid,ssstateen,ssstrict,sstc,sstvala,sstvecd,ssu64xl,supm,svade,svadu,svbare,svinval,svnapot,svpbmt,svvptc,tagged-globals,unaligned-scalar-mem,unaligned-vector-mem,use-postra-scheduler,v,ventana-veyron,vl-dependent-latency,vxrm-pipeline-flush,xandesbfhcvt,xandesperf,xandesvbfhcvt,xandesvdot,xandesvpackfph,xandesvsintload,xcvalu,xcvbi,xcvbitmanip,xcvelw,xcvmac,xcvmem,xcvsimd,xmipscbop,xmipscmov,xmipslsp,xsfcease,xsfmm128t,xsfmm16t,xsfmm32a16f,xsfmm32a32f,xsfmm32a8f,xsfmm32a8i,xsfmm32t,xsfmm64a64f,xsfmm64t,xsfmmbase,xsfvcp,xsfvfnrclipxfqf,xsfvfwmaccqqq,xsfvqmaccdod,xsfvqmaccqoq,xsifivecdiscarddlone,xsifivecflushdlone,xtheadba,xtheadbb,xtheadbs,xtheadcmo,xtheadcondmov,xtheadfmemidx,xtheadmac,xtheadmemidx,xtheadmempair,xtheadsync,xtheadvdot,xventanacondops,xwchc,za128rs,za64rs,zaamo,zabha,zacas,zalrsc,zama16b,zawrs,zba,zbb,zbc,zbkb,zbkc,zbkx,zbs,zca,zcb,zcd,zce,zcf,zclsd,zcmop,zcmp,zcmt,zdinx,zexth-fusion,zextw-fusion,zfa,zfbfmin,zfh,zfhmin,zfinx,zhinx,zhinxmin,zic64b,zicbom,zicbop,zicboz,ziccamoa,ziccamoc,ziccif,zicclsm,ziccrse,zicntr,zicond,zicsr,zifencei,zihintntl,zihintpause,zihpm,zilsd,zimop,zk,zkn,zknd,zkne,zknh,zkr,zks,zksed,zksh,zkt,zmmul,ztso,zvbb,zvbc,zve32f,zve32x,zve64d,zve64f,zve64x,zvfbfmin,zvfbfwma,zvfh,zvfhmin,zvkb,zvkg,zvkn,zvknc,zvkned,zvkng,zvknha,zvknhb,zvks,zvksc,zvksed,zvksg,zvksh,zvkt,zvl1024b,zvl128b,zvl16384b,zvl2048b,zvl256b,zvl32768b,zvl32b,zvl4096b,zvl512b,zvl64b,zvl65536b,zvl8192b",
+}
+
+// ---------------------------------------------------------------------------------------------
+// TARGET FEATURE ENABLEMENT (LEDGER #543)
+//
+// C++ Reference: src/build_settings.cpp:2200 check_target_feature_is_enabled, and the
+// target_features_set that init_build_paths seeds from get_default_features()
+// (src/llvm_backend.cpp:66) via get_final_microarchitecture().
+//
+// WHY THIS EXISTS. check_builtin_has_target_feature returned a hardcoded `false` with the comment
+// "The actual value would be determined by checking target features". That is not a wrong ANSWER,
+// it is no answer, and it is invisible to every diagnostic gate: code guarded by
+// `when intrinsics.has_target_feature("sse2")` simply is not checked, and unchecked-but-correct
+// code is indistinguishable from checked-and-clean. It surfaced only through the model comparison
+// (#542), as three entities missing from core/hash/xxhash.
+
+// microarch_default_features maps a microarchitecture to the feature set LLVM enables for it.
+//
+// SCOPE, STATED RATHER THAN IMPLIED. C++ carries the full generated table for every
+// microarchitecture of every architecture (src/build_settings_microarch.cpp, 2241 lines, produced
+// by misc/featuregen and gated on LLVM_VERSION_MAJOR). Reproduced here are the entries reachable
+// as a DEFAULT -- which is every microarch the checker can select without an explicit
+// `-microarch:` flag, and therefore all of what any gate in this tree exercises. An unlisted
+// microarch returns "" and has_target_feature answers false for everything, which is the old
+// behaviour confined to a case that no longer silently covers the default path.
+// TO EXTEND: copy the corresponding `{ str_lit("name"), str_lit("features") }` row from C++.
+microarch_default_features :: proc(microarch: string) -> string {
+	switch microarch {
+	case "x86-64":
+		return "64bit,64bit-mode,cmov,cx8,fxsr,idivq-to-divl,macrofusion,mmx,nopl,slow-3ops-lea,slow-incdec,sse,sse2,vzeroupper,x87"
+	case "x86-64-v2":
+		return "64bit,64bit-mode,cmov,crc32,cx16,cx8,false-deps-popcnt,fast-15bytenop,fast-scalar-fsqrt,fast-shld-rotate,fxsr,idivq-to-divl,macrofusion,mmx,nopl,popcnt,sahf,slow-3ops-lea,slow-unaligned-mem-32,sse,sse2,sse3,sse4.1,sse4.2,ssse3,vzeroupper,x87"
+	case "generic-rv64":
+		return "64bit,i,optimized-nf2-segment-load-store"
+	case "generic":
+		return "64bit,64bit-mode,cx8,fast-15bytenop,fast-scalar-fsqrt,idivq-to-divl,macrofusion,slow-3ops-lea,sse,sse2,vzeroupper,x87"
+	}
+	return ""
+}
+
+// target_feature_is_enabled ports check_target_feature_is_enabled (build_settings.cpp:2200)
+// line for line, including the two details that are easy to drop:
+//   - a leading '+' or '-' inverts what the caller is ASKING (want_enabled), it does not merely
+//     decorate the name
+//   - "feature" and "+feature" are ALWAYS equivalent in the enabled set, and a "-feature" entry
+//     overrides both. C++'s own note explains the ordering.
+// ALL comma-separated features must hold; the first that does not short-circuits to false.
+target_feature_is_enabled :: proc(features: string, enabled: string) -> bool {
+	// split_iterator MUTATES its argument, and Odin parameters are immutable -- take a local copy.
+	rest := features
+	for entry in strings.split_iterator(&rest, ",") {
+		feature_str := entry
+		want_enabled := true
+		if len(feature_str) > 0 && (feature_str[0] == '+' || feature_str[0] == '-') {
+			want_enabled = feature_str[0] == '+'
+			feature_str = feature_str[1:]
+		}
+		if len(feature_str) == 0 {
+			break
+		}
+
+		// C++ does three string_set_exists lookups against feature/+feature/-feature. One pass over
+		// the enabled set answers all three, and comparing the prefix in place avoids the
+		// concatenation C++'s set lookup needs.
+		has_raw, has_plus, has_minus := false, false, false
+		set := enabled
+		for have in strings.split_iterator(&set, ",") {
+			if have == feature_str {
+				has_raw = true
+			} else if len(have) > 0 && have[1:] == feature_str {
+				if have[0] == '+' {
+					has_plus = true
+				} else if have[0] == '-' {
+					has_minus = true
+				}
+			}
+		}
+
+		is_enabled := (has_plus || has_raw) && !has_minus
+		if want_enabled != is_enabled {
+			return false
+		}
+	}
+	return true
+}
+
+// enabled_target_features returns the feature set active for the current build target, i.e. what
+// C++ seeds build_context.target_features_set with at init_build_paths (build_settings.cpp:2284).
+enabled_target_features :: proc() -> string {
+	// get_final_microarchitecture (build_settings.odin, ported from llvm_backend.cpp:54) already
+	// applies the "empty means default" rule. An earlier draft of this reintroduced that logic as
+	// a second copy of get_default_microarchitecture; deleted -- one implementation, not two.
+	return microarch_default_features(get_final_microarchitecture())
 }
 
 // check_single_target_feature_is_valid checks if a single feature is in the feature list

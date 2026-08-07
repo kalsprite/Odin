@@ -3,6 +3,7 @@ package checker
 import "core:odin/ast"
 import "core:odin/tokenizer"
 import big "core:math/big"
+import "core:slice"
 import "core:strings"
 import "core:sync"
 
@@ -188,7 +189,45 @@ check_scope_decls :: proc(ctx: ^Checker_Context, stmts: []^ast.Stmt) {
 
 	// Step 2: Check all collected entities that need immediate checking
 	// C++ Reference: check_expr.cpp:352-366
+	//
+	// LEDGER #440 (task #335). This was a RAW `for _, entity in s.elements`. Odin's map iteration
+	// order is ASLR-dependent even for string keys -- measured directly (LEDGER #437): the same
+	// ten keys iterate in 3 distinct orders across runs, and identically under `setarch -R`. So
+	// which of two SIBLING NESTED PROCEDURES got checked first varied per process, and with it
+	// the order their bodies were queued and their entities recorded.
+	//
+	// C++ walks its ScopeMap in SLOT order here. scope_map_slot_order (scope.odin) reproduces that
+	// table exactly -- its hash is over string CONTENTS, so the layout is a pure function of the
+	// names and their insertion order. Sorting by position first recovers the declaration order
+	// that IS the insertion order, which is what the Robin Hood simulation needs. Identical shape
+	// to the two existing callers, check_proc.odin:932 and error.odin:1992.
+	//
+	// Name-sorting would also have been deterministic and would have been WRONG: it is not the
+	// order C++ checks these entities in.
+	//
+	// THIS IS ONE OF SEVERAL CONTRIBUTING SITES, not the whole of #335. Measured with
+	// .claude/tools/dumpdet.sh on core/odin/parser, n=12, ASLR ON, moved_positions:
+	//     baseline  1141 1141 1130 1141      (min 1130)
+	//     with this  1125 1125 1125 1125     (zero variance, below baseline's min)
+	// A real -16 outside noise. It does NOT reach 0 -- other raw scope.elements iterations remain
+	// (check_proc.odin:932/1491/1780, check_stmt.odin:3225/3895/3937, scope.odin:749/767).
+	ordered := make([dynamic]^Entity, 0, len(s.elements), context.temp_allocator)
 	for _, entity in s.elements {
+		if entity != nil {
+			append(&ordered, entity)
+		}
+	}
+	slice.sort_by(ordered[:], proc(a, b: ^Entity) -> bool {
+		if a.token.pos.file != b.token.pos.file {
+			return a.token.pos.file < b.token.pos.file
+		}
+		if a.token.pos.offset != b.token.pos.offset {
+			return a.token.pos.offset < b.token.pos.offset
+		}
+		return a.token.text < b.token.text
+	})
+
+	for entity in scope_map_slot_order(ordered[:], context.temp_allocator) {
 		if entity == nil {
 			continue
 		}
@@ -3215,14 +3254,52 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 			if name == "_" {
 				error_token(token, "'using' cannot be applied to variable declared as '_'")
 			} else if is_type_struct(t) || is_type_raw_union(t) {
-				// Apply using to struct/union fields
-				// C++ Reference: check_stmt.cpp lines 2302-2318
+				// Apply using to struct/union fields, in SLOT order. LEDGER #498.
+				//
+				// C++ Reference: check_stmt.cpp:2375-2392 (the old citation here said 2302-2318,
+				// which is a foreign-variable loop over entities[i] -- a drifted reference of the
+				// #134 family, found by grepping the diagnostic text instead of trusting the line
+				// number):
+				//     Scope *scope = t->Struct.scope;
+				//     for (auto const &entry : scope->elements) {
+				//         Entity *f = entry.value;
+				//         if (f->kind == Entity_Variable) { ... scope_insert ... }
+				//     }
+				//
+				// That range-for IS a slot walk: ScopeMapIterator (checker.hpp:468-505) starts at
+				// index 0, advances the index skipping slots with a zero hash, and ends at cap --
+				// i.e. exactly the explicit `for (i = 0; i < cap; i++)` loop C++ writes elsewhere
+				// (docs_writer.cpp:1065, check_stmt.cpp:804). #494 deliberately left this site
+				// alone until that was confirmed rather than assumed, because scope_map_slot_order
+				// reproduces SLOT layout specifically.
+				//
+				// The order is DIAGNOSTIC-VISIBLE: the loop RETURNS on the first collision, so
+				// which field collides first decides the message and where checking stops.
 				#partial switch st in t.variant {
 				case Type_Struct:
 					scope := st.scope
 					assert(scope != nil)
 
+					ordered := make([dynamic]^Entity, 0, len(scope.elements), context.temp_allocator)
 					for _, f in scope.elements {
+						if f != nil {
+							append(&ordered, f)
+						}
+					}
+					slice.sort_by(ordered[:], proc(a, b: ^Entity) -> bool {
+						if a.token.pos.file != b.token.pos.file {
+							return a.token.pos.file < b.token.pos.file
+						}
+						if a.token.pos.offset != b.token.pos.offset {
+							return a.token.pos.offset < b.token.pos.offset
+						}
+						return a.token.text < b.token.text
+					})
+
+					for f in scope_map_slot_order(ordered[:], context.temp_allocator) {
+						if f == nil {
+							continue
+						}
 						if f.kind == .Variable {
 							uvar := alloc_entity_using_variable(e, f.token, get_entity_type(f), vd.names[0])
 
@@ -3253,7 +3330,7 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 
 // check_assignment_variable validates an assignment to a variable
 // This performs variable-specific validation before delegating to check_assignment
-// C++ Reference: /mnt/c/odin/src/check_stmt.cpp:421-640
+// C++ Reference: check_stmt.cpp:421-640
 check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, context_name: string) -> ^Type {
 	// C++: check_stmt.cpp:422-424
 	if rhs.mode == .Invalid {
@@ -3531,8 +3608,8 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 }
 
 // check_foreign_block_decl validates foreign import blocks
-// C++ Reference: /mnt/c/odin/src/checker.cpp:4760-4780 (check_add_foreign_block_decl)
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3417-3488 (foreign_block_decl_attribute)
+// C++ Reference: checker.cpp:4760-4780 (check_add_foreign_block_decl)
+// C++ Reference: checker.cpp:3417-3488 (foreign_block_decl_attribute)
 //
 // Foreign blocks have the form:
 //   foreign lib_name { ... }
@@ -3704,7 +3781,7 @@ check_foreign_block_attributes :: proc(ctx: ^Checker_Context, attributes: [dynam
 }
 
 // string_to_calling_convention converts a string to a calling convention
-// C++ Reference: /mnt/c/odin/src/checker.cpp (string_to_calling_convention)
+// C++ Reference: checker.cpp (string_to_calling_convention)
 string_to_calling_convention :: proc(str: string) -> Calling_Convention {
 	switch str {
 	case "odin":
@@ -3891,14 +3968,61 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 			sync.rw_mutex_lock(&scope.mutex)
 			defer sync.rw_mutex_unlock(&scope.mutex)
 
-			// Import all exported entities
+			// Import all exported entities, in SLOT order. LEDGER #497.
+			//
+			// C++ Reference: check_stmt.cpp:804-816 --
+			//     for (u32 i = 0; i < scope->elements.cap; i++) {
+			//         if (!scope->elements.slots[i].hash) continue;
+			//         Entity *decl = scope->elements.slots[i].value;
+			//         ...
+			//         auto interned = scope->elements.keys[i];
+			//         Entity *found = scope_insert_with_name(ctx->scope, interned, hash, decl);
+			//         if (found != nullptr) { error(...); return false; }
+			//     }
+			//
+			// This was a raw `for name, decl in scope.elements`, i.e. Odin map order. The order is
+			// DIAGNOSTIC-VISIBLE, not cosmetic: the loop RETURNS on the first collision, so which
+			// entity collides first decides both the message printed and where checking stops.
+			// Measured before the fix, a probe with four colliding locals reported printf, eprintf,
+			// println, println, tprintf, eprintf across six runs.
+			//
+			// scope_map_slot_order (scope.odin:965, from #214) reproduces C++'s slot layout; the
+			// deterministic pre-sort is required because the simulation only reproduces that layout
+			// if its input order is itself deterministic. Same treatment as #494 (docs_writer) and
+			// the three sites that already do this (check_proc.odin:944, error.odin:2010,
+			// check_stmt.odin:230).
+			//
+			// The name comes from the map KEY, matching C++'s elements.keys[i], so it is carried
+			// alongside rather than re-derived from decl.token.text (not guaranteed equal, #31).
+			ordered := make([dynamic]^Entity, 0, len(scope.elements), context.temp_allocator)
+			names := make(map[^Entity]string, len(scope.elements), context.temp_allocator)
 			for name, decl in scope.elements {
+				if decl == nil {
+					continue
+				}
+				append(&ordered, decl)
+				names[decl] = name
+			}
+			slice.sort_by(ordered[:], proc(a, b: ^Entity) -> bool {
+				if a.token.pos.file != b.token.pos.file {
+					return a.token.pos.file < b.token.pos.file
+				}
+				if a.token.pos.offset != b.token.pos.offset {
+					return a.token.pos.offset < b.token.pos.offset
+				}
+				return a.token.text < b.token.text
+			})
+
+			for decl in scope_map_slot_order(ordered[:], context.temp_allocator) {
+				if decl == nil {
+					continue
+				}
 				if !is_entity_exported(decl, true) {
 					continue
 				}
 
 				// Insert into current scope
-				found := scope_insert_with_name(ctx.scope, name, decl)
+				found := scope_insert_with_name(ctx.scope, names[decl], decl)
 				if found != nil {
 					expr_str := expr_to_string(expr)
 					defer delete(expr_str)
@@ -3933,8 +4057,37 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 					return false
 				}
 
-				// Import all struct fields
+				// Import all struct fields, in SLOT order. LEDGER #498.
+				//
+				// C++ Reference: check_stmt.cpp:2375-2392 walks t->Struct.scope->elements with a
+				// range-for, and that range-for IS a slot walk: ScopeMapIterator (checker.hpp:468-505)
+				// begins at index 0, advances skipping zero-hash slots, and ends at cap -- the same
+				// order as the explicit `for (i = 0; i < cap; i++)` loops elsewhere.
+				//
+				// DIAGNOSTIC-VISIBLE: this loop RETURNS on the first collision, so which field
+				// collides first decides the message. Measured with four colliding locals, the port
+				// reported alpha/delta/delta/delta/delta/beta/delta/gamma across eight runs while
+				// the oracle reported delta every time.
+				ordered := make([dynamic]^Entity, 0, len(found_scope.elements), context.temp_allocator)
 				for _, field in found_scope.elements {
+					if field != nil {
+						append(&ordered, field)
+					}
+				}
+				slice.sort_by(ordered[:], proc(a, b: ^Entity) -> bool {
+					if a.token.pos.file != b.token.pos.file {
+						return a.token.pos.file < b.token.pos.file
+					}
+					if a.token.pos.offset != b.token.pos.offset {
+						return a.token.pos.offset < b.token.pos.offset
+					}
+					return a.token.text < b.token.text
+				})
+
+				for field in scope_map_slot_order(ordered[:], context.temp_allocator) {
+					if field == nil {
+						continue
+					}
 					if field.kind == .Variable {
 						// Create using variable entity
 						uvar := alloc_entity_using_variable(e, field.token, get_entity_type(field), expr)

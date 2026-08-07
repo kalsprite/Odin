@@ -7,7 +7,7 @@ import "core:sync"
 Entity allocation and management.
 
 This module provides entity construction functions, similar to the C++
-implementation in /mnt/c/odin/src/entity.cpp.
+implementation in entity.cpp.
 
 Entity allocation functions create and initialize entities of various kinds
 with appropriate flags and variant data.
@@ -15,7 +15,7 @@ with appropriate flags and variant data.
 
 
 // Entity_Visibility_Kind determines the export scope of an entity
-// C++ Reference: EntityVisiblityKind in /mnt/c/odin/src/checker.hpp
+// C++ Reference: EntityVisiblityKind in checker.hpp
 Entity_Visibility_Kind :: enum {
 	Public, // Exported from package
 	Private_To_Package, // Private to package (@private)
@@ -25,7 +25,7 @@ Entity_Visibility_Kind :: enum {
 // Entity_Flag and Entity_Flags are now aliased from ast.Entity_Flag/ast.Entity_Flags in checker.odin
 
 // Entity_Flags_Is_Subtype combines Using and Subtype flags
-// C++ Reference: /mnt/c/odin/src/entity.cpp - EntityFlags_IsSubtype
+// C++ Reference: entity.cpp - EntityFlags_IsSubtype
 Entity_Flags_Is_Subtype :: Entity_Flags{.Using, .Subtype}
 
 // Global entity ID counter
@@ -43,10 +43,39 @@ alloc_entity :: proc(kind: Entity_Kind, scope: ^Scope, token: tokenizer.Token, t
 	// C++ line 350: entity->id = 1 + global_entity_id.fetch_add(1)
 	entity.id = 1 + cast(u64)sync.atomic_add(&global_entity_id, 1)
 
-	// C++ lines 351-353: Set entity file from token position
-	// In the Odin AST, pos.file is a string path, not an ID
-	// We don't set entity.file here since we don't have access to Checker_Info
-	// The file will be set by the caller who has access to the context
+	// C++ Reference: entity.cpp:369 --
+	//     e_->file = thread_unsafe_get_ast_file_from_id((token_).pos.file_id);
+	// C++ stamps every entity with its file AT ALLOCATION, derived from the entity's OWN TOKEN.
+	// That value is independent of checker state: it is correct even when the current context has
+	// no file.
+	//
+	// LEDGER #466 (task #344). This was previously left unset with the note "pos.file is a string
+	// path, not an ID / we don't have access to Checker_Info / the file will be set by the caller".
+	// The deviation was real, but its CONSEQUENCE was not traced: deriving file from the context
+	// instead of the token is SELF-PROPAGATING. A fileless context yields a fileless entity
+	// (nothing backfills it), which yields a fileless Proc_Info (check_proc.odin:228
+	// `pi.file = e.file`), which yields a fileless context for that body (check_proc.odin:660),
+	// which yields more fileless entities. Measured on base/runtime: ~3 seeds/run single-threaded
+	// where the loop barely starts, vs ~58/run threaded -- the amplification is what made the
+	// semantic model nondeterministic under threading (#344).
+	//
+	// The stated obstacle is gone: #279 added a GLOBAL path-keyed source-file registry, so no
+	// Checker_Info is needed to resolve a path to its file. A miss leaves file nil, exactly as
+	// before, and C++'s lazy backfill (checker.cpp:2096, ported at entity_helpers.odin:447) still
+	// covers that case -- so this strictly adds information, it never removes any.
+	// DO NOT MEMOISE THIS LOOKUP. It takes a global mutex and runs once per entity, so a
+	// single-slot thread-local cache looks like an obvious win -- it was tried and measured
+	// (LEDGER #467). Two results killed it: the timing difference was inside run-to-run noise
+	// (110-122ms on utf8string either way), and it made the model LESS deterministic --
+	// base/runtime threaded went from sorted=1/8 to 2/8. The registry OVERWRITES entries
+	// (error.odin:584), so one path can map to different ^ast.File objects over time; a fresh
+	// lookup sees the current one, a memo returns whatever it cached, and which you get depends
+	// on when the thread first touched that path.
+	if len(token.pos.file) > 0 {
+		if f := lookup_source_file(token.pos.file); f != nil {
+			entity.file = f
+		}
+	}
 
 	// Initialize variant based on kind
 	#partial switch kind {
@@ -296,15 +325,14 @@ alloc_entity_label :: proc(scope: ^Scope, token: tokenizer.Token, type: ^Type, n
 }
 
 // alloc_entity_builtin creates a builtin procedure entity
-alloc_entity_builtin :: proc(name: string, id: Builtin_Proc_Id, pkg := Builtin_Proc_Pkg.Builtin, allocator := context.allocator) -> ^Entity {
+alloc_entity_builtin :: proc(name: string, id: Builtin_Proc_Id, allocator := context.allocator) -> ^Entity {
 	token := tokenizer.Token {
 		text = name,
 		kind = .Ident,
 	}
 	entity := alloc_entity(.Builtin, nil, token, t_invalid, allocator)
 	entity.variant = Entity_Builtin {
-		id  = id,
-		pkg = pkg,
+		id = id,
 	}
 	entity.state = .Resolved
 	return entity

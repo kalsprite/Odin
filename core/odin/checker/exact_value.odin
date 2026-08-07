@@ -6,7 +6,7 @@ Exact value conversion and support functions.
 This module implements compile-time constant type conversions, type promotion,
 and component extraction following the Odin compiler's exact value system.
 
-Ported from /mnt/c/odin/src/exact_value.cpp
+Ported from exact_value.cpp
 */
 
 import "core:fmt"
@@ -365,7 +365,7 @@ exact_value_string :: proc(s: string) -> Exact_Value {
 }
 
 // exact_value_typeid creates an Exact_Value for a typeid
-// C++ Reference: /mnt/c/odin/src/exact_value.cpp:183-187
+// C++ Reference: exact_value.cpp:183-187
 // Used by check_builtin_typeid_of to create compile-time typeid constants
 exact_value_typeid :: proc(t: ^Type) -> Exact_Value {
 	return Exact_Value_Typeid{type = t}
@@ -2213,13 +2213,16 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 		// Return empty for pointer
 		return
 
-	// C++ line 1118-1119: Compound
+	// LEDGER #546. C++ (exact_value.cpp:1145,1147) passes shorthand=FALSE at both arms; the port
+	// passed TRUE, and write_expr_to_string's Comp_Lit arm renders `...` instead of the elements
+	// when shorthand is set. So every compound constant printed as `{...}` where C++ prints
+	// `{7, 7, 7, 7}`. Not cosmetic and not dump-only: exact_value_to_string feeds DIAGNOSTICS
+	// (#144), so any message naming a compound constant's value was losing it.
 	case Exact_Value_Compound:
-		write_expr_to_string(buf, val.expr, true)
+		write_expr_to_string(buf, val.expr, false)
 
-	// C++ line 1120-1121: Procedure
 	case Exact_Value_Procedure:
-		write_expr_to_string(buf, val.expr, true)
+		write_expr_to_string(buf, val.expr, false)
 	}
 }
 

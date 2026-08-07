@@ -6,8 +6,8 @@ Type Equivalence and Assignability System
 This module implements the core type comparison logic for the Odin checker,
 including type identity, equivalence, assignability, and convertibility checks.
 
-C++ Reference: /mnt/c/odin/src/types.cpp lines 2893-3191
-C++ Reference: /mnt/c/odin/src/check_expr.cpp lines 667-1047
+C++ Reference: types.cpp lines 2893-3191
+C++ Reference: check_expr.cpp lines 667-1047
 */
 
 import "core:odin/ast"
@@ -897,7 +897,7 @@ internal_check_is_assignable_to :: proc(src, dst: ^Type) -> bool {
 
 // base_complex_elem_type extracts the element type from complex or quaternion types
 // Returns the floating-point type that makes up the components
-// C++ Reference: /mnt/c/odin/src/types.cpp:1836-1852
+// C++ Reference: types.cpp:1836-1852
 base_complex_elem_type :: proc(t: ^Type) -> ^Type {
 	t_ct := core_type(t)
 	if t_ct.kind == .Basic {
@@ -930,7 +930,7 @@ base_complex_elem_type :: proc(t: ^Type) -> ^Type {
 }
 
 // is_type_soa_struct checks if a type is a structure-of-arrays struct
-// C++ Reference: /mnt/c/odin/src/types.cpp:1864-1868
+// C++ Reference: types.cpp:1864-1868
 is_type_soa_struct :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {

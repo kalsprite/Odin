@@ -6,7 +6,7 @@ Builtin procedure checking.
 This module implements type checking for Odin's built-in procedures,
 following the logic in check_builtin.cpp from the Odin compiler.
 
-C++ Reference: /mnt/c/odin/src/check_builtin.cpp
+C++ Reference: check_builtin.cpp
 
 */
 
@@ -22,7 +22,7 @@ import "core:strings"
 import "core:sync"
 
 // check_builtin_procedure is the central dispatcher for builtin checking
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2396-2506
+// C++ Reference: check_builtin.cpp:2396-2506
 check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id, type_hint: ^Type) -> bool {
 	// C++ Reference: check_builtin.cpp:2779-2782. This guard did not exist in the port at all, so
 	// `#force_inline len(x)` was silently accepted. It is NOT an early return in C++ either -- the
@@ -429,7 +429,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		result = check_builtin_fixed_point(ctx, operand, call, id)
 
 	// SIMD operations
-	// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:720-1612
+	// C++ Reference: check_builtin.cpp:720-1612
 
 	// SIMD binary numeric operations
 	case .Simd_Add, .Simd_Sub, .Simd_Mul, .Simd_Div, .Simd_Min, .Simd_Max, .Simd_Rem, .Simd_Pairwise_Add, .Simd_Pairwise_Sub:
@@ -665,7 +665,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 }
 
 // check_builtin_len_cap handles len() and cap() builtins
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2529-2637
+// C++ Reference: check_builtin.cpp:2529-2637
 check_builtin_len_cap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id, type_hint: ^Type) -> bool {
 	// Check argument (type or expression)
 	check_expr_or_type(ctx, operand, call.args[0])
@@ -763,7 +763,7 @@ check_builtin_len_cap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 
 	} else if operand.mode == .Type && is_type_enum(op_type) {
 		// Enum len/cap on type
-		// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2591-2601
+		// C++ Reference: check_builtin.cpp:2591-2601
 		bt := base_type(op_type)
 		mode = .Constant
 		result_type = t_untyped_integer
@@ -782,7 +782,7 @@ check_builtin_len_cap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 
 	} else if is_type_simd_vector(op_type) {
 		// SIMD vector length - constant
-		// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2603-2608
+		// C++ Reference: check_builtin.cpp:2603-2608
 		bt := base_type(op_type)
 		simd := bt.variant.(Type_Simd_Vector)
 		mode = .Constant
@@ -848,7 +848,7 @@ check_builtin_len_cap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 }
 
 // check_builtin_size_of handles size_of() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2639-2658
+// C++ Reference: check_builtin.cpp:2639-2658
 check_builtin_size_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	// `size_of(&x)` measures the POINTER, which is almost never what was meant.
 	//
@@ -887,7 +887,7 @@ check_builtin_size_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 }
 
 // check_builtin_align_of handles align_of() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2660-2679
+// C++ Reference: check_builtin.cpp:2660-2679
 check_builtin_align_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	// Nearly identical to size_of
 	o: Operand
@@ -913,7 +913,7 @@ check_builtin_align_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^
 // Removed: old stub implementation replaced by check_builtin_offset_of_impl
 
 // check_builtin_type_of handles type_of() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2870-2907
+// C++ Reference: check_builtin.cpp:2870-2907
 check_builtin_type_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	o: Operand
 	check_expr_or_type(ctx, &o, call.args[0])
@@ -962,7 +962,7 @@ check_builtin_type_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 }
 
 // check_builtin_type_info_of handles type_info_of() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2909-2952
+// C++ Reference: check_builtin.cpp:2909-2952
 // Returns ^Type_Info for any type
 check_builtin_type_info_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "type_info_of"
@@ -1025,7 +1025,7 @@ check_builtin_type_info_of :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 }
 
 // check_builtin_typeid_of handles typeid_of() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2954-2990
+// C++ Reference: check_builtin.cpp:2954-2990
 // Returns typeid (integer constant) for any type
 check_builtin_typeid_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "typeid_of"
@@ -1084,7 +1084,7 @@ check_builtin_typeid_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 // ============================================================================
 
 // Atomic_Memory_Order enum matches Odin's runtime.Atomic_Memory_Order
-// C++ Reference: OdinAtomicMemoryOrder in /mnt/c/odin/src/checker.hpp
+// C++ Reference: OdinAtomicMemoryOrder in checker.hpp
 Atomic_Memory_Order :: enum {
 	Relaxed = 0,
 	Consume = 1,
@@ -1104,7 +1104,7 @@ Atomic_Memory_Order_Strings := [Atomic_Memory_Order]string {
 }
 
 // check_atomic_memory_order_argument validates memory order argument
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:686-716
+// C++ Reference: check_builtin.cpp:686-716
 check_atomic_memory_order_argument :: proc(ctx: ^Checker_Context, expr: ^ast.Expr, builtin_name: string, out_order: ^Atomic_Memory_Order = nil, extra_message := "") -> bool {
 	x: Operand
 	// Check with type hint if t_atomic_memory_order is available (set when core:runtime is loaded)
@@ -1154,7 +1154,7 @@ check_atomic_memory_order_argument :: proc(ctx: ^Checker_Context, expr: ^ast.Exp
 }
 
 // check_atomic_ptr_argument validates pointer argument for atomic operations
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:1756-1763
+// C++ Reference: check_builtin.cpp:1756-1763
 check_atomic_ptr_argument :: proc(operand: ^Operand, builtin_name: string, elem: ^Type) -> bool {
 	if !is_type_valid_atomic_type(elem) {
 		error_node(operand.expr, "Only an integer, floating-point, boolean, or pointer can be used as an atomic for '%s'", builtin_name)
@@ -1164,7 +1164,7 @@ check_atomic_ptr_argument :: proc(operand: ^Operand, builtin_name: string, elem:
 }
 
 // check_builtin_atomic_type_is_lock_free checks if a type is guaranteed lock-free for atomics
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5718-5746
+// C++ Reference: check_builtin.cpp:5718-5746
 check_builtin_atomic_type_is_lock_free :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "atomic_type_is_lock_free"
 
@@ -1196,7 +1196,7 @@ check_builtin_atomic_type_is_lock_free :: proc(ctx: ^Checker_Context, operand: ^
 }
 
 // check_builtin_atomic_thread_fence handles atomic_thread_fence and atomic_signal_fence
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5523-5543
+// C++ Reference: check_builtin.cpp:5523-5543
 check_builtin_atomic_fence :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
 	builtin_name := builtin_proc_infos[id].name
 	_ = builtin_name // unused but kept for consistency
@@ -1223,7 +1223,7 @@ check_builtin_atomic_fence :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 }
 
 // check_builtin_atomic_store handles atomic_store and atomic_store_explicit
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5548-5596
+// C++ Reference: check_builtin.cpp:5548-5596
 check_builtin_atomic_store :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
 	builtin_name := builtin_proc_infos[id].name
 	_ = builtin_name // unused but kept for consistency
@@ -1268,7 +1268,7 @@ check_builtin_atomic_store :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 }
 
 // check_builtin_atomic_load handles atomic_load and atomic_load_explicit
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5602-5644
+// C++ Reference: check_builtin.cpp:5602-5644
 check_builtin_atomic_load :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
 	builtin_name := builtin_proc_infos[id].name
 	_ = builtin_name // unused but kept for consistency
@@ -1308,7 +1308,7 @@ check_builtin_atomic_load :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 }
 
 // check_builtin_atomic_rmw handles atomic RMW operations (add/sub/and/or/xor/exchange)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5646-5725
+// C++ Reference: check_builtin.cpp:5646-5725
 check_builtin_atomic_rmw :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
 	builtin_name := builtin_proc_infos[id].name
 	_ = builtin_name // unused but kept for consistency
@@ -1359,7 +1359,7 @@ check_builtin_atomic_rmw :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 }
 
 // check_builtin_atomic_compare_exchange handles compare_exchange operations
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5727-5825
+// C++ Reference: check_builtin.cpp:5727-5825
 check_builtin_atomic_compare_exchange :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
 	builtin_name := builtin_proc_infos[id].name
 	_ = builtin_name // unused but kept for consistency
@@ -1470,7 +1470,7 @@ check_builtin_atomic_compare_exchange :: proc(ctx: ^Checker_Context, operand: ^O
 // ============================================================================
 
 // check_builtin_objc_send handles objc_send builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:285-377
+// C++ Reference: check_builtin.cpp:285-377
 check_builtin_objc_send :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "objc_send"
 
@@ -1582,10 +1582,20 @@ check_builtin_objc_send :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	}
 
 	// Package dependency tracking implemented in entity_helpers.odin:709
-	add_package_dependency(ctx, "runtime", "objc_msgSend")
-	add_package_dependency(ctx, "runtime", "objc_msgSend_fpret")
-	add_package_dependency(ctx, "runtime", "objc_msgSend_fp2ret")
-	add_package_dependency(ctx, "runtime", "objc_msgSend_stret")
+	try_to_add_package_dependency(ctx, "runtime", "objc_msgSend")
+	try_to_add_package_dependency(ctx, "runtime", "objc_msgSend_fpret")
+	try_to_add_package_dependency(ctx, "runtime", "objc_msgSend_fp2ret")
+	try_to_add_package_dependency(ctx, "runtime", "objc_msgSend_stret")
+
+	// C++ Reference: check_builtin.cpp:258-262. Gated on the FIRST argument carrying an
+	// objc_super_target, i.e. the call came through objc_super().
+	if len(call.args) > 0 {
+		a0 := ast.unparen_expr(call.args[0])
+		if a0 != nil && a0.tav.objc_super_target != nil {
+			try_to_add_package_dependency(ctx, "runtime", "objc_msgSendSuper2")
+			try_to_add_package_dependency(ctx, "runtime", "objc_msgSendSuper2_stret")
+		}
+	}
 
 	// Set result
 	if return_type != nil {
@@ -1601,7 +1611,7 @@ check_builtin_objc_send :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 
 // check_builtin_objc_find_register handles objc_find_selector, objc_find_class,
 // objc_register_selector, and objc_register_class
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:379-406
+// C++ Reference: check_builtin.cpp:379-406
 check_builtin_objc_find_register :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
 	builtin_name := builtin_proc_infos[id].name
 	_ = builtin_name // unused but kept for consistency
@@ -1640,15 +1650,15 @@ check_builtin_objc_find_register :: proc(ctx: ^Checker_Context, operand: ^Operan
 	operand.mode = .Value
 
 	// Package dependency tracking implemented in entity_helpers.odin:709
-	add_package_dependency(ctx, "runtime", "objc_lookUpClass")
-	add_package_dependency(ctx, "runtime", "sel_registerName")
-	add_package_dependency(ctx, "runtime", "objc_allocateClassPair")
+	try_to_add_package_dependency(ctx, "runtime", "objc_lookUpClass")
+	try_to_add_package_dependency(ctx, "runtime", "sel_registerName")
+	try_to_add_package_dependency(ctx, "runtime", "objc_allocateClassPair")
 
 	return true
 }
 
 // check_builtin_objc_ivar_get handles objc_ivar_get builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:408-458
+// C++ Reference: check_builtin.cpp:408-458
 check_builtin_objc_ivar_get :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, type_hint: ^Type) -> bool {
 	builtin_name := "objc_ivar_get"
 
@@ -1732,7 +1742,7 @@ check_builtin_objc_ivar_get :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 }
 
 // check_builtin_objc_block handles objc_block() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:470-691
+// C++ Reference: check_builtin.cpp:470-691
 // Creates ObjC block literals with captured values
 check_builtin_objc_block :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "objc_block"
@@ -1858,10 +1868,15 @@ check_builtin_objc_block :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		}
 	}
 
-	// Add runtime dependencies for ObjC blocks
-	// C++ Reference: check_builtin.cpp L622-640
-	add_package_dependency(ctx, "runtime", "_NSConcreteGlobalBlock")
-	add_package_dependency(ctx, "runtime", "_NSConcreteStackBlock")
+	// C++ Reference: check_builtin.cpp:683-688. C++ picks exactly ONE of these on
+	// `is_global_block`; the port registered BOTH unconditionally, so every block literal pulled
+	// in a runtime symbol it does not use.
+	is_global_block := capture_arg_count == 0 && proc_info.calling_convention != .Odin
+	if is_global_block {
+		try_to_add_package_dependency(ctx, "runtime", "_NSConcreteGlobalBlock")
+	} else {
+		try_to_add_package_dependency(ctx, "runtime", "_NSConcreteStackBlock")
+	}
 
 	// NOTE: Full implementation would create specialized Objc_Block(T) type
 	// via check_polymorphic_record_type. For now, return rawptr which is
@@ -1872,7 +1887,7 @@ check_builtin_objc_block :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 }
 
 // check_builtin_objc_super handles objc_super() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:693-800
+// C++ Reference: check_builtin.cpp:693-800
 // Returns a reference to the superclass for method calls
 check_builtin_objc_super :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "objc_super"
@@ -1910,6 +1925,13 @@ check_builtin_objc_super :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		return false
 	}
 
+	// Track the original type BEFORE it is transformed to the superclass, because
+	// objc_msgSendSuper2 must start its search on the subclass, not the superclass.
+	// C++ Reference: check_builtin.cpp:723 -- `call->tav.objc_super_target = obj_type;`
+	if call != nil && call.expr != nil {
+		call.expr.tav.objc_super_target = obj_type
+	}
+
 	// Look up the superclass type via objc_superclass attribute
 	// C++ Reference: check_builtin.cpp L750-780
 	superclass_type: ^Type = nil
@@ -1941,7 +1963,7 @@ check_builtin_objc_super :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 // ============================================================================
 
 // check_builtin_offset_of_impl handles offset_of() builtin (full implementation)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2682-2793
+// C++ Reference: check_builtin.cpp:2682-2793
 //
 // Supports two forms:
 //   - offset_of(value.field) -> uintptr
@@ -2117,7 +2139,7 @@ check_builtin_offset_of_impl :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 }
 
 // check_builtin_offset_of_by_string handles offset_of_by_string() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2795-2870
+// C++ Reference: check_builtin.cpp:2795-2870
 //
 // Signature: offset_of_by_string(Type, field_name: string) -> uintptr
 //
@@ -2212,7 +2234,7 @@ check_builtin_offset_of_by_string :: proc(ctx: ^Checker_Context, operand: ^Opera
 // ============================================================================
 
 // check_builtin_complex handles complex() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:3078-3151
+// C++ Reference: check_builtin.cpp:3078-3151
 //
 // Signature: complex(real, imag: float_type) -> complex_type
 //
@@ -2324,7 +2346,7 @@ check_builtin_complex :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 }
 
 // check_builtin_real_imag handles real() and imag() builtins
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:3352-3414
+// C++ Reference: check_builtin.cpp:3352-3414
 //
 // Signature: real(x: complex_or_quaternion) -> float_type
 //            imag(x: complex_or_quaternion) -> float_type
@@ -2418,7 +2440,7 @@ check_builtin_real_imag :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 }
 
 // check_builtin_conj handles conj() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:3472-3516
+// C++ Reference: check_builtin.cpp:3472-3516
 //
 // Signature: conj(x: complex_or_quaternion_or_array_thereof) -> same_type
 //
@@ -2493,7 +2515,7 @@ check_builtin_conj :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.
 // ============================================================================
 
 // check_builtin_swizzle handles swizzle() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:2992-3076
+// C++ Reference: check_builtin.cpp:2992-3076
 //
 // Signature: swizzle(v: [N]T, ..int) -> [M]T
 //
@@ -2601,7 +2623,7 @@ check_builtin_swizzle :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 // ============================================================================
 
 // check_builtin_min handles min() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:3744-3919
+// C++ Reference: check_builtin.cpp:3744-3919
 //
 // Two forms:
 //   - min(Type) -> returns minimum value of type
@@ -2831,7 +2853,7 @@ check_builtin_min :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.C
 }
 
 // check_builtin_max handles max() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:3921-4102
+// C++ Reference: check_builtin.cpp:3921-4102
 //
 // Two forms:
 //   - max(Type) -> returns maximum value of type
@@ -3065,7 +3087,7 @@ check_builtin_max :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.C
 }
 
 // check_builtin_abs handles abs() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:4104-4164
+// C++ Reference: check_builtin.cpp:4104-4164
 //
 // Signature: abs(n: numeric) -> numeric
 //
@@ -3151,7 +3173,7 @@ check_builtin_abs :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.C
 }
 
 // check_builtin_clamp handles clamp() builtin
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:4166-4258
+// C++ Reference: check_builtin.cpp:4166-4258
 //
 // Signature: clamp(value, min, max: ordered) -> ordered
 //
@@ -3263,7 +3285,7 @@ check_builtin_clamp :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast
 
 // check_builtin_procedure_directive handles special directive-based builtin procedures
 // like #caller_expression, #location, etc.
-// Reference: /mnt/c/odin/src/check_builtin.cpp:2089-2175
+// Reference: check_builtin.cpp:2089-2175
 //
 // Implemented directives:
 // - #caller_expression: Returns the source code string of an expression
@@ -6015,11 +6037,11 @@ check_builtin_fixed_point :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 
 // =============================================================================
 // Memory Intrinsics
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5057-5108 (alloca)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5111-5119 (cpu_relax, trap, debug_trap)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5514-5715 (mem_copy, mem_zero, ptr_offset, ptr_sub)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5770-5841 (volatile/unaligned/non_temporal store/load)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:6200-6233 (prefetch_*)
+// C++ Reference: check_builtin.cpp:5057-5108 (alloca)
+// C++ Reference: check_builtin.cpp:5111-5119 (cpu_relax, trap, debug_trap)
+// C++ Reference: check_builtin.cpp:5514-5715 (mem_copy, mem_zero, ptr_offset, ptr_sub)
+// C++ Reference: check_builtin.cpp:5770-5841 (volatile/unaligned/non_temporal store/load)
+// C++ Reference: check_builtin.cpp:6200-6233 (prefetch_*)
 // =============================================================================
 
 // is_type_normal_pointer checks if a type is a normal (non-rawptr) pointer
@@ -7259,6 +7281,23 @@ check_builtin_valgrind_client_request :: proc(ctx: ^Checker_Context, operand: ^O
 }
 
 // has_target_feature
+// Reference: src/check_builtin.cpp:5080
+//
+// LEDGER #543. This returned a hardcoded `exact_value_bool(false)` under the comment "The actual
+// value would be determined by checking target features". It was invisible to every gate in the
+// tree: an always-false has_target_feature makes `when intrinsics.has_target_feature("sse2")`
+// select the else-branch, so the guarded code is never CHECKED, and code that is never checked
+// produces no diagnostic to disagree about. It surfaced only via the model dump (#542), as three
+// entities missing from core/hash/xxhash -- the body locals of SIMD procedures that were
+// consequently never instantiated.
+//
+// Two things here are easy to get wrong and are deliberate:
+//  1. The argument may be a constant string OR A PROCEDURE TYPE, in which case the features come
+//     from that type's @(require_target_feature)/@(enable_target_feature). check_expr_OR_TYPE is
+//     required for the type case to resolve at all.
+//  2. C++ does NOT bail on an invalid operand. An invalid argument falls into the else branch,
+//     base_type gives a non-Proc, and it reports "Expected a constant string or procedure type".
+//     The port used to `return false` first, suppressing that message.
 check_builtin_has_target_feature :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "has_target_feature"
 
@@ -7267,22 +7306,38 @@ check_builtin_has_target_feature :: proc(ctx: ^Checker_Context, operand: ^Operan
 		return false
 	}
 
-	x: Operand
-	check_expr(ctx, &x, call.args[0])
+	features := ""
 
-	if x.mode == .Invalid {
-		return false
+	check_expr_or_type(ctx, operand, call.args[0])
+
+	if is_type_string(operand.type) && operand.mode == .Constant {
+		str, is_string := operand.value.(string)
+		assert(is_string) // C++ GB_ASSERTs the same invariant (check_builtin.cpp:5087)
+		features = str
+	} else {
+		bt := base_type(operand.type)
+		if bt != nil && bt.kind == .Proc {
+			pt := bt.variant.(Type_Proc)
+			if len(pt.require_target_feature) != 0 {
+				assert(len(pt.enable_target_feature) == 0)
+				features = pt.require_target_feature
+			} else if len(pt.enable_target_feature) != 0 {
+				features = pt.enable_target_feature
+			} else {
+				error_node(call.args[0], "Expected the procedure type given to '%s' to have @(require_target_feature=\"...\") or @(enable_target_feature=\"...\")", builtin_name)
+			}
+		} else {
+			error_node(call.args[0], "Expected a constant string or procedure type for '%s'", builtin_name)
+		}
 	}
 
-	if x.mode != .Constant || !is_type_string(x.type) {
-		error_node(x.expr, "Argument to '%s' must be a constant string", builtin_name)
-		return false
+	if valid, invalid := check_target_feature_is_valid_globally(features); !valid {
+		error_node(call.args[0], "Target feature '%s' is not a valid target feature", invalid)
 	}
 
+	operand.value = exact_value_bool(target_feature_is_enabled(features, enabled_target_features()))
 	operand.mode = .Constant
 	operand.type = t_untyped_bool
-	// The actual value would be determined by checking target features
-	operand.value = exact_value_bool(false)
 
 	return true
 }

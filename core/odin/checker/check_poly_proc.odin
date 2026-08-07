@@ -134,9 +134,30 @@ find_or_generate_polymorphic_procedure :: proc(old_ctx: ^Checker_Context, base_e
 	}
 
 	// Check if procedure is polymorphic and unspecialized
-	// C++ lines 406-408
+	// C++ Reference: check_expr.cpp:412-423.
 	src_proc, src_ok := src.variant.(Type_Proc)
 	if !src_ok || !src_proc.is_polymorphic || src_proc.is_poly_specialized {
+		// IDEMPOTENCE GUARD. Upstream PR #7208 added this; C++'s own comment is
+		// "NOTE: polymorphic procedure check not idempotent without this". Re-checking an
+		// ALREADY-SPECIALIZED entity used to fall straight out of this bail with false, so a
+		// second visit to the same call site produced no gen_entity and the caller treated
+		// the instantiation as having failed. Hand the base entity back instead: it IS the
+		// specialization being asked for. dst is nil on the param_operands path, and
+		// are_types_identical is nil-safe (check_equivalence.odin:36), so it returns false
+		// there -- matching C++, where are_types_identical(src, nullptr) is likewise false.
+		// LEDGER #386.
+		if src_proc.is_poly_specialized {
+			// C++ reads base_entity->Procedure.generated_from_polymorphic, i.e. the flag on
+			// the PROCEDURE variant, not a whole-entity field.
+			if bp, bp_ok := &base_entity.variant.(Entity_Procedure); bp_ok && bp.generated_from_polymorphic {
+				if are_types_identical(src, dst) {
+					if poly_proc_data != nil {
+						poly_proc_data.gen_entity = base_entity
+					}
+					return true
+				}
+			}
+		}
 		return false
 	}
 
@@ -194,9 +215,11 @@ find_or_generate_polymorphic_procedure :: proc(old_ctx: ^Checker_Context, base_e
 	scope.flags += {.Proc}
 	nctx.scope = scope
 	nctx.allow_polymorphic_types = true
-	if nctx.polymorphic_scope == nil {
-		nctx.polymorphic_scope = scope
-	}
+	// UNCONDITIONAL. This used to be `if nctx.polymorphic_scope == nil`, matching C++ at the
+	// time. Upstream PR #7208 dropped the guard: a NESTED instantiation inherited the OUTER
+	// polymorphic scope from the copied context, so its own type parameters were resolved
+	// against the wrong scope. The fresh scope must always win. LEDGER #386.
+	nctx.polymorphic_scope = scope
 
 	// Build procedure type from polymorphic template
 	// C++ lines 459-468
@@ -479,7 +502,7 @@ clear_scope :: proc(s: ^Scope) {
 }
 
 // NOTE: clone_ast_node is now implemented in ast_clone.odin
-// C++ Reference: /mnt/c/odin/src/parser.cpp:176-496 (~320 lines of recursive cloning)
+// C++ Reference: parser.cpp:176-496 (~320 lines of recursive cloning)
 // The implementation provides full deep cloning of all AST node types
 
 // Helper: base_entity_type gets the type of an entity

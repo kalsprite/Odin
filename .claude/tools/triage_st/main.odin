@@ -49,13 +49,28 @@ main :: proc() {
 			checker.build_context.ODIN_DEFAULT_TO_NIL_ALLOCATOR = true
 		case "-disable-init-fini":
 			checker.build_context.disable_init_fini = true
+		case "-no-threads":
+			// LEDGER #426. The REAL control for #344, replacing a taskset attempt whose effect on
+			// worker_count was never verified. checker_lifecycle.odin:193 gates thread-pool
+			// creation on this flag, so setting it means there is no pool at all -- not merely
+			// fewer cores to schedule one onto.
+			checker.build_context.no_threaded_checker = true
 		case "-entry-point":
 			// Undoes the default above. C++ checks `main` unless -no-entry-point is passed, and
 			// the bedrock calling-convention rule lives INSIDE that block -- so without this the
 			// check cannot fire at all.
 			checker.build_context.no_entry_point = false
 		case:
-			append(&paths, a)
+			// LEDGER #418. -dump-model:<path> writes a canonical dump of the semantic model.
+			// Handled in the default arm rather than as its own case because it carries a value.
+			if len(a) > 12 && a[:12] == "-dump-model:" {
+				checker.build_context.dump_model_path = a[12:]
+			} else if len(a) > 10 && a[:10] == "-dump-doc:" {
+				// LEDGER #480. Doc FLAG BITS, which doccmp cannot see.
+				checker.build_context.dump_doc_path = a[10:]
+			} else {
+				append(&paths, a)
+			}
 		}
 	}
 

@@ -268,6 +268,25 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// The earlier version of this comment blamed task #42. That was wrong by the time it was read:
 	// #42 closed with the OPPOSITE conclusion ("the error cap all along -- NOT a dependency set"),
 	// so nothing was ever going to make this loop non-empty. Corrected here.
+	// C++ checker.cpp:3111-3202, the FORCE_ADD_RUNTIME_ENTITIES roster inside
+	// generate_minimum_dependency_set. This is a SECOND dependency mechanism, separate from
+	// add_package_dependency, and the port had no equivalent at all -- none of
+	// memory_compare_zero / memory_equal / memory_compare / __init_context / _cleanup_runtime
+	// were referenced anywhere. LEDGER #547-B.
+	//
+	// SCOPE, and why this does not reopen #272. C++'s force_add_dependency_entity does TWO
+	// things: `e->flags |= EntityFlag_Used` and `add_dependency_to_set(c, e)`. #272 scoped the
+	// dependency SET out of a checker on evidence -- every min_dep_count reader is codegen, a
+	// race backstop, or the RTTI table, and none emits a diagnostic. That still holds and the
+	// set is still not built here. What #272 could not have weighed is the FLAG: the dump-model
+	// comparison did not exist then, and `used` is entity state the model compares directly.
+	// So the flag half is ported and the set half deliberately is not.
+	//
+	// VERIFIED before being written: force-adding just memory_compare_zero and memset over four
+	// packages took the `used` divergence 70 -> 65 and dropped both entities out of the residual,
+	// which is what established that this mechanism is the cause rather than a guess.
+	force_add_runtime_used(c)
+
 	check_unchecked_bodies(c)
 
 	check_merge_queues_into_arrays(c)
@@ -743,5 +762,73 @@ check_unique_package_names :: proc(c: ^Checker) {
 		} else {
 			seen[pkg.name] = pkg
 		}
+	}
+}
+// force_add_runtime_used marks the runtime entities C++ force-adds to the minimum dependency set.
+//
+// C++ Reference: checker.cpp:3111-3202, the FORCE_ADD_RUNTIME_ENTITIES macro inside
+// generate_minimum_dependency_set, and force_add_dependency_entity at checker.cpp:3086.
+//
+// Only the ENTITY FLAG half of C++'s force_add_dependency_entity is reproduced -- see the note at
+// the call site for why the dependency-set half stays out of scope per #272. C++'s helper returns
+// silently when the lookup fails (its GB_ASSERT_MSG sits after an `if (e == nullptr) return;`, so
+// it is unreachable), and several roster names are documented there as "only if these exist", so a
+// missing name is expected rather than a defect here.
+force_add_runtime_used :: proc(c: ^Checker) {
+	rt := get_core_package(&c.info, "runtime")
+	if rt == nil {
+		return
+	}
+	scope := get_package_scope(&c.info, rt)
+	if scope == nil {
+		return
+	}
+
+	add :: proc(scope: ^Scope, names: []string) {
+		for name in names {
+			if e := scope_lookup(scope, name); e != nil {
+				e.flags += {.Used}
+			}
+		}
+	}
+
+	// Always required. NOTE cstring_to_string is commented out in C++ and is omitted here too.
+	add(scope, {
+		// Odin types
+		"Source_Code_Location", "Context", "Allocator", "Logger",
+		// Odin internal procedures
+		"__init_context", "_cleanup_runtime",
+		// Pseudo-CRT required procedures
+		"memset",
+		// Utility procedures
+		"memory_equal", "memory_compare", "memory_compare_zero",
+	})
+
+	if build_context.no_crt {
+		add(scope, {"memcpy", "memmove"})
+	}
+	if build_context.metrics.arch == .Arm32 {
+		add(scope, {"aeabi_d2h"})
+	}
+	if is_arch_wasm() {
+		// The extended-data-type entries above these are commented out in C++; only the three
+		// WASM-specific ones are live.
+		add(scope, {"__ashlti3", "__multi3", "__lshrti3"})
+	}
+	if !build_context.no_rtti {
+		add(scope, {"Type_Info", "type_table", "__type_info_of"})
+	}
+	if !build_context.no_entry_point {
+		add(scope, {"args__"})
+	}
+	if build_context.no_crt && !is_arch_wasm() {
+		add(scope, {"_tls_index", "_fltused"})
+	}
+	if !build_context.no_bounds_check {
+		add(scope, {
+			"bounds_check_error", "matrix_bounds_check_error",
+			"slice_expr_error_hi", "slice_expr_error_lo_hi",
+			"multi_pointer_slice_expr_error",
+		})
 	}
 }

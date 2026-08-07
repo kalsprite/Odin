@@ -7,7 +7,7 @@ This module provides deep cloning of AST nodes for polymorphic procedure instant
 Each polymorphic procedure specialization needs its own AST tree copy to avoid sharing
 cached entity bindings and type information.
 
-C++ Reference: /mnt/c/odin/src/parser.cpp:155-496 (clone_ast, clone_ast_array)
+C++ Reference: parser.cpp:155-496 (clone_ast, clone_ast_array)
 */
 
 import "core:odin/ast"

@@ -7,9 +7,9 @@ This module provides documentation string building, entity sorting for display,
 and documentation output formatting. It ports logic from the C++ docs system.
 
 C++ References:
-- /mnt/c/odin/src/docs.cpp (main documentation logic)
-- /mnt/c/odin/src/docs_format.cpp (binary format definitions)
-- /mnt/c/odin/src/docs_writer.cpp (binary writer implementation)
+- docs.cpp (main documentation logic)
+- docs_format.cpp (binary format definitions)
+- docs_writer.cpp (binary writer implementation)
 
 Note: This initial port focuses on the core sorting and comparison logic.
 The full binary writer and format printer implementations will be added as needed.
@@ -22,7 +22,7 @@ import "core:strings"
 
 // ======================================================================================
 // ENTITY SORTING FOR DOCUMENTATION DISPLAY
-// C++ Reference: /mnt/c/odin/src/docs.cpp:3-65
+// C++ Reference: docs.cpp:3-65
 // ======================================================================================
 
 // print_entity_kind_ordering defines sort order for entity kinds in documentation
@@ -107,7 +107,7 @@ cmp_ast_package_by_name :: proc(a: ^ast.Package, b: ^ast.Package) -> slice.Order
 
 // ======================================================================================
 // DOCUMENTATION STRING HELPERS
-// C++ Reference: /mnt/c/odin/src/docs.cpp:69-179, docs_writer.cpp:281-395
+// C++ Reference: docs.cpp:69-179, docs_writer.cpp:281-395
 // ======================================================================================
 
 // C++ Reference: docs.cpp:100-106, 77-86
@@ -489,7 +489,7 @@ comment_group_has_content :: proc(g: ^ast.Comment_Group) -> bool {
 
 // ======================================================================================
 // BINARY FORMAT STRUCTURES (STUBBED FOR FUTURE IMPLEMENTATION)
-// C++ Reference: /mnt/c/odin/src/docs_format.cpp:1-237
+// C++ Reference: docs_format.cpp:1-237
 // ======================================================================================
 
 // NOTE: The binary format (.odin-doc) structures are defined in docs_format.cpp
@@ -511,7 +511,7 @@ comment_group_has_content :: proc(g: ^ast.Comment_Group) -> bool {
 
 // ======================================================================================
 // BINARY WRITER (STUBBED FOR FUTURE IMPLEMENTATION)
-// C++ Reference: /mnt/c/odin/src/docs_writer.cpp:1-1175
+// C++ Reference: docs_writer.cpp:1-1175
 // ======================================================================================
 
 // NOTE: The binary writer implementation is complex and involves:

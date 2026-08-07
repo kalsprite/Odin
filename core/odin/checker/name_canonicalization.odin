@@ -12,8 +12,8 @@ Name canonicalization and type hashing infrastructure.
 This module provides canonical string representation and hashing for types and entities,
 used for type deduplication, RTTI generation, and name mangling.
 
-C++ Reference: /mnt/c/odin/src/name_canonicalization.cpp
-               /mnt/c/odin/src/name_canonicalization.hpp
+C++ Reference: name_canonicalization.cpp
+               name_canonicalization.hpp
 
 Architecture:
 - TypeWriter: Abstraction for writing canonical strings (to string or hash)
@@ -36,7 +36,7 @@ Canonical Name Format Rules (from name_canonicalization.hpp:1-22):
 
 // ======================================================================================
 // CANONICAL NAME SEPARATORS AND CONSTANTS
-// C++ Reference: /mnt/c/odin/src/name_canonicalization.hpp:24-44
+// C++ Reference: name_canonicalization.hpp:24-44
 // ======================================================================================
 
 CANONICAL_TYPE_SEPARATOR :: ":"
@@ -53,7 +53,7 @@ CANONICAL_NONE_TYPE :: "<>"
 CANONICAL_RANGE_OPERATOR :: "..="
 
 // TYPE_SET_TOMBSTONE marks deleted entries in TypeSet hash table
-// C++ Reference: /mnt/c/odin/src/name_canonicalization.hpp:69
+// C++ Reference: name_canonicalization.hpp:69
 TYPE_SET_TOMBSTONE :: max(u64)
 
 // ======================================================================================
@@ -271,7 +271,7 @@ is_printable_ascii :: proc(r: rune) -> bool {
 
 // ======================================================================================
 // TYPE WRITER INFRASTRUCTURE
-// C++ Reference: /mnt/c/odin/src/name_canonicalization.cpp:241-300
+// C++ Reference: name_canonicalization.cpp:241-300
 // ======================================================================================
 
 // Type_Writer_Proc is the callback for writing data
@@ -355,7 +355,7 @@ type_writer_make_hasher :: proc(w: ^Type_Writer, hash: ^u64) {
 
 // ======================================================================================
 // FNV-1a HASH FUNCTION
-// C++ Reference: /mnt/c/odin/src/gb/gb.h:4804-4814
+// C++ Reference: gb/gb.h:4804-4814
 // ======================================================================================
 
 // fnv64a computes FNV-1a 64-bit hash
@@ -686,9 +686,21 @@ write_canonical_entity_name :: proc(w: ^Type_Writer, e: ^Entity) {
 			// Jump to write_base_name
 		} else if .Builtin in s.flags {
 			// Jump to write_base_name
+		} else if e.kind == .Type_Name {
+			// C++ Reference: name_canonicalization.cpp:689-691 --
+			//     if (e->kind == Entity_TypeName) {
+			//         goto write_base_name;
+			//     }
+			// LEDGER #482. This escape was MISSING, so any Type_Name reaching here panicked.
+			// Measured: `-dump-doc` on core/unicode/utf8 died with "Weird entity Odin_Arch_Type"
+			// -- a UNIVERSE-SCOPE type name, i.e. entirely ordinary input, not an edge case.
+			// C++ takes the goto and writes the base name; only NON-TypeName entities reach its
+			// diagnostic. The old comment cited "C++ line 530-546", which is the typeid-hashing
+			// and WebKit-workaround block -- a drifted citation pointing at unrelated code.
 		} else {
-			// C++ Reference: line 530-546
-			// This is an error case in C++ - print diagnostic and panic
+			// C++ Reference: name_canonicalization.cpp:693 onward -- C++ prints a detailed
+			// WEIRD ENTITY TYPE diagnostic (position, type, scope flags, decl_info) and then dies.
+			// The port keeps the die; the diagnostic detail is not reproduced.
 			panic(fmt.tprintf("write_canonical_entity_name: Weird entity %s", e.token.text))
 		}
 	}
@@ -815,6 +827,18 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		dyn := actual_type.variant.(Type_Dynamic_Array)
 		type_writer_appendc(w, "[dynamic]")
 		write_type_to_canonical_string(w, dyn.elem)
+
+	case .Fixed_Capacity_Dynamic_Array:
+		// C++ Reference: name_canonicalization.cpp:812-814 --
+		//     type_writer_append_fmt(w, "[dynamic;%lld]", capacity);
+		//     write_type_to_canonical_string(w, elem);
+		// LEDGER #482. This arm was MISSING, so `[dynamic; N]T` panicked in the canonical-name
+		// writer. Reached via the doc path: a Generic whose default_type() is a fixed-capacity
+		// dynamic array. Same family as #309 (the type kind missing from the literal switch) and
+		// #89 (missing from is_ast_type) -- [dynamic; N]T keeps being the one kind left out.
+		fcda := actual_type.variant.(Type_Fixed_Capacity_Dynamic_Array)
+		type_writer_appendc(w, fmt.tprintf("[dynamic;%d]", fcda.capacity))
+		write_type_to_canonical_string(w, fcda.elem)
 
 	case .Simd_Vector:
 		// C++ Reference: line 649-652
@@ -1059,6 +1083,100 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		write_canonical_params(w, type)
 
 	case:
-		panic(fmt.tprintf("write_type_to_canonical_string: Unknown type kind %v", type.kind))
+		// LEDGER #482. This used to print `type.kind` -- the ORIGINAL type's kind -- while the
+		// switch above dispatches on `actual_type.kind` (actual_type := default_type(type), :773).
+		// So an unhandled kind was reported under the name of whatever was passed IN, and a
+		// Generic input whose default_type() lands on an unhandled kind said "Unknown type kind
+		// Generic" -- pointing at the .Generic arm, which exists and is fine. It cost a wrong fix
+		// attempt (caught only by a duplicate-case compile error). Report BOTH.
+		panic(fmt.tprintf(
+			"write_type_to_canonical_string: Unknown type kind %v (from %v)",
+			actual_type.kind, type.kind))
 	}
+}
+
+// entity_symbol_name returns the LINKER SYMBOL for an entity.
+//
+// C++ Reference: lb_get_entity_name (llvm_backend_general.cpp:1771). Four cases, in order:
+//
+//     TypeName with ir_mangled_name set  -> ir_mangled_name
+//     Procedure with link_name set       -> link_name            (i.e. @(link_name))
+//     e.pkg == nil                       -> e.token.text         (builtins / universe)
+//     otherwise                          -> string_canonical_entity_name(e)
+//
+// WHY IT LIVES HERE. The canonical name IS the symbol, and the rule that maps an entity to it is
+// linking-critical: any backend that reproduces it slightly differently emits objects that will
+// not link against anything the existing compiler produced. Two copies in two languages WILL
+// drift. The rule now has one home.
+//
+// DELIBERATE DIVERGENCE -- THIS DOES NOT CACHE. C++ writes the computed name back into
+// TypeName.ir_mangled_name / Procedure.link_name / Variable.link_name and returns the cached value
+// on subsequent calls. That is a backend-local memoisation, and it is safe there because the
+// backend is the last thing to run and owns the model. It is NOT safe for an exported checker
+// procedure, for three reasons:
+//
+//   1. It writes into the fields that carry the USER'S OVERRIDE. After caching you cannot
+//      distinguish "the source said @(link_name)" from "somebody asked for the symbol once".
+//      That is information-destroying, and the checker is now a library with several readers.
+//
+//   2. dump_model EMITS ir_mangled_name (dump_model.odin, `mangled`). A caching version would make
+//      the model dump depend on whether any consumer had called this -- so the parity and
+//      modelsweep measurements would depend on consumer behaviour rather than on the checker.
+//      An instrument must not be perturbable by its observers.
+//
+//   3. Two consumers disagreeing on whether to cache leaves a later reader seeing different state
+//      depending on who ran first. Raised by the mir backend work, and correct.
+//
+// The name PRODUCED is identical either way -- C++'s cache is pure memoisation, so this is an
+// ownership divergence, not a behavioural one. Recorded in CPP_DEVIATIONS.md.
+//
+// The returned string is allocated from `allocator` in the fourth case ONLY; the first three
+// return borrowed slices of the entity. Callers that free unconditionally will fault -- if you
+// need uniform ownership, clone the result.
+entity_symbol_name :: proc(e: ^Entity, allocator := context.allocator) -> string {
+	if e == nil {
+		return ""
+	}
+
+	// Case 1 and 2: an already-set name wins. Note the asymmetry, which is C++'s: TypeName is
+	// consulted through ir_mangled_name, Procedure through link_name.
+	#partial switch v in e.variant {
+	case Entity_Type_Name:
+		if len(v.ir_mangled_name) != 0 {
+			return v.ir_mangled_name
+		}
+	case Entity_Procedure:
+		if len(v.link_name) != 0 {
+			return v.link_name
+		}
+	}
+
+	// Case 3: no package -- builtins and the universe scope. Their symbol is their spelling.
+	if e.pkg == nil {
+		return e.token.text
+	}
+
+	// Case 4: the canonical name IS the symbol.
+	//
+	// GUARDED, and this is the second deliberate divergence. write_canonical_entity_name handles
+	// exactly four entity kinds -- TypeName, Constant, Procedure, Variable -- and PANICS on
+	// anything else (C++: `default: GB_PANIC("TODO(bill): entity kind %d")`,
+	// name_canonicalization.cpp). The port is faithful there and panics too.
+	//
+	// That is safe in C++ because lb_get_entity_name is only ever reached from the backend, on
+	// entities it is about to EMIT, and it never emits a builtin. It is NOT safe for an exported
+	// library procedure: a consumer walking a package scope sees Entity_Builtin, Import_Name,
+	// Library_Name, Label and Nil alongside the four, and the first builtin would abort the host
+	// process (#12: the checker must not kill its caller).
+	//
+	// So kinds with no linker symbol return "" rather than panicking. This invents no name --
+	// for the four kinds C++ handles the result is bit-for-bit what C++ produces; it only
+	// replaces an abort with an empty answer for kinds C++ never asks about. Callers should treat
+	// "" as "this entity has no symbol", which is the truth: builtins, imports, libraries and
+	// labels are compile-time only and are never emitted by any backend.
+	#partial switch _ in e.variant {
+	case Entity_Type_Name, Entity_Constant, Entity_Procedure, Entity_Variable:
+		return string_canonical_entity_name(e, allocator)
+	}
+	return ""
 }

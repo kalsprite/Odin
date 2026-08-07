@@ -21,14 +21,14 @@ import "core:unicode/utf8"
 // ======================================================================================
 
 // Unpack_Flag controls unpacking behavior for check_unpack_arguments
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:6039-6043
+// C++ Reference: check_expr.cpp:6039-6043
 Unpack_Flag :: enum {
 	Allow_Ok, // Allow optional-ok unpacking (x, ok := map[key])
 	Allow_Undef, // Allow uninitialized values (---)
 }
 
 // entity_of_node extracts the entity from an AST node
-// C++ Reference: /mnt/c/odin/src/checker.cpp:1630-1664
+// C++ Reference: checker.cpp:1630-1664
 entity_of_node :: proc(info: ^Checker_Info, expr: ^ast.Node) -> ^Entity {
 	if expr == nil {
 		return nil
@@ -108,7 +108,7 @@ entity_of_node :: proc(info: ^Checker_Info, expr: ^ast.Node) -> ^Entity {
 // decl_info_of_entity is defined in entity_helpers.odin
 
 // check_unpack_arguments unpacks tuple/multi-value expressions for assignments
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:6046-6181
+// C++ Reference: check_expr.cpp:6046-6181
 check_unpack_arguments :: proc(ctx: ^Checker_Context, lhs: []^Entity, operands: ^[dynamic]Operand, rhs_arguments: []^ast.Expr, flags: bit_set[Unpack_Flag], variadic_index: int = -1) -> bool {
 	// C++ Reference: check_expr.cpp:6046-6181 (135 lines)
 
@@ -295,7 +295,7 @@ check_unpack_arguments :: proc(ctx: ^Checker_Context, lhs: []^Entity, operands: 
 // - exact_value_string16
 
 // is_type_distinct checks if a type expression is marked as distinct
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:354-386
+// C++ Reference: check_decl.cpp:354-386
 is_type_distinct :: proc(node: ^ast.Expr) -> bool {
 	// C++ Reference: check_decl.cpp:354-386
 	expr := node
@@ -326,7 +326,7 @@ is_type_distinct :: proc(node: ^ast.Expr) -> bool {
 }
 
 // remove_type_alias_clutter removes parentheses and distinct wrappers
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:388-401
+// C++ Reference: check_decl.cpp:388-401
 remove_type_alias_clutter :: proc(node: ^ast.Expr) -> ^ast.Expr {
 	// C++ Reference: check_decl.cpp:388-401
 	expr := node
@@ -348,7 +348,7 @@ remove_type_alias_clutter :: proc(node: ^ast.Expr) -> ^ast.Expr {
 // alloc_type_enum is defined in types.odin
 
 // alloc_type_named allocates a named type
-// C++ Reference: /mnt/c/odin/src/types.cpp:1120-1129
+// C++ Reference: types.cpp:1120-1129
 alloc_type_named :: proc(name: string, base: ^Type, type_name: ^Entity, allocator := context.allocator) -> ^Type {
 	// C++ line 1121-1128: Create named type with entity reference
 	t := new(Type, allocator)
@@ -362,7 +362,7 @@ alloc_type_named :: proc(name: string, base: ^Type, type_name: ^Entity, allocato
 }
 
 // make_attribute_context creates an attribute context
-// C++ Reference: /mnt/c/odin/src/checker.hpp:169-174
+// C++ Reference: checker.hpp:169-174
 make_attribute_context :: proc(link_prefix, link_suffix: string) -> Attribute_Context {
 	// C++ Reference: checker.hpp:169-174
 	ac := Attribute_Context{}
@@ -372,7 +372,7 @@ make_attribute_context :: proc(link_prefix, link_suffix: string) -> Attribute_Co
 }
 
 // check_decl_attribute_value evaluates an attribute value expression
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3395-3410
+// C++ Reference: checker.cpp:3395-3410
 check_decl_attribute_value :: proc(ctx: ^Checker_Context, value: ^ast.Expr, type_hint: ^Type = nil) -> Exact_Value {
 	// C++ Reference: checker.cpp:3396-3409
 	ev := Exact_Value{}
@@ -504,7 +504,7 @@ report_unknown_attribute :: proc(elem: ^ast.Node, name: string) {
 }
 
 // check_decl_attributes checks declaration attributes
-// C++ Reference: /mnt/c/odin/src/checker.cpp:4227-4311
+// C++ Reference: checker.cpp:4227-4311
 // Extended to handle common attributes: deprecated, warning, link_name, test, init, fini, etc.
 check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribute, ac: ^Attribute_Context, kind: Attribute_Decl_Kind) {
 	// C++ Reference: checker.cpp:4228 - Early return if no attributes
@@ -1065,8 +1065,7 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				case "entry_point_only":      ac.entry_point_only = true
 				case "instrumentation_enter": ac.instrumentation_enter = true
 				case "instrumentation_exit":  ac.instrumentation_exit = true
-				// no_sanitize_thread: C++ has ac->no_sanitize_thread but Attribute_Context
-				// here has no such field, so there is nothing to store yet.
+				case "no_sanitize_thread":    ac.no_sanitize_thread = true
 				// objc_implement is handled by the objc path.
 				}
 				continue
@@ -1102,9 +1101,35 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				}
 				continue
 
-			// A string is required.
-			case "require_target_feature", "enable_target_feature", "extra_linker_flags",
-			     "default_calling_convention":
+			// A string is required AND STORED. C++ checker.cpp:4202-4219 assigns each of these to
+			// its AttributeContext field; the port validated the value and dropped it, so
+			// ac.require_target_feature/enable_target_feature were always empty. That made the whole
+			// target-feature block in check_decl (check_decl.odin:1209) dead: no validity
+			// diagnostic, nothing written to Type_Proc, and therefore
+			// intrinsics.has_target_feature(type_of(p)) could never see a procedure's features
+			// and matched_target_features always scored 0. LEDGER #543.
+			case "require_target_feature":
+				ev := check_decl_attribute_value(ctx, value)
+				if str, ok := ev.(string); ok {
+					ac.require_target_feature = str
+				} else {
+					error(elem, "Expected a string value for '%s'", name)
+				}
+				continue
+
+			case "enable_target_feature":
+				ev := check_decl_attribute_value(ctx, value)
+				if str, ok := ev.(string); ok {
+					ac.enable_target_feature = str
+				} else {
+					error(elem, "Expected a string value for '%s'", name)
+				}
+				continue
+
+			// A string is required. extra_linker_flags is stored on the foreign-library path
+			// (check_decl.odin:2015) and default_calling_convention through foreign_context
+			// (check_collect.odin:1205), so these two are validate-only HERE by design.
+			case "extra_linker_flags", "default_calling_convention":
 				ev := check_decl_attribute_value(ctx, value)
 				if _, ok := ev.(string); !ok {
 					error(elem, "Expected a string value for '%s'", name)
@@ -1157,8 +1182,15 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 					error(elem, "Expected a constant bit_set of type 'intrinsics.Fast_Math_Flags' for '%s'", name)
 				} else {
 					ev := check_decl_attribute_value(ctx, value, t_fast_math_flags)
-					if _, ok := ev.(big.Int); !ok {
+					if bi, ok := ev.(big.Int); !ok {
 						error(elem, "Expected a constant bit_set of type 'intrinsics.Fast_Math_Flags' for '%s'", name)
+					} else {
+						// C++ Reference: checker.cpp:4277 -- the value is STORED, not merely
+						// validated. The port validated and dropped it (#138/#139 shape).
+						v, err := big.int_get_u64(&bi)
+						if err == nil {
+							ac.fast_math_flags = v
+						}
 					}
 				}
 				continue
@@ -1210,7 +1242,7 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 }
 
 // handle_link_name processes link name with prefix/suffix
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:1016-1050
+// C++ Reference: check_decl.cpp:1016-1050
 handle_link_name :: proc(ctx: ^Checker_Context, token: tokenizer.Token, link_name, link_prefix, link_suffix: string) -> string {
 	// C++ Reference: check_decl.cpp:1017
 	original_link_name := link_name
@@ -1251,7 +1283,7 @@ handle_link_name :: proc(ctx: ^Checker_Context, token: tokenizer.Token, link_nam
 // is_arch_wasm is defined in build_settings.odin
 
 // is_platform_darwin checks if target OS is Darwin (macOS, iOS, etc.)
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:271
+// C++ Reference: check_builtin.cpp:271
 // Used to validate that Objective-C intrinsics are only used on Darwin platforms
 // C++ Reference: check_builtin.cpp:283-287, inside check_builtin_objc_procedure:
 //
@@ -1331,7 +1363,7 @@ is_foreign_name_valid :: proc(name: string) -> bool {
 }
 
 // init_entity_foreign_library initializes foreign library linkage
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:972-1014
+// C++ Reference: check_decl.cpp:972-1014
 init_entity_foreign_library :: proc(ctx: ^Checker_Context, e: ^Entity) -> ^Entity {
 	// C++ Reference: check_decl.cpp:973-987
 	// Extract ident and foreign_library pointer based on entity kind
@@ -1384,7 +1416,7 @@ init_entity_foreign_library :: proc(ctx: ^Checker_Context, e: ^Entity) -> ^Entit
 // token_pos_to_string is defined in error.odin
 
 // signature_parameter_similar_enough checks if two types are ABI-compatible
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:786-844
+// C++ Reference: check_decl.cpp:786-844
 signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 	// C++ Reference: check_decl.cpp:786-844
 	// Check if two types have similar enough signatures for foreign declarations
@@ -1557,7 +1589,7 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 }
 
 // are_signatures_similar_enough checks if two procedure signatures are compatible
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:902-968
+// C++ Reference: check_decl.cpp:902-968
 are_signatures_similar_enough :: proc(a_, b_: ^Type) -> bool {
 	// C++ Reference: check_decl.cpp:902-968
 	// Check if two procedure types have compatible signatures for foreign declarations
@@ -1683,7 +1715,7 @@ are_signatures_similar_enough :: proc(a_, b_: ^Type) -> bool {
 // add_entity is defined in entity_helpers.odin
 
 // add_entity_use marks entity as used and tracks dependencies
-// C++ Reference: /mnt/c/odin/src/checker.cpp:1934-1961
+// C++ Reference: checker.cpp:1934-1961
 add_entity_use :: proc(ctx: ^Checker_Context, identifier: ^ast.Node, entity: ^Entity) {
 	// C++ Reference: checker.cpp:1935-1936
 	if entity == nil {
@@ -1749,7 +1781,7 @@ add_entity_use :: proc(ctx: ^Checker_Context, identifier: ^ast.Node, entity: ^En
 // - check_init_constant
 
 // clone_enum_type clones an enum type for distinct declarations
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:403-447
+// C++ Reference: check_decl.cpp:403-447
 clone_enum_type :: proc(ctx: ^Checker_Context, original_enum_type: ^Type, named_type: ^Type) -> ^Type {
 	// C++ Reference: check_decl.cpp:404-414
 	// NOTE(bill, 2022-02-05): Stupid edge case for `distinct` declarations
@@ -1811,7 +1843,7 @@ clone_enum_type :: proc(ctx: ^Checker_Context, original_enum_type: ^Type, named_
 // ======================================================================================
 
 // check_type_decl checks type declarations
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:449-517
+// C++ Reference: check_decl.cpp:449-517
 check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr, def: ^Type, type_expr: ^ast.Expr = nil, ac: ^Attribute_Context = nil) {
 	// C++ Reference: check_decl.cpp:449-517
 	assert(entity_type(e) == nil)
@@ -2121,7 +2153,7 @@ make_decl_info :: proc(scope: ^Scope, parent: ^Decl_Info = nil, allocator := con
 // ======================================================================================
 
 // check_objc_methods validates Objective-C method declarations
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:1051-1215
+// C++ Reference: check_decl.cpp:1051-1215
 check_objc_methods :: proc(ctx: ^Checker_Context, e: ^Entity, ac: ^Attribute_Context) {
 	// C++ Reference: check_decl.cpp:1052-1054
 	if ac.objc_type == nil {
@@ -2324,7 +2356,7 @@ check_objc_methods :: proc(ctx: ^Checker_Context, e: ^Entity, ac: ^Attribute_Con
 }
 
 // check_foreign_procedure validates foreign procedure declarations
-// C++ Reference: /mnt/c/odin/src/check_decl.cpp:1217-1252
+// C++ Reference: check_decl.cpp:1217-1252
 check_foreign_procedure :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 	// C++ Reference: check_decl.cpp:1218-1220
 	assert(e != nil)
@@ -2395,7 +2427,7 @@ init_core_load_directory_file :: proc(c: ^Checker) {
 }
 
 // init_core_source_code_location ensures core:runtime.Source_Code_Location is loaded
-// C++ Reference: /mnt/c/odin/src/checker.cpp:3362-3368
+// C++ Reference: checker.cpp:3362-3368
 init_core_source_code_location :: proc(c: ^Checker) {
 	// C++ Reference: checker.cpp:3587-3589 - Early return if already loaded.
 	// NOTE: guard on the GLOBAL, matching C++. See init_mem_allocator.

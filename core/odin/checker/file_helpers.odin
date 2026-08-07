@@ -7,7 +7,7 @@ These helpers provide safe access to file metadata stored in external maps.
 C++ stores this data directly on AstFile, but since core:odin/ast.File is immutable,
 we use external maps in Checker_Info.
 
-C++ Reference: /mnt/c/odin/src/parser.hpp:107-173 - struct AstFile
+C++ Reference: parser.hpp:107-173 - struct AstFile
 */
 
 import "core:odin/ast"

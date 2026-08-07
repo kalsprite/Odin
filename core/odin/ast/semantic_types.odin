@@ -343,6 +343,10 @@ Type_And_Value :: struct {
 	is_lhs:       bool,
 	is_bit_field: bool, // True if access goes through a bit field (cannot take address)
 	value:        Exact_Value,
+	// objc_super_target is the ORIGINAL type of the Obj-C object, before objc_super() converts it
+	// to the superclass' type. objc_msgSendSuper2 must begin its search at the SUBCLASS.
+	// C++ Reference: parser.hpp:52
+	objc_super_target: ^Type,
 }
 
 // ============================================================================
@@ -350,6 +354,13 @@ Type_And_Value :: struct {
 // ============================================================================
 
 // Entity_Flags (bit set definition)
+// LEDGER #477. Fourteen members were removed here: they existed in the port and NOT in C++'s
+// EntityFlag_ set, had ZERO writes in Entity_Flags context, and thirteen had zero reads as well.
+// The fourteenth, Auto_Cast, had exactly one reader -- docs_writer's Param_Auto_Cast bit -- and
+// C++ has no EntityFlag_AutoCast and no such read, so both the flag and the read were invented.
+// Removed: Auto_Cast Custom_Align Deprecated Export Foreign No_Nil Optional_Allocator_Error
+// Optional_Ok Require_Results Soa_Field Swizzle Swizzle_Lhs Using_Scope Warning.
+// Members carry EXPLICIT values, so removal does not renumber the survivors.
 Entity_Flag :: enum u64 {
 	Visited                  = 0,
 	Used                     = 1,
@@ -371,10 +382,23 @@ Entity_Flag :: enum u64 {
 	Static                   = 17, // Static variable
 	Implicit_Reference       = 18, // Implicit reference (like C++ const &)
 	Soa_Ptr_Field            = 19, // SOA pointer field
-	// UNUSED - do not read or set. The ordinal is kept so the set stays aligned with C++'s
-	// EntityFlag_ProcBodyChecked. The actual state now lives in Entity.proc_body_checked, because
+	// UNUSED - do not read or set. The actual state lives in Entity.proc_body_checked, because
 	// publishing it into this word with atomic_or raced with the ~108 non-atomic `flags +=` sites.
 	// See the note on that field.
+	//
+	// WHY THE SLOT IS KEPT (#552 -- the previous wording here was wrong). It did NOT say this
+	// correctly: it claimed the ordinal "stays aligned with C++'s EntityFlag_ProcBodyChecked",
+	// which reads as numeric equality and is false -- C++ has 1ull<<21, this is 20.
+	//
+	// The port's ordinals are uniformly C++'s BIT INDEX MINUS ONE, across the whole enum:
+	//     Const_Input 16 / 1<<17   Static 17 / 1<<18   Implicit_Reference 18 / 1<<19
+	//     Soa_Ptr_Field 19 / 1<<20   Proc_Body_Checked 20 / 1<<21   Cold 25 / 1<<26
+	// so nothing is misaligned here specifically. The slot is kept because DELETING it would
+	// renumber every flag after it and break that uniform correspondence, making future
+	// side-by-side reads against entity.cpp harder for no gain.
+	//
+	// Nothing compares these numerically against C++ -- dump_model emits flag NAMES, not bits
+	// (dump_model.odin:315) -- so the values need not match, only the sequence.
 	Proc_Body_Checked        = 20,
 	C_Var_Arg                = 21, // C vararg parameter
 	No_Broadcast             = 22, // #no_broadcast attribute
@@ -388,7 +412,6 @@ Entity_Flag :: enum u64 {
 	Init                     = 30, // Init procedure
 	Subtype                  = 31, // Subtype entity
 	Fini                     = 32, // Fini procedure
-	Require_Results          = 33, // Procedure requires results to be used
 	Custom_Link_Name         = 34, // Has custom link name
 	Custom_Linkage_Internal  = 35, // Internal linkage
 	Custom_Linkage_Strong    = 36, // Strong linkage
@@ -398,19 +421,6 @@ Entity_Flag :: enum u64 {
 	By_Ptr                   = 40, // Parameter passed by pointer
 	Overridden               = 41, // Entity has been overridden
 	// Additional legacy flags for compatibility
-	Soa_Field                = 42, // SOA field
-	Custom_Align             = 43, // Custom alignment
-	Optional_Ok              = 44,
-	Optional_Allocator_Error = 45,
-	Warning                  = 46,
-	Deprecated               = 47,
-	Using_Scope              = 48,
-	Auto_Cast                = 49,
-	Foreign                  = 50,
-	Export                   = 51,
-	No_Nil                   = 52,
-	Swizzle                  = 53,
-	Swizzle_Lhs              = 54,
 }
 
 Entity_Flags :: bit_set[Entity_Flag;u64]
@@ -426,9 +436,18 @@ Parameter_Value_Kind :: enum {
 }
 
 // Parameter_Value stores parameter default value information
+//
+// C++ Reference: entity.cpp:111-120 (`struct ParameterValue`).
 Parameter_Value :: struct {
 	kind:              Parameter_Value_Kind,
 	original_ast_expr: ^Expr,
+	// proc_entity is the procedure entity when the default value IS a procedure
+	// (entity.cpp:114). Added by upstream PR #7208 together with the removal of the
+	// "polymorphic procedure as default value" short-circuit in
+	// check_is_assignable_to_with_score: the short-circuit accepted any polymorphic
+	// procedure for any concrete proc type, and recording the entity here is what lets
+	// resolution find the real procedure later without weakening that test. LEDGER #386.
+	proc_entity:       ^Entity,
 	value:             Exact_Value,
 	ast_value:         ^Expr,
 }
@@ -540,13 +559,19 @@ Entity_Type_Name :: struct {
 
 Entity_Procedure :: struct {
 	type:                       ^Type,
-	body:                       ^Block_Stmt,
+	// NO `body` HERE. C++'s Entity::Procedure has no body field either -- the body lives on
+	// ProcInfo (checker.hpp:264), which the port mirrors as Proc_Info.body. A `body: ^Block_Stmt`
+	// used to sit here: never written, never read, always nil. A backend filtering procedures on
+	// it collected zero and emitted a valid-but-empty object that linked to nothing. Walk
+	// info.all_procedures instead -- it carries the body AND generated_from_polymorphic, so
+	// instantiations arrive without a second pass.
 	tags:                       u64,
 	foreign_library:            ^Entity,
 	foreign_library_ident:      ^Expr,
 	link_name:                  string,
 	link_prefix:                string,
 	link_suffix:                string,
+	link_section:               string,       // C++ Reference: entity.cpp:253
 	objc_selector_name:         string,       // C++ Reference: entity.cpp:254
 	objc_class:                 ^Entity,      // C++ Reference: entity.cpp:255
 	deferred_procedure:         Deferred_Procedure,
@@ -563,6 +588,8 @@ Entity_Procedure :: struct {
 	is_anonymous:               bool,
 	no_sanitize_address:        bool,
 	no_sanitize_memory:         bool,
+	no_sanitize_thread:         bool,         // C++ Reference: entity.cpp:274
+	fast_math_flags:            u64,          // C++ Reference: entity.cpp:262
 	is_objc_impl_or_import:     bool,         // C++ Reference: entity.cpp:271
 	is_objc_class_method:       bool,         // C++ Reference: entity.cpp:272
 }
@@ -674,7 +701,7 @@ Builtin_Proc_Id :: enum {
 	Objc_Super,
 
 	// SIMD operations
-	// C++ Reference: /mnt/c/odin/src/checker_builtin_procs.hpp:140-220
+	// C++ Reference: checker_builtin_procs.hpp:140-220
 	Simd_Add,
 	Simd_Sub,
 	Simd_Mul,
@@ -930,9 +957,18 @@ Builtin_Proc_Pkg :: enum {
 	Intrinsics,
 }
 
+// LEDGER #348. `id` ONLY, matching C++'s `struct { i32 id; } Builtin;` (entity.cpp:281-283).
+// A `pkg` field was INVENTED here. It was WRITTEN (alloc_entity_builtin passed proc_info.pkg) but
+// read by NOTHING that made a decision -- every live reader takes `.id` -- and one construction
+// path omitted it entirely (check_decl.odin's operand arm built `Entity_Builtin{id = ...}`, leaving
+// pkg at the zero value `.Builtin`). So it was write-only AND unreliable.
+//
+// It was not harmless: in #480 it was the obvious-looking source for the doc writer's
+// Builtin_Pkg_* bits, and reading it labelled intrinsics as `.Builtin`. C++ recovers the package
+// from the TABLE (`builtin_procs[e->Builtin.id].pkg`); the port now does the same via
+// `builtin_proc_infos[id].pkg`. Deleted so the trap cannot be re-entered.
 Entity_Builtin :: struct {
-	id:  Builtin_Proc_Id,
-	pkg: Builtin_Proc_Pkg,
+	id: Builtin_Proc_Id,
 }
 
 Entity_Label :: struct {

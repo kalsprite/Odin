@@ -73,6 +73,67 @@ CORPUS=(
   # assertions went away. The predicate lives in TWO places -- the parser's
   # integer_value_is_valid and the checker's big_int_from_string -- so this probe pins both.
   intlit
+  # #386. Upstream PR #7208 deleted the "polymorphic procedure as default value"
+  # short-circuit from check_is_assignable_to_with_score. It returned true with score 1 for
+  # ANY polymorphic procedure assigned to ANY concrete proc type, on the promise that it
+  # "will be properly instantiated when actually used" -- so a polymorphic procedure that
+  # could never instantiate to the target was accepted without complaint. a.odin holds one
+  # rejected shape per declaration (arity 2v1, arity 1v2, result 0v1); b.odin holds the
+  # accepted contrast, a polymorphic proc that DOES fit, used both as the default and passed
+  # explicitly. Nothing in the plain corpus or either parity sweep reached this site.
+  polydef
+  # #388/#389, the two parse_package/parse_stmt error-path defects found by triaging the 22
+  # oracle-nonzero packages that #331 had deferred.
+  #   rsvpkg  `package builtin` then a bare `typeid`. The reserved-name error must NOT suppress
+  #           the file body: C++ raises it through the file-UNAWARE syntax_error(Token), which
+  #           cannot bump f->error_count, and the decl loop is gated on that count.
+  #   unktag  `#bogus` at file scope -- the statement-level unknown-tag catch-all. The port used
+  #           to build a Tag_Stmt silently and let the file-scope check reject it with a
+  #           different message.
+  rsvpkg unktag
+  # #390 the `#define` and `#include` arms of parse_stmt's tag dispatch. One probe per distinct
+  # path through the arm, not per syntactic variation:
+  #   defprobe  `#define FOO 1`      object-like with a body -> the expr_to_string Suggestion
+  #   defexpr   `#define FOO 1 + 2*3`  same path, but pins the printer past a single literal
+  #   defcall   `#define FOO(x) x*2`   adjacent paren -> call_like -> Note, NOT a Suggestion
+  #   defcall3  `#define FOO()`        empty arg list; also the nil-operand parse_call_expr crash
+  #   defbare   `#define FOO`          ident, no body -> Note
+  #   defspc    `#define FOO (x)`      paren NOT adjacent, so NOT call_like -> Suggestion
+  #   defnum    `#define 123`          next token is not an ident; message anchors on it anyway
+  #   defnone   `#define`              nothing on the line -> the '#'-anchored fallback branch
+  #   definc    `#include "stdio.h"`   the sibling arm: text, anchor and fix_advance all differed
+  defprobe defexpr defcall defcall3 defbare defspc defnum defnone definc
+  # #390 also unblocked the `Foo[]` Suggestion (parser.cpp:3369-3373), declined twice before
+  # for want of a continuation channel (#307 added it) and an expression printer (#390 did).
+  #   opidx   `x: Foo[]` in a type position -- allow_type set, so the Suggestion IS emitted.
+  #           The POSITIVE control: without it this probe still passes at 1 line.
+  #   opidx2  `v[]` on a value -- allow_type clear, so the Suggestion must NOT appear
+  #   opidx3  `Bar :: Foo[]` -- also 1 line; pins that the gate is allow_type and not merely
+  #           "the operand names a type"
+  opidx opidx2 opidx3
+  # #391 proc-group candidacy with an INVALID argument. C++ (check_expr.cpp:6954-6958) skips an
+  # invalid operand instead of scoring it, so every candidate survives and the group reports
+  # "Ambiguous procedure group call". The port had that guard on its named-argument path only,
+  # so a positional call rejected every candidate and reported "No procedures or ambiguous
+  # call" plus a package-qualified overload list.
+  #   pgbad   a failed `#load` passed to a two-member group -- the whole divergence in 3 lines
+  pgbad
+  # #392 `context` as a default parameter value (check_type.cpp:1807-1809).
+  #   ctxdef  `proc(ctx := context)` -- LEGAL, and vendor/libc-shim's set_context is this
+  #           exact shape. The port rejected it ("Default parameter must be a constant, got
+  #           context") and then cascaded a bogus missing-parameter error at every call.
+  #   pandep  a `#panic` in a DEPENDENCY package plus two type errors in the dependent. Both
+  #           compilers report all three. Kept as the standing refutation of "a compile-time
+  #           panic upstream suppresses downstream diagnostics" -- hypothesis 3 of #335 -- so
+  #           that it does not get re-derived.
+  ctxdef pandep
+  # #401 fix_advance_to_next_stmt's progress test was INVERTED, so recovery skipped the very
+  # statement-start token it should have stopped on.
+  #   soarec  `soa_zip :: proc(slices: ...) -> #soa[]Struct ---` -- the base/builtin.odin:349
+  #           shape. Three agreed diagnostics, then the oracle recovers onto `#soa` and reports
+  #           the unknown tag; the port used to skip it. This is also the last residual of
+  #           #337/#388 -- base/builtin is byte-identical at 15/15 with it fixed.
+  soarec
   # #308 tag ORDER. C++ walks a file's tags in source order and stops at the first EXCLUDING one.
   #   bt_order   `#+build windows` then `#+vet bogusname` -- excluded first, so silent
   #   bt_order2  `#+vet bogusname` then `#+build windows` -- vet reported, THEN excluded
@@ -268,7 +329,12 @@ EXCLUDED=(
   "fb|Foundation bisect scratch (#277/#278). probe.sh says MATCH; the FULL diff is 16 lines. Still excluded."
   "fb2|Foundation bisect scratch, deliberately truncated: SEL/BOOL/UInteger are USED but never DECLARED. 19 diagnostics each side at identical positions, differing on which of Undeclared-name vs is-not-a-type 4 of them get. The plain undeclared-name path MATCHES in isolation, in a foreign block, and in a proc type -- so this is recovery CLASSIFICATION after a cascade in a fragment with no declaration source, not an isolable rule."
   "fbisect|as fb; FULL diff is 15 lines."
-  "objchang|#277 scratch. Message text and position divergences FIXED in #378. The residual is a HARNESS MISMATCH, not a port defect (#379): cmpfull.py runs the oracle as `odin build`, triage_st sets command_kind={.Check}, and C++ suppresses \"only works on darwin\" under Command_check/Command_doc (check_builtin.cpp:284). Oracle as `odin check` emits 0 of them, same as the port. Excluded until the comparators agree on which command they emulate."
+  # SINGLE-quoted deliberately. This note names two commands, and in a DOUBLE-quoted array
+  # element bash command-substitutes the backticks AT CONSTRUCTION time -- the exclusion
+  # block then printed ~40 lines of `odin` usage text, twice, burying the list of what was
+  # NOT measured. Cosmetic in effect, but it is command execution from a data string, and
+  # this block exists precisely to stay legible. Keep single quotes for any note with ` or $.
+  'objchang|#277 scratch. Message text and position divergences FIXED in #378. The residual is a HARNESS MISMATCH, not a port defect (#379): cmpfull.py runs the oracle as `odin build`, triage_st sets command_kind={.Check}, and C++ suppresses "only works on darwin" under Command_check/Command_doc (check_builtin.cpp:284). Oracle as `odin check` emits 0 of them, same as the port. Excluded until the comparators agree on which command they emulate.'
   "p_ppp|#196 scratch: the oracle emits a <nopos> Note continuation block the port does not. #155 records that the older comparator could not even SEE continuation lines; cmpfull can, and they are genuinely absent."
   "shadowparam|vet-mode probe -- a member of the VET corpus (corpus_vet.sh), which now exists and runs it; TEXT-MATCH as of #384. Excluded HERE only because this harness is the plain one."
   "shadowvar|vet-mode probe -- a member of the VET corpus (corpus_vet.sh), which now exists and runs it; TEXT-MATCH as of #384. Excluded HERE only because this harness is the plain one."

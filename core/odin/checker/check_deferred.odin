@@ -9,11 +9,11 @@ These operations happen after main procedure checking to handle:
 2. Objective-C context providers (@(objc_context_provider))
 3. Global untyped expressions that need default type resolution
 
-C++ Reference: /mnt/c/odin/src/checker.cpp:6481-6704 (check_deferred_procedures)
-               /mnt/c/odin/src/checker.cpp:6971-7007 (check_objc_context_provider_procedures)
-               /mnt/c/odin/src/checker.cpp:7458-7465 (global_untyped_queue processing)
-               /mnt/c/odin/src/types.cpp:899-920 (base_named_type)
-               /mnt/c/odin/src/check_expr.cpp:1042-1047 (internal_check_is_assignable_to)
+C++ Reference: checker.cpp:6481-6704 (check_deferred_procedures)
+               checker.cpp:6971-7007 (check_objc_context_provider_procedures)
+               checker.cpp:7458-7465 (global_untyped_queue processing)
+               types.cpp:899-920 (base_named_type)
+               check_expr.cpp:1042-1047 (internal_check_is_assignable_to)
 */
 
 import "core:container/queue"
@@ -21,7 +21,7 @@ import "core:container/queue"
 
 // ======================================================================================
 // TUPLE TO POINTERS CONVERSION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:6495-6513
+// C++ Reference: checker.cpp:6495-6513
 // ======================================================================================
 
 // tuple_to_pointers converts a tuple type's elements to pointer types
@@ -69,7 +69,7 @@ tuple_to_pointers :: proc(ot: ^Type, allocator := context.allocator) -> ^Type {
 
 // ======================================================================================
 // DEFERRED PROCEDURE VALIDATION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:6515-6704
+// C++ Reference: checker.cpp:6515-6704
 // ======================================================================================
 
 // check_deferred_procedures validates deferred procedure attributes
@@ -311,7 +311,7 @@ check_deferred_procedures :: proc(c: ^Checker) {
 
 // ======================================================================================
 // OBJECTIVE-C CONTEXT PROVIDERS
-// C++ Reference: /mnt/c/odin/src/checker.cpp:6971-7007
+// C++ Reference: checker.cpp:6971-7007
 // ======================================================================================
 
 // check_objc_context_provider_procedures validates Objective-C context provider procedures
@@ -457,7 +457,7 @@ check_objc_context_provider_procedures :: proc(c: ^Checker) {
 
 // ======================================================================================
 // GLOBAL UNTYPED EXPRESSION RESOLUTION
-// C++ Reference: /mnt/c/odin/src/checker.cpp:7458-7465
+// C++ Reference: checker.cpp:7458-7465
 // ======================================================================================
 
 // resolve_global_untyped_expressions processes untyped expressions and assigns default types
@@ -497,7 +497,7 @@ resolve_global_untyped_expressions :: proc(c: ^Checker) {
 
 // base_named_type unwraps a Type_Named to find the last named type in the chain
 // Returns t_invalid if the type is not a named type
-// C++ Reference: /mnt/c/odin/src/types.cpp:899-920
+// C++ Reference: types.cpp:899-920
 base_named_type :: proc(t: ^Type) -> ^Type {
 	if t == nil {
 		return t_invalid

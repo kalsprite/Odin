@@ -7,7 +7,7 @@ This module implements procedure group (overload) resolution, allowing multiple
 procedures with the same name but different signatures to coexist and be resolved
 at call sites based on argument types.
 
-Reference: /mnt/c/odin/src/check_expr.cpp:6933-7504
+Reference: check_expr.cpp:6933-7504
 */
 
 import "core:odin/ast"
@@ -26,6 +26,91 @@ import "core:strings"
 // check_is_assignable_to_with_score and rejected them - which is why
 // `validate(date.year, date.month, date.day)` in core/time/datetime failed on argument 2 while
 // the same call to a non-group procedure was fine.
+// eval_param_and_score is C++'s lambda of the same name, ported once.
+// C++ Reference: check_expr.cpp:6860-6921.
+//
+// The port had TWO REDUCED copies of it inline in this file (the named-argument scoring loop and
+// the positional one) while check_expr.odin carried a third, fuller one. #527 fixed the two items
+// that made the reduced copies emit invented text and bail where C++ continues. This ports the
+// rest and gives both sites one implementation, per CLAUDE.md's standing rule that simplified
+// versions are not acceptable -- two copies is exactly how this drifted.
+//
+// Returns the score. `err` is an in-out flag mirroring C++'s CallArgumentError parameter: set on
+// failure, never cleared, and the caller consults it AFTER the loop so a bad argument no longer
+// hides a later missing-parameter report.
+eval_param_and_score :: proc(
+	ctx: ^Checker_Context,
+	operand: ^Operand,
+	param_type: ^Type,
+	err: ^bool,
+	param_is_variadic: bool,
+	param: ^Entity,
+	show_error: bool,
+) -> i64 {
+	// C++ Reference: check_expr.cpp:6861. `#no_broadcast` on a parameter disables array
+	// programming for THAT parameter, so the assignability test has to be told.
+	allow_array_programming := !(param != nil && .No_Broadcast in param.flags)
+
+	score: i64 = 0
+	if !check_is_assignable_to_with_score(ctx, operand, param_type, &score, param_is_variadic, allow_array_programming) {
+		ok := param_accepts_via_any_int(ctx, operand, param, param_type)
+
+		// C++ Reference: check_expr.cpp:6870-6874. When broadcasting is disallowed but the
+		// argument WOULD have been assignable with it allowed, C++ names the reason rather
+		// than emitting a bare type mismatch.
+		if !allow_array_programming && check_is_assignable_to(ctx, operand, param_type, true) {
+			if show_error {
+				error_node(operand.expr, "'#no_broadcast' disallows automatic broadcasting a value across all elements of an array-like type in a procedure argument")
+			}
+		}
+
+		if ok {
+			score = assign_score_function(MAXIMUM_TYPE_DISTANCE)
+		} else {
+			// C++ Reference: check_expr.cpp:6879-6881.
+			if show_error {
+				check_assignment(ctx, operand, param_type, "procedure argument")
+			}
+			err^ = true
+		}
+	} else if show_error {
+		// C++ Reference: check_expr.cpp:6882-6884. C++ calls check_assignment on the SUCCESS
+		// path too. check_is_assignable_to_with_score answers "could this convert";
+		// check_assignment performs the conversion and reports what only the conversion can
+		// discover. Omitting it was an UNDER-REJECTION -- #194's class, fixed there for a
+		// different site and still missing here:
+		//     E :: enum{A,B};  fe :: proc(x: E);  ge :: proc{fe};  ge(0)
+		//     oracle -> Cannot convert untyped value '0' to 'E' from 'untyped integer'
+		//     port   -> accepted
+		// data/err is deliberately NOT set here: C++ leaves err untouched in this branch.
+		check_assignment(ctx, operand, param_type, "procedure argument")
+	}
+
+	// C++ Reference: check_expr.cpp:6887-6894.
+	if param != nil && .Const_Input in param.flags {
+		if operand.mode != .Constant {
+			if show_error {
+				error_node(operand.expr, "Expected a constant value for the argument '%s'", param.token.text)
+			}
+			err^ = true
+		}
+	}
+
+	// C++ Reference: check_expr.cpp:6896-6909.
+	if param != nil && param.kind == .Constant && is_type_proc(entity_type(param)) {
+		_, is_proc_value := operand.value.(Exact_Value_Procedure)
+		ok := operand.mode == .Constant || is_proc_value
+		if !ok {
+			if show_error {
+				error_node(operand.expr, "Expected a constant procedure value for the argument '%s'", param.token.text)
+			}
+			err^ = true
+		}
+	}
+
+	return score
+}
+
 param_accepts_via_any_int :: proc(ctx: ^Checker_Context, operand: ^Operand, param: ^Entity, param_type: ^Type) -> bool {
 	if param == nil || .Any_Int not_in param.flags {
 		return false
@@ -43,11 +128,11 @@ param_accepts_via_any_int :: proc(ctx: ^Checker_Context, operand: ^Operand, para
 }
 
 // MAXIMUM_TYPE_DISTANCE is defined in check_equivalence.odin (value: 10)
-// Reference: /mnt/c/odin/src/check_expr.cpp:665
+// Reference: check_expr.cpp:665
 
 // strip_or_return_expr peels `or_return` / `or_break` / `or_continue` wrappers
 // and parentheses off an expression.
-// C++ Reference: /mnt/c/odin/src/parser.cpp strip_or_return_expr
+// C++ Reference: parser.cpp strip_or_return_expr
 strip_or_return_expr :: proc(node: ^ast.Expr) -> ^ast.Expr {
 	n := node
 	for {
@@ -77,7 +162,7 @@ strip_or_return_expr :: proc(node: ^ast.Expr) -> ^ast.Expr {
 // resolved yet, so asking for its result arity would answer "one value" for
 // every not-yet-checked call and prune away every viable candidate.
 //
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp check_call_arguments_proc_group,
+// C++ Reference: check_expr.cpp check_call_arguments_proc_group,
 // the `max_arg_count = ISIZE_MAX` loops.
 might_return_multiple_values :: proc(ctx: ^Checker_Context, expr: ^ast.Expr) -> bool {
 	if expr == nil {
@@ -101,7 +186,7 @@ might_return_multiple_values :: proc(ctx: ^Checker_Context, expr: ^ast.Expr) -> 
 
 // Proc_Type_Overload_Kind classifies how two procedure types differ
 // Used by are_proc_types_overload_safe to determine overload safety
-// C++ Reference: /mnt/c/odin/src/types.cpp:3355-3369
+// C++ Reference: types.cpp:3355-3369
 Proc_Type_Overload_Kind :: enum {
 	Identical, // The types are identical (not safe - collision)
 	Calling_Convention, // Different calling conventions
@@ -116,17 +201,17 @@ Proc_Type_Overload_Kind :: enum {
 }
 
 // Valid_Index_And_Score tracks a candidate procedure with its match quality score
-// Reference: /mnt/c/odin/src/check_expr.cpp:57-60
+// Reference: check_expr.cpp:57-60
 Valid_Index_And_Score :: struct {
 	index: int, // Index into the candidate list
 	score: i64, // Match quality score (higher = better match)
 }
 
 // Call_Argument_Data is defined in check_expr.odin
-// Reference: /mnt/c/odin/src/check_expr.cpp:41-50
+// Reference: check_expr.cpp:41-50
 
 // Call_Argument_Error_Mode controls how errors are reported during argument checking
-// Reference: /mnt/c/odin/src/check_expr.cpp:31-35
+// Reference: check_expr.cpp:31-35
 Call_Argument_Error_Mode :: enum {
 	No_Errors, // Don't report errors (for candidate testing)
 	Show_Errors, // Report all errors
@@ -140,7 +225,7 @@ Call_Argument_Error_Mode :: enum {
 // - UNSAFE: Identical signatures, same params but different results, variadic differences
 // - CONDITIONAL: Polymorphic (allowed with 'where' clauses)
 //
-// C++ Reference: /mnt/c/odin/src/types.cpp:3371-3436
+// C++ Reference: types.cpp:3371-3436
 are_proc_types_overload_safe :: proc(x, y: ^Type) -> Proc_Type_Overload_Kind {
 	// Null checks (C++ lines 3372-3376)
 	if x == nil && y == nil do return .Not_Procedure
@@ -227,7 +312,7 @@ are_proc_types_overload_safe :: proc(x, y: ^Type) -> Proc_Type_Overload_Kind {
 }
 
 // proc_group_entities retrieves the list of procedures in a procedure group
-// Reference: /mnt/c/odin/src/checker.cpp:3230-3240
+// Reference: checker.cpp:3230-3240
 // proc_group_entities is defined in entity_helpers.odin
 
 // proc_group_entities_cloned is defined in entity_helpers.odin
@@ -265,7 +350,7 @@ score_type_name_argument :: proc(ctx: ^Checker_Context, param: ^Entity, operand:
 
 // assign_score_function converts a type distance into a match quality score
 // Higher score = better match. Uses a quadratic formula to ensure distinct scores.
-// Reference: /mnt/c/odin/src/check_expr.cpp:992-1002
+// Reference: check_expr.cpp:992-1002
 assign_score_function :: proc(distance: i64, is_variadic := false) -> i64 {
 	// Formula: 3*x^2 + 1 > x^2 + x + 1 (for positive x)
 	// This ensures that lower distances always produce higher scores
@@ -282,7 +367,7 @@ assign_score_function :: proc(distance: i64, is_variadic := false) -> i64 {
 
 // valid_index_and_score_cmp compares two candidates by score (for sorting)
 // Returns: -1 if a better than b, +1 if b better than a, 0 if equal
-// Reference: /mnt/c/odin/src/check_expr.cpp:62-66
+// Reference: check_expr.cpp:62-66
 valid_index_and_score_cmp :: proc(a, b: Valid_Index_And_Score) -> slice.Ordering {
 	if a.score > b.score {
 		return .Less // a is better (higher score)
@@ -293,7 +378,7 @@ valid_index_and_score_cmp :: proc(a, b: Valid_Index_And_Score) -> slice.Ordering
 }
 
 // get_procedure_param_count_excluding_defaults counts required parameters
-// Reference: /mnt/c/odin/src/check_expr.cpp:6174-6225
+// Reference: check_expr.cpp:6174-6225
 get_procedure_param_count_excluding_defaults :: proc(proc_type: ^Type, total_count: ^int = nil) -> int {
 	if proc_type.kind != .Proc {
 		if total_count != nil {
@@ -369,29 +454,25 @@ get_procedure_param_count_excluding_defaults :: proc(proc_type: ^Type, total_cou
 }
 
 // check_is_assignable_to_with_score checks assignability and returns a match score
-// Reference: /mnt/c/odin/src/check_expr.cpp:1005-1034
+// Reference: check_expr.cpp:1005-1034
 check_is_assignable_to_with_score :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: ^Type, score: ^i64 = nil, is_variadic := false, allow_array_programming := true) -> bool {
 	if ctx == nil {
 		assert(operand.mode == .Value)
 	}
 
-	// Special case: polymorphic procedure as default value
-	if operand.mode == .Value && is_type_proc(target_type) && is_type_proc(operand.type) {
-		entity := entity_from_expr_ctx(ctx, operand.expr)
-		if entity != nil && entity.kind == .Procedure {
-			proc_entity := &entity.variant.(Entity_Procedure)
-			if proc_entity.type != nil && is_type_polymorphic(proc_entity.type) {
-				base_target := base_type(target_type)
-				if !is_type_polymorphic(base_target) {
-					// Allow polymorphic proc as default for concrete proc type
-					if score != nil {
-						score^ = assign_score_function(1)
-					}
-					return true
-				}
-			}
-		}
-	}
+	// REMOVED: the "polymorphic procedure as default value" special case.
+	//
+	// C++ Reference: check_expr.cpp:1026-1036 as it USED to read. It short-circuited to
+	// `true` with score 1 for ANY polymorphic procedure assigned to ANY concrete proc type,
+	// on the reasoning that "it will be properly instantiated when actually used" -- so the
+	// initial check never verified that the polymorphic procedure could instantiate to the
+	// target at all. Measured under-rejections it caused, oracle vs port before this edit:
+	//     poly(a, b: $T) -> T   as default for proc(x: int) -> int    oracle 1 error, port 0
+	//     poly(x: $T) -> T      as default for proc(x, y: int) -> int oracle 1 error, port 0
+	//     poly(x: $T)           as default for proc(x: int) -> int    oracle 1 error, port 0
+	// Upstream PR #7208 deleted the block and instead records the procedure entity on the
+	// parameter value (ParameterValue.proc_entity, entity.cpp:114), so resolution can find it
+	// later without weakening the assignability test now. LEDGER #386.
 
 	// Calculate type distance
 	distance := check_distance_between_types(ctx, operand, target_type, allow_array_programming)
@@ -410,7 +491,7 @@ check_is_assignable_to_with_score :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 // lookup_procedure_parameter looks up a parameter index by name
 // Returns -1 if not found or name is blank identifier
-// Reference: /mnt/c/odin/src/check_expr.cpp:6228-6241
+// Reference: check_expr.cpp:6228-6241
 lookup_procedure_parameter :: proc(pt: ^Type_Proc, name: string) -> int {
 	if pt.params == nil || pt.params.kind != .Tuple {
 		return -1
@@ -436,7 +517,7 @@ lookup_procedure_parameter :: proc(pt: ^Type_Proc, name: string) -> int {
 }
 
 // has_named_arguments checks if a call expression has any named arguments
-// Reference: /mnt/c/odin/src/check_expr.cpp:6325-6364 (implied)
+// Reference: check_expr.cpp:6325-6364 (implied)
 has_named_arguments :: proc(call: ^ast.Call_Expr) -> bool {
 	for arg in call.args {
 		if _, ok := arg.derived.(^ast.Field_Value); ok {
@@ -448,7 +529,7 @@ has_named_arguments :: proc(call: ^ast.Call_Expr) -> bool {
 
 // check_named_arguments validates and type-checks named arguments for a procedure call
 // Returns true if all named arguments are valid, false otherwise
-// Reference: /mnt/c/odin/src/check_expr.cpp:6799-6857
+// Reference: check_expr.cpp:6799-6857
 check_named_arguments :: proc(ctx: ^Checker_Context, proc_type: ^Type, named_args: []^ast.Node, named_operands: ^[dynamic]Operand, show_error: bool) -> bool {
 	success := true
 
@@ -523,7 +604,7 @@ check_named_arguments :: proc(ctx: ^Checker_Context, proc_type: ^Type, named_arg
 
 // matched_target_features counts how many target features are matched/enabled
 // This is used for scoring procedure candidates in overload resolution
-// Reference: /mnt/c/odin/src/types.cpp:3338-3353
+// Reference: types.cpp:3338-3353
 matched_target_features :: proc(pt: ^Type_Proc) -> int {
 	if len(pt.require_target_feature) == 0 {
 		return 0
@@ -531,21 +612,21 @@ matched_target_features :: proc(pt: ^Type_Proc) -> int {
 
 	matches := 0
 
-	// Split the comma-separated feature list
-	feature_str := pt.require_target_feature
-	features := strings.split(feature_str, ",", context.temp_allocator)
-
-	for feature in features {
-		trimmed := strings.trim_space(feature)
-		if len(trimmed) > 0 {
-			// Note: Full implementation requires checking if feature is enabled in
-			// build_context.target_features_set (populated by frontend, not available here).
-			// For now, count all valid features as "matched" for scoring purposes.
-			// C++: types.cpp:3365 uses check_target_feature_is_valid_for_target_arch
-			valid, _ := check_target_feature_is_valid_for_target_arch(trimmed)
-			if valid {
-				matches += 1
-			}
+	// C++ (types.cpp:3599) scores on VALIDITY FOR THE TARGET ARCH, not on whether the feature is
+	// enabled -- the note that used to stand here claimed this needed target_features_set and was
+	// simply wrong about which predicate C++ uses. Two smaller divergences went with it:
+	//   - C++ does NOT trim whitespace, so " sse2" is not a valid feature to it. Trimming here made
+	//     the port score candidates C++ scores zero.
+	//   - C++ BREAKS on the first empty element; the port skipped it and kept going, so "a,,b"
+	//     counted b where C++ stops at the empty.
+	rest := pt.require_target_feature
+	for feature in strings.split_iterator(&rest, ",") {
+		if feature == "" {
+			break
+		}
+		valid, _ := check_target_feature_is_valid_for_target_arch(feature)
+		if valid {
+			matches += 1
 		}
 	}
 
@@ -553,7 +634,7 @@ matched_target_features :: proc(pt: ^Type_Proc) -> int {
 }
 
 // Split_Args holds the result of splitting call arguments into positional and named
-// Reference: /mnt/c/odin/src/check_expr.cpp:7527-7545
+// Reference: check_expr.cpp:7527-7545
 Split_Args :: struct {
 	positional: []^ast.Node,
 	named:      []^ast.Node,
@@ -561,7 +642,7 @@ Split_Args :: struct {
 
 // split_call_arguments splits arguments into positional and named slices
 // Positional arguments come first, named arguments (Field_Value nodes) come after
-// Reference: /mnt/c/odin/src/check_expr.cpp:7527-7545
+// Reference: check_expr.cpp:7527-7545
 split_call_arguments :: proc(call: ^ast.Call_Expr, allocator := context.allocator) -> Split_Args {
 	// Count positional args (stop at first Field_Value)
 	positional_count := 0
@@ -637,7 +718,7 @@ check_call_parameter_mixture :: proc(args: []^ast.Expr, context_name: string, al
 }
 
 // filter_proc_group_by_param_count removes candidates with incompatible parameter counts
-// Reference: /mnt/c/odin/src/check_expr.cpp:6998-7019
+// Reference: check_expr.cpp:6998-7019
 filter_proc_group_by_param_count :: proc(candidates: ^[dynamic]^Entity, min_arg_count: int, max_arg_count: int) {
 	// C++ Reference: check_expr.cpp:7378-7404. C++ walks FORWARD with a manual index and removes
 	// with `array_unordered_remove`, which swaps the LAST element into the vacated slot and does
@@ -681,7 +762,7 @@ filter_proc_group_by_param_count :: proc(candidates: ^[dynamic]^Entity, min_arg_
 
 // check_call_arguments_internal performs the detailed argument checking
 // Handles positional arguments, named arguments, variadic parameters, and scoring
-// Reference: /mnt/c/odin/src/check_expr.cpp:6095-6638
+// Reference: check_expr.cpp:6095-6638
 check_call_arguments_internal :: proc(
 	ctx: ^Checker_Context,
 	call_node: ^ast.Node,
@@ -702,8 +783,54 @@ check_call_arguments_internal :: proc(
 
 	pt := &proc_type.variant.(Type_Proc)
 
+	// THE ARITY CHECK. C++ Reference: check_expr.cpp:6684-6700, and its POSITION is load-bearing:
+	// it runs before the polymorphic instantiation below, exactly as C++ runs it before its own
+	// instantiation at check_expr.cpp:6940.
+	//
+	// C++ has ONE of these because it scores proc-group candidates through this very function --
+	// the same check_call_arguments_internal a direct call uses -- so the single check both sets
+	// `err = CallArgumentError_TooManyArguments` (which check_expr.cpp:6940's
+	// `err == CallArgumentError_None` then consults, suppressing instantiation) and emits the
+	// diagnostic. The port split that function in two, and this copy had NEITHER half. Two
+	// defects followed from the one omission (LEDGER #510):
+	//
+	//   MODEL POLLUTION. A candidate whose arity the call overshoots was instantiated anyway.
+	//   `syscall` in core/sys/linux is a proc GROUP dispatching by arity to syscall1..6, so
+	//       ptrace_attach :: proc(rq: PTrace_Attach_Type, pid: Pid) {
+	//           syscall(SYS_ptrace, rq, pid, 0, rawptr(nil))    // 5 args
+	//       }
+	//   inferred syscall1's `$T` from the first TWO arguments of that five-argument call. C++
+	//   instantiates syscall1 only for ptrace_traceme, the one wrapper that passes one argument.
+	//   Invisible to every text-anchored gate, because the losing candidate is discarded either
+	//   way -- only -dump-model shows it.
+	//
+	//   INVENTED DIAGNOSTIC. With no check here, a single-candidate group fell through to
+	//   "Too many arguments to procedure call" further down -- a string that appears NOWHERE in
+	//   src/. The oracle names the procedure and gives counts, as below.
+	//
+	// The variadic arm is C++'s: a variadic procedure has no upper bound to violate, so it is
+	// simply excluded rather than clamped here (C++ clamps positional_operand_count for its own
+	// later use, which the port does at its own use sites).
+	if !pt.variadic && len(positional_operands) > pt.param_count {
+		if show_error {
+			if ce, ce_ok := call_node.derived.(^ast.Call_Expr); ce_ok {
+				proc_str := expr_to_string(ce.expr)
+				defer delete(proc_str)
+				required := get_procedure_param_count_excluding_defaults(proc_type)
+				if required != pt.param_count {
+					error_node(call_node, "Too many arguments for '%s', expected %d..=%d arguments, got %d",
+						proc_str, required, pt.param_count, len(positional_operands))
+				} else {
+					error_node(call_node, "Too many arguments for '%s', expected %d arguments, got %d",
+						proc_str, pt.param_count, len(positional_operands))
+				}
+			}
+		}
+		return false
+	}
+
 	// Handle polymorphic procedures by attempting instantiation
-	// C++ Reference: check_expr.cpp:6116-6140
+	// C++ Reference: check_expr.cpp:6684-6960 (the polymorphic arm of check_call_arguments_internal)
 	specialized_proc_type := proc_type
 	if pt.is_polymorphic && !pt.is_poly_specialized {
 		// C++ Reference: check_expr.cpp:6666-6700 and 6759-6788.
@@ -758,7 +885,103 @@ check_call_arguments_internal :: proc(
 				}
 				ops[pt.variadic_index] = o
 			}
+
+			// Map NAMED arguments into their parameter slots BEFORE instantiation.
+			// C++ Reference: check_expr.cpp:6322-6361 orders named arguments into
+			// ordered_operands ahead of the polymorphic arm, so by the time it instantiates,
+			// a parameter supplied by name is indistinguishable from one supplied positionally.
+			// The port did this ordering only in a LATER block, so the polymorphic arm saw an
+			// unwritten operand for every named-only parameter and reported
+			//     Cannot determine polymorphic type from parameter: 'invalid type' to '$T'
+			// at the DECLARATION. Same wrong-position signature #524 fixed for the zero-argument
+			// case. LEDGER #533.
+			named_filled := make([]bool, pcount)
+			defer delete(named_filled)
+			for named_arg, ni in args_split.named {
+				if ni >= len(named_operands) {
+					break
+				}
+				fv, fv_ok := named_arg.derived.(^ast.Field_Value)
+				if !fv_ok {
+					continue
+				}
+				ident, id_ok := fv.field.derived.(^ast.Ident)
+				if !id_ok {
+					continue
+				}
+				param_idx := lookup_procedure_parameter(pt, ident.name)
+				// A bad or duplicate name is NOT diagnosed here: the later ordering block owns
+				// those two messages, and emitting them from this pass as well would double them.
+				if param_idx < 0 || param_idx >= pcount || named_filled[param_idx] {
+					continue
+				}
+				ops[param_idx] = named_operands[ni]
+				named_filled[param_idx] = true
+			}
+
 			operands = ops
+
+			// MISSING-REQUIRED gate. C++ Reference: check_expr.cpp:6835-6857 sets
+			// `err = CallArgumentError_ParameterMissing`, which check_expr.cpp:6940's
+			// `err == CallArgumentError_None` then consults to suppress instantiation.
+			//
+			// LEDGER #524, and this is the THIRD gate found on only one side of a function the
+			// port split in two. #255 added this check to the DIRECT-CALL path
+			// (check_expr.odin:10842); #510 found the too-many-arguments gate present there and
+			// absent here and added it; this is the same asymmetry again. C++ has neither problem
+			// because proc-group candidates are scored through the very same
+			// check_call_arguments_internal a direct call uses -- one function, one gate.
+			//
+			// Without it, `gp()` on a polymorphic group instantiated with an UNWRITTEN operand:
+			// mode .Invalid, type nil, expr nil. That reached determine_type_from_polymorphic,
+			// whose guard printed
+			//     Cannot determine polymorphic type from parameter: 'invalid type' to '$T'
+			// at the DECLARATION's position, because operand.expr was nil and there was no call
+			// site to point at. The oracle names the parameter and reports at the call.
+			//
+			// RESTRICTED TO len(named_operands) == 0, deliberately. C++ runs this check AFTER
+			// ordering named arguments into ordered_operands, so it knows which parameters a name
+			// supplies. This path does not: named arguments are mapped to parameter indices later
+			// (the `len(named_operands) > 0` block below), so at this point a parameter supplied
+			// only by name is indistinguishable from one not supplied at all, and gating on it
+			// would report a missing parameter that was in fact provided. The subset covered here
+			// is exactly the one where the answer is unambiguous, and on it the behaviour is
+			// C++'s. The named-argument case is left as it was -- not made worse, not yet fixed;
+			// see #524's residual note.
+			{
+				for i in 0 ..< pcount {
+					if i < positional_count {
+						continue // supplied positionally
+					}
+					if named_filled[i] {
+						continue // supplied by name -- now knowable, see above
+					}
+					if has_variadic_slot && i == pt.variadic_index {
+						continue // a variadic slot with no arguments is legitimately empty
+					}
+					pe := ptup.variables[i]
+					if pe == nil {
+						continue
+					}
+					// A parameter with a default value is not missing.
+					if var_e, var_ok := pe.variant.(Entity_Variable); var_ok {
+						if var_e.param_value.kind != .Invalid {
+							continue
+						}
+					}
+					// C++ has three arms here (type parameter / an already-valued constant, which
+					// it ignores / the general case). Only the general one is ported: the other
+					// two need a repro before they are written, and #266 is the standing lesson
+					// about implementing branches that no input reaches.
+					if show_error {
+						type_str := type_to_string(pe.type)
+						defer delete(type_str)
+						error_node(call_node, "Parameter '%s' of type '%s' is missing in procedure call",
+							pe.token.text, type_str)
+					}
+					return false
+				}
+			}
 		} else {
 			ops := make([]Operand, len(positional_operands))
 			copy(ops, positional_operands)
@@ -803,7 +1026,7 @@ check_call_arguments_internal :: proc(
 	total_score: i64 = 0
 
 	// Handle named arguments by creating ordered operand array
-	// Reference: /mnt/c/odin/src/check_expr.cpp:6291-6364
+	// Reference: check_expr.cpp:6291-6364
 	if len(named_operands) > 0 {
 		// Create ordered array matching parameter order
 		ordered_operands := make([dynamic]Operand, len(params.variables))
@@ -832,7 +1055,7 @@ check_call_arguments_internal :: proc(
 		}
 
 		// Fill named arguments using pre-checked named_operands
-		// Reference: /mnt/c/odin/src/check_expr.cpp:7569-7600
+		// Reference: check_expr.cpp:7569-7600
 		for named_arg, i in args_split.named {
 			if fv, ok := named_arg.derived.(^ast.Field_Value); ok {
 				if ident, ok2 := fv.field.derived.(^ast.Ident); ok2 {
@@ -862,6 +1085,11 @@ check_call_arguments_internal :: proc(
 			}
 		}
 
+		// C++ Reference: check_expr.cpp:6879. C++'s `err` is a value the scoring loop SETS and
+		// keeps going with, not a bail. Mirrored here so a mis-typed argument no longer hides a
+		// separate missing-parameter error reported after the loop.
+		had_wrong_types := false
+
 		// Now score using ordered operands
 		for &operand, i in ordered_operands {
 			if operand.mode == .Invalid {
@@ -885,22 +1113,18 @@ check_call_arguments_internal :: proc(
 				continue
 			}
 
-			arg_score: i64 = 0
+			// Routed through the single ported lambda (LEDGER #534).
 			is_variadic_param := i == pt.variadic_index
-
-			if !check_is_assignable_to_with_score(ctx, &operand, param_type, &arg_score, is_variadic_param) {
-				if !param_accepts_via_any_int(ctx, &operand, param, param_type) {
-					if show_error {
-						error_node(call_node, "Argument for parameter '%s' has incompatible type", param.token.text)
-					}
-					return false
-				}
+			arg_err := false
+			arg_score := eval_param_and_score(ctx, &operand, param_type, &arg_err, is_variadic_param, param, show_error)
+			if arg_err {
+				had_wrong_types = true
 			}
-
 			total_score += arg_score
 		}
 
-		if !report_missing_parameters(pt, params, visited[:], call_node, show_error) {
+		missing_ok := report_missing_parameters(pt, params, visited[:], call_node, show_error)
+		if !missing_ok || had_wrong_types {
 			return false
 		}
 
@@ -911,6 +1135,9 @@ check_call_arguments_internal :: proc(
 	}
 
 	// Fall through to existing positional-only logic
+	// See the named-argument site above: C++ SETS an error and continues scoring (#526).
+	had_wrong_types := false
+
 	// Match positional arguments
 	for &operand, i in positional_operands {
 		// Index of the parameter this argument binds to. Everything at or past the
@@ -930,6 +1157,32 @@ check_call_arguments_internal :: proc(
 			return false
 		}
 		if param_index >= len(params.variables) {
+			continue
+		}
+
+		// C++ Reference: check_expr.cpp:6954-6958 -- an INVALID operand is skipped, not
+		// scored:
+		//     Operand *o = &ordered_operands[i];
+		//     if (o->mode == Addressing_Invalid) {
+		//         continue;
+		//     }
+		//
+		// C++ has ONE scoring loop. The port split it in two -- an ordered_operands path
+		// taken only when `len(named_operands) > 0`, and this positional-only path -- and
+		// the guard was ported into the FIRST one only. So a call with no named arguments
+		// dropped an already-errored argument into check_is_assignable_to_with_score, which
+		// returns false for an invalid operand (matching C++), and the candidate was
+		// rejected.
+		//
+		// The consequence is not a missing diagnostic but the WRONG one, and it only shows
+		// up on already-broken code: with every candidate rejected, valids.count is 0, so
+		// the group reports "No procedures or ambiguous call ..." where C++ -- having kept
+		// all of them -- reports "Ambiguous procedure group call ...". Measured on probe
+		// pgbad (a failed `#load` passed to a two-member group).
+		//
+		// Skipping is what makes the cascade quiet: the argument's own error was already
+		// reported at the point it went invalid, so re-judging it here can only add noise.
+		if operand.mode == .Invalid {
 			continue
 		}
 
@@ -969,15 +1222,14 @@ check_call_arguments_internal :: proc(
 			}
 		}
 
-		if !check_is_assignable_to_with_score(ctx, &operand, effective_type, &arg_score, is_variadic_param) {
-			if !param_accepts_via_any_int(ctx, &operand, param, effective_type) {
-				if show_error {
-					error_node(call_node, "Argument %d has incompatible type", i + 1)
-				}
-				return false
-			}
+		// Routed through the single ported lambda (LEDGER #534). `effective_type` rather than
+		// param_type: the variadic element-type substitution above (#120) is this path's own and
+		// is preserved.
+		arg_err := false
+		arg_score = eval_param_and_score(ctx, &operand, effective_type, &arg_err, is_variadic_param, param, show_error)
+		if arg_err {
+			had_wrong_types = true
 		}
-
 		total_score += arg_score
 	}
 
@@ -990,6 +1242,10 @@ check_call_arguments_internal :: proc(
 		if !report_missing_parameters(pt, params, positional_visited, call_node, show_error) {
 			return false
 		}
+	}
+
+	if had_wrong_types {
+		return false
 	}
 
 	data.result_type = pt.results
@@ -1007,7 +1263,7 @@ check_call_arguments_internal :: proc(
 // the variadic parameter (which may be empty), or when it is a polymorphic type
 // or constant parameter resolved during instantiation rather than passed.
 //
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp check_call_arguments_internal,
+// C++ Reference: check_expr.cpp check_call_arguments_internal,
 // the `for (isize i = 0; i < pt->param_count; i++) if (!visited[i])` loop that
 // sets `CallArgumentError_ParameterMissing`.
 report_missing_parameters :: proc(pt: ^Type_Proc, params: ^Type_Tuple, visited: []bool, call_node: ^ast.Node, show_error: bool) -> bool {
@@ -1055,7 +1311,7 @@ report_missing_parameters :: proc(pt: ^Type_Proc, params: ^Type_Tuple, visited: 
 }
 
 // check_call_arguments_single checks a single procedure candidate
-// Reference: /mnt/c/odin/src/check_expr.cpp:6859-6930
+// Reference: check_expr.cpp:6859-6930
 check_call_arguments_single :: proc(
 	ctx: ^Checker_Context,
 	call_node: ^ast.Node,
@@ -1448,7 +1704,7 @@ print_procedure_group_overloads :: proc(
 
 // check_procedure_group_call resolves overloaded procedure calls
 // This is the main entry point for procedure group resolution
-// Reference: /mnt/c/odin/src/check_expr.cpp:6933-7504
+// Reference: check_expr.cpp:6933-7504
 check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, call_node: ^ast.Node) -> Call_Argument_Data {
 	data := Call_Argument_Data {
 		result_type = t_invalid,
@@ -1471,7 +1727,7 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	copy(procs[:], procs_slice)
 
 	// Count arguments, considering multi-value returns
-	// C++ Reference: /mnt/c/odin/src/check_expr.cpp:6880-6920
+	// C++ Reference: check_expr.cpp:6880-6920
 	min_arg_count := len(call.args)
 	max_arg_count := len(call.args)
 
@@ -1485,7 +1741,7 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	}
 
 	// Filter by named arguments FIRST (before arity filtering)
-	// Reference: /mnt/c/odin/src/check_expr.cpp:6969-6988
+	// Reference: check_expr.cpp:6969-6988
 	if len(call.args) > 0 {
 		for arg in call.args {
 			// Check if this is a named argument (field_value: name = value)
@@ -1511,12 +1767,29 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 			}
 		}
 
-		// If all candidates were filtered out, restore the original list
-		// This allows for better error messages downstream
-		// Reference: /mnt/c/odin/src/check_expr.cpp:6990-6995
+		// If all candidates were filtered out, restore the original list so the diagnostics
+		// downstream have something to name.
+		//
+		// LEDGER #522: these two statements were in the WRONG ORDER and the branch was a
+		// guaranteed panic. `copy(procs[:len(procs_slice)], ...)` slices `procs` to
+		// len(procs_slice) while `procs` is EMPTY -- that is the condition guarding the branch --
+		// so it aborted the checker with "Invalid slice indices 0:1 is out of range 0..<0". The
+		// resize that makes room ran on the next line, after the copy that needed it.
+		//
+		// REPRO, and it is ordinary code rather than a corner case:
+		//     vari :: proc(a: int, rest: ..int) {}
+		//     gv   :: proc{vari}
+		//     gv(1, 2, 3, x = 4)          // named argument naming no parameter
+		// The oracle reports "No parameter named 'x' for this procedure type"; the port died.
+		// Every candidate is filtered out (none has a parameter `x`), which is exactly the
+		// state this branch exists to recover from -- so the recovery path could never run.
+		//
+		// The neighbouring citation to check_expr.cpp:6990-6995 is DRIFTED: those lines are the
+		// polymorphic-variadic arm, not this restore. Left uncited rather than given a
+		// plausible-looking wrong line number.
 		if len(procs) == 0 {
-			copy(procs[:len(procs_slice)], procs_slice)
 			resize(&procs, len(procs_slice))
+			copy(procs[:len(procs_slice)], procs_slice)
 		}
 	}
 
@@ -1526,13 +1799,13 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	}
 
 	// If only one candidate remains, check it directly
-	// Reference: /mnt/c/odin/src/check_expr.cpp:7030-7048
+	// Reference: check_expr.cpp:7030-7048
 	if len(procs) == 1 {
 		entity := procs[0]
 		proc_type := base_type(entity_type(entity))
 
 		// Split arguments before checking
-		// Reference: /mnt/c/odin/src/check_expr.cpp:7527-7545
+		// Reference: check_expr.cpp:7527-7545
 		args_split := split_call_arguments(call)
 		defer delete(args_split.positional)
 		defer delete(args_split.named)
@@ -1540,7 +1813,7 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 		// Check positional arguments, unpacking any multi-valued expression and
 		// hinting each argument with the sole candidate's matching parameter type.
 		//
-		// C++ Reference: /mnt/c/odin/src/check_expr.cpp check_call_arguments_proc_group,
+		// C++ Reference: check_expr.cpp check_call_arguments_proc_group,
 		// the `procs.count == 1` branch's
 		// `check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index)`.
 		//
@@ -1562,7 +1835,7 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 		positional_operands := positional_operands_dyn[:]
 
 		// Check named arguments using helper function
-		// Reference: /mnt/c/odin/src/check_expr.cpp:7041
+		// Reference: check_expr.cpp:7041
 		named_operands := make([dynamic]Operand)
 		defer delete(named_operands)
 
@@ -1583,14 +1856,14 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	// Multiple candidates - need to score and select best match
 
 	// Split arguments before checking
-	// Reference: /mnt/c/odin/src/check_expr.cpp:7527-7545
+	// Reference: check_expr.cpp:7527-7545
 	args_split := split_call_arguments(call)
 	defer delete(args_split.positional)
 	defer delete(args_split.named)
 
 	// Check positional arguments, unpacking any multi-valued expression.
 	//
-	// C++ Reference: /mnt/c/odin/src/check_expr.cpp check_call_arguments_proc_group,
+	// C++ Reference: check_expr.cpp check_call_arguments_proc_group,
 	// the multi-candidate
 	// `check_unpack_arguments(c, lhs, lhs_count, &positional_operands, positional_args, UnpackFlag_None, variadic_index)`.
 	//
@@ -1686,7 +1959,7 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	positional_operands := positional_operands_dyn[:]
 
 	// Check named arguments using helper function
-	// Reference: /mnt/c/odin/src/check_expr.cpp:7124-7153
+	// Reference: check_expr.cpp:7124-7153
 	named_operands := make([dynamic]Operand)
 	defer delete(named_operands)
 
@@ -1695,7 +1968,7 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	for arg in args_split.named {
 		if fv, ok := arg.derived.(^ast.Field_Value); ok {
 			// Check only the VALUE part of Field_Value
-			// Reference: /mnt/c/odin/src/check_expr.cpp:7151
+			// Reference: check_expr.cpp:7151
 			operand := Operand{}
 			check_expr_base(ctx, &operand, fv.value, nil)
 			append(&named_operands, operand)
@@ -1718,7 +1991,7 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	copy(proc_entities[:], procs[:])
 
 	// Track maximum matched target features for scoring
-	// Reference: /mnt/c/odin/src/check_expr.cpp:7204-7221
+	// Reference: check_expr.cpp:7204-7221
 	max_matched_features := 0
 
 	// Test each candidate.
@@ -1785,7 +2058,7 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 		}
 
 		// Track max matched target features across all candidates
-		// Reference: /mnt/c/odin/src/check_expr.cpp:7204
+		// Reference: check_expr.cpp:7204
 		matched := matched_target_features(pt)
 		max_matched_features = max(max_matched_features, matched)
 
@@ -1794,7 +2067,13 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 
 	// Adjust scores based on target feature matching
 	// Procedures with more matched features get higher scores
-	// Reference: /mnt/c/odin/src/check_expr.cpp:7212-7221
+	//
+	// C++ Reference: check_expr.cpp:7603-7610. This site read `procs[valids[i].index]` where
+	// its immediate neighbours read `proc_entities[...]`; the port used proc_entities, and the
+	// inconsistency was filed upstream as #263. Upstream has now corrected C++ to proc_entities
+	// with the note "A polymorphic candidate appends its instantiated entity to proc_entities
+	// above, so valids[i].index can be >= procs.count" -- i.e. the old read could index PAST the
+	// end of procs. The port was right; nothing to change here. LEDGER #386.
 	if max_matched_features > 0 {
 		for &candidate in valid_candidates {
 			entity_proc := proc_entities[candidate.index]

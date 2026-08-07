@@ -6,7 +6,7 @@ Type expression checking.
 This module implements type validation and construction from AST type expressions,
 following the logic in check_type.cpp from the Odin compiler.
 
-C++ Reference: /mnt/c/odin/src/check_type.cpp (3856 lines)
+C++ Reference: check_type.cpp (3856 lines)
 */
 
 import "core:container/queue"
@@ -728,7 +728,47 @@ check_pointer_type :: proc(ctx: ^Checker_Context, pt: ^ast.Pointer_Type, type: ^
 		}
 	}
 
-	type^ = make_pointer_type(elem)
+	// C++ Reference: check_type.cpp:3774-3791 -- the pointer TAG.
+	//
+	// The port ignored pt.tag entirely and always allocated a plain pointer, so `#soa ^T` silently
+	// became `^T`. That is visible in any diagnostic naming the type:
+	//     oracle   Cannot convert ... to '#soa ^#soa[]S'
+	//     port     Cannot convert ... to '^#soa[]S'
+	// and it made size_of report one word where the language lays a #soa pointer out as two
+	// (LEDGER #516 fixed the size arm; this is what kept that arm unreachable from the type
+	// syntax).
+	//
+	// The tag was NOT lost by the parser -- parser.odin:3707 records it, mirroring C++
+	// parser.cpp:2466. Both implementations carry a `tag` on the pointer node; only the port's
+	// CHECKER never read it. Worth stating because a missing tag could equally have been a parser
+	// defect, and the fix would have been in a different file.
+	//
+	// Three branches, all of them C++'s. The final `else` is an UNDER-REJECTION the port had: any
+	// tag at all was accepted silently, so `#foo ^int` checked clean.
+	if pt.tag != nil {
+		// C++ asserts the tag is a BasicDirective. The parser only ever stores one here, but this
+		// is a checker reading a parser-produced node, so it degrades to the plain-pointer path
+		// rather than asserting -- an assert would turn a parser bug into a checker crash.
+		if tag_directive, tag_ok := pt.tag.derived.(^ast.Basic_Directive); tag_ok {
+			name := tag_directive.name
+			if name == "soa" {
+				// TODO(bill): generic #soa pointers  -- C++'s own note, kept.
+				if is_type_soa_struct(elem) {
+					type^ = alloc_type_soa_pointer(elem)
+				} else {
+					error_node(pt.tag, "#soa pointers require an #soa record type as the element")
+					type^ = make_pointer_type(elem)
+				}
+			} else {
+				error_node(pt.tag, "Invalid tag applied to pointer, got #%s", name)
+				type^ = make_pointer_type(elem)
+			}
+		} else {
+			type^ = make_pointer_type(elem)
+		}
+	} else {
+		type^ = make_pointer_type(elem)
+	}
 	set_base_type(named_type, type^)
 	return true
 }
@@ -4256,7 +4296,7 @@ check_procedure_type :: proc(ctx: ^Checker_Context, proc_type: ^Type, proc_type_
 }
 
 // determine_type_from_polymorphic infers concrete type from polymorphic type parameter
-// Reference: /mnt/c/odin/src/check_type.cpp:1573-1617
+// Reference: check_type.cpp:1573-1617
 // Takes a polymorphic type (e.g., []$T) and an operand (e.g., []int{1,2,3})
 // and determines what concrete type the polymorphic parameter should be (e.g., int)
 determine_type_from_polymorphic :: proc(ctx: ^Checker_Context, poly_type: ^Type, operand: Operand) -> ^Type {
@@ -4366,7 +4406,7 @@ determine_type_from_polymorphic :: proc(ctx: ^Checker_Context, poly_type: ^Type,
 }
 
 // is_caller_expression checks if an expression is a caller expression directive
-// Reference: /mnt/c/odin/src/check_type.cpp:1637-1655
+// Reference: check_type.cpp:1637-1655
 is_caller_expression :: proc(expr: ^ast.Node) -> bool {
 	// Check for #caller_expression directive
 	if basic_dir, ok := expr.derived.(^ast.Basic_Directive); ok {
@@ -4387,7 +4427,7 @@ is_caller_expression :: proc(expr: ^ast.Node) -> bool {
 }
 
 // handle_parameter_value evaluates a default parameter value expression
-// Reference: /mnt/c/odin/src/check_type.cpp:1657-1763
+// Reference: check_type.cpp:1657-1763
 // Validates that the default value is a compile-time constant
 handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_ptr: ^^Type, expr: ^ast.Node, allow_caller_location: bool) -> Parameter_Value {
 	param_value: Parameter_Value
@@ -4426,7 +4466,7 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 	}
 
 	// Handle caller expression directives like #caller_expression
-	// Reference: /mnt/c/odin/src/check_type.cpp:1677-1689
+	// Reference: check_type.cpp:1677-1689
 	if is_caller_expression(expr) {
 		// If it's not a basic directive, validate it as a call expression
 		if _, ok := expr.derived.(^ast.Basic_Directive); !ok {
@@ -4449,7 +4489,7 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 	}
 
 	// Check the default value expression
-	// Reference: /mnt/c/odin/src/check_type.cpp:1691-1699
+	// Reference: check_type.cpp:1691-1699
 	if in_type != nil {
 		check_expr_with_type_hint(ctx, &o, expr, in_type)
 		check_assignment(ctx, &o, in_type, "parameter value")
@@ -4458,12 +4498,12 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 	}
 
 	// Determine parameter value kind based on the operand
-	// Reference: /mnt/c/odin/src/check_type.cpp:1702-1751
+	// Reference: check_type.cpp:1702-1751
 	if is_operand_nil(o) {
 		param_value.kind = .Nil
 	} else if o.mode != .Constant {
 		// Non-constant operand - check for special cases
-		// Reference: /mnt/c/odin/src/check_type.cpp:1704-1740
+		// Reference: check_type.cpp:1704-1740
 
 		// Handle procedure literals as default parameters
 		// C++ Reference: check_type.cpp:1705-1707
@@ -4475,8 +4515,13 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 			if entity != nil {
 				if entity.kind == .Procedure {
 					// Procedure as default parameter
+					// C++ Reference: check_type.cpp:1791-1795.
 					param_value.kind = .Constant
 					param_value.value = exact_value_procedure(cast(^ast.Expr)entity.identifier)
+					// Record the entity itself, not just its identifier expression. Added
+					// upstream alongside the removal of the polymorphic-default
+					// short-circuit; see Parameter_Value.proc_entity. LEDGER #386.
+					param_value.proc_entity = entity
 				} else if .Param in entity.flags {
 					// Cannot use another parameter as default
 					error(expr, "Default parameter cannot be another parameter")
@@ -4485,6 +4530,26 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 					param_value.kind = .Value
 					param_value.ast_value = cast(^ast.Expr)expr
 				}
+			} else if allow_caller_location && o.mode == .Context {
+				// C++ Reference: check_type.cpp:1807-1809.
+				//     } else if (allow_caller_location && o.mode == Addressing_Context) {
+				//         param_value.kind = ParameterValue_Value;
+				//         param_value.ast_value = expr;
+				//     }
+				//
+				// `proc(ctx := context)` is legal, and core uses it -- vendor/libc-shim's
+				// set_context is exactly this shape. `context` is not an entity, so
+				// entity_of_node returns nil, and it carries no exact value, so without this
+				// arm it fell to the final else and was REJECTED as "Default parameter must be
+				// a constant, got context". That then cascaded: the parameter had no usable
+				// default, so every zero-argument call reported "Parameter 'ctx' of type
+				// 'Context' is missing in procedure call".
+				//
+				// The arm sits between the entity branch and the exact-value branch in C++,
+				// and the ORDER matters -- placing it later would let the o.value test claim
+				// the operand first.
+				param_value.kind = .Value
+				param_value.ast_value = cast(^ast.Expr)expr
 			} else if o.value != nil {
 				// Has an exact value even though not constant mode
 				param_value.kind = .Constant
@@ -4511,7 +4576,7 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 	}
 
 	// Set output type
-	// Reference: /mnt/c/odin/src/check_type.cpp:1754-1760
+	// Reference: check_type.cpp:1754-1760
 	if out_type_ptr != nil {
 		if in_type != nil {
 			out_type_ptr^ = in_type
@@ -4683,7 +4748,7 @@ check_get_params :: proc(
 		}
 
 		// Handle default parameter values
-		// Reference: /mnt/c/odin/src/check_type.cpp:424-435
+		// Reference: check_type.cpp:424-435
 		param_value: Parameter_Value
 		if field.default_value != nil && !is_field_variadic {
 			// Check the default value expression
@@ -5002,6 +5067,26 @@ check_get_params :: proc(
 				// If operands provided, extract values and determine types
 				if len(operands) > 0 && len(variables) < len(operands) {
 					operand := operands[len(variables)]
+
+					// C++ Reference: check_type.cpp:2141-2155. An operand with NO expression
+					// carries no position, and determine_type_from_polymorphic needs one to
+					// report against, so C++ substitutes the parameter list itself.
+					//
+					// The accompanying reset used to be unconditional. Upstream PR #7208 made
+					// it conditional -- C++'s own note is "Can still have valid type with null
+					// expr. Needed for resolving" -- because an operand synthesised during
+					// instantiation legitimately has a type and a valid mode but no expr, and
+					// forcing it to t_invalid destroyed the very type being resolved. The port
+					// never had the reset at all, so it already behaved like the fixed C++ on
+					// that half; what it lacked was the position fallback. Both halves are now
+					// present and match. LEDGER #386.
+					if operand.expr == nil && params_node != nil {
+						operand.expr = &params_node.node
+						if operand.mode == .Invalid || operand.type == nil {
+							operand.mode = .Invalid
+							operand.type = t_invalid
+						}
+					}
 
 					// If parameter type contains polymorphic types (e.g., []$T),
 					// determine concrete type from operand (C++ lines 2057-2070)
@@ -5644,7 +5729,7 @@ union_variant_index_types_equal :: proc(v: ^Type, vt: ^Type) -> bool {
 
 // polymorphic_assign_index binds a generic count parameter to a concrete value
 // Used for generic array counts, SIMD vector counts, matrix dimensions, and fixed dynamic capacities
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:1389-1419
+// C++ Reference: check_expr.cpp:1389-1419
 //
 // TWO DIVERGENCES FIXED HERE, both of which broke `[$N]$E`:
 //
@@ -5745,7 +5830,7 @@ polymorphic_assign_index :: proc(
 
 // check_type_specialization_to_internal walks a polymorphic record's parameter list
 // against a concrete instance's, binding each parameter.
-// C++ Reference: /mnt/c/odin/src/check_type.cpp:1519-1563
+// C++ Reference: check_type.cpp:1519-1563
 check_type_specialization_to_internal :: proc(
 	ctx: ^Checker_Context,
 	specialization: ^Type,
@@ -5820,7 +5905,7 @@ check_type_specialization_to_internal :: proc(
 // check_type_specialization_to checks whether a concrete type satisfies a polymorphic
 // specialization, e.g. `Queue(string)` against the `$Q/Queue` of `proc(q: ^$Q/Queue)`.
 //
-// C++ Reference: /mnt/c/odin/src/check_type.cpp:1565-1631. The port previously carried a
+// C++ Reference: check_type.cpp:1565-1631. The port previously carried a
 // reduced version of this that diverged in four ways, all restored here:
 //
 //  1. The head guard was inverted. C++ returns TRUE for a nil/invalid `type` (nothing to

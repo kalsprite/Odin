@@ -6,7 +6,7 @@ Entity collection from file declarations.
 This module implements Phase 1 of the checker pipeline - collecting declarations
 from files and creating file scopes. This happens before entity resolution.
 
-C++ Reference: /mnt/c/odin/src/checker.cpp:5548-5775
+C++ Reference: checker.cpp:5548-5775
 
 Architecture:
 - collect_when_stmt_from_file: Evaluates compile-time when conditions
@@ -364,7 +364,7 @@ check_create_file_scopes :: proc(c: ^Checker) {
 		// thread-safe entity collection (see checker.cpp:2044 enqueue, 5780 dequeue).
 		// In multi-threaded mode, entities are enqueued during parallel file collection,
 		// then dequeued and added to package scope in check_export_entities_in_pkg.
-		// MPMC queue implementation complete: see /mnt/c/odin/core/container/queue/mp_queue.odin
+		// MPMC queue implementation complete: see core/container/queue/mp_queue.odin
 		// and package_helpers.odin for queue operations on pkg.exported_entity_queue
 	}
 }
@@ -427,7 +427,21 @@ check_collect_entities_all :: proc(c: ^Checker) {
 
 		// Set up tasks for each file
 		task_idx := 0
-		for file in sorted_files(c.info.files) {
+		// C++ Reference: checker.cpp:6052 sorts sort_file_by_name over pkg->files -- the
+		// PER-PACKAGE array, inside check_create_file_scopes. Its collection pass
+		// (checker.cpp:6104) then iterates the GLOBAL c->info.files map unsorted.
+		//
+		// The port applied that basename sort to the global set instead, which is a sort C++
+		// does not have on a collection C++ does not sort. It matters because the key is
+		// basename-first: vendor/libc-shim's files are stdio.odin / stdlib.odin / math.odin,
+		// names shared with dozens of core packages, so sorting the global set SCATTERS every
+		// package's files through the submission order rather than keeping them together.
+		//
+		// Iterating packages and then each package's basename-sorted files restores C++'s
+		// grouping while keeping the determinism #50 requires (an Odin map cannot be walked
+		// raw without reintroducing ASLR-dependent output). LEDGER #404.
+		for pkg in sorted_packages(&c.info) {
+			for file in sorted_files(pkg.files) {
 			file_scope := c.info.file_scopes[file]
 			if file_scope == nil {
 				assert(false, "File scope missing for file - check_create_file_scopes not run?")
@@ -444,6 +458,7 @@ check_collect_entities_all :: proc(c: ^Checker) {
 			// C++ line 5801: thread_pool_add_task(check_collect_entities_all_worker_proc, f)
 			thread_pool_add_task(check_collect_entities_all_worker_proc, &tasks[task_idx])
 			task_idx += 1
+			}
 		}
 
 		// Wait for all tasks to complete

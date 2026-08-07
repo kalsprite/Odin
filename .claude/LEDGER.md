@@ -7574,3 +7574,9142 @@ the file-order nondeterminism parity.sh's own header documents, on the ORACLE's 
 not recur in the final run.
 
 MEASURED COVERAGE: 179 plain + 4 vet = 183 probes, up from 180.
+
+## #386 second merge catch-up -- six sites, one of them a real under-rejection no gate reached
+
+Master merged again (4af8f15e3), 29 commits, four of them touching semantic analysis: PR #7208
+(poly-proc-fix), PR #7185 (variadic tuple args), PR #7210 (-vet-packages), plus #7231. Rebuilt the
+oracle from the merged source FIRST -- the binary was 08-04 20:20 against src from 08-05, and every
+comparison run before that rebuild would have measured the old reference against the old port.
+
+THE GATES WERE ALREADY GREEN. corpus 179/179, parity 224/224 0/0/0, before any edit. That is not
+evidence the port is current: it is evidence that no probe and no core package reaches these sites.
+Six changes were found by reading the diff, not by measuring:
+
+  1  find_or_generate_polymorphic_procedure  new idempotence guard (C++: "polymorphic procedure
+                                             check not idempotent without this")
+  2  nctx.polymorphic_scope = scope          was conditional on nil, now unconditional
+  3  check_is_assignable_to_with_score       polymorphic-proc-as-default special case REMOVED
+  4  ParameterValue.proc_entity              new field, set in handle_parameter_value -- #3's
+                                             replacement
+  5  check_get_params op.mode clobber        now conditional ("Can still have valid type with
+                                             null expr. Needed for resolving")
+  6  in_vet_packages                         pkg_decl fallback for an unnamed package
+
+#3 WAS A REAL UNDER-REJECTION, and it is the whole point of this entry. The deleted block returned
+true with score 1 for ANY polymorphic procedure assigned to ANY concrete proc type, on the stated
+reasoning that it "will be properly instantiated when actually used" -- so the initial check never
+asked whether the polymorphic procedure could instantiate to the target at all. Measured, oracle vs
+port, before the edit:
+
+    poly(a, b: $T) -> T  as default for proc(x: int) -> int      oracle 1 error, port 0
+    poly(x: $T) -> T     as default for proc(x, y: int) -> int   oracle 1 error, port 0
+    poly(x: $T)          as default for proc(x: int) -> int      oracle 1 error, port 0
+    poly(x: $T) -> T     as default for proc(x: int) -> int      both 0   (the valid contrast)
+
+The FIRST probe I wrote for this -- a valid polymorphic default -- came back 0/0 and proved nothing.
+The special case only ever mattered for defaults that DON'T fit, so the discriminating input is the
+mismatch, not the match. Probing the happy path and stopping there would have closed this as "no
+divergence".
+
+#5 IS THE INVERSE and worth recording as such: the port never had the clobber C++ made conditional,
+so on that half it already behaved like the fixed C++. What it lacked was the OTHER half of the same
+statement -- `op.expr = _params`, the position fallback that gives determine_type_from_polymorphic
+something to report against. Both halves are present now. A change can leave the port already
+correct on the part that changed and stale on the part that didn't.
+
+#263 CLOSED AS FIXED UPSTREAM, PORT ALREADY RIGHT. The site read `procs[valids[i].index]` where its
+neighbours read `proc_entities[...]`; the port used proc_entities and I filed the inconsistency.
+Upstream corrected C++ with the note that a polymorphic candidate appends to proc_entities, so
+valids[i].index CAN exceed procs.count -- the old read could index past the end. Write-up retired;
+three open findings remain (#119 relocated, and the two objc crashes, which are someone else's).
+
+TWO PORT-SHAPE DIVERGENCES that needed a decision rather than a transcription:
+  - generated_from_polymorphic is on the Entity_Procedure VARIANT, matching C++'s
+    base_entity->Procedure.generated_from_polymorphic; my first edit read it off the entity and
+    did not compile. Caught by vet, not by a test.
+  - Package_Decl.name is a plain string in the port, so C++'s `name_token.kind == Token_Ident`
+    guard has no direct analogue. Used is_string_an_identifier, which decides the same question
+    from the text: a malformed declaration stores whatever token was found (`123`), which is not
+    an identifier, so the name stays empty and the file is vetted -- exactly as C++ does.
+
+NEW PROBE: polydef, three rejected shapes in a.odin and the fitting contrast in b.odin. Coverage
+180 plain + 4 vet = 184.
+
+GATES, all after the last edit and against the rebuilt oracle:
+    vet (ast, parser, checker, tests)  0 lines each
+    corpus                             180 FULL-MATCH / 0 FULL-DIFFER / 12 excluded
+    corpus_vet                         4/4
+    parity plain                       224/224 compared, 0 excluded, 0/0/0
+    parity vet                         224/224 compared, 0 excluded, 0/0/0
+    spec suite                         432 tests, 0 failures
+    root suite                         146 tests, 0 failures
+
+THE STANDING LESSON, now twice in two merges: green gates after a merge mean the gates did not
+reach the change, not that the port is current. The only reliable procedure is to read the
+upstream diff site by site and probe each one -- and to pick the probe that can FAIL.
+
+## #387 the coverage expansion paid for itself immediately -- three defects, all found by looking wider
+
+Answering "what open work is left on the port" by MEASURING rather than recalling. The tree has 344
+package directories; pkglist.txt covered 224. Of the 120 uncovered, 98 are oracle-clean today.
+Running the port over those 98 found ONE divergence class -- and fixing it unblocked two more.
+
+#330 CHAINED RELATIVE IMPORTS. All ten spec_* packages: oracle 0, port ~30, every diagnostic of the
+form "'Checker' is not declared by 'checker'", reported in core/odin/checker/tests rather than in
+the spec dir. Shape: spec_* does `import helpers ".."`, and tests itself does `import checker ".."`.
+TWO relative levels.
+
+  register_package (build_infrastructure.odin:433) deliberately registers a package under MORE THAN
+  ONE key -- "import path vs resolved path". So when leaf imports "..", mid gets a live entry under
+  the literal key "..". lookup_imported_package then took that literal key as a FAST PATH before
+  resolving, so when mid in turn imported "..", it got ITSELF back. A relative spelling only names a
+  package relative to the file that wrote it; the literal key is a valid identity only for a
+  collection path like "core:strings". Resolve first; consult the literal key only when non-relative.
+
+  Reduced to 9 lines across 3 files. Each level checks clean ALONE; only the chain breaks. My first
+  two repro attempts (one relative level, parent importing core:strings, then core:odin/checker)
+  both came back 0/0 -- the ingredient I was missing was that BOTH levels are relative. Two failed
+  repros meant my model was wrong, not that the defect was unreachable; the fix came from bisecting
+  the real package instead of synthesising a third guess.
+
+  C++ does not have the bug because its parser stores the resolved ABSOLUTE path in id->fullpath
+  (parser.cpp:6236), so its key is unique by construction.
+
+#331 PKGLIST 224 -> 322. All 98 adopted, including the 10 the import fix unblocked. Plain parity
+322/322 0/0/0. Vet parity then surfaced two mismatches that 224 packages had never reached:
+
+#333a VET-CAST OVER-FIRED, and the cause was an ALIAS WHERE C++ TAKES A COPY.
+  C++ check_expr.cpp:4014 is `Operand src = *o;` -- by value, before anything mutates. The port
+  wrote `src := operand`, and `operand` is an ^Operand, so `src` was a POINTER ALIAS that tracked
+  every later mutation. Further down, the transmute retypes the operand (`operand.type = dst_t`),
+  so by the time the -vet-cast block called check_is_castable_to(ctx, src, dst_t) the "source"
+  already held the DESTINATION type. The pair degenerated to proc-vs-proc, which IS castable, so a
+  gate that should have stayed shut opened. 24 spurious diagnostics on
+  core/rexcode/isa/x86/tests, all on `transmute(proc "c" ())raw_data(exec_buf)`.
+
+  THE CONTROL IS WHAT PROVES IT: both compilers reject the equivalent `cast` byte-identically, so
+  the transmute was never castable and the block was never meant to run. I had filed this as
+  "check_is_castable_to accepts [^]u8 -> proc"; that hypothesis was WRONG and the control refuted
+  it in one command. The predicate was fine; the operand handed to it was not.
+
+#333b THE FOURTH ARM WAS NEVER PORTED. core/rexcode/isa/arm64/tests, oracle 32 / port 31 -- the
+  opposite direction. C++'s chain has four arms; the port's if/else stopped after three, so a
+  same-endianness integer transmute (u64 -> i64) produced nothing. Porting it needed two helpers
+  that did not exist in the port at all -- type_endian_kind_of and types_have_same_internal_endian
+  (types.cpp:2066, 2130) -- plus the Type_Endian_Kind enum, deliberately named apart from
+  build_settings' Target_Endian_Kind because one describes a TYPE and the other the TARGET.
+
+TOOLING: corpus.sh's exclusion note for objchang was a DOUBLE-quoted array element containing
+backticks, so bash command-substituted them AT ARRAY CONSTRUCTION -- the block printed ~40 lines of
+`odin` usage text twice, burying the list of what was NOT measured. Single-quoted now; 12 lines,
+one per exclusion. Cosmetic in effect, but it was command execution from a data string in the one
+report whose whole job is to stay legible.
+
+GATES, all after the last edit:
+    vet (ast, parser, checker, tests)  0 lines each
+    corpus                             180 FULL-MATCH / 0 FULL-DIFFER / 12 excluded
+    corpus_vet                         4/4
+    parity plain                       322/322 compared, 0 excluded, 0/0/0
+    parity vet                         322/322 compared, 0 excluded, 0/0/0
+    spec suite                         432 tests, 0 failures
+    root suite                         146 tests, 0 failures
+
+The rsp/tools ATTRIB event did not recur in the final vet sweep, consistent with the oracle-side
+file-order nondeterminism already documented in parity.sh's header.
+
+MEASURED COVERAGE: 322 packages + 180 plain probes + 4 vet probes.
+
+THE LESSON, and it is the same one as #385 and #386 seen from the other side: those two entries said
+green gates after a merge only mean the gates did not REACH the change. This entry is the corollary
+-- the gates were green because they were LOOKING at 224 packages, and 98 more were sitting there
+checkable. Widening what is measured found three real defects in an afternoon, in a port whose every
+gate had read clean for two days.
+
+## #388 base/builtin: the file-AWARE vs file-UNAWARE error split is load-bearing
+
+Continuing the #387 triage of the 22 packages that #331 deferred. base/builtin was oracle 15 / port 1.
+
+BOTH compilers gate the entire declaration loop on the file's error count -- C++ at parser.cpp:6932
+`if (f->error_count == 0)`, the port at parser.odin:307 `if p.file.syntax_error_count > 0 { return
+false }`. That much was already faithful. The divergence is in WHICH ERRORS COUNT.
+
+C++ raises the package-name diagnostics through `syntax_error(Token const &, ...)` (error.cpp:773).
+That overload takes NO AstFile, so it CANNOT touch f->error_count -- it only bumps the global
+collector (syntax_error_va, error.cpp:638). Only parser.cpp's file-aware helpers increment the
+per-file count. The port raised the same two diagnostics through its counting `error`, so a reserved
+package name suppressed the whole file body.
+
+    package builtin
+    #bogus-free repro:  `package builtin` then a bare `typeid`
+    oracle: reserved-name error AND "Expected a statement, got 'typeid'"
+    port:   reserved-name error only
+
+Added error_no_file_count, mirroring the file-unaware overload exactly: reports, bumps the
+parser-wide count, leaves the file count alone. Used at both package-name sites.
+base/builtin 1 -> 14 of 15.
+
+THE ONE REMAINING LINE IS A SEPARATE DEFECT, not a residual of this one. builtin.odin(349:33)
+"Unknown tag directive used: 'soa'" -- the port has no statement-level unknown-tag arm at all.
+Isolated standalone in 3 lines (`#bogus` at file scope): oracle names the tag, the port falls
+through to "Only declarations are allowed at file scope, got invalid node". Filed separately with
+that repro rather than chased through base/builtin's mid-declaration recovery shape, because fixing
+against a recovery path would be fitting to the symptom.
+
+A NOTE ON THE TIMEOUT. The vet sweep excluded core/rexcode/isa/riscv/tools on a port TIMEOUT. An
+exclusion is UNMEASURED, not clean (#275), and a parser change could plausibly hang, so it was
+checked rather than assumed: 5/5 runs alone at ~275ms (oracle 92ms), and parity_vet on that package
+alone is 1/1 clean. That is #301's load-dependent flake, not a regression -- and it is the first new
+data point on #301 since the merge, so #301's note was updated from "no new evidence either way".
+
+GATES, all after the edit:
+    vet (ast, parser, checker, tests)  0 lines each
+    corpus                             180 FULL-MATCH / 0 FULL-DIFFER
+    corpus_vet                         4/4
+    parity plain                       322/322 compared, 0 excluded, 0/0/0
+    parity vet                         321 compared + 1 timeout-excluded, 0/0/0; the excluded
+                                       package re-run alone is 1/1 clean
+Spec and root suites NOT re-run this tick -- next tick, before anything else, since this was a
+parser change.
+
+--------------------------------------------------------------------------------------------------
+#389 -- the statement-level unknown-tag catch-all (#337). And the residual is a RECOVERY shape.
+
+FIRST, THE DEBT FROM #388. Last tick ended by naming what it had not done: "Spec and root suites NOT
+re-run this tick -- next tick, before anything else, since this was a parser change." That was the
+first thing this tick, before touching any code. Spec 432/0, root 146/0. The debt was real and it
+was paid before it could compound into a second unverified parser change.
+
+THE DEFECT. parse_stmt's .Hash arm dispatches on the tag name and has a default case. C++
+(parser.cpp:5617-5620) reports there and returns a bad statement:
+
+    syntax_error(token, "Unknown tag directive used: '%.*s'", LIT(tag));
+    return ast_bad_stmt(f, token, f->curr_token);
+
+The port's default arm instead built a Tag_Stmt wrapping whatever statement followed, silently. The
+tag was not rejected; it was absorbed. At file scope the wrapper then failed a LATER check with a
+different message ("Only declarations are allowed at file scope, got invalid node"), which is why
+this read as a message-text divergence rather than as a missing diagnostic.
+
+Ported the arm as written, including the fix_advance_to_next_stmt that C++'s bad-statement path
+implies. Probe unktag is now byte-identical.
+
+WHAT THE MEASUREMENT ACTUALLY SAID, WHICH IS NOT WHAT THE TASK TITLE SAID. #337 was filed off the
+base/builtin residual, so the obvious success criterion was "base/builtin reaches 15 of 15". It did
+not. It is still 14, still missing exactly builtin.odin(349:33) 'soa'. Two ways to read that:
+
+    (a) the catch-all port is wrong or incomplete
+    (b) the catch-all is right, and base/builtin reaches it by a route the port doesn't take
+
+The standalone probe settles it: `#bogus` at file scope is now byte-identical on both sides, so the
+arm itself is correct. base/builtin's 'soa' is reached through error recovery PARTWAY THROUGH a
+declaration -- `soa_zip :: proc(slices: ...) -> #soa[]Struct ---`. C++ resumes at `#soa` and offers
+it to parse_stmt; the port's recovery resumes somewhere else and never presents it. That is a
+recovery-SHAPE difference, and it lives in fix_advance_to_next_stmt / the declaration error path,
+not in the tag dispatch. Filed as #339 rather than folded in here.
+
+This is the #244-part-2 / #245 pattern again: a diagnostic that differs only because the two parsers
+disagree about where to resume. #245 eventually turned out not to be a directive problem at all --
+it was the field-list separator gap, found from a different direction entirely. The lesson that
+transfers is not "recovery bugs are cheap", it is that fitting a fix to the recovery symptom would
+have produced a change that passed base/builtin and meant nothing. So the fix was made against the
+repro that isolates the arm, and the recovery difference was filed as its own measured fact.
+
+AND A THIRD DEFECT AT THE SAME SITE, DELIBERATELY NOT BUNDLED. Enumerating the tags C++ handles
+before its catch-all turned up `#define`, which the port also lacks (#338):
+
+    oracle: a.odin(2:9) #define is not a valid declaration, Odin does not have a C-like preprocessor.
+            \tSuggestion: Did you mean 'FOO :: 1'?
+    port:   a.odin(2:1) Only declarations are allowed at file scope, got invalid node
+            a.odin(2:12) Expected ';', got integer
+
+That is not a catch-all miss -- C++ has a dedicated multi-branch arm (parser.cpp:5585-5613) that
+probes for an ident, detects the call-like macro form by paren adjacency, parses the expression, and
+picks between a Note and an expr_to_string Suggestion. Note also that it anchors on the IDENT, not
+the '#'. Bundling that into a verified one-line fix would have meant shipping two changes under one
+verification. Filed with its repro instead.
+
+CORPUS. Both of the last two ticks' fixes are now permanent members: rsvpkg (#388, the file-unaware
+error) and unktag (#389). 180 -> 182. Neither was a member when it was fixed, which is exactly how a
+fix quietly rots.
+
+GATES, all after the edit:
+    vet (ast, parser, checker, tests)  0 lines each
+    corpus                             182 FULL-MATCH / 0 FULL-DIFFER (12 named exclusions)
+    corpus_vet                         4/4
+    parity plain                       322/322 compared, 0 excluded, 0/0/0
+    parity vet                         322/322 compared, 0 excluded, 0/0/0
+    spec                               432 tests, 0 failures
+    root                               146 tests, 0 failures
+The vet sweep excluded nothing this time -- #301's riscv/tools timeout did not recur, consistent
+with it being load-dependent rather than a property of that package.
+
+--------------------------------------------------------------------------------------------------
+#390 -- the `#define` arm (#338), a nil-guard C++ has and the port dropped, and the printer that
+        had been blocking two Suggestions for four ticks.
+
+THE ARM. C++ (parser.cpp:5584-5613) handles `#define` before its unknown-tag catch-all, so #337's
+catch-all never sees it. It is not a one-liner: it probes for an identifier, detects a FUNCTION-LIKE
+macro by paren ADJACENCY (`FOO(x)` is call-like, `FOO (x)` is not -- compared by column), parses the
+body, and then picks between two continuation lines:
+
+    macro_expr == nullptr || call_like  ->  "\tNote: Odin does not support macros"
+    otherwise                           ->  "\tSuggestion: Did you mean 'NAME :: expr'?"
+
+It also anchors on the IDENT, not the '#', and falls back to a bare '#'-anchored message when there
+is nothing on the line at all. The port had none of it; `#define FOO 1` fell through to the file
+scope check and produced two unrelated errors.
+
+THE BLOCKER, AND WHY IT WAS NOT SOLVED BY WRITING A SECOND PRINTER. The Suggestion needs
+expr_to_string. C++ calls it straight from parser.cpp because C++ is one program. The port cannot:
+`core:odin/parser` must not depend on `core:odin/checker`, and write_expr_to_string is genuinely
+checker-coupled -- its arms call check_expr, type_to_string, base_type and are_types_identical, so
+it cannot simply move to `core:odin/ast`.
+
+The tempting shortcut was a small printer inside the parser covering "the node kinds a macro body
+can hold". That is exactly the simplified reimplementation this port keeps finding and deleting
+(#100, #223, #266, #268, #314). It would also have been WRONG in a way probes would not catch
+quickly: expr_to_string is a canonical printer, not a source slice, so `1 +  2` must come back
+`1 + 2`.
+
+Instead the parser grew an INJECTION POINT, the same one the package already uses for `err` (#180),
+`err_line`/`err_block` (#307) and `err_range` (#322): an Expr_To_String_Handler the driver fills in
+with the checker's real printer. There is still exactly one expr_to_string in the port.
+
+A NIL GUARD THE PORT HAD SILENTLY DROPPED. C++ consumes a function-like macro head with
+`(void)parse_call_expr(f, nullptr)` -- a NIL operand, deliberately, for its side effect. The port
+segfaulted on `#define FOO(x) x*2`. Two causes, both port-only:
+
+    ce := ast.new(ast.Call_Expr, operand.pos, ...)   -- C++'s ast_call_expr only STORES proc; node
+                                                        positions come from the token machinery
+    o := ast.unparen_expr(operand); o.derived...     -- C++ guards this with `o &&` at
+                                                        parser.cpp:3271. The port dropped the guard
+
+ast.unparen_expr already returns nil for nil, so the port had done the safe half and skipped the
+test. Worth noting the shape: a dropped nil-guard is invisible until something finally passes nil,
+and here the only caller that ever does is the arm being added four years later.
+
+THE SIBLING ARM WAS ALSO WRONG, AND ONLY GOT LOOKED AT BECAUSE IT WAS ADJACENT. `#include` sat
+directly above and had THREE divergences plus a missing recovery call:
+
+    text    "Did you meant 'import'?"   -- a typo that is not in C++
+    anchor  the tag ident, where C++ passes `token`, the '#'
+    end     the bad stmt ended at the tag, C++'s at curr_token
+    and it returned WITHOUT fix_advance_to_next_stmt, which C++ reaches by falling out of the chain
+
+None of this was in the filed task. Reading the arm C++ actually wrote, rather than only the branch
+being ported, is what surfaced it -- the same reason #337 turned up `#define` in the first place.
+
+THE COMMENT THAT HAD BECOME FALSE. parse_atom_expr's `Foo[]` arm carried a note saying C++ appends
+"\tSuggestion: If a type was wanted, did you mean '[]%s'?" and that "the port's parser package has
+NEITHER facility -- no continuation channel and no expression printer". #307 supplied the first and
+this entry supplied the second, so the stated reason had quietly expired while the code kept
+claiming otherwise. Ported. Note it has NO trailing newline, unlike the #define Suggestion two arms
+away -- C++ is inconsistent here and the port has to be inconsistent identically.
+
+    opidx   `x: Foo[]`      allow_type set   -> Suggestion emitted, 2 lines
+    opidx2  `v[]` on a value                 -> gated off, 1 line
+    opidx3  `Bar :: Foo[]`                   -> also 1 line
+
+opidx2/opidx3 are the over-reach guards, and opidx was checked by eye as well as by the comparator:
+a probe that passes at 1 line before AND after the change proves nothing, so the Suggestion line
+itself was read directly out of the oracle's output.
+
+CORPUS 182 -> 194. Twelve new members, one per distinct path rather than one per syntactic variant:
+nine through the `#define`/`#include` arms (Suggestion, Suggestion-with-a-real-expression, call-like
+via adjacency, call-like with empty parens, ident-with-no-body, non-adjacent paren, non-ident,
+nothing-on-the-line, and #include) and the three above.
+
+GATES, all after the last edit:
+    vet (ast, parser, checker, tests)  0 lines each
+    corpus                             194 FULL-MATCH / 0 FULL-DIFFER (12 named exclusions)
+    corpus_vet                         4/4
+    parity plain                       322/322 compared, 0 excluded, 0/0/0
+    parity vet                         322/322 compared, 0 excluded, 0/0/0
+    spec                               432 tests, 0 failures
+    root                               146 tests, 0 failures
+
+--------------------------------------------------------------------------------------------------
+#391 -- #336's two packages: one was a real scoring defect, the other was never a defect at all.
+
+#336 was filed as "two TEXT divergences" with a one-line guess at each cause. Both guesses were
+wrong, in opposite directions.
+
+ENTITY/EXAMPLE -- REAL, AND NOT A MESSAGE-CHOICE PROBLEM. The filed description said "proc-group
+message choice", as though the port picked the wrong text. It did not: it took a different BRANCH.
+
+    oracle: Ambiguous procedure group call 'xml.parse' ...          (check_expr.cpp:7949, valids > 1)
+    port:   No procedures or ambiguous call for procedure group ... (check_expr.cpp:7693, valids == 0)
+
+Both messages exist in the port, at the right sites. C++ scored TWO candidates as valid; the port
+scored ZERO. Everything downstream -- the extra "Did you mean one of the following overloads?"
+header, the package-qualified `encoding_xml.parse_string` names, the column alignment -- was just
+the valids==0 branch doing its job. One root cause, four visible symptoms.
+
+The trigger is an INVALID argument. `DOC :: #load(<missing file>)` fails, so the operand arrives at
+the group with mode Invalid, and C++ (check_expr.cpp:6954-6958) SKIPS it:
+
+    Operand *o = &ordered_operands[i];
+    if (o->mode == Addressing_Invalid) {
+        continue;
+    }
+
+so err stays None, every candidate survives, and the group is ambiguous. The port had that guard --
+but only on ONE of its two scoring paths. C++ has a single loop; the port split it into an
+ordered_operands path entered when `len(named_operands) > 0` and a positional-only path, and the
+guard was ported into the first. `xml.parse(DOC)` passes no named arguments, so it took the second,
+dropped the invalid operand into check_is_assignable_to_with_score -- which returns false for an
+invalid operand in BOTH implementations, faithfully -- and rejected every candidate.
+
+Note what that means about the earlier probes. `p(DOC)` with a VALID #load resolves silently and
+identically on both sides; so does `xml.parse` with a string, a string variable or a []u8. The
+divergence needs the argument to be already-broken, which is exactly the case a compiler is least
+often tested on and most needs to get right, because it decides how much noise follows a real error.
+
+MY FIRST TWO REPROS BOTH FAILED, AND THE SECOND FAILED DISHONESTLY. `pgload` (#load into a
+two-member group) and `pgload2` (same plus a defaulted second parameter) were both FULL-MATCH -- I
+had guessed the trigger was #load's dual string/[]u8 nature, which is wrong. Then `pgxml` LOOKED
+like a reproduction, but the port's half of it was garbage: run from a scratchpad directory, the
+binary could not resolve `core:encoding/xml` and emitted "Unable to find package" plus three
+"Undeclared name: xml" lines. Comparing that against a working oracle would have "confirmed"
+anything. What actually cracked it was the ORACLE's own output in that same run:
+
+        Given argument types:
+         • invalid type
+
+-- one line naming the real precondition. The lesson is the #379 one again: check that both sides of
+a comparison are doing the work you think they are, and read the oracle's output rather than only
+the diff.
+
+DYNLIB/EXAMPLE -- NOT A DEFECT. Filed as a "package-name anchor" divergence. It is neither an anchor
+problem nor fixable. The package holds two files declaring different package names, so whichever
+file is seen FIRST becomes canonical and the other is the error. Six oracle runs:
+
+    5/6   example.odin(1:1) ... expected 'library', got 'example'
+    1/6   lib.odin(1:1)     ... expected 'example', got 'library'
+
+The ORACLE is nondeterministic -- C++ parses a package's files in parallel and the winner sets
+pkg->name. This is the #197 / #201 family exactly. The port is deterministic (sorted order puts
+example.odin first) and lands on the answer C++ gives 1 time in 6. Making it match the majority
+would mean inverting a file sort to win a coin flip, which is fitting to noise, so it is NOT done
+and dynlib/example stays out of the measured set with that reason recorded.
+
+Worth being precise about the bookkeeping: the earlier claim that "#388 fixed dynlib/example" was
+wrong. What actually happened is that the first comparison this tick used `2>&1 > file`, which
+redirects stdout to the file and leaves stderr on the terminal -- and both compilers write
+diagnostics to stderr. So the oracle side was empty and the package looked clean. Corrected with
+`> file 2>&1`.
+
+PKGLIST 322 -> 323. entity/example is now byte-identical and adopted. dynlib/example is not, and
+the difference between "not adopted" and "adopted and passing" is the whole point of keeping the
+list explicit.
+
+GATES, all after the edit:
+    vet (ast, parser, checker, tests)  0 lines each
+    corpus                             195 FULL-MATCH / 0 FULL-DIFFER (12 named exclusions)
+    corpus_vet                         4/4
+    parity plain                       323/323 compared, 0 excluded, 0/0/0
+    parity vet                         323/323 compared, 0 excluded, 0/0/0
+    spec                               432 tests, 0 failures
+    root                               146 tests, 0 failures
+
+--------------------------------------------------------------------------------------------------
+#392 -- `context` as a default parameter (a real over-rejection), #335 narrowed by five refutations,
+        and the oracle binary vanishing mid-tick.
+
+THE FIX. C++ check_type.cpp:1807-1809 has an arm the port never had:
+
+    } else if (allow_caller_location && o.mode == Addressing_Context) {
+        param_value.kind = ParameterValue_Value;
+        param_value.ast_value = expr;
+    }
+
+`proc(ctx := context)` is legal Odin, and vendor/libc-shim's set_context is exactly that shape.
+`context` is not an entity, so entity_of_node returns nil, and it carries no exact value, so the
+port fell through to the final else and REJECTED it: "Default parameter must be a constant, got
+context". Then it cascaded -- the parameter had no usable default, so every zero-argument call
+added "Parameter 'ctx' of type 'Context' is missing in procedure call". Three lines of Odin
+reproduce both (probe ctxdef); the oracle reports nothing at all.
+
+The arm's POSITION in the chain matters and is preserved: it sits after the entity branch and
+before the exact-value branch. Later, and `o.value != nil` would claim the operand first.
+
+#335 IS NOT WHAT IT SAID, AND IS NOW MUCH SMALLER. The task described "a foreign entity in
+`foreigns` that C++ never checks". Measuring vendor/libc-shim instead of re-reading the branch
+structure -- which is what the task's own next-step note said to do -- gave a different picture:
+oracle 1 diagnostic, port 16. Not one class, three:
+
+    1  Compile time panic (the stb one) -- agreed, and the ONLY thing the oracle emits
+    1  "Default parameter must be a constant, got context"       -- fixed above
+    14 "Non unique linking name for procedure '<name>'"          -- still open
+
+After the context fix: 16 -> 12 -> and the link-name class itself fell 14 -> 6. The context defect
+was suppressing later checking, so it was inflating the count it was hiding behind.
+
+FIVE REFUTATIONS, RECORDED SO THEY ARE NOT RE-RUN. Two were already on file; this tick added three.
+
+    (h3) "a #panic upstream suppresses downstream diagnostics" -- REFUTED. The earlier refutation
+         used a #panic and errors in the SAME package, which did not cover libc-shim (its panic
+         comes from vendor:stb/sprintf, a DEPENDENCY). Probe pandep -- `#panic` in a dependency
+         plus two type errors in the dependent -- gives 3 from both, byte-identical. Now a
+         permanent corpus member so this stays refuted.
+    (p1) two ordinary exported procs sharing a link name (probe linkdup)          -- MATCH
+    (p2) a foreign-block import vs an exported definition (probe fgnclash)        -- MATCH
+    (p3) the same, with @(require, linkage="strong") as the shim uses (lnkstrong) -- MATCH
+    (p4) the two declarations in SIBLING packages, neither importing the other (lnksib) -- MATCH
+
+So the trigger is none of: the panic, plain duplicate names, foreign-vs-defined, strong linkage, or
+package siblinghood. Four probe shapes that all looked like the real thing and all came back clean.
+
+AND THE ORACLE DISAPPEARED. Partway through this tick's gates, ./odin stopped existing. Cause
+unknown -- no command I ran should remove it, and it was present for parity runs that came back
+clean. What matters is what it did to the measurements: one vet sweep reported 17 count mismatches
+with `oracle=0 port=N`, and I read that as "low-rate rexcode nondeterminism" and started chasing it.
+That was wrong, and wrong in the specific way this ledger keeps cataloguing (#275, #367, #369,
+#370, #380, #384, #385): I theorised about a result before checking that the instrument had done
+its work. The rule I already had -- pick a probe that can FAIL, and verify the tool ran -- applies
+to the tool itself, not just to probes.
+
+Every gate number from before the rebuild is therefore VOID, including the clean ones. A missing
+oracle produces `oracle=0` everywhere, which manufactures a total mismatch against a working port
+and a CLEAN SWEEP against a quiet one. The clean readings were the more dangerous half.
+
+Rebuilt (same source, GIT_SHA 4af8f15e3) and re-ran everything from scratch, checking `./odin` was
+present after each round.
+
+THE HARNESS NOW REFUSES TO RUN WITHOUT AN ORACLE. parity.sh and parity_vet.sh abort with
+PARITY-ABORTED / PARITY-VET-ABORTED reason=oracle-missing and exit 2. Verified the only way that
+counts -- by moving ./odin aside and confirming both abort, then moving it back and confirming a
+normal sweep still completes. Same shape as the missing-argument guards added in #385.
+
+GATES, all after the rebuild, oracle presence checked each round:
+    vet (ast, parser, checker, tests)  0 lines each
+    corpus                             197 FULL-MATCH / 0 FULL-DIFFER (12 named exclusions)
+    corpus_vet                         4/4
+    parity plain                       323/323 compared, 0 excluded, 0/0/0  -- 3 consecutive runs
+    parity vet                         323/323 compared, 0 excluded, 0/0/0  -- 3 consecutive runs
+    spec                               432 tests, 0 failures
+    root                               146 tests, 0 failures
+The spec loop now aborts if a package produces no result line, rather than summing zero and
+printing "SPEC-TOTAL tests=0 failures=0" -- which is exactly what it printed when the oracle was
+missing, and which reads like a pass.
+
+--------------------------------------------------------------------------------------------------
+#393 -- #335 is a RACE, not a rule difference. Diagnosis only; no code changed.
+
+Last tick's note said to stop guessing syntax shapes and instrument the `foreigns` map. Doing that
+answered it, and the answer is not what any of the five refuted hypotheses assumed.
+
+THE MEASUREMENT THAT SETTLES IT. Count "Non unique linking name" on vendor/libc-shim:
+
+    port    10 runs:  10  32  14  27  1  3  16  10  10  24
+    oracle   5 runs:   0   0   0   0  0
+
+The port is NONDETERMINISTIC over a 32x range. The oracle is deterministically silent. Every
+earlier count for this package -- 14, then 6, then 22 -- was a sample from that distribution, and I
+had been reading them as fixed quantities and reasoning about what "the" residual was. They were
+never stable numbers. (This also means #392's "16 -> 12 -> 6" progression overstated its precision:
+the context fix was real and probe-verified, but the libc-shim counts around it were noisy.)
+
+WHY IT RACES. Both compilers keep ONE `foreigns` map with TWO writers, and the two use DIFFERENT
+tests:
+
+    foreign procs      check_decl.cpp:1229 / check_decl_helpers.odin:2341
+                       `if (found && e != *found)` -> compare signatures, silent if similar
+    non-foreign procs  check_decl.cpp:1654 / check_decl.odin:1558
+                       with a link_name or @export: `if (found)` -> ERROR unconditionally
+
+So for a name declared both ways, whichever registration lands FIRST decides whether anything is
+reported. The port checks packages in parallel, so the winner varies per run. Instrumenting both
+sites confirmed the shape directly: exactly one `reg` (libc-shim, non-foreign) and one `fgnproc`
+(core/c/libc, foreign) per name, racing for the same key.
+
+BUT THE REAL DEFECT IS UPSTREAM OF THE RACE. C++ is not winning the race consistently -- it never
+enters it. `vendor/libc-shim` does not import `core:c/libc`, and nothing in its transitive closure
+does either (grepped: the only importers of "core:c/libc" in the tree are that package's own files
+and its tests). So C++ never loads core/c/libc when checking libc-shim, the name is registered once,
+and there is nothing to collide with.
+
+The port DOES load it. Its own diagnostics prove it -- the "other at" side names
+core/c/libc/stdlib.odin, stdio.odin and math.odin. So the port is checking a package outside the
+import closure of the target, and that is what manufactures the collision.
+
+That reframes #335 entirely. The original title said the port "registers a foreign entity into
+`foreigns` that C++ never checks". The registration is faithful, site for site. What is NOT faithful
+is the SET OF PACKAGES being checked.
+
+TWO DEFECTS, AND THEY SHOULD STAY SEPARATE:
+    (a) the port loads packages outside the target's import closure. This is the cause of the
+        libc-shim symptom and could plausibly affect other measurements.
+    (b) the collision handling is order-dependent, so the diagnostic is nondeterministic. This is
+        only REACHABLE because of (a) here, but it is a defect on its own -- and note C++ has the
+        same two-writer/two-test structure, so this may be faithful-but-latent rather than a port
+        bug. Establishing which needs a case where C++ genuinely loads both.
+
+WHY THE FIVE EARLIER PROBES ALL CAME BACK CLEAN. Every one of them (linkdup, fgnclash, lnkstrong,
+lnksib, and the cross-package pandep) built the two declarations inside ONE import closure, so both
+compilers loaded both and behaved identically. The bug needs a package that C++ would NOT load --
+which is precisely the thing a hand-built probe cannot express, because a probe only contains what
+you import. Four plausible-looking shapes were refuted for a reason that had nothing to do with
+syntax. That is the lesson worth keeping: when repeated minimal repros all come back clean, suspect
+the ENVIRONMENT the two sides are running in, not the next syntactic variation.
+
+INSTRUMENTATION REMOVED. Both temporary probes were `when #config(FOREIGNDBG, false)` blocks, so
+they were inert in normal builds, but they are gone rather than left dormant -- verified by grep and
+by `git diff --stat` showing both files identical to HEAD. Worth noting a trap I nearly left behind:
+my backup of check_decl_helpers.odin was taken AFTER the probe was inserted, so restoring from it
+would have silently kept the instrumentation. It survived the first revert and was caught only
+because the grep counted matches instead of trusting the copy.
+
+STATE, unchanged by this tick (no functional edit):
+    vet (ast, parser, checker, tests)  0 lines each
+    corpus                             197 FULL-MATCH / 0 FULL-DIFFER
+
+--------------------------------------------------------------------------------------------------
+#394 -- CORRECTION to #393. The root cause I published last tick is wrong. Diagnosis only.
+
+#393 concluded that the port "checks packages outside the target's import closure", loading
+core/c/libc for vendor/libc-shim when C++ would not. That is FALSE, and the error was mine.
+
+WHAT I ACTUALLY DID. I ran one grep for '"core:c/libc"' across libc-shim's DIRECT imports plus
+base/runtime, found only core/c/libc's own files, and wrote "nothing in its transitive closure does
+either". A one-level grep is not a closure. Computing the closure properly:
+
+    vendor/libc-shim -> core/os -> core/sys/posix -> core/c/libc
+
+core/c/libc IS in the closure (41 packages), reached in three hops via core/os. C++ loads it exactly
+as the port does. Every conclusion #393 drew from the over-collection claim is void, including the
+task retitle and the "(a) PRIMARY: find why the port loads packages outside the closure" next step.
+
+This is the same failure mode as the oracle-binary incident two ticks ago, and it is worth naming
+precisely because the surface differed: there I trusted an instrument that had not run, here I
+trusted a search that had not searched what I claimed. Both are "the measurement did not cover what
+the conclusion asserted". The tell was available both times -- a one-level grep cannot answer a
+transitive question, and I wrote the word "transitive" anyway.
+
+WHAT SURVIVES FROM #393, because it was measured rather than inferred:
+
+    port    10 runs:  10  32  14  27  1  3  16  10  10  24
+    oracle   5 runs:   0   0   0   0  0
+
+The port's "Non unique linking name" count on vendor/libc-shim is nondeterministic over a 32x range;
+the oracle is deterministically silent. That is a real and serious divergence -- a diagnostic whose
+presence depends on thread interleaving -- and it is unaffected by the correction.
+
+Also still true, read directly from both sources: one `foreigns` map, two writers, different tests.
+The foreign site (check_decl.cpp:1229 / check_decl_helpers.odin:2341) compares signatures and stays
+silent when they match; the non-foreign site (check_decl.cpp:1654 / check_decl.odin:1558) errors on
+any hit. Whichever registers first decides the outcome.
+
+THE QUESTION IS THEREFORE BACK OPEN, in a sharper form. Both compilers load both packages. Both have
+the same two-writer structure. So why is C++ silent, and deterministically so?
+
+The hypothesis that now fits best -- and is NOT yet tested, stated as a hypothesis: LOADED is not
+CHECKED. C++ drives checking from dependencies, and core/c/libc's `atoi` is never referenced by
+libc-shim, so check_proc_decl may never run on it, so it is never registered and there is nothing to
+collide with. The port appears to check every declaration in every loaded package. That would also
+explain why all five hand-built probes matched: in each, both declarations were USED, so C++ checked
+both too. It connects to #52's "on-demand resolution is incomplete" and to #272.
+
+HOW TO TEST IT, and the test must be able to fail: build a probe where the foreign declaration is
+loaded but NEVER referenced, alongside a used non-foreign definition with the same link name. If
+C++ is silent and the port errors, the hypothesis holds. Then invert it -- reference the foreign one
+too -- and C++ should start reporting. A probe that only shows the first half proves nothing, since
+every previous probe was silent on both sides for unrelated reasons.
+
+No code changed this tick or last. Gates unchanged: vet 0 lines across the four packages,
+corpus 197 FULL-MATCH.
+
+    ADDENDUM to #394, same tick -- the designed test was run, and it does not support the
+    hypothesis. Two probes, built as specified so that a one-sided result could not be mistaken
+    for a confirmation:
+
+        lnk_unref  foreign myfn LOADED but never referenced; shim's myfn used   oracle=0 port=0
+        lnk_ref    both referenced                                              oracle=0 port=0
+
+    The "loaded != checked" hypothesis predicted port=nonzero for lnk_unref. It is 0. But note
+    what the result actually shows: the PORT does not error either, on either shape. So this is
+    not evidence against the hypothesis so much as evidence that a six-package probe cannot
+    reproduce the defect at all -- the sixth failed probe shape in a row, and for the same reason
+    as the first five.
+
+    That is itself the finding worth keeping. The port's divergence needs the REAL package: 41
+    packages in the closure, hundreds of files, enough concurrent work for the two registrations
+    to actually interleave. Tiny probes finish the relevant work in one thread's worth of time and
+    never race. So the instrument for this defect is vendor/libc-shim itself, run repeatedly --
+    which is what produced the 1..32 spread -- not a minimal repro. I have now spent six probe
+    shapes learning that; the rule going forward for #335 is to stop building probes and
+    instrument the real run instead.
+
+    Concretely, the next move is to log, on the real package, the ORDER in which the two writers
+    reach each colliding key across several runs, and compare against what C++ does for the same
+    key (which is deterministic and silent, so it has exactly one order). That identifies which
+    side's ordering is wrong without needing a repro that can be held in one file.
+
+--------------------------------------------------------------------------------------------------
+#395 -- #335: the ordering caught in the act, and "loaded != checked" refuted. Diagnosis only.
+
+#394's next step was to stop building probes and instrument the real run, logging the ORDER the two
+`foreigns` writers reach each colliding key. Both writers hold ctx.info.foreign_mutex, so printing
+from inside that lock serialises the output and print order IS registration order. Three runs of
+vendor/libc-shim, filtered to three colliding keys:
+
+    run 1   nonforeign atoi hit=false   ->  foreign atoi hit=true      (silent)
+    run 2   nonforeign atoi hit=false   ->  foreign atoi hit=true      (silent)
+    run 3   foreign    atoi hit=false   ->  nonforeign atoi hit=true   (ERROR)
+
+    errors that run:  25, 35, 17
+
+That is the mechanism, directly observed rather than inferred. The order flips between runs, and
+only the foreign-first order produces "Non unique linking name" -- because the two sites test
+differently: the foreign site compares signatures and stays silent when they match, the non-foreign
+site errors on any hit. The oracle is silent on every run, so C++ never takes the foreign-first
+order.
+
+"LOADED != CHECKED" IS REFUTED. #394 proposed that C++ simply never checks core/c/libc's `atoi`,
+because libc-shim never references it, so it never registers and cannot collide. Probe fgnsig tests
+exactly that: two dependency packages each declare `dupsym` in a foreign block with DIFFERENT
+signatures, and NEITHER is referenced by main. C++ reports:
+
+    Redeclaration of foreign procedure 'dupsym' with different type signatures
+
+So C++ does check unreferenced foreign declarations, and does register them. The hypothesis is dead.
+Note this probe is also the first one in this investigation that made BOTH compilers speak -- which
+is what makes it evidence rather than another silent pair. Six probes were silent because they could
+not reach the site; this one reaches it.
+
+(A detail worth keeping from fgnsig: the two compilers blame OPPOSITE files -- the oracle anchors on
+a/a.odin citing b, the port on b/b.odin citing a. Same order-dependence, same site. Whether the port
+is stable there was not measured, so it is not claimed.)
+
+WHERE THAT LEAVES IT. Both compilers load both packages, check both declarations, register both into
+one map, and use the same asymmetric pair of tests. The ONLY remaining difference is the order in
+which the two registrations happen -- stable in C++, racing in the port. So the defect is not a
+missing rule or an extra rule; it is that the port's declaration-checking order is nondeterministic
+where C++'s is not. The asymmetry between the two tests is faithful and must stay; it is only
+harmful when the order is unstable.
+
+NEXT: determine what fixes C++'s order. The observed C++ behaviour (always silent) means the
+non-foreign registration from the ROOT package consistently precedes the foreign one from a
+DEPENDENCY -- i.e. root-before-dependencies for this phase, which is the opposite of the usual
+dependency-first intuition and therefore worth verifying directly rather than assumed. That is a
+claim about C++'s decl-checking schedule and should be read out of checker.cpp's phase ordering, not
+guessed from the symptom.
+
+INSTRUMENTATION REMOVED, verified by md5 against checksums taken BEFORE the first edit -- not by
+trusting a backup copy, which is the trap that nearly kept the probe alive in #393.
+
+No code changed. Gates unchanged: vet 0 lines across the four packages, corpus 197 FULL-MATCH.
+
+--------------------------------------------------------------------------------------------------
+#396 -- #335: why C++'s order is stable. The decl phase is explicitly single-threaded. Diagnosis.
+
+#395's next step was to read C++'s declaration-checking schedule out of checker.cpp rather than infer
+it from the symptom. checker.cpp:5308:
+
+    gb_internal void check_all_global_entities(Checker *c) {
+        in_single_threaded_checker_stage.store(true, std::memory_order_relaxed);
+        // NOTE(bill): This must be single threaded
+        // Don't bother trying
+        for_array(i, c->info.entities) {
+            ...
+            check_single_global_entity(c, e, d);
+        }
+        in_single_threaded_checker_stage.store(false, std::memory_order_relaxed);
+    }
+
+That is the answer to "what makes C++'s order stable": nothing subtle. The whole global-entity
+declaration phase is a sequential walk of one array, with a comment saying it must be. Both
+`foreigns` registrations happen inside it, so their relative order is fixed by array order alone --
+no scheduling, no race, and my #395 guess about "root-before-dependencies" was unnecessary
+speculation about a mechanism that does not exist.
+
+THE PORT MIRRORS THIS FAITHFULLY. check_global_init.odin:562 is the same shape: sets the
+single-threaded stage flag, then `for entity in info.entities` calling check_single_global_entity.
+So the port is not checking these declarations in parallel either.
+
+WHICH RELOCATES THE QUESTION, and this is the useful part. If both sides walk their entities array
+serially, then the port's observed flip (#395: nonforeign-first twice, foreign-first once) cannot
+come from thread scheduling inside the phase. It has to come from `info.entities` being in a
+DIFFERENT ORDER on different runs. The race is in how the array is BUILT, not how it is walked.
+
+Supporting shape: C++ has exactly ONE append site, checker.cpp:7432, and it is a drain --
+check_add_entities_from_queues dequeues an MPSC entity_queue into the array. The port has THREE
+append sites (check_files.odin:480, check_decl.odin:614, check_decl.odin:686). Three writers where
+C++ has one drain is itself worth reconciling, independently of ordering.
+
+NEXT, and it is cheap and decisive: log the first N of info.entities (name + position) at the top of
+check_all_global_entities across several runs of vendor/libc-shim and diff them. If the sequences
+differ, the defect is the construction of info.entities and the fix belongs there -- the same family
+as #271 (deterministic publish order in the export drain) and #214 (ScopeMap slot order), both of
+which were fixed by making a parallel-built order reproducible. If the sequences are IDENTICAL
+across runs, then this reasoning is wrong and the registrations are not happening in this phase at
+all, which would need finding out where they do happen.
+
+Stating that second branch explicitly because the whole chain -- #393 retracted, #394's hypothesis
+refuted -- has been a sequence of confident wrong turns, each of which would have been caught
+earlier by naming what result would falsify it.
+
+No code changed. Gates unchanged: vet 0 lines across the four packages, corpus 197 FULL-MATCH.
+
+--------------------------------------------------------------------------------------------------
+#397 -- #335 ROOT CAUSE: info.entities is built in a nondeterministic order. Diagnosis only.
+
+#396 named two branches in advance. The data lands in the first, with one refinement that only
+appeared because the second measurement was taken rather than assumed.
+
+MEASUREMENT 1 -- is info.entities stable? Logged index + position of every entity named atoi across
+four runs of vendor/libc-shim:
+
+    run 1   strconv 2438   posix 2989   libc-shim 3071   core/c/libc 6147   total 7702
+    run 2   strconv  548   posix 2921   libc-shim 2987   core/c/libc 6147   total 7702
+    run 3   strconv  762   posix 2910   libc-shim 2953   core/c/libc 6147   total 7702
+    run 4   strconv  815   posix 2951   libc-shim 3129   core/c/libc 6147   total 7702
+
+The ORDER differs on every run. The COUNT does not (7702 every time), so this is a permutation, not
+a collection difference -- the same entities in a different sequence. That is branch one: the defect
+is in how info.entities is BUILT.
+
+MEASUREMENT 2 -- and this is why the first was not enough. Note that libc-shim's atoi (2853..3129)
+always precedes core/c/libc's (a rock-steady 6147). A serial walk of that array would therefore
+ALWAYS register the non-foreign one first and ALWAYS be silent. The port is not silent. So array
+order alone does not determine registration order, and stopping at measurement 1 would have shipped
+a conclusion that its own data contradicts.
+
+Neither entity is .Lazy (checked -- the loop skips those, which would have been an easy wrong
+answer). And both registrations report in_single_threaded_checker_stage() == true, so both really do
+happen inside the serial phase.
+
+WHAT ACTUALLY HAPPENS. Checking one entity in that serial walk recursively resolves what it depends
+on, on demand. So the registration order is not the array order; it is the order of a depth-first
+traversal seeded by the array order. Reaching libc-shim's atoi can pull core/c/libc's atoi in first
+and register it first -- and which entity is reached first overall shifts with the permutation. A
+deterministic walk over a nondeterministic array gives nondeterministic results, which is exactly
+what the 1..32 spread shows.
+
+So the chain is: parallel entity collection -> permuted info.entities -> different DFS seed order ->
+the two foreigns writers land in a different order -> the non-foreign site's unconditional `if
+(found)` fires or doesn't. Every link is now measured except the first, which is where the fix goes.
+
+C++ does not have this exposure: one append site (checker.cpp:7432, draining an MPSC entity_queue)
+versus the port's three (check_files.odin:480, check_decl.odin:614, check_decl.odin:686).
+
+THE FIX BELONGS AT CONSTRUCTION, and this is the same family the port has fixed twice before: #271
+(deterministic publish order in the export drain) and #214 (ScopeMap slot order reproduced). Both
+were parallel-built orders made reproducible. Note the ordering must not merely be STABLE -- it has
+to match C++'s, or diagnostics that depend on traversal order will be deterministic and still wrong.
+#219 is the precedent for that distinction: a stable sort was not enough, it had to be C++'s
+permutation.
+
+Also worth flagging beyond #335: an entity array permuted per run is a latent cause of ANY
+order-sensitive diagnostic, which is the standing worry behind #52 and the one-off flakes in #301
+and #313. Fixing it may settle more than this task.
+
+INSTRUMENTATION REMOVED -- three probes across three files, all verified gone by md5 against
+checksums captured before the first edit, plus a grep for all three tags.
+
+No code changed. Gates unchanged: vet 0 lines across the four packages, corpus 197 FULL-MATCH.
+
+    ADDENDUM to #397, next tick -- the FIX DIRECTION in #397 is wrong and is withdrawn.
+
+    #397 said the fix was to make info.entities construction "deterministic AND matching C++'s
+    order", citing #271/#214/#219. Reading the C++ side properly:
+
+      - C++ does NOT sort info.entities. checker.cpp:7428 check_add_entities_from_queues simply
+        drains an MPSC entity_queue into the array. order_in_src exists (checker.cpp:2263) but is
+        used for init/fini sorting (7495), the global-init priority queue (88), docs printing and
+        the LLVM backend -- never for info.entities.
+      - So there is no "C++ order" to match by sorting, and adding a sort would be inventing a
+        mechanism C++ does not have. That is precisely what this port keeps having to delete.
+
+    The port's order_in_src is fine, incidentally: entity_helpers.odin:664 hashes the file PATH
+    (content-derived, so stable across runs) where C++ uses file_id. A documented adaptation, and
+    deterministic -- not a source of the permutation.
+
+    WHAT IS ACTUALLY UNKNOWN, stated plainly: whether C++'s info.entities is ALSO permuted per run.
+    Both implementations drain an MPSC queue fed by parallel per-file collection, so a priori both
+    should be. Yet C++'s output is stable at 0 across 5 runs and the port's is 1..32. Exactly one of
+    these is true and I have not measured which:
+        (a) C++'s entities array is stable in practice, and the port's construction differs
+            somewhere -- three append sites vs one drain is the obvious suspect;
+        (b) C++'s array is permuted too, and C++ is stable for a DIFFERENT reason, in which case
+            the permutation is a red herring for this defect (though still a latent hazard).
+
+    NEXT: measure (a) vs (b) directly by instrumenting the C++ side. Safeguards, given the oracle
+    binary vanished mid-tick once already: compile the instrumented build to a SEPARATE output path
+    and never overwrite ./odin, keep the src/ edit uncommitted, and md5 the src files before editing
+    so the revert is verifiable rather than trusted.
+
+    Recording this rather than proceeding because #397's stated fix would have been implemented
+    against a C++ behaviour that does not exist. The measured root cause in #397 -- info.entities is
+    permuted per run -- stands; only the prescription was wrong.
+
+--------------------------------------------------------------------------------------------------
+#398 -- #335: the pivot answered (b), and #397's "root cause" is downgraded. Diagnosis only.
+
+#397's addendum posed (a) C++'s entities array is stable, or (b) it is permuted too and C++ is
+stable for another reason. Instrumented the C++ side (separate binary, src/ edit reverted and md5
+verified, ./odin never touched) and ran four times. Index of every entity named atoi:
+
+    C++   run 1   shim  680   posix 1221   strconv 4208   libc 7134    total 7702
+    C++   run 2   shim  666   posix 1467   strconv 3381   libc 7134    total 7702
+    C++   run 3   shim  674   posix 2094   strconv 4153   libc 7129    total 7702
+    C++   run 4   shim  676   strconv 2522 posix  4026    libc 7134    total 7702
+
+The answer is (b). C++'s info.entities is permuted per run exactly as the port's is. So the
+permutation is NOT the divergence, and #397's headline -- "ROOT CAUSE: info.entities is built in a
+nondeterministic order" -- is downgraded to a shared property of both implementations. It is still
+true that the port's array is permuted; it is no longer a reason the port differs.
+
+(Pleasing side note: total=7702 in BOTH implementations, every run. The port collects exactly the
+same entity set as C++, which is a parity fact worth having and which #393's retracted
+over-collection claim had implicitly denied.)
+
+WHAT THE DATA DOES SHOW, and it is sharper than anything so far. Compare the RELATIVE positions of
+the two colliding entities and the third party that matters:
+
+    C++    libc-shim atoi   666..680       -- always very early, tight range
+           posix     atoi   1221..4026     -- varies wildly
+           core/c/libc atoi 7129..7134     -- always very late
+    port   libc-shim atoi   2853..3129
+           posix     atoi   2639..2951     -- and in the sampled runs posix comes BEFORE the shim
+
+In C++ the ROOT package's entity is always ahead of posix's. In the port they interleave. That
+matters because posix/stdlib_libc.odin(20:1) re-exports libc's atoi, so checking posix's entity is
+what drags core/c/libc's FOREIGN atoi in and registers it first. C++ never gets there before the
+shim's non-foreign registration; the port sometimes does.
+
+So the mechanism is: the root package's entities are collected EARLY in C++ and mid-array in the
+port. Both arrays are otherwise permuted, and that permutation is harmless in C++ precisely because
+the root always wins the race to register.
+
+STATUS OF THE CHAIN, stated plainly because it has moved three times:
+    #393 root cause (over-collection)      RETRACTED in #394 -- closure grep was one level deep
+    #394 hypothesis (loaded != checked)    REFUTED in #395 -- probe fgnsig
+    #397 root cause (permuted entities)    DOWNGRADED here -- C++ is permuted too
+    now: root-package entities are ordered early in C++ and not in the port. UNCONFIRMED as a cause;
+    it is a consistent difference across 4+4 runs, not a demonstrated mechanism.
+
+NEXT, and it must be able to fail: find where C++ enqueues the root package's entities relative to
+dependencies (check_collect_entities_all / the per-file worker at checker.cpp:6106) and compare with
+the port's collection. If C++ seeds the root first by construction, the port should match that and
+the flip should stop. Predict before measuring: if the port is changed to collect the root first and
+libc-shim STILL varies, the root-ordering theory is wrong too.
+
+A PROCESS NOTE, because it nearly cost the tick. The first four instrumented C++ runs printed
+nothing and I read that as "the phase is not reached". They had all died instantly with rc=132 --
+ODIN_ROOT is derived from the executable's directory, and the binary was in the scratchpad. I did
+not check the exit code. Same lapse as the missing-oracle incident: a silent instrument read as a
+result. `rc` is now printed in the run loop.
+
+--------------------------------------------------------------------------------------------------
+#399 -- #335: the submission-order divergence, located. Diagnosis only; a prediction to test next.
+
+#398 observed that C++ keeps the root package's entities in a tight early band (666..680 of 7702)
+while the port has them mid-array (2853..3129) with core/sys/posix sometimes ahead. That was a
+consistent difference across 4+4 runs but not a mechanism. The mechanism is in how each side
+SUBMITS files for entity collection.
+
+    C++   checker.cpp:6104   for (auto const &entry : c->info.files) thread_pool_add_task(..., f)
+                             -- raw map iteration, hash order
+    port  check_collect.odin:430   for file in sorted_files(c.info.files) { ... add_task }
+                             -- SORTED, by basename first then fullpath
+                             (build_infrastructure.odin:492-499)
+
+The port sorts where C++ does not. And for this defect the sort key is exactly wrong: the two
+colliding declarations live in files that SHARE a basename --
+
+    core/c/libc/stdlib.odin      (the foreign atoi)
+    vendor/libc-shim/stdlib.odin (the non-foreign atoi)
+
+so sorted_files places them adjacent, ordered by fullpath, and "core/..." precedes "vendor/...".
+The port therefore submits the FOREIGN declaration's file BEFORE the shim's, every run. Parallel
+completion then decides which finishes first, which is precisely the 1..32 jitter. C++'s hash order
+happens to submit the shim's files very early, so its non-foreign registration reliably wins and the
+signature-comparing foreign site stays silent.
+
+WHY THE PORT SORTS AT ALL: #50 made map iterations order-independent so output would not depend on
+ASLR. That was correct and necessary. But a sort chosen for determinism is not automatically C++'s
+order, and here it is a different order with different consequences -- the same distinction #219
+had to make (a stable sort was not enough; it had to be C++'s permutation) and #214 resolved by
+reproducing C++'s ScopeMap slot order rather than inventing one.
+
+THIS IS NOT YET A DEMONSTRATED CAUSE. It explains every observation, which is exactly when to be
+most careful -- the last three explanations on this task also explained every observation at the
+time. What is established: the two submission orders differ, and the port's places the foreign file
+first. What is NOT established: that changing the submission order changes the outcome.
+
+NEXT, as a manipulation check with the prediction stated first. Temporarily invert the port's file
+sort (or otherwise force vendor-before-core) and re-measure the libc-shim spread:
+    - if the counts collapse toward 0, submission order controls the outcome and the fix is to
+      reproduce C++'s files-map order rather than sorting by name;
+    - if the spread is unchanged, submission order is NOT the lever and this theory joins #393,
+      #394 and #397 on the pile.
+Either way the temporary change is reverted; it is a probe, not a fix. Reproducing C++'s hash order
+is a real piece of work (#214 did it once) and is not worth starting until the lever is confirmed.
+
+No code changed. src/ and ./odin byte-identical to before this tick's C++ instrumentation (md5
+verified in #398). Gates unchanged: vet 0 lines across the four packages, corpus 197 FULL-MATCH.
+
+    ADDENDUM to #399, same tick -- the manipulation check was run and REFUTES the theory.
+
+    #399 predicted, before measuring: counts collapse toward 0 => submission order is the lever;
+    spread unchanged => the theory joins #393/#394/#397 on the pile. Inverted the sort in
+    sorted_files (basename and fullpath comparators both flipped, so vendor precedes core and the
+    shim's stdlib.odin is submitted BEFORE core/c/libc's), rebuilt, and measured:
+
+        inverted   23 15 13 15 24 23 23 24 24 19      (10 runs)
+        restored    7 35 15 19 11                     (5 runs, control)
+
+    No collapse. The spread is comparable and never zero. Submission order is NOT the lever, and the
+    theory is refuted -- the fourth on this task. The probe change is reverted, md5-verified against
+    the checksum taken before the edit.
+
+    WHAT THAT RULES OUT, precisely: the outcome does not depend on which of the two files is handed
+    to the collector first. Combined with #398 (both arrays permuted, same 7702 total) and #397
+    (both registrations inside the single-threaded stage), the remaining candidate is the on-demand
+    recursive resolution DURING the serial walk -- reaching any entity that references libc's atoi
+    pulls the foreign declaration in and registers it, and how often that happens before the shim's
+    own entity is reached depends on the array permutation in a way that submission order does not
+    control.
+
+    That is now the only surviving mechanism, and it is worth stating what would falsify it before
+    anyone tests it: if the on-demand resolution were disabled or forced to complete before the walk
+    began, the counts should go to 0 or to a stable non-zero value. If they still vary, the
+    remaining explanation is inside the foreigns registration itself and this whole ordering line of
+    inquiry is finished.
+
+    Being blunt about the state: five ticks on #335 have produced one landed fix (#392's `context`
+    default parameter), a large amount of ruled-out territory, and no fix for the residual. The
+    ruled-out territory is real -- over-collection, loaded-vs-checked, permuted entities as cause,
+    submission order, plus six probe shapes -- and each was closed by measurement rather than
+    argument. But the cost per closed hypothesis is high, and if the next test does not localise it,
+    the honest move is to write the whole thing up as a known nondeterminism, exclude
+    vendor/libc-shim from parity with that reason recorded, and spend the ticks on #339 or the
+    upstream items instead.
+
+--------------------------------------------------------------------------------------------------
+#400 -- #335 MECHANISM CONFIRMED, and the task is PARKED with the reason recorded. Diagnosis only.
+
+The surviving mechanism from #399 was on-demand recursive resolution during the serial walk. Tested
+it by recording which entity the walk is CURRENTLY ON at each foreigns registration:
+
+    run 1   foreign    atoi   walking=core/sys/posix/stdlib_libc.odin(20:1)
+            nonforeign atoi   walking=vendor/libc-shim/stdlib.odin(81:1)      -> ERROR
+    run 2   same order                                                        -> ERROR
+    run 3   nonforeign atoi   walking=vendor/libc-shim/stdlib.odin(81:1)
+            foreign    atoi   walking=core/sys/posix/stdlib_libc.odin(20:1)   -> silent
+
+The foreign declaration never registers while the walk is on core/c/libc's own entity. It registers
+while the walk is on POSIX's, and posix/stdlib_libc.odin:20 is
+
+    atoi          :: libc.atoi
+
+a direct re-export. Checking that alias resolves libc.atoi on demand and registers the foreign
+declaration as a side effect. So the two competing registrations are driven by two entities that are
+NOT the two declarations: posix's alias and the shim's definition. Whichever of those the walk
+reaches first decides, and #397's indices show their bands OVERLAP in the port (posix 2639..2989,
+shim 2853..3129) while #398's show they do not in C++ (shim 666..680, posix 1221..4026).
+
+That is the whole mechanism, end to end, and every link is measured.
+
+A CORRECTION TO #399's REFUTATION, which was right for a wrong reason. I inverted sorted_files and
+concluded submission order is not the lever. The inversion did not do what I assumed: the sort is
+basename-FIRST, and "stdlib.odin" < "stdlib_libc.odin", so the NORMAL order already submits the
+shim's file before posix's -- inverting moved posix EARLIER, not later. So that probe never tested
+"shim first". The conclusion survives anyway, and for a stronger reason: the normal sort already
+submits shim-first, yet the array still comes out posix-first on some runs. Parallel completion
+overrides submission order, which is exactly why changing submission order cannot fix this.
+
+PARKED, and here is the honest accounting. My own criterion last tick was: if this test does not
+localise the defect, write it up and move on. It DID localise it -- precisely. But localising is not
+fixing, and the fix now visible is "make parallel entity collection produce C++'s band structure",
+which is a structural change to the collection phase with no C++ counterpart to copy (C++ is
+parallel too and its tightness is a property of its map iteration, not of any code that intends it).
+That is a large, speculative change to fix:
+
+    - a diagnostic that only misfires on ALREADY-BROKEN source (a duplicate link name),
+    - in vendor/libc-shim, which is NOT in the 323-package parity set (verified: 0 matches in
+      pkglist.txt), so no gate measures it and nothing regresses by leaving it,
+    - after five ticks, four refuted theories and six dead probe shapes.
+
+So: not fixed, documented instead. vendor/libc-shim stays out of parity, and now the reason is on
+record rather than implicit. If it is ever adopted, this entry is why it should not be.
+
+WHAT WAS ACTUALLY WON on this task: #392's `context` default-parameter fix (real over-rejection,
+probe-verified, gated, still landed), the fgnsig probe as a reachability control, and a large amount
+of precisely ruled-out territory. The ledger of what is NOT the cause is worth as much as the cause
+here, because every one of those hypotheses looked right at the time.
+
+INSTRUMENTATION REMOVED across three files, md5-verified against checksums taken before the first
+edit. No code changed. Gates unchanged: vet 0 lines across the four packages, corpus 197 FULL-MATCH.
+
+--------------------------------------------------------------------------------------------------
+#401 -- #339: fix_advance_to_next_stmt's progress test was INVERTED. One line; base/builtin 15/15.
+
+C++ (parser.cpp, fix_advance_to_next_stmt), on reaching a statement-start token:
+
+    if (t.pos == f->fix_prev_pos && f->fix_count < PARSER_MAX_FIX_COUNT) { f->fix_count++; return; }
+    if (f->fix_prev_pos < t.pos) {          // moved FORWARD past the last fix point
+        f->fix_prev_pos = t.pos;
+        f->fix_count = 0;
+        return;                             // STOP -- let parse_stmt handle this token
+    }
+
+The port asked the opposite question:
+
+    if t.pos.offset < p.fix_prev_pos.offset  // moved BACKWARD
+
+Forward is the normal case: it is precisely what "recovery has reached a new statement boundary"
+means. C++ stops there. The port's condition was false for it, so control fell out of the switch
+into `advance_token(p)` and the token was SKIPPED -- recovery ate the very thing it exists to stop
+on. Every one of `package foreign import if for when return switch defer using break continue
+fallthrough #` was affected.
+
+WHY IT SURFACED HERE AND ALMOST NOWHERE ELSE. Most recovery terminates at a semicolon or EOF, which
+are handled by an earlier arm that returns unconditionally. The inverted test only matters when
+recovery lands on a statement-start token BEFORE reaching a semicolon -- which is what happens in
+the middle of a malformed declaration. base/builtin.odin:349 is exactly that:
+
+    soa_zip :: proc(slices: ...) -> #soa[]Struct ---
+
+`(slices: ...)` is not valid syntax, so both parsers error and recover; C++ lands on `#soa` and
+reports "Unknown tag directive used: 'soa'", the port skipped past it. Minimal repro (probe soarec,
+5 lines) reproduces all four diagnostics.
+
+RESULT: base/builtin is now BYTE-IDENTICAL at 15/15. That closes the residual carried since #388
+(1 -> 14) and #389 (14, with the last line split out as #339). Three ledger entries, one line of
+code, and the line was not in the place any of the three predicted -- #389 guessed the tag dispatch,
+#399's sibling reasoning guessed submission order. The defect was in the shared recovery helper both
+of them call.
+
+A NOTE ON WHAT I DID NOT CHANGE. parse_stmt's fall-through also diverges: the port does
+`tok := advance_token(p)` before reporting "Expected a statement, got '%s'", where C++ reports on the
+already-captured `token` without consuming, and builds its bad statement ending at f->curr_token
+AFTER fix_advance rather than at the offending token. That is a second, real divergence at the same
+site. It is NOT fixed here because the one-line inversion already makes every measured case match,
+and bundling an unverified second change into a verified fix is how a clean result becomes an
+ambiguous one. Filed as its own item rather than smuggled in.
+
+OFFSETS vs POSITIONS: the port compares `.offset` where C++ compares TokenPos (which orders by file
+first). fix_prev_pos is per-Parser and a Parser handles one file, so they cannot disagree; noted in
+the code so the next reader does not "fix" it.
+
+GATES, all after the edit -- a recovery change touches every malformed input, so the full set:
+    vet (ast, parser, checker, tests)  0 lines each
+    corpus                             198 FULL-MATCH / 0 FULL-DIFFER (12 named exclusions)
+    corpus_vet                         4/4
+    parity plain                       323/323 compared, 0 excluded, 0/0/0
+    parity vet                         323/323 compared, 0 excluded, 0/0/0
+    spec                               432 tests, 0 failures
+    root                               146 tests, 0 failures
+
+--------------------------------------------------------------------------------------------------
+#402 -- #340 landed. And I nearly threw it away by trusting a single noisy sweep.
+
+THE CHANGE, mirroring parser.cpp:5668-5670 at parse_stmt's fall-through:
+    tok := advance_token(p)                          ->  tok := p.curr_tok
+    ... error ... fix_advance_to_next_stmt(p)
+    ast.new(ast.Bad_Stmt, tok.pos, end_pos(tok))     ->  ast.new(..., end_pos(p.curr_tok))
+C++ reports on the token WITHOUT consuming it and ends the bad statement wherever recovery stopped.
+The port consumed first, so fix_advance began one token later and the node's range ended at the
+offending token instead of at the recovery point.
+
+WHAT WENT WRONG IN THE MIDDLE, and it is the point of this entry. The first parity sweep after the
+change reported 2 attrib mismatches, with an extra "Redeclaration of 'main'" in
+core/rexcode/isa/x86/tools. I read that as a regression caused by the change and reverted.
+
+Then the arithmetic did not add up. That package has FOUR files, all `package main`, each with its
+own `main` -- and ZERO syntax errors. parse_stmt's fall-through only runs on a token parse_stmt does
+not recognise, so on a package with no syntax errors the change is INERT. A change that cannot
+execute cannot regress the output.
+
+So I re-applied it and measured instead of arguing:
+    parity, change applied, run 1   323/323  0/0/0
+    parity, change applied, run 2   323/323  0/0/0
+    blamed-file set on x86/tools, 8 runs     identical every time
+It does not reproduce. The 2 attrib mismatches were noise, and the revert was wrong.
+
+Worth being precise about the near-miss: I had already measured x86/tools 10 times and seen a stable
+count of 3, which I took as "not a flake, therefore my change did it". That inference was bad twice
+over. The mismatch was an ATTRIB mismatch -- same count, different attribution -- so counting
+occurrences could not detect it; and "stable now" says nothing about whether one earlier sweep was
+perturbed. The right test was the only one that isolates the variable: re-apply and re-run. It cost
+one rebuild.
+
+This cuts the opposite way from the running theme. The last several entries were about not believing
+a green result too readily (#392's missing oracle, #398's crashed binary). This one is about not
+believing a RED result too readily. A single sweep is a sample either way, and a package whose
+diagnostics depend on entity order (#335, #397) is exactly where a one-off reading should be
+re-measured before it is acted on. The asymmetry to keep: a false green ships a defect, a false red
+throws away a fix -- and the second is easier to miss because reverting feels like the safe move.
+
+GATES, all with the change applied:
+    vet (ast, parser, checker, tests)  0 lines each
+    corpus                             198 FULL-MATCH / 0 FULL-DIFFER
+    corpus_vet                         4/4
+    parity plain                       323/323 compared, 0 excluded, 0/0/0  (2 runs)
+    parity vet                         323/323 compared, 0 excluded, 0/0/0
+    spec                               432 tests, 0 failures
+    root                               146 tests, 0 failures
+base/builtin remains byte-identical at 15/15 and probe soarec remains FULL-MATCH, so #401's result
+is unaffected.
+
+An earlier sweep this tick also excluded core/compress on a TIMEOUT. Re-run alone: 3/3 clean, 0
+excluded. Same load-dependent shape as #301; recorded rather than assumed.
+
+--------------------------------------------------------------------------------------------------
+#403 -- quiet tick: structural sweep with the non-routine instruments. No drift; nothing changed.
+
+Every port-side task is closed and the gate set is green, so this tick ran the instruments that are
+NOT part of the routine gates, to check for drift rather than to find new work.
+
+    invented.py   506 candidates   (baseline 538 at its first run, #progress note above)
+    deadproc.py   155 names        (baseline 165 when the instrument was built)
+    taskrefs.sh   19 references
+
+Both counts moved DOWN, which is what the intervening deletions and faithful ports should do. Read
+them the way their own headers say: invented.py's output is candidates, not verdicts (much of it is
+legitimately emitted from parser.cpp rather than the checker), and deadproc.py's signal is a
+CONTIGUOUS RUN of dead procs -- an invented block -- not scattered singletons. What is there now is
+scattered: timings_*, type_info_*, validate_checker_state, verify_queues_empty. Those are library
+API and lifecycle diagnostics, exactly the shape the baseline note says to leave alone.
+
+TARGETED CHECK OF THIS SESSION'S OWN WORK. invented.py is the sharpest static signal that a message
+was written rather than ported, so every diagnostic string added across #390/#401/#402 was grepped
+against its output:
+
+    "C-like preprocessor"        0        "If a type was wanted"      0
+    "Did you mean 'import'"      0        "does not support macros"   0
+    "Unknown tag directive"      0        "Expected a statement, got" 0
+
+None flagged -- each has a counterpart in src/, which is the point of quoting C++ verbatim.
+
+Also confirmed the upstream items are filed rather than merely remembered: UPSTREAM-119 (the
+`intrinicss.byte_swap` typo still live in base/runtime/random_generator_chacha8_ref.odin:26),
+UPSTREAM-161 and UPSTREAM-285 all have write-ups, and 11 retired ones sit in upstream-merged/.
+#119 is deliberately NOT fixed here: it is library source, not checker source, and the convention on
+this branch is that upstream defects get a write-up, not a local edit.
+
+NOTHING CHANGED THIS TICK. No code, no tools, no probes. Recorded so the next tick does not repeat
+the sweep, and so the counts have a dated anchor if they ever climb.
+
+--------------------------------------------------------------------------------------------------
+#404 -- #335 IS FIXED. The port sorted a collection C++ does not sort, and it scattered packages.
+
+THE DIVERGENCE. checker.cpp:6052 applies sort_file_by_name to `pkg->files` -- the PER-PACKAGE array,
+inside check_create_file_scopes. C++'s collection pass (checker.cpp:6104) then iterates the GLOBAL
+`c->info.files` map UNSORTED. The port did the per-package sort correctly in ~6 places, but
+check_collect.odin:430 also applied that same basename sort to the GLOBAL file set before submitting
+collection tasks -- a sort C++ does not have, on a collection C++ does not sort.
+
+WHY IT MATTERED. The key is basename-FIRST. vendor/libc-shim's files are stdio.odin, stdlib.odin,
+math.odin -- names shared with dozens of core packages -- so sorting the global set by basename
+SCATTERS every package's files through the submission order instead of keeping them together. That
+is what let core/sys/posix's entities interleave with libc-shim's, which is the race #395-#400
+documented: posix's `atoi :: libc.atoi` re-export resolves libc's FOREIGN atoi on demand and
+registers it first, and the non-foreign site's unconditional `if (found)` then fires.
+
+THE FIX. Iterate packages, then each package's basename-sorted files. That restores C++'s grouping
+while keeping the determinism #50 requires (an Odin map cannot be walked raw without reintroducing
+ASLR-dependent output).
+
+    vendor/libc-shim "Non unique linking name", 10 runs:   0 0 0 0 0 0 0 0 0 0
+    (was 1..32 across 10 runs -- see #397)
+
+libc-shim now differs from the oracle by exactly ONE line, and it is not this defect: a caret WIDTH
+on the `#panic` continuation (`^~~~~^` vs the oracle's full-width run). Deterministic, unrelated,
+and filed separately.
+
+I PREDICTED THIS WOULD NOT WORK. Before running it I wrote: "I do not expect it to fix #335, because
+core/sys/posix still sorts before vendor/libc-shim, so posix's alias would still be reached first."
+That reasoning was about SORT ORDER between the two packages, and it missed the actual mechanism --
+grouping changes when a package's entities land as a block, not merely which package sorts first.
+Recording the wrong prediction because the value here is in the method, not the guess: the
+experiment was cheap and falsifiable, so running it cost less than continuing to argue about it.
+
+AND MY EARLIER REFUTATION WAS TOO BROAD. #399's addendum concluded "submission order is NOT the
+lever" from one manipulation -- inverting sorted_files. That inversion preserved the basename-first
+key, so it never tested grouping; it only tested direction. The correct claim was the narrower one:
+REVERSING that particular order is not the lever. Stating a refutation more broadly than the
+experiment supports is how a live lead gets closed early, and this one stayed closed for four ticks.
+
+GATES, all with the change applied:
+    vet (ast, parser, checker, tests)  0 lines each
+    corpus                             198 FULL-MATCH / 0 FULL-DIFFER
+    corpus_vet                         4/4
+    parity plain                       6 sweeps: five 323/323 0/0/0, one with 1 ATTRIB mismatch
+    parity vet                         323/323 compared, 0 excluded, 0/0/0
+    spec                               432 tests, 0 failures
+    root                               146 tests, 0 failures
+
+THE ONE ATTRIB MISMATCH, stated as an open item rather than waved through.
+core/rexcode/isa/mos65816/tools, "same TEXT, different site" -- which of its two `main`-declaring
+files is blamed for the redeclaration. In isolation the grouped binary is stable 8/8 on that
+package; it only appears under full-sweep load. This is the same class seen on x86/tools with the
+PRE-change binary in #402, so it is very likely pre-existing and not introduced here -- but that is
+an inference from a different package, not a measurement.
+
+NOT DONE, and it is the honest gap: a baseline A/B, i.e. rebuilding the pre-change binary and
+running the same six sweeps to confirm it produces the same ~1-in-6 attrib flake. Until that is run,
+"pre-existing" is the likely reading and not an established one.
+
+    ADDENDUM to #404 -- the baseline A/B was run. It is NOT decisive, and here is why.
+
+        #404 build   1 ATTRIB mismatch in 6 plain-parity sweeps
+        baseline     0 ATTRIB mismatches in 10 sweeps (pre-#404 binary, built by reverting
+                     check_collect.odin, building to a separate path, then restoring the tree --
+                     md5-verified both ways; sanity-checked that it still shows the libc-shim
+                     race at 34/8/15, so it really is the pre-change build)
+        targeted     12 CONCURRENT runs of each binary on core/rexcode/isa/mos65816/tools:
+                     both 12/12 identical. The flake needs the full-sweep condition, not merely
+                     load on that package.
+
+    My pre-stated branches were "baseline also ~1-in-6 => pre-existing" and "baseline 0-in-6 =>
+    #404 introduced it". The data lands nominally in the second, but that reading would be
+    overconfident: at a true rate of 1/6, P(0 in 10) is about 16%, so 1-in-6 versus 0-in-10 does
+    not separate "introduced" from "pre-existing at the same rate". Distinguishing them properly
+    needs ~20 sweeps per arm, roughly two and a half hours. Recording the numbers instead of
+    picking the branch they nominally point at.
+
+    DISPOSITION: #404 stays. The reasoning, weighed explicitly rather than by preference --
+      - it fixes a measured 32x-range nondeterminism (#335: 1..32 -> 0 across ten runs) and
+        removes a real faithfulness divergence (a sort C++ does not have, on a collection C++
+        does not sort);
+      - every other gate is clean, including vet parity 323/323 0/0/0, corpus 198/198, spec
+        432/0 and root 146/0;
+      - the one observed event is an ATTRIB mismatch -- same diagnostic TEXT, different blamed
+        file -- on a package whose four files each declare `main`. That is attribution on
+        pathological input, not a wrong or missing diagnostic;
+      - and that class is inherently order-sensitive in BOTH compilers (#197 showed the ORACLE
+        itself flipping which file it blames, 5/6 vs 1/6, on dynlib/example).
+    Trading a rare attribution difference on a duplicate-`main` package for the elimination of a
+    32x nondeterminism is the right side of that trade. If it were a count or text mismatch the
+    answer would be different.
+
+    #341 stays OPEN with the numbers above, so this is a known unfinished measurement rather than
+    a silently accepted one.
+
+    #405 -- a near-miss worth recording, because the failure mode was invisible in the output.
+
+    Extending #404's arm, I ran parity.sh six times with NO ARGUMENTS. It takes <PORT_BIN>
+    <PKGLIST>. All six aborted in under 20ms. My loop extracted `attrib=$(grep -c ATTRIB log)`,
+    which on an empty log is 0 -- so the run printed six clean zeros:
+
+        run1 attrib=0 rc=1     <- six sweeps that never checked a single package,
+        ...                       reported in exactly the shape of a perfect result
+
+    Had I taken that at face value the ledger would now read "#404 arm 1-in-12", halving an
+    apparent defect rate using six runs that never executed. This is the #392 oracle-missing
+    failure in a new place: absence of output is indistinguishable from clean output whenever the
+    metric is a count of bad things. It is the same asymmetry as always -- a false green ships.
+
+    Two things saved it, and only one was luck:
+      - the abort GUARD added in #392 printed PARITY-ABORTED into the log, so the evidence was
+        there to find. Without it the logs would have been silently empty.
+      - I checked. `attrib=0` on all six is the shape of a result too good to accept, and the
+        standing rule is verify the instrument RAN. Six identical zeros where the arm had
+        previously shown 1-in-6 should read as suspicious, not as success.
+
+    The `rc=$?` in that loop was also wrong -- it captured grep's status, not parity.sh's, because
+    the command substitution ran first. grep -c exits 1 on a zero count, so every clean run
+    printed rc=1. I flagged that before reading results rather than after.
+
+    Loop rewritten to ASSERT validity rather than infer it: it requires a ^PARITY-DONE line and
+    prints "run$i INVALID" otherwise. A count of zero is now only believable next to proof the
+    sweep happened.
+
+    I then had to ask whether the BASELINE arm was fiction the same way -- if so #341 had no data
+    at all. It is not, and the proof is timing rather than memory: the six bogus logs were written
+    within 0.02s of EACH OTHER (14:41:53.185 -> .201), whereas base404.bin at 14:19:41 is followed
+    by a 22-minute gap before the next artifact -- six real sweeps at ~2min plus the batch that hit
+    the 10-minute timeout. An aborted run cannot consume 22 minutes. Baseline 0-in-10 stands.
+
+    #406 -- #341 was CONFOUNDED from the start, and I only saw it after the arms were complete.
+
+    Final A/B numbers, all sweeps validity-asserted (PARITY-DONE compared=323):
+        #404 arm    2 ATTRIB events / 12 sweeps
+        baseline    0 ATTRIB events / 10 sweeps
+    Fisher exact p ~= 0.48. Not separable. Reaching power needed ~20/arm, another ~40min per arm.
+
+    Before spending that, I looked at what the events actually were. The second one was
+    core/rexcode/isa/mos6502/tools -- a DIFFERENT package from the first (mos65816/tools), same
+    family. Both are two-file packages where BOTH files declare `main`:
+        dump_verify_input.odin      main :: ...
+        gen_mnemonic_builders.odin  main :: ...
+    so the diagnostic is "Redeclaration of 'main' in this scope", and WHICH file is blamed versus
+    which is named in the `at ...` continuation is decided purely by collection order.
+
+    Then parity.sh:88 -- which I wrote -- settled it:
+
+        timeout 180 ./odin check "$p" -no-entry-point > "$TMP/o.raw" 2>&1; orc=$?
+        timeout 180 "$PORT" "$p"                      > "$TMP/p.raw" 2>&1; prc=$?
+
+    The ORACLE IS RE-RUN FOR EVERY PACKAGE ON EVERY SWEEP. It is not a cached reference. So an
+    ATTRIB mismatch means only "the two disagreed on THIS run" -- it does not say which side moved.
+    My entire A/B framing ("did #404 introduce the flake?") assumed a fixed reference and a varying
+    port. That assumption was never true, and no number of additional sweeps would have fixed it,
+    because more samples cannot resolve a confound. I would have spent 80 minutes making a
+    contaminated comparison more precise.
+
+    Both binaries are stable 12/12 when run ALONE on the package (oracle -> gen_mnemonic_builders
+    every time; port likewise, measured earlier). So whatever moves, moves only under full-sweep
+    load -- which is exactly the condition under which the ORACLE is also being re-run 323 times.
+
+    CONTROL now running, falsifier stated before measuring: parity.sh takes the port binary as an
+    argument, so I pass a wrapper that runs THE ORACLE with the oracle-side arguments. Any mismatch
+    it reports is oracle-vs-oracle.
+        >=1 ATTRIB in 6 sweeps  => the instrument is nondeterministic on this class; the A/B was
+                                   measuring oracle noise; #341 closes as IRREDUCIBLE (#197 family)
+                                   and #404 is exonerated.
+        0 ATTRIB in 6 sweeps    => oracle stable under load, so the port is the moving side and
+                                   #404 is implicated. WEAK either way, since the port arm itself
+                                   only fires ~17% of the time -- 0-in-6 is unsurprising even if
+                                   the port is guilty.
+    Note the asymmetry: a POSITIVE result here is decisive, a negative one is not. That is the
+    right shape for a control.
+
+    #407 -- #341 RESOLVED as IRREDUCIBLE, and #404 EXONERATED. The control fired on run 1.
+
+    Ran parity.sh with a wrapper in the PORT slot that invokes THE ORACLE with the oracle-side
+    arguments, so every comparison is oracle-vs-oracle. Result (4 sweeps so far):
+
+        run1  ATTRIB core/rexcode/isa/rsp/tools   <-- the oracle DISAGREEING WITH ITSELF
+        run2-4  clean
+
+    That is the pre-stated decisive branch. rsp/tools is a THIRD member of the family (after
+    mos65816 and mos6502), all of them two-file packages where BOTH files declare `main`. So:
+
+      - the ATTRIB flake is INSTRUMENT nondeterminism, not a port defect;
+      - #341's entire A/B (#404 2/12 vs baseline 0/10) was measuring oracle noise, which is why
+        it would not separate -- there was nothing there to separate;
+      - #404 is EXONERATED. Its disposition never depended on this, but now it is not merely
+        "kept on judgement", it is cleared on evidence.
+      - #341 CLOSES as IRREDUCIBLE, same family as #197 (oracle flipped 5/6 vs 1/6 on
+        dynlib/example) and #201/#173/#185.
+
+    The lesson is #406's, sharpened: I ran 22 sweeps across two arms before asking whether the
+    REFERENCE was stable. The control cost 2 minutes and was decisive on the first sweep. Ask
+    whether the instrument is a function of its input BEFORE running the experiment, not after.
+
+    #408 -- cross-check against the rule_engine agent's findings pile (/home/kalsprite/dev/
+    rule_engine/findings). Five findings, not four. I verified each against MY binaries rather
+    than taking them on report. Net: NONE expose a port parity gap, and one is a direct
+    corroboration of #406/#407.
+
+      #4 nondeterministic shift `X :: 5 << 3j` -- REAL, REPRODUCES ON MY ORACLE. 20 runs of
+         identical input: 01110000110011010110, i.e. 10 accept / 10 reject. My port is 20/20
+         deterministic (always accepts). This is an INDEPENDENT second mechanism proving the
+         oracle is not a function of its input -- theirs in exact_value constant handling, mine
+         in diagnostic attribution. Two unrelated mechanisms, same conclusion.
+         NOT currently contaminating my gates: the trigger (shift by a complex/quaternion amount)
+         appears in NONE of the 323 parity packages -- grepped, zero hits -- and no corpus probe
+         uses it. But it is a landmine: any future probe with that shape would flake forever and
+         read as a port bug. Do not add one until upstream fixes it. Note also that "which verdict
+         is correct" is undecidable as a parity target while C++ coin-flips.
+
+      #3 `X :: 3j == 3j` panic -- REAL, reproduces: rc=132, src/exact_value.cpp(1086), and
+         ZERO lines matching "Error:". Their warning that a grep-for-Error wrapper reads the crash
+         as clean is correct in general -- but MY instruments are already immune, by #275's design:
+         parity.sh partitions on SIGNAL (rc>=128 -> EXCLUDED) and cmpfull.py returns
+         ORACLE-CRASHED on `orc not in (0,1)` / PORT-CRASHED on `prc < 0` (Python reports signal
+         death as negative). Confirmed empirically too: every PARITY-DONE reads excluded=0, and
+         excluded is exactly where an oracle crash would land. The port SURVIVES this input.
+
+      #2 `1e309` rejected as "Invalid integer literal" -- REAL in C++, and MY PORT ALREADY MATCHES
+         IT, byte-for-byte, including the accept of `1.0e309`. Boundary confirmed at exp>308,
+         consistent with #222.
+
+      #1 (constant bound with no type) and #5 (annotation flips shift acceptance) -- the shift
+         family; port agrees with the oracle on the cases I built.
+
+    A NEAR-MISS I have to record, because I nearly filed a false finding against my own port. My
+    first pass reported "#2 DIVERGES -- oracle rejects 1e309, port accepts silently". It did not.
+    The port takes a DIRECTORY; I passed a single .odin file, so it loaded files=0 and exited 0
+    VACUOUSLY. The tell was `files=0` in its own header line, and the positive control (a file
+    with an obvious undeclared name, also "clean" under the same invocation) proved it. Re-run
+    against a directory: port emits "Syntax Error: Invalid integer literal", identical to C++.
+    Same failure shape as #405 -- a run that never happened reading as a passing result -- caught
+    by the same habit of checking that the instrument actually ran.
+
+    #409 -- CORRECTION TO #404: #335 IS NOT FIXED. I closed it on an underpowered measurement.
+
+    #404 claimed vendor/libc-shim's "Non unique linking name" race went from 1..32 across ten runs
+    to 0 across ten runs. That measurement was real but was taken SEQUENTIALLY, and sequential runs
+    cannot expose this race. Re-measured today with the same #404 binary (tri.bin, files=239):
+
+        30 sequential runs          0 every time
+         8 CONCURRENT runs          0 0 14 0 32 0 24 0   <-- 3/8 fire, counts 14/32/24
+
+    14/32/24 sit squarely inside #335's original 1..32 band. The oracle reports ZERO "Non unique
+    linking name" on this package (its only diagnostic is the STB #panic), so every one of these is
+    a spurious port error -- up to 32 of them.
+
+    So the honest statement is: #404 removed the race from SEQUENTIAL observation and did not
+    eliminate it. Grouping collection by package (which is C++-faithful and independently correct)
+    narrowed the window; it did not close it. #404 stays -- it is right on its own merits and the
+    #407 control cleared it of the ATTRIB flake -- but it must stop being credited with fixing #335.
+
+    How I got it wrong, precisely: not a broken instrument this time -- the instrument ran and
+    reported truthfully. I chose the wrong CONDITION. I verified a concurrency bug was gone using
+    runs that had no concurrency. Ten clean sequential runs of a race that only fires under
+    parallel load is a vacuous test, and it read as a strong result because N=10 sounds like
+    evidence. The rule this adds to "verify the instrument ran": also verify the instrument is
+    RUN IN THE CONDITION THAT PRODUCES THE DEFECT. A race needs contention; a load-dependent flake
+    needs load. #341's own targeted test made exactly this point in the other direction (12
+    concurrent runs on rexcode tools were stable, so THAT flake needed full-sweep conditions) --
+    I had the concept in hand and still did not apply it here.
+
+    Also note WHY no gate caught the regression in my claim: vendor/libc-shim is not in the
+    323-package parity set, exactly as #335 recorded. The one package that would measure this is
+    the one nothing measures.
+
+    #410 -- probed the maintainer's report that verdicts can change with STRUCT OR ENUM ORDER.
+    Result: NOT REPRODUCED in 174 permutations across 12 case families. Negative, and narrow.
+
+    Odin is order-independent at file scope, so "permuting declarations must not change the
+    verdict" is a DECIDABLE property -- which makes this mechanically testable rather than a
+    matter of opinion. Two instruments, both kept:
+        .claude/tools/ordprobe.py         permutes TOP-LEVEL declarations
+        .claude/tools/ordprobe_fields.py  permutes FIELDS inside a struct / MEMBERS inside an
+                                          enum, union, bit_field  (the maintainer's actual claim)
+
+    Verdict = (rc, sorted multiset of normalised diagnostics), with file(line:col) prefixes
+    stripped -- permuting declarations legitimately moves line numbers, and comparing raw text
+    would have made every case falsely "order-dependent".
+
+    CONFOUND CONTROL, built in from the start rather than bolted on: C++ is nondeterministic
+    run-to-run (#408). So a difference between two permutations is NOT evidence of
+    order-dependence. Each permutation runs REPS=3 times; a permutation whose OWN verdict varies
+    is marked UNSTABLE, excluded from the order judgement, and reported as nondeterminism instead.
+    Without this the two defect classes are indistinguishable and every finding is worthless.
+
+    BOTH CONTROLS VERIFIED, because a negative result is only worth as much as the harness's
+    ability to produce a positive one:
+      - error control: a planted `Undeclared name` must appear in every permutation. The harness
+        ABORTS if it does not -- if nothing is being compiled, every "stable" line is vacuous.
+        This is the #405/#408 failure mode (a run that never happened reading as a pass), and it
+        nearly bit again: my first version printed "stable" for the control without showing its
+        verdict, so I could not tell whether it had actually errored. Now asserted, not reported.
+      - nondeterminism control: `X :: 5 << 3j` (known ~50/50) must be flagged UNSTABLE. Verified
+        detected at REPS=3 and REPS=8. Without this, "nondeterminism=no" would be unverified.
+
+    Cases covered: mutually-referencing structs, enum+bit_set+len(), constant chains, size_of
+    feeding #assert, polymorphic where-clauses, union variants, struct fields, `using` embedding,
+    enum members, bit_field members, and five UNTYPED-constant families (mixed int/float, shifts,
+    complex, rune/string, enum backing type) -- untyped being where the known gremlins live.
+    `untyped_cplx` re-checked at REPS=8: genuinely stable.
+
+    WHAT THIS DOES AND DOES NOT SHOW. It does not refute the maintainer -- the shapes are
+    hand-picked and small, the bugs he refers to may predate this build or need constructs I did
+    not write. Absence of evidence over 174 hand-chosen permutations is weak evidence of absence.
+    What it does give is a working, control-verified detector. The productive next step is to
+    drive it from a GENERATED universe rather than my hand-written cases -- which is precisely
+    what the rule_engine agent's expansion already does, so the two should be joined rather than
+    me writing case #13 by hand.
+
+    #411 -- #335 diagnosis SHARPENED, and it is not the bug I assumed. Plus one real divergence
+    found next door, deliberately NOT fixed.
+
+    (a) THE UNIQUENESS BLOCK IS FAITHFUL. check_decl.odin:1551-1568 vs check_decl.cpp:1651-1673
+    are line-for-line: same mutex, same foreigns map, same found/main/insert three-way branch.
+    Notably NEITHER has a `found != e` idempotence guard, so my working assumption -- that the
+    port double-registers one entity and then finds itself -- is WRONG. Do not "fix" it by adding
+    a guard C++ does not have; that would be an invention (#266 family).
+
+    (b) THE COLLIDING ENTITIES ARE GENUINELY DIFFERENT. The diagnostic is
+        vendor/libc-shim/math.odin(8:10)  Non unique linking name for procedure 'sqrtf'
+            other at core/c/libc/math.odin(91:28)
+    Two DISTINCT declarations, both foreign, both linking as 'sqrtf'. So the port is not confused
+    about identity -- it is correct that these two collide. The question is why C++ reports ZERO.
+
+    (c) ANSWER: because C++ never registers core/c/libc's entity while checking libc-shim. The
+    port does, through the on-demand path #400 identified -- posix/stdlib_libc.odin re-exports
+    `atoi :: libc.atoi`, so resolving POSIX's alias drags libc's FOREIGN decls into `foreigns`.
+    So this is NOT a missing lock and NOT a double-check. It is OVER-EAGER on-demand resolution
+    registering foreign declarations C++ never reaches at all. That reframes it into the #52
+    family (on-demand resolution not matching C++'s reachability), not the #141 family (missing
+    mutex).
+    It also explains the timing sensitivity cleanly: the collision depends on WHETHER the
+    on-demand resolution of libc's decl lands before or after the shim's own registration -- so
+    it fires only when the interleaving allows, i.e. under concurrency (#409's 3/8), and never
+    sequentially.
+
+    (d) SEPARATE REAL DIVERGENCE, FOUND WHILE READING, NOT FIXED. C++ guards the foreign-check
+    call on the objc flag and the port does not:
+        C++   } else if (!e->Procedure.is_objc_impl_or_import) { check_foreign_procedure(ctx,e,d); }
+        port  } else { check_foreign_procedure(ctx, e, d) }                 (check_decl.odin:1543)
+    The port HAS the field and already uses it correctly one arm up at check_decl.odin:1495, so
+    this is an omission at one site rather than a missing feature. LEAVING IT ALONE: objc is
+    explicitly someone else's work. Filed here so it is not lost, not silently absorbed.
+
+    NEXT STEP for #335 is therefore a reachability question, not a locking one: determine which
+    entities C++ actually registers in `foreigns` for this package set and why libc's are absent.
+    Do NOT reach for a mutex or an idempotence guard -- (a) rules both out.
+
+    #412 -- #335 refined further. BOTH foreigns sites verified faithful; the hazard is SHARED with
+    C++ by construction, so the divergence can only be reachability.
+
+    There are TWO writers to info.foreigns, not one, and they have DIFFERENT rules:
+      1. check_foreign_procedure (check_decl_helpers.odin:2328 / check_decl.cpp:1222) -- the
+         FOREIGN path. Guarded `if has_found && e != found`, compares signatures, and emits
+         "Redeclaration of foreign procedure ... with different type signatures".
+      2. the non-foreign link_name/export path (check_decl.odin:1551 / check_decl.cpp:1651) --
+         UNGUARDED, emits "Non unique linking name for procedure".
+    I checked the port against C++ line by line at both. Both are faithful, including the
+    `e != found` guard at site 1 and its ABSENCE at site 2. So there is no local logic defect,
+    and "add an idempotence guard" is definitively off the table (it would diverge from C++).
+
+    The colliding pair, now fully identified:
+        vendor/libc-shim/math.odin:7-8   @(require, linkage="strong", link_name="sqrtf")
+                                         sqrtf :: proc "c" (v: f32) -> f32 { ... }   NON-FOREIGN
+        core/c/libc/math.odin:91         @(link_name="sqrtf") libc_sqrtf :: proc(...) ---  FOREIGN
+    Both resolve to link name "sqrtf" but travel DIFFERENT paths into the SAME map. Whichever is
+    checked first wins: shim-first is silent (libc's foreign path then hits `e != found` and the
+    signatures are similar enough), libc-first errors (the shim's unguarded path finds it).
+    That is precisely an ordering race, and it is present in C++'s source too -- the structure is
+    identical. So C++ is not protected by better logic here.
+
+    Therefore C++ must simply never check core/c/libc's foreign declarations during this run.
+    libc-shim does NOT import core/c/libc directly (its imports are base:*, core:bytes/c/io/math/
+    mem/os/slice/sort/strconv/strings/thread/time, odin_env, vendor:stb/sprintf); libc is reached
+    only transitively via core:os -> core/sys/posix (#393/#394). Being in the import closure is not
+    the same as having your declarations checked -- and that gap is the whole defect. The port
+    checks them (via the #400 re-export on-demand path); C++ does not.
+
+    So the fix belongs in WHICH ENTITIES ARE CHECKED, not in the foreigns bookkeeping. Next
+    measurement, and it should come before any edit: instrument both compilers to dump what they
+    insert into `foreigns` for this package, and diff the SETS. Do not touch check_decl.odin or
+    check_decl_helpers.odin until that diff exists -- both are verified faithful and editing them
+    would be inventing.
+
+    #413 -- CORRECTING MY OWN #412. I wrote that the divergence "can only be reachability".
+    Too strong, and a simpler hypothesis fits the evidence better. Both now stand as live.
+
+    The two decls are SIGNATURE-COMPATIBLE:
+        vendor/libc-shim  sqrtf      :: proc "c" (v: f32) -> f32     (non-foreign, link_name)
+        core/c/libc       libc_sqrtf :: proc(x: float) -> float ---  (foreign; float = c.float = f32)
+    That is decisive for the ORDER hypothesis, because the two insertion paths are ASYMMETRIC:
+      - shim first: libc's FOREIGN path then finds it, `e != found` holds, are_signatures_similar_
+        enough() passes -> NOTHING IS EMITTED.
+      - libc first: the shim's NON-FOREIGN path finds it and is UNGUARDED and does no signature
+        comparison at all -> "Non unique linking name".
+    So the order alone decides whether anything is reported, with no reachability difference
+    required. C++ needs only a deterministic order that happens to put the shim first.
+
+    This explains the measurements BETTER than reachability does. Reachability is a static
+    property -- if the port simply checks entities C++ never checks, it should fire on EVERY run.
+    It does not: 30/30 sequential runs are silent and only 3/8 concurrent runs fire (#409). A
+    static over-collection cannot produce that pattern; an order race can, and it also explains
+    why #404 (which regrouped collection by package) moved the RATE without eliminating the bug.
+
+    So #412's conclusion was drawn too fast from "the local logic is faithful". Faithful local
+    logic plus a different ARRIVAL ORDER is sufficient to produce this divergence -- I did not need
+    to reach for a reachability difference, and I asserted one without testing it. Both hypotheses
+    are now open:
+        (H1) ORDER -- the port checks these two decls in a nondeterministic order; C++'s is
+             deterministic. Favoured by the 30/30-vs-3/8 evidence.
+        (H2) REACHABILITY -- the port checks libc decls C++ never reaches. Not excluded, but it
+             alone cannot explain the sequential silence.
+    DISCRIMINATING TEST, to run before any edit: instrument the PORT to log every insert into
+    info.foreigns with the entity's file and a timestamp/sequence number, then run sequentially and
+    concurrently. H1 predicts the SAME SET both times with the ORDER of the two "sqrtf" inserts
+    flipping exactly on the runs that error. H2 predicts a set DIFFERENCE. The set is the same
+    object either way, so one instrumented run answers both.
+    Still do NOT edit check_decl.odin / check_decl_helpers.odin -- both remain verified faithful,
+    and under H1 neither is the defect site.
+
+    #414 -- #335 ROOT CAUSE ESTABLISHED BY DIRECT MEASUREMENT. H1 (order) CONFIRMED, H2
+    (reachability) REFUTED as the explanation of the variance. Decisive on three runs.
+
+    Instrumented the PORT to log every touch of info.foreigns for the watched names (temporary
+    file zz_instr_foreigns.odin plus two one-line call sites; both source files md5-backed up
+    BEFORE editing, and the revert md5-verified afterwards -- see the end of this entry).
+
+        run1  nonunique=32   FOREIGN    insert sqrtf  core/c/libc/math.odin:91
+                             NONFOREIGN found  sqrtf  vendor/libc-shim/math.odin:8
+        run2  nonunique=0    NONFOREIGN insert sqrtf  vendor/libc-shim/math.odin:8
+                             FOREIGN    found  sqrtf  core/c/libc/math.odin:91
+        run3  nonunique=0    (identical to run2)
+
+    The two orders map EXACTLY onto the two outcomes, with no other difference:
+      libc first  -> the shim's NON-FOREIGN path finds it. That path is UNGUARDED and does no
+                     signature comparison, so it errors. 32 of them.
+      shim first  -> libc's FOREIGN path finds it, `e != found` holds, are_signatures_similar_
+                     enough() passes (f32->f32 vs c.float->c.float), so it says NOTHING.
+    That is #413's H1, confirmed directly rather than inferred.
+
+    AND THE EVENT COUNT IS IDENTICAL IN ALL THREE RUNS (12). Same SET, different ORDER. That
+    refutes H2 as the cause of the variance: libc's declarations ARE checked on the silent runs
+    too, so the port is not sometimes-reaching-more. Had H2 been the mechanism the silent runs
+    would have shown FEWER events.
+
+    STATED PRECISELY, so this is not over-claimed like #412 was: this experiment establishes that
+    THE PORT'S OWN VARIANCE is entirely an ordering effect. It does NOT establish anything about
+    C++'s entity set, because I instrumented only the port. C++ may additionally never check
+    core/c/libc here -- that remains untested and is a SEPARATE question. What can be said about
+    C++ from the outside is narrower: since the collision is unavoidable whenever libc lands first,
+    and C++ never reports it, C++ must either always order the shim first or never register libc's
+    entity at all. Both remain open; the port's bug does not depend on which.
+
+    THE DEFECT IS THEREFORE NONDETERMINISTIC ORDERING of global-entity checking, not the foreigns
+    bookkeeping (both sites verified faithful in #412) and not a missing mutex (the map is
+    correctly locked -- the interleaving is at a coarser grain than the critical section).
+    This is squarely the #52 family. It also explains #404's effect precisely: regrouping
+    collection by package shifted WHICH order is typical without making it deterministic, which is
+    why the rate moved (1..32 every run -> ~3/8 concurrent) while the bug survived.
+
+    Note the instrumented build reproduced the failing order SEQUENTIALLY (run1) -- the added
+    logging perturbs timing enough to flip it. Useful accident: it handed me both orders in three
+    runs instead of needing concurrency. It also confirms how fine the margin is.
+
+    INSTRUMENTATION FULLY REVERTED AND VERIFIED: `md5sum -c` OK on both files against the
+    pre-edit checksums, zz_instr_foreigns.odin deleted, and a grep for `instr_foreign_event` /
+    `INSTR #413` across core/odin/checker/ returns nothing. Recording the verification because
+    #405's lesson was that a backup taken or checked carelessly silently preserves the probe.
+
+    #415 -- NEW GATE: modelcmp.sh. Closes a hole I only noticed while answering an architecture
+    question: PARITY.SH PROVES THE TWO CHECKERS AGREE ABOUT WHAT IS WRONG, NOT THAT THEY BUILD THE
+    SAME TYPES. A checker can be byte-identical on every diagnostic and still hand a backend a
+    different type graph. Nothing in the gate set measured that. doccmp.sh is the nearest thing and
+    only covers doc-visible state over 60 packages.
+    This is not hypothetical: #110 (dynamic arrays/maps hardcoded to 24 and 8), #112 (offset_of had
+    only the aligned arm, so raw unions laid out sequentially and #packed was ignored) and #113
+    (type_align_of ignored every struct alignment directive) were ALL defects of exactly this class.
+    Every one was found by accident. None would be caught by a diagnostic-only gate today.
+
+    METHOD. A checker never runs code, so layout values cannot be printed directly. But a type
+    error PRINTS THE TYPE, so `p: [size_of(T)]u8` assigned to an int yields
+        Cannot assign value 'p' of type '[40]u8' to 'int'
+    and the array length IS the value. Same trick reads align_of and offset_of. One probe file per
+    chunk, one run per compiler, diff the extracted numbers.
+
+    FIRST RESULT: probes=56 oracle_values=56 port_values=56 mismatches=0.
+    56 layout values across strings/mem/bytes/time/big/sync/thread/queue/slice/ast/tokenizer plus
+    the builtin aggregates ([dynamic]int, map, slice, string, any, complex64, quaternion256) --
+    sizes, alignments and ten field offsets. The port's type model agrees with the oracle
+    everywhere measured. That is real evidence for model equivalence, where before there was none.
+
+    TWO INSTRUMENT DEFECTS FOUND WHILE BUILDING IT, BOTH OF WHICH REPORTED A FALSE CLEAN:
+      1. The diagnostic names the ARRAY (p_N), not the int (f_N). My sed anchored on f_, so nothing
+         substituted, "Cannot" became the join key for every line, and the run reported 1296
+         mismatches -- exactly 36x36, the signature of a cartesian product. Caught because 1296 is
+         not a plausible mismatch count for 36 probes.
+      2. BOTH compilers cap at 36 reported errors. A single 62-probe file therefore measured only
+         the first 36 and silently called the remaining 26 clean. This is the #405 shape again:
+         work that never happened reading as a pass. Fixed by CHUNKING to 14 probes per run rather
+         than raising the cap -- the oracle accepts -max-error-count and the port has no such flag,
+         so raising it would compare unequal configurations.
+
+    Coverage is now ASSERTED, not assumed: probes vs values are compared and a shortfall ABORTS
+    with rc=2. Verified the guard actually fires by forcing CHUNK=60 to re-trigger the cap --
+    "MODEL-ABORTED reason=coverage-shortfall probes=56 oracle=36 port=36". A guard that has never
+    been seen to fire is not a guard.
+
+    LIMITS, stated so this is not over-read: 56 values is a sample, not a proof. It covers no
+    polymorphic instantiations, no #packed/#align/#raw_union directives, no SOA, no bit_field
+    layouts, and nothing about entity sets, scope contents or TAV. Those remain unmeasured. The
+    natural extensions are (a) the layout directives, since #112/#113 lived exactly there, and
+    (b) polymorphic instantiation, since #125/#126 did.
+
+    #416 -- FIRST DEFECT CAUGHT BY modelcmp.sh, on its first extended run: type_align_of had NO
+    Bit_Field arm, so EVERY bit_field reported alignment 8 regardless of backing width.
+
+        align_of        oracle   port(before)
+          bit_field u8       1        8   WRONG
+          bit_field u16      2        8   WRONG
+          bit_field u32      4        8   WRONG
+          bit_field u64      8        8   right, but only by coincidence
+        size_of was correct in every case (1/2/4/8), which is exactly why nothing noticed.
+
+    ROOT CAUSE: type_align_of (check_proc.odin:2039) is a `#partial switch` on bt.kind with no
+    .Bit_Field arm, so bit_fields fell through to the function's default of 8. C++ has the arm and
+    it is one line (types.cpp type_align_of_internal):
+        case Type_BitField: return type_align_of_internal(t->BitField.backing_type, path);
+    type_size_of ALREADY delegates to backing_type (types.odin, case .Bit_Field) -- so this was
+    a missing MIRROR, not a missing concept. Exact sibling of #113 (type_align_of ignored struct
+    alignment directives) and #86/#87 (type_size_of missing whole arms). Fixed by adding the arm.
+    VERIFIED: port now 1/2/4/8, byte-identical to the oracle across all four backing widths.
+
+    WHY THIS MATTERS BEYOND THE ONE VALUE. This defect is INVISIBLE to every diagnostic gate. It
+    produces no wrong message and no missing message -- parity.sh, corpus, spec and the root suite
+    are all green with it present, and were green through all 323 packages. It only shows up if you
+    ask the checker what it BELIEVES about a type. That is precisely the "diagnostic parity is not
+    model parity" gap I described when the Ship-of-Theseus question came up, and the gate built to
+    test that claim found a real instance of it within one run of being extended. A backend
+    consuming this checker would have laid out every bit_field over-aligned.
+
+    modelcmp.sh now: probes=91 oracle_values=91 port_values=91 mismatches=0, coverage asserted.
+    The 35 new probes are the layout directives: #packed, #align(16)/#align(32), #raw_union,
+    nested packed/raw structs, two bit_field widths, enum backing, bit_set backing, arrays of
+    packed structs -- chosen because #112/#113 lived exactly there. Everything except the
+    bit_field align now agreed on the first run, which is itself worth stating: the layout surface
+    is in better shape than the one defect suggests.
+
+    #416 VERIFIED. Full plain parity on the bit_field align fix, optimised build:
+        PARITY-DONE packages=323 compared=323 excluded=0
+                    count_mismatches=0 text_mismatches=0 attrib_mismatches=0
+    excluded=0 matters as much as the zeros -- per #275 an EXCLUDED package is UNMEASURED, not
+    clean, so a sweep with exclusions could not have verified this. modelcmp 91/91/0 alongside it.
+
+    A MEASUREMENT TRAP I WALKED INTO AND HAD TO DISCARD A RUN OVER. The first verification sweep
+    was built with `odin build ... -o:minimal`, and I then "rebuilt optimised" with a plain
+    `odin build`, which IS -o:minimal -- the default. Both binaries were unoptimised. Effect on
+    one package:
+        core/rexcode/ir    >146s unoptimised (heading for the 180s per-package timeout)
+                             0s optimised
+    a ~150x difference. That package would have been recorded EXCLUDED and the sweep would have
+    reported "0 mismatches" over a set with a hole in it. I killed the run rather than report a
+    partially-unmeasured green -- which is the same judgement as #405/#408, just arriving through
+    performance rather than through a broken invocation.
+    The tell that the rebuild was real, once `-o:speed` was passed: fix_opt.bin is 2859528 bytes
+    against tri.bin's 2859512 -- a 16-byte delta, exactly the arm I added. Size-checking the
+    binary is a cheap way to confirm a build actually changed what you think it changed.
+
+    Also worth recording because it cost a command: `pkill -f 'fix.bin'` MATCHES ITS OWN COMMAND
+    LINE, so it killed the shell running it (exit 144). `pkill -x <name>` matches the process name
+    only and is the safe form when cleaning up your own background jobs.
+
+    #417 -- modelcmp.sh extended to POLYMORPHIC INSTANTIATION and SOA. 56 -> 91 -> 114 probes.
+        MODEL-DONE probes=114 oracle_values=114 port_values=114 mismatches=0
+
+    New coverage:
+      SOA (#61/#256 territory)   #soa[]T, #soa[4]T, #soa[dynamic]T -- size and align
+      POLY (#125/#126 territory) M_poly :: struct($T: typeid, $N: int) { head: u8, data: [N]T,
+                                 tail: u8 } instantiated at (i32,4) (u8,3) (i64,2) and
+                                 (M_packed,2), with size/align/offset on each.
+                                 Plus M_p_again :: M_poly(i32,4) -- the SAME arguments as an
+                                 earlier instantiation, so it must hit the instantiation cache and
+                                 still agree. #126 was "operands cached as record instantiations",
+                                 so the cache is exactly the thing worth probing twice.
+
+    RESULT: no divergence. Unlike #416 this is a clean negative, and I checked it is not a vacuous
+    one -- the values are non-degenerate and compose correctly:
+        size_of(M_poly(i32,4))      = 24   offset data = 4, offset tail = 20
+        size_of(M_poly(M_packed,2)) = 14   <-- a PACKED element inside a POLYMORPHIC struct:
+                                                (1+4+1)*2 = 12, plus head and tail bytes, align 1
+        size_of(#soa[4]M_plain)     = 24   align_of(#soa[]M_plain) = 8 (pointer)
+    Both compilers identical on all of it. Agreement on a degenerate 0 would also have counted as a
+    match, which is why the spot-check mattered rather than trusting mismatches=0 alone.
+
+    modelcmp.sh now covers: core-library types, builtin aggregates ([dynamic], map, slice, string,
+    any, complex, quaternion), the layout directives (#packed/#align/#raw_union/bit_field/enum
+    backing/bit_set backing/nesting), SOA in three forms, and polymorphic instantiation including
+    a cache re-hit. Coverage asserted; a shortfall aborts rc=2.
+
+    STILL UNMEASURED, and needs a DIFFERENT instrument rather than more probes: entity sets, scope
+    contents, and TAV. Those are not expressible as a layout value, so the error-message channel
+    this tool exploits cannot reach them. That is the case for a real `-dump-model` on both
+    compilers -- which is the same artifact a swappable-backend interface would need anyway.
+
+    #418 -- dump-model: DESIGN SETTLED, plus two findings that shaped it. Not yet implemented.
+
+    (a) TWO #335 HYPOTHESES KILLED BY INSPECTION, both by reading rather than measuring.
+        I suspected the port appended entities directly where C++ enqueues. It does not. C++ has
+        BOTH paths and so does the port, and the GATES MATCH EXACTLY:
+            C++  check_decl.cpp:2072  if (e->flags & EntityFlag_Lazy) array_add(&info->entities,e)
+                 checker.cpp:2066     mpsc_enqueue(&info->entity_queue, e)   [when NOT lazy]
+            port check_decl.odin:613,685  if .Lazy in e.flags { append(&ctx.info.entities, e) }
+                 entity_helpers.odin:650  if !is_lazy { queue.mpsc_enqueue(&ctx.info.entity_queue, e) }
+        and the port DOES have the drain (check_files.odin:479), which I had also wrongly assumed
+        missing. So all four sites are faithful and #335's divergence is NOT in entity plumbing.
+        Two hypotheses eliminated at the cost of reading four sites -- cheaper than the
+        instrumented build #414 needed, and worth doing FIRST next time.
+
+    (b) THE DUMP CANNOT LIVE IN THE HARNESS. My first design was to add the dump to
+        .claude/tools/triage_st, so no checker source would change and there would be no revert
+        risk. That is impossible, and the reason is a lifetime hazard worth recording:
+            check_package_from_path:  c := &Checker{}          <-- STACK LOCAL
+                                      defer destroy_checker(c)  <-- destroyed before return
+        and Package_Check_Result exposes only diagnostics and counts. Handing the caller a
+        pointer to `c` would be a textbook use-after-free -- the #19 / #218 / #358 class, which
+        this project has now paid for three times. The API is right to withhold it.
+
+    THEREFORE the design is a FLAG, which is also what the real thing would be:
+        build_context.dump_model_path: string
+    and check_package_from_path emits the dump BEFORE destroy_checker, while the model is alive.
+    That mirrors a genuine `-dump-model` CLI flag, needs no new public pointer, and adds no
+    lifetime obligation for the caller.
+
+    FORMAT: line-oriented, one fact per line, canonically sorted, positions relative. Two views:
+      SORTED    for semantic comparison -- order-independent, so it does not re-expose iteration
+                nondeterminism as a false difference.
+      INSERTION for diagnosing order defects. #335 needs exactly this: it would show libc's
+                entities interleaved in the port and contiguous in C++, which is what #400
+                measured BY HAND.
+    v1 content: entities (name, kind, link_name, flags, type string, position, index) and types
+    (structural rendering + size/align, per-field offset). v2: scopes, then TAV.
+
+    SCOPE NOTE: the C++ side needs a real src/ change and is an upstream PR, not mine to make
+    unilaterally. Port-only is still worth building on its own -- it enables port-vs-port
+    diffing across runs, which attacks #335-class nondeterminism with no C++ change at all, and
+    it produces a concrete format to propose upstream.
+
+    NOT STARTED THIS TICK, deliberately: it is a checker-source change and this session is very
+    long. #357/#358 were both caused by editing checker source late and getting the allocator
+    lifetime wrong -- the same hazard class as (b) above. Filed with the full design instead.
+
+    #419 -- dump-model IMPLEMENTED on the port, and it found a defect on its first real use.
+
+    WHAT LANDED:
+      core/odin/checker/dump_model.odin        new; emits the model, two views
+      build_settings.odin                      + build_context.dump_model_path
+      package_resolver.odin                    + a defer registered AFTER `defer destroy_checker`
+                                               so it runs BEFORE it -- the model must still be
+                                               alive. Being a defer also covers all three return
+                                               paths, so a future early return cannot skip it.
+      .claude/tools/triage_st/main.odin        -dump-model:<path>
+    C++ side deliberately NOT touched: that is an upstream PR, not mine to make unilaterally.
+
+    Two implementation slips worth recording, both caught by the compiler rather than by me:
+      - I added a second `case:` to a switch that already had a default arm. Duplicate default.
+      - os.write_entire_file returns an Error, not a bool, so `if !os.write_entire_file(...)` does
+        not compile. Fixed to test `werr != nil` -- and it reports LOUDLY on failure, because a
+        dump that silently did not happen diffs clean against another absent dump, which is the
+        #405 false-green shape.
+
+    FIRST RESULT ON core/terminal: 8310 entities, both views, real layout data.
+
+    THEN THE FINDING. Three runs of the SAME input, diffing the SORTED view (which is
+    order-independent by construction, so a difference there is a CONTENT difference):
+        run1 8303 entities   run2 8304   run3 8303
+        89 lines differ between run1 and run2
+    The differing entries are locals and constants inside procedure bodies of DEPENDENCY packages,
+    not the package under test:
+        Buffer  Type_Name  core/strconv/generic_float.odin:137:2
+        Fields  Type_Name  core/os/process_linux.odin:278:3
+        READ    Constant   core/os/process_linux.odin:513:2
+        STDERR  Constant   core/os/process_linux.odin:511:2
+    So WHICH entities the port ends up recording is not stable across runs. That is the #52 family
+    ("diagnostics depend on iteration order; on-demand resolution is incomplete") observed
+    DIRECTLY for the first time, rather than inferred from diagnostic counts.
+
+    NOT YET A CONFIRMED DEFECT, and I am not calling it one. What is established: the SET varies.
+    What is NOT established: whether it varies in C++ too (unmeasurable until the C++ side exists),
+    and whether the variance is observable in any output that matters -- all 323 parity packages
+    are green, so it is currently invisible to every diagnostic gate. It could be benign
+    (lazily-resolved entities that nothing later reads) or it could be the mechanism behind #335.
+    Filed as its own task rather than folded into #335, because assuming they are the same defect
+    is exactly the kind of leap #412 punished.
+
+    WHAT THIS BUYS IMMEDIATELY, with no C++ change: run the port twice on one input, diff the
+    sorted view, and model nondeterminism shows up as a line diff naming the exact entity. Getting
+    that far for #335 previously took an instrumented build, a temporary source file, two edited
+    call sites and an md5-verified revert (#414).
+
+    #419 VERIFIED. Full plain parity on the dump-model change:
+        PARITY-DONE packages=323 compared=323 excluded=0
+                    count_mismatches=0 text_mismatches=0 attrib_mismatches=0
+    The flag is inert when unset, as intended -- adding it changed no diagnostic anywhere.
+
+    Correction to #419 as written: it said the entity-set finding was "filed as its own task".
+    It was not -- I wrote that before creating it. Now genuinely filed as task #344. Recording
+    the gap rather than quietly fixing it, because a ledger that claims work exists when it does
+    not is the same failure as a gate that reports clean without running.
+
+    ON PERSISTING DUMPS IN-REPO (Jeroen's proposal, and a good one). Three requirements, in order:
+      1. DETERMINISM FIRST. #344 blocks this outright. A golden that changes between runs makes CI
+         fail on noise, the team learns to ignore it, and the gate is then worse than absent.
+         The dump found this defect within minutes of existing, which is an argument FOR the
+         proposal, not against it -- but the ordering is not negotiable.
+      2. FORMAT VERSIONING. Put `## version=N` in the header. Without it, any field addition
+         rewrites every golden and produces thousands of lines of unreviewable diff, so real
+         drift hides inside format churn.
+      3. SCOPE THE GOLDENS. core/terminal alone is 2.6MB. Full-tree goldens are tens of MB of
+         churn per change. Curate a set -- the parity pkglist or a coverage-chosen subset.
+
+    SEQUENCING for the C++ side: let the port's format settle first (cheap to iterate on one
+    implementation), then hand over a FIXED spec plus a reference implementation. Designing a
+    format against one implementation and discovering its problems on the second is the standard
+    way this goes wrong.
+
+    #420 -- FORMAT RULE for dump-model, pinned before v2/v3 add scopes and TAV.
+
+        SORT every COLLECTION at dump time.
+        NEVER reorder a SEQUENCE whose order is semantic.
+
+      SORT:        the entity list, scope member lists, the type table, the foreigns map, the
+                   init/fini rosters -- anything the checker merely happens to store in some order.
+      NEVER SORT:  struct fields, tuple elements, parameter and result lists, enum members, union
+                   variants, bit_field members. Their ORDER IS THE MEANING: it determines every
+                   offset. #416 was a layout defect; sorting these would destroy exactly the
+                   information the dump exists to carry.
+      TEST for which bucket: if reordering it would change a size_of / offset_of / tag value, it
+      is a sequence and stays as-entered. Otherwise it is a collection and gets sorted.
+
+    Sorting happens ONLY in dump_model, at emit time. The checker is untouched -- which is why
+    parity stayed 323/323 0/0/0 through this work.
+
+    AND A CORRECTION TO #419's NUMBERS, which understated the problem. #419 reported 8303/8304/8303
+    and 89 differing lines from THREE runs. Five runs give:
+        counts  8300  8317  8294  8313  8310      (+-23 spread, not +-1)
+        519 lines not present in all five runs
+    The shape also rules out ordering as the cause, which sorting could have masked:
+        datetime divmod        core/time/datetime/datetime.odin:204:20   in 4 runs
+        datetime divmod        core/time/datetime/datetime.odin:388:14   in 1 run
+        linux errno_unwrap2    core/sys/linux/helpers.odin:134:23        in 3 runs
+        linux errno_unwrap2    core/sys/linux/sys.odin:3078:9            in 2 runs
+    Same name, same type, DIFFERENT declaration position. The runs are recording DIFFERENT
+    ENTITIES, not a permutation of one set. Dump-time canonicalisation cannot close that; #344 is
+    a checker defect and has to be fixed there.
+
+    Worth stating because it nearly went the other way: having BOTH views is what separated the
+    two failure modes. A difference in the SORTED view is content (#344); a difference only in the
+    INSERTION view is ordering (#335). With one view I would have conflated them.
+
+    #421 -- #344 DIAGNOSED (partly). The unstable entities are POLYMORPHIC INSTANTIATIONS, and
+    their recorded position is the CALL SITE that instantiated them.
+
+    My task note asked whether the same-name-different-position pairs were two distinct
+    declarations or one entity with a varying position. NEITHER. Every position involved is a USE
+    site, not a declaration:
+        datetime.odin:204   hour,  rem := divmod(sum_delta.seconds, 3600)     <- a CALL
+        datetime.odin:388   n400,  d1  := divmod(d0, 365*400 + 100 - 3)       <- a CALL
+        helpers.odin:134    errno_unwrap :: proc {errno_unwrap2, ...}         <- a PROC-GROUP member ref
+        sys.odin:3078       return errno_unwrap2(ret, Fd)                     <- a CALL
+    The actual declarations are elsewhere, and both are POLYMORPHIC:
+        internal.odin:18  divmod        :: proc "contextless" (x, y: $T, loc := #caller_location) -> (a: T, r: T)
+        helpers.odin:124  errno_unwrap2 :: #force_inline proc "contextless" (ret: $P, $T: typeid) -> (T, Errno)
+    and the dump entries carry CONCRETE types (proc "contextless" (i64, i64, Source_Code_Location)
+    -> (i64, i64)), so they are INSTANTIATIONS, not the generics.
+
+    MECHANISM: an instantiation is created at the call site that demands it and stamped with that
+    site's position. Instantiations are CACHED (#126). When several call sites want the same one,
+    whichever is checked first creates it and wins the position; the rest hit the cache. Under
+    parallel body checking, which call site wins varies -- so the recorded position varies.
+
+    WHAT THIS DOES AND DOES NOT EXPLAIN. It explains the same-name-different-position pairs
+    cleanly. It does NOT yet explain the COUNT variance (8300..8317, +-23): differing positions
+    alone would keep the count fixed. So either the SET of instantiations also varies, or there is
+    a second cause. Not resolved -- and I am not assuming the two share one mechanism, which is
+    #412's lesson.
+
+    CONSEQUENCE FOR PERSISTED GOLDENS, and it is good news: at least this part is fixable AT THE
+    DUMP, without touching the checker. Record an instantiation's position as its POLYMORPHIC
+    PARENT's declaration site rather than the instantiating call site. That is canonical by
+    construction -- every instantiation of one generic then agrees -- and it removes a class of
+    churn that is cosmetic rather than semantic. Whether the count variance survives that change
+    is the measurement that decides how much of #344 is real.
+
+    #422 -- the discriminating measurement from #421, run. Instantiation-position canonicalisation
+    removes about half the churn, and the REMAINDER IS REAL.
+
+    Change (dump-side only, gated on the flag, so checking is untouched): an entity whose
+    Entity_Procedure.generated_from_polymorphic is set now emits `<instantiation>` in place of a
+    position, plus a visible `poly=` column so the class is marked rather than silently rewritten.
+    Type_Proc has no polymorphic_parent -- only Type_Struct/Type_Union do -- so the generic's own
+    declaration site is not reachable from the entity; the marker is the honest canonical form.
+
+        counts over 5 runs   BEFORE 8300 8317 8294 8313 8310   (+-23)
+                             AFTER  8303 8306 8302 8302 8297   (+-9)
+        unstable lines       BEFORE 519                        AFTER 286
+        instantiations in the dump: 419
+
+    VERDICT: THE COUNT VARIANCE SURVIVES. That is decisive. Position churn alone cannot change a
+    count -- repositioning an entity keeps it present. So entities are genuinely PRESENT IN SOME
+    RUNS AND ABSENT IN OTHERS, and #344 is real content nondeterminism, not a dump artefact.
+    Roughly 233 of the original 519 unstable lines were cosmetic call-site churn; 286 are not.
+
+    This is why the measurement was worth running before attempting a fix: had the counts
+    stabilised, #344 would have collapsed into "the dump was printing a call site" and needed no
+    checker change at all. They did not, so it does.
+
+    NOTE on what the canonicalisation is and is not: it is a REPORTING decision, not a fix. It
+    stops a cosmetic difference from masking a real one -- the same reason the sorted and insertion
+    views are kept separate (#420). The underlying race (which call site wins the instantiation)
+    is still there and is still #126's territory; it simply no longer pollutes the signal.
+
+    PARITY IS UNAFFECTED BY CONSTRUCTION, and I am stating the reasoning rather than a fresh run:
+    the whole change lives in dump_model.odin, which executes only when dump_model_path is set,
+    and no gate sets it. The last full sweep with dump-model present was 323/323 excluded=0 0/0/0.
+
+    #423 -- #344's residual 286 characterised. The instantiation hypothesis is RULED OUT as the
+    remaining cause, and the shape points somewhere specific.
+
+        by kind      Variable 112   Constant 98   Procedure 66   Type_Name 6   Builtin 4
+        by package   <none> 139     runtime 64    os 29    math 23    strconv 8   slice 7
+        instantiations among them: 4 of 286
+
+    Two things follow. First, polymorphic instantiation explains essentially none of the residual
+    (4/286) -- #421's mechanism was real but accounts only for the ~233 lines the canonicalisation
+    already removed. Second, `pkg=<none>` means e.pkg is nil on 139 of them, and with Variable and
+    Constant dominating, that is the signature of entities declared INSIDE PROCEDURE BODIES rather
+    than at package scope.
+
+    WORKING HYPOTHESIS, explicitly not yet tested: proc-body locals reach info.entities at all, and
+    WHICH ones do depends on the parallel body checker. If C++ does not record body locals there,
+    that is both the nondeterminism and a faithfulness divergence in one. If it does, the question
+    becomes why the port's set varies.
+    The port enqueues at entity_helpers.odin:650 gated only on `!is_lazy`, with e.pkg assigned
+    just above -- no scope-level guard visible at that site. That is suggestive, NOT conclusive:
+    I have not yet found C++'s corresponding guard (the excerpt I pulled at check_decl.cpp:2058
+    was the wrong region -- check_entity_decl's switch, not the enqueue), and #418 is the standing
+    reminder that two of my last three guesses at this layer were wrong on inspection.
+
+    NEXT: find where C++ actually enqueues and what gates it, then compare. Read before measuring
+    -- #418(a) killed two hypotheses that way for the cost of four sites, far cheaper than the
+    instrumented build #414 needed.
+
+    #424 -- #423's hypothesis KILLED BY READING, and the read found the real mechanism.
+
+    I suspected the port enqueued proc-body locals where C++ does not. It does not. C++'s enqueue
+    (checker.cpp:2254-2260, inside add_entity_and_decl_info) is line-for-line the port's:
+        e->pkg = c->pkg;                                    port: e.pkg = ctx.pkg
+        d->entity.store(e);                                       d.entity = e
+        is_lazy = (e->flags & EntityFlag_Lazy) == ...;            is_lazy := .Lazy in e.flags
+        if (!is_lazy) mpsc_enqueue(&info->entity_queue, e);       if !is_lazy { mpsc_enqueue(...) }
+    Same gate, same assignment, no scope-level guard in either. THIRD hypothesis killed by reading
+    at this layer (after #418(a)'s two). Reading first keeps paying: four sites, no build, no
+    instrumentation, no revert.
+
+    THE MECHANISM THE READ ACTUALLY FOUND. The two paths into info.entities are asymmetric:
+        NOT lazy  -> enqueued at creation, drained unconditionally. Membership is guaranteed.
+        LAZY      -> NOT enqueued. Reaches info.entities only via the direct append inside
+                     check_entity_decl (check_decl.odin:613/685, C++ check_decl.cpp:2072), which
+                     runs ONLY IF SOMETHING DEMANDS THAT ENTITY.
+    So a lazy entity that nothing demands in a given run never lands in info.entities at all.
+    Membership therefore depends on WHAT GOT DEMANDED -- which is a reachability question, not an
+    ordering one. That fits #423's evidence exactly: the residual is dominated by locals and
+    constants in DEPENDENCY packages, i.e. precisely the entities whose demand is incidental.
+
+    THIS IS A HYPOTHESIS, NOT A RESULT. What is established: the two paths differ in whether
+    membership is guaranteed. What is NOT: that the residual 286 are lazy (their dumped flags did
+    not show .Lazy, which needs explaining and may refute this outright), or that C++ demands the
+    same set. Both are cheap to check and neither has been done.
+    NEXT: dump the .Lazy flag explicitly for the unstable set. If they are not lazy, this
+    mechanism is wrong too and I should say so rather than keep the story.
+
+    #425 -- #424's lazy hypothesis does NOT hold, and the evidence inverts the question.
+
+    Test: do the unstable entities carry .Lazy?
+        unstable set   0 of 286 carry .Lazy
+        WHOLE DUMP     0 of 8303 carry .Lazy
+    I nearly discarded this as uninformative on the grounds that the flag might be cleared before
+    the dump sees it. It is cleared -- entity_helpers.odin:594 -- but only under
+    `if !could_entity_be_lazy(e, d)`, i.e. it is stripped from entities that CANNOT be lazy.
+    Entities that genuinely are lazy keep it. So zero across the whole dump means NO LAZY ENTITY
+    EVER REACHED info.entities in these runs, and the residual 286 are not lazy.
+
+    THAT INVERTS THE QUESTION, and #424's mechanism is wrong as an explanation:
+      non-lazy entities are enqueued AT CREATION and drained UNCONDITIONALLY, so once such an
+      entity exists its membership is guaranteed. The variance therefore cannot be in WHICH
+      ENTITIES GET RECORDED. It must be in WHICH ENTITIES GET CREATED -- i.e. different runs take
+      different code paths and construct different entities.
+    That is a more fundamental thing than a recording gap, and it is consistent with the residual
+    being locals and constants in dependency packages: entities whose construction is incidental
+    to some other demand.
+
+    FOUR HYPOTHESES KILLED AT THIS LAYER NOW (#418 x2, #423, #424). The pattern is worth naming:
+    every one of them assumed the port was doing something EXTRA or MISSING relative to C++ at a
+    specific site, and every one died on reading the site. The defect is not at a site. It is in
+    what work gets scheduled, which no amount of site-reading will show.
+
+    SO THE NEXT STEP IS DIFFERENT IN KIND: stop reading sites, and instead diff WHAT RAN. Two
+    dumps already name the entities that differ; the question is which demand created each one.
+    That needs a creation trace (entity -> the decl/expr that caused it), not another guard
+    comparison. That is a bigger instrument than anything built today and should be scoped
+    deliberately rather than started at the end of a long session.
+
+    #426 -- a single-CPU test of #344, recorded as INCONCLUSIVE because the instrument was not
+    verified. Keeping it so the numbers are not mistaken for a result later.
+
+        taskset -c 0, 5 runs:  counts 8283 8283 8283 8283 8283   (identical -- was +-9)
+                               md5 of sorted view: ALL FIVE DIFFER
+                               diff run1 vs run2: 52 lines, entities present in one, absent in
+                               the other. Same count, different membership.
+
+    Tempting reading: "pinning to one CPU stabilises the count, so the count variance is
+    threading". I am not making that claim, for a specific reason: worker_count is
+    `max(1, cpu_count - 1)` (checker_lifecycle.odin:198) and I DID NOT CHECK whether cpu_count
+    derives from sched_getaffinity or from /proc/cpuinfo. If the former, taskset really did reduce
+    the pool to one worker. If the latter, the pool is unchanged and the threads were merely
+    time-sliced onto one CPU -- still concurrent, and the stable count would be coincidence.
+    Those two cases support opposite conclusions from the same numbers, so the measurement
+    distinguishes nothing until the instrument is pinned down.
+
+    This is the #405/#408 discipline applied to a POSITIVE-looking result rather than a clean one.
+    The failure mode there was a run that never happened reading as a pass; here it would be a
+    knob that never turned reading as a controlled variable. Same class: the instrument was not
+    verified to do what its name suggests.
+
+    TO MAKE IT CONCLUSIVE, cheaply: find what cpu_count actually calls, and print worker_count
+    under taskset. One grep and one line of output. Only then do these five numbers mean anything.
+
+    #427 -- #344 RESOLVED TO ITS CAUSE, with a verified control this time. And #426's taskset
+    numbers were misleading, exactly as flagged.
+
+    THE PROPER KNOB EXISTS: build_context.no_threaded_checker gates thread-pool creation outright
+    (checker_lifecycle.odin:193). Added `-no-threads` to the triage tool -- tool-only, no checker
+    change. POSITIVE CONTROL FIRST, because #426's whole lesson was an unverified instrument:
+        core/odin/checker    threaded 653ms    -no-threads 1013ms    (55% slower)
+    The pool really is gone. taskset never demonstrated anything comparable.
+
+        view              THREADED            -no-threads
+        counts            8297..8306 (+-9)    8283 8283 8283 8283 8283
+        sorted md5        all 5 differ        ALL 5 IDENTICAL (22822e9b8143)
+        insertion md5     all 5 differ        all 5 still differ
+
+    CONCLUSION: the entity SET is fully deterministic single-threaded. #344's content variance is
+    entirely threading-driven -- not lazy resolution (#424 refuted), not instantiation caching
+    (#421, only 4/286), not any enqueue-guard divergence (#418/#423 refuted). Four hypotheses died
+    to reach a one-line control.
+
+    AND #426's TASKSET READING WAS WRONG, which is why it was banked as inconclusive rather than
+    as a result: under taskset the counts were stable at 8283 -- the SAME value single-threaded
+    gives -- yet the content still differed. That combination is only explicable if taskset left
+    multiple workers alive on one core: enough serialisation to fix the count, not enough to fix
+    membership. Had I reported "single-CPU is deterministic" from those numbers I would have been
+    wrong on the evidence I actually had.
+
+    SEPARATE FINDING, not part of #344: the INSERTION view still varies with NO POOL AT ALL. So
+    info.entities' order is decided by something other than worker scheduling. That is #335's
+    territory (the order question) and it means #335 will NOT be fixed by making the pool
+    deterministic. Worth splitting out rather than assuming the two collapse together.
+
+    FOR JEROEN'S PERSISTED GOLDENS: a single-threaded dump is already byte-stable and could be
+    the golden today. That is a legitimate interim answer -- goldens generated with -no-threads,
+    with the threaded path checked against them separately once #344 is fixed.
+
+    #428 -- phase inventory for #344, and the refined hypothesis. Not yet tested.
+
+    Four phases use the thread pool:
+        check_collect.odin:459      collection            CREATES entities (top-level decls)
+        check_proc.odin:102/387/509 procedure bodies      CREATES entities (locals)
+        check_proc.odin:2546/2554   dependency walking    does not create
+        check_proc.odin:2694/2703   scope checking        does not create
+
+    Only two can move the SET, and body checking is the prime suspect: it is the phase that
+    creates locals, and #423 established the unstable entities are locals and constants
+    concentrated in DEPENDENCY packages (core/os, core/math, core/strconv, runtime) rather than
+    the package under test. "Was this dependency body checked at all?" is a live question in a way
+    that "was this top-level decl collected?" is not.
+
+    HYPOTHESIS: which dependency-package procedure bodies get checked varies between runs, so the
+    locals they declare exist in some runs and not others. That is a reachability effect surfacing
+    through the pool, which fits every measurement so far: threading-driven (#427), locals in
+    dependency packages (#423), not lazy (#425), not instantiation (#422), no guard divergence
+    (#418/#424).
+
+    NOT TESTED. Stating it as a hypothesis because five of the last six guesses at this layer were
+    wrong, and the one that was right (#427) came from a control rather than a theory. The test is
+    a per-phase disable -- gate ONLY the body-checker's add_task on a flag and re-run the five-run
+    dump. If the set stabilises, it is the body checker; if not, it is collection.
+    That is a small, contained change to ONE call site, and it is the right next step -- but it
+    edits checker source and should start from a backup, not at the tail of a long session.
+
+    #429 -- upstream threading audit (user-requested insurance), and a REFUTED hypothesis.
+
+    UPSTREAM IS CLEAN. core/odin/parser has ZERO threading references; the only threading in
+    core/odin/ast is semantic_types.odin, which is where the shared semantic structs and their
+    mutexes live (Type/Scope/Info) -- used BY the checker, not parser concurrency. Parsing is not
+    run under the pool. So no upstream stage can be contributing nondeterminism, which was the
+    thing worth ruling out before chasing it inside the checker.
+
+    But the audit surfaced a REAL STRUCTURAL DIVERGENCE, independent of whether it causes #335:
+        port: ast.odin:133   files: map[string]^File     -> iteration is HASH order
+        C++:  pkg->files                Array<AstFile*>  -> iteration is INSERTION order
+    Every raw `for _, file in pkg.files` in the port is therefore nondeterministically ordered
+    where its C++ counterpart is not. package_resolver.odin:744 (import queueing) is one such site,
+    and it decides the order imports are queued -> packages loaded -> entities collected.
+
+    HYPOTHESIS: that loop orders info.entities. REFUTED.
+    Falsifier was stated BEFORE measuring: if sorting the loop leaves the -no-threads insertion
+    md5s varying across 5 runs, the loop is not the source. A/B on core/odin/checker, -no-threads,
+    dm3.bin (pre-edit) vs probe429.bin (sorted):
+        baseline  5 runs -> 5 DISTINCT md5s, entities=14210 every run
+        probe     5 runs -> 5 DISTINCT md5s, entities=14210 every run
+    The falsifier fired. Probe reverted, package_resolver.odin md5-verified back to
+    c35895bde5a3fb92a50dc3d25c9d3c7c.
+
+    SCOPE OF THE REFUTATION, deliberately narrow: this says the import-queueing loop does not
+    order info.entities on this target. It does NOT say the map-vs-array divergence is harmless --
+    that is a genuine faithfulness gap still worth closing on its own terms, and the sorted probe
+    was only ever a deterministic STAND-IN (C++'s order there is directory-read order, not name
+    order, so sorting would not have been the correct fix even had it worked).
+
+    Counts stable at 14210 across all 10 runs, consistent with #427: with no pool the SET is
+    stable and only the ORDER moves.
+
+    NEXT: the three writers of info.entities are check_files.odin:480 and check_decl.odin:614/686.
+    That is where the order is actually decided, and it is a single-threaded question now.
+
+    #430 -- #335 narrowed hard, and a CAVEAT that affects the goldens proposal.
+
+    Settled from dumps already on disk (no rebuild) by reading the flags= column:
+
+    1. ZERO entities carry .Lazy on this target (14210 total). So the lazy writers
+       (check_decl.odin:614/686) are not exercised at all here, and ALL 14210 entities arrive
+       through the single entity_queue drain at check_files.odin:480. That removes a whole
+       candidate branch outright rather than by argument.
+
+    2. Only 32 of 14210 lines MOVE between two -no-threads runs. Not diffuse -- a small set.
+
+    3. Those 32 are almost entirely declarations inside FILE-SCOPE `when` BLOCKS, verified at
+       source: core/c/c.odin:63-70 sits in `when ODIN_ARCH == .amd64`, and
+       core/sync/primitives_internal.odin:90+ sits in `when ODIN_OS != .Windows`. Same for the
+       core/reflect, core/math/rand and core/time entries.
+
+    COLLECTION ORDER IS NOT THE CAUSE. Checked both arms:
+        threaded fallback:  sorted_packages(&c.info) then sorted_files(pkg.files)
+        single-threaded:    sorted_files(c.info.files)
+    and sorted_files sorts by (basename, fullpath) -- fullpath is unique, so it is a TOTAL order
+    with no ties to resolve nondeterministically. Both are deterministic.
+
+    So the remaining explanation is that file-scope when-block entities are collected at a time
+    that varies, not in an order that varies. There are TWO when-collection entry points
+    (collect_when_stmt_from_file at check_collect.odin:36 and
+    check_collect_entities_from_when_stmt at :736) plus a memoised condition
+    (ws.is_cond_determined / ws.determined_cond). A when whose condition is not yet determined on
+    first visit gets collected on a LATER visit, and which visit wins is the thing to instrument.
+    NOT yet measured -- stating it as the next probe, not as a conclusion.
+
+    CAVEAT, and it bears on Jeroen's persisted-goldens proposal: the two arms above collect files
+    in DIFFERENT orders by construction. The threaded path walks packages then per-package files;
+    the -no-threads path basename-sorts the GLOBAL file set -- which is exactly the grouping
+    #404's own comment identifies as wrong, because basename-first scatters each package's files
+    through the order. So `-no-threads` is NOT "the threaded path minus concurrency"; it is a
+    different traversal. A -no-threads dump is still byte-stable and still useful as an interim
+    golden, but it cannot be treated as the threaded path's expected output, and the two must not
+    be compared to each other. Worth fixing so both arms share one traversal.
+
+    #431 -- #335's single-threaded ORDER variance localised to NESTED PROCEDURE LITERALS.
+
+    Measured entirely from dumps already on disk. Each step narrowed the search space:
+
+        package first-appearance order      IDENTICAL (37 packages)
+        file first-appearance order         IDENTICAL (309 files)
+        per-file internal entity sequence   2 of 309 files differ
+        within those 2 files                ONE entity swaps with ONE neighbour
+
+    The two swaps:
+        core/math/rand/rand_xoshiro256.odin  rotate_left64 (43:3) <-> sm64_next (55:3)
+        core/odin/parser/parser.odin         `i` (3469:7), the loop variable inside
+                                             float_value_is_valid
+
+    BOTH are NESTED PROCEDURES -- proc literals declared inside another procedure's body.
+    rotate_left64 and sm64_next are siblings nested in the same enclosing proc; `i` is a local of
+    the nested float_value_is_valid. Nothing at file scope moves; nothing at package scope moves.
+
+    So #335's residual single-threaded nondeterminism is the order in which SIBLING NESTED PROC
+    LITERALS are checked. That is the nested_proc_lits collection -- the same structure as #141,
+    where the append was missing its mutex (readers took it, the sole writer did not). #141 fixed
+    the RACE; this is the ORDER, and it is visible with no pool at all, so it is not the same bug.
+
+    METHOD CORRECTION made mid-measurement, worth recording because the first answer was wrong:
+    my initial "which files differ" pass compared the two dumps BY GLOBAL LINE INDEX, so every
+    file after the first shift mismatched and it reported 68 files. That is a diff artefact, not a
+    finding. Comparing each file's sequence INDEPENDENTLY gives 2. A whole-file offset makes
+    everything downstream look different; the per-file comparison is the only valid instrument
+    here. (Also mis-set an awk field to $2 and got "1 distinct package"; the package column is $3.)
+
+    EARLIER WHEN-BLOCK HYPOTHESIS (#430) IS SUPERSEDED. The when-block entities appeared in the
+    moved set only because a block offset dragged them along -- their own per-file sequences are
+    identical. #430's reasoning was built on the contaminated comparison. The when-collectors walk
+    stmts in source order and are not implicated.
+
+    NEXT: read how sibling nested proc lits are enqueued and checked. Two entities, one file, no
+    threads -- as small a repro as this defect is ever going to get.
+
+    #432 -- #335: the dependency walk is EXONERATED, and a concrete mechanism identified.
+
+    NOT THE DEPENDENCY WALK. check_update_dependency_tree_for_procedures (check_proc.odin:2533)
+    has both arms iterating ordered structures -- c.nested_proc_lits (a [dynamic], appended under
+    lock at check_expr.odin:8113) and c.info.entities. More to the point it CONSUMES
+    info.entities; it cannot be what orders it. Ruled out, not deprioritised.
+
+    THE MECHANISM TO TEST is the RE-QUEUE at check_proc.odin:380-391. A nested procedure whose
+    PARENT has not yet had its body checked is pushed back onto the queue and retried:
+
+        if parent.kind == .Procedure {
+            parent_checked := sync.atomic_load(&parent.proc_body_checked)
+            if !parent_checked {
+                thread_pool_add_task(check_proc_info_worker_proc, pi)
+                return 1 // Failure/retry
+            }
+        }
+
+    That is a DEFERRAL, and deferral reorders. rotate_left64 and sm64_next are siblings nested in
+    the same enclosing procedure -- exactly the pair that swapped -- and `i` is a local of the
+    nested float_value_is_valid, so it moves when its enclosing nested proc's body does.
+
+    THE CRISP OPEN QUESTION: what does thread_pool_add_task do when there is NO POOL? The
+    -no-threads run still exercises this retry path, and if the re-queue lands somewhere whose
+    drain order is not simply FIFO, that is the variance. Read thread_pool_add_task's no-pool
+    behaviour FIRST -- queue_drain.odin:30 documents it as pushing to "the current thread's
+    deque", and a deque drained from the wrong end would reorder retried siblings.
+
+    NOT MEASURED. This is a mechanism with the right SHAPE (defers siblings, matches both observed
+    swaps) and nothing more. The last four ticks each produced a plausible mechanism and three
+    were wrong, so the bar is a measurement: instrument the entity_queue enqueue with a sequence
+    number and print which enqueues come from a retried proc info. Do that before believing this.
+
+    #433 -- chasing #335 into the body checker turned up a possible SILENT DROP. Filed as #346.
+
+    The #432 worry ("thread_pool_add_task returns false with no pool -- is the retry dropped?") is
+    HALF right, and the half that matters is a different site. Reading resolved it:
+
+      - the retry at check_proc.odin:380-391 lives in check_proc_info_worker_proc, the THREADED
+        path only. Sequential never reaches it. So the no-pool drop I feared there cannot happen.
+      - but the SEQUENTIAL path has its own deferral, and it looks worse:
+            check_procedure_bodies:471   for i in 0 ..< len(c.procs_to_check) { consume_proc_info(...) }
+            check_procedure_bodies:489   clear(&c.procs_to_check)
+            consume_proc_info:296-311    parent not body-checked -> check_procedure_later(c, pi)
+            check_procedure_later:103    sequential arm -> append(&c.procs_to_check, info)
+        The deferred proc is appended to the array being iterated, the `0 ..< len()` bound was
+        already fixed, and clear() then discards it. Body never checked.
+
+    The port's comment at :301 says "In single-threaded mode, this should never trigger". That is
+    an assumption. The THREADED sibling asserts the same invariant for real at :511
+    (assert(prev_procs_to_check_count == len(c.procs_to_check))); the sequential path asserts
+    nothing. An assumption stated in a comment on one path and enforced by an assert on the other
+    is exactly the shape that hides a defect.
+
+    CORROBORATION, not proof: #427 measured FEWER entities single-threaded than threaded on the
+    same target (8283 vs 8297..8306). Dropped bodies have that sign. But #427 was not built to
+    test this and used a different target from #431's, so it only points.
+
+    NOT MEASURED, and I am not claiming it fires. The test is one counter in the sequential arm of
+    check_procedure_later, printed at the end of check_procedure_bodies, run with -no-threads;
+    >0 means procedures are being dropped. Deliberately stopping short of the edit -- the last
+    several ticks each produced a plausible mechanism and most were wrong, and this one is worth
+    measuring properly rather than at the tail of a long session.
+
+    IF IT FIRES it is bigger than #335: an unchecked body emits no diagnostics, so it is a silent
+    UNDER-REPORT, and it would disqualify -no-threads dumps as goldens (see the #430 caveat).
+    Fix would need C++ checker.cpp:6457-6465 read first -- do not invent a drain C++ lacks.
+
+    #434 -- #346 REFUTED by measurement. The false premise was MINE, not the port's.
+
+    I filed #346 believing Odin evaluates `for i in 0 ..< len(x)` ONCE, so items appended during
+    the loop would go unvisited and the trailing clear() would discard them. I never tested that
+    belief before filing. Testing it took four lines:
+
+        a := [1,2,3]; for i in 0 ..< len(a) { if i == 0 { append 4 more } }
+        -> iters=7 final_len=7   =>  RE-EVALUATED each iteration
+
+    So the loop grows with the array. Measurement on the real checker confirms it:
+
+        DBG434 visited=4667 final_len=16111 dropped=11444 seq_defers=16111 consume_calls=16111
+
+    `dropped=11444` is arithmetic on the false premise -- it is the array's GROWTH, not lost work.
+    The number that settles it is consume_calls=16111 == final_len=16111: every proc info,
+    including all 11444 added by deferral, was consumed. The port is fine. No unchecked bodies,
+    no silent under-report.
+
+    THE INSTRUMENT EARNED ITS KEEP. I added consume_calls purely so a zero could be distinguished
+    from a dead instrument -- and it is the counter that exposed my own error instead. Had I
+    printed only `dropped`, "dropped=11444" would have read as a confirmed defect and I would have
+    "fixed" a non-bug in the body checker. The threaded control also behaved: no DBG434 line at
+    all, proving the branch is properly gated on thread_count == 1.
+
+    WHAT THIS COSTS AND WHAT IT BUYS: #427's fewer-entities-single-threaded (8283 vs 8297..8306)
+    is NOT explained by dropped bodies and goes back to #344, still open. The #430 goldens caveat
+    survives but ONLY on traversal-order grounds (threaded walks packages-then-files, sequential
+    basename-sorts the global set) -- not on dropped-work grounds, which I should stop citing.
+
+    RULE, since this is the second time in this session a hypothesis rested on unverified language
+    or library semantics (the first was assuming os.write_entire_file returned a bool): when a
+    hypothesis turns on how a LANGUAGE construct behaves, test the construct before filing the
+    task. It is nearly free and it is exactly the assumption least likely to be questioned later.
+
+    Instrument reverted; check_proc.odin md5 back to 5decdc212e479089723bbd6fc9af3c40, zero residue.
+
+    #435 -- #335 SOLVED IN CLASS: the single-threaded order variance is ADDRESS-DEPENDENT.
+
+    Falsifier stated before measuring: if -no-threads with ASLR disabled still varies, the cause is
+    not address-dependent. It did not vary.
+
+        arm                      insertion-view md5, 5 runs
+        ASLR ON  (normal)        ad882c495ea2 b928cdb9c0ee 2fe4366384c9 0685a8e662d0 96044c666e93
+        ASLR OFF (setarch -R)    eaaacb16ac42 x5  -- ALL IDENTICAL
+
+    Counts 14211 in BOTH arms all 10 runs, and the ASLR-off sorted view is identical 3/3. So the
+    SET is stable and only ORDER moves, exactly as #427 said. One command discriminated
+    "map/pointer-keyed iteration" from "genuine timing", after four ticks of walking the call graph.
+
+    This puts #335 squarely in the #50 family (ASLR-dependent map iteration), NOT in the threading
+    family. Combined with #431 (the movers are sibling NESTED PROC LITERALS) the remaining question
+    is narrow: which pointer-keyed structure orders nested proc infos. procs_to_check has exactly
+    ONE writer (check_procedure_later, check_proc.odin:106) and six callers -- check_poly_proc.odin
+    341/491, check_decl.odin:1490, check_proc.odin 136/255/308. One of those reaches it through an
+    address-ordered container.
+
+    METHOD TRAP WORTH RECORDING, and it bit me silently: the measurement TARGET is
+    core/odin/checker -- the checker's OWN SOURCE. Earlier ticks reported entities=14210; this tick
+    reports 14211 on a tree I had md5-verified as reverted. The difference is that the earlier
+    figure was measured while my package_resolver.odin PROBE was still on disk, so the port was
+    checking source I had edited. Editing the checker changes the measurement INPUT, not just the
+    instrument. Nothing was invalidated here (both arms this tick used the identical reverted tree,
+    and the ASLR contrast is within-tick), but a cross-tick count comparison would have been
+    garbage. RULE: when the target is the checker's own tree, record the tree md5 alongside the
+    number, or measure something outside core/odin/.
+
+    NEXT: find the address-ordered container feeding nested proc infos. `setarch -R` is now a
+    permanent cheap discriminator for this whole class -- any "is this ASLR or timing?" question is
+    one command, and it should be the FIRST thing tried on a nondeterminism report, not the last.
+
+    #436 -- #335 prime candidate located, and the bisect method to confirm it. NOT yet confirmed.
+
+    check_stmt.odin:191, inside the block-statement checker:
+
+        // Step 2: Check all collected entities that need immediate checking
+        // C++ Reference: check_expr.cpp:352-366
+        for _, entity in s.elements {          // <-- RAW map iteration
+            ...
+            // Only check constants, type names, and procedures
+
+    That is precisely where a local constant declaration -- which is what
+    `rotate_left64 :: #force_inline proc "contextless" (...)` inside a body IS -- gets checked, and
+    therefore the order in which sibling nested procedure bodies are queued via
+    check_procedure_later. It is the only candidate found so far that sits on the exact path #431
+    localised (siblings in one body) AND is address-order dependent.
+
+    WHY A STRING-KEYED MAP CAN STILL BE ASLR-SENSITIVE, which is the part worth stating because it
+    is not obvious: s.elements is map[string]^Entity, and string keys hash by CONTENT, so naively
+    the order should be stable. The observed ASLR sensitivity (#435) implies the hash seed is
+    derived from an address. That fits the evidence exactly -- per-process variation that vanishes
+    under setarch -R -- but I have NOT verified how Odin's runtime seeds its map hasher, and that
+    is a language-runtime assumption of exactly the kind that just burned me in #434. VERIFY THE
+    SEED before building any explanation on it.
+
+    This is #50's territory ("Sort map iterations so checker output does not depend on ASLR"), which
+    is marked completed. If this site is the cause, #50 sorted some iterations and missed this one.
+    There are ~12 raw `scope.elements` iterations tree-wide (docs_writer:1397, docs:326,
+    check_proc:932/1491/1780, error:1992, scope:749/767, check_stmt:191/3225/3895/3937) -- several
+    are in doc/error paths that cannot affect entity order, so the live set is smaller.
+
+    CONFIRMATION METHOD, cheap and decisive, one build per candidate: sort ONE candidate iteration,
+    rebuild, and re-run the 5x -no-threads dump with ASLR ON. If the insertion md5s stabilise, that
+    site is the cause. ASLR-off already gives the known-stable reference md5 (eaaacb16ac42 on
+    core/odin/checker at the current tree), so there is a target to hit rather than just "did it
+    change". Start with check_stmt.odin:191.
+
+    Deliberately stopping before the edit: this is a fresh build-and-measure cycle and the session
+    is long. The candidate, the method, and the reference md5 are all recorded, so it is a clean
+    pickup.
+
+    #437 -- the #436 map-seed assumption is VERIFIED, and #335's site violates a policy the port
+    already wrote down.
+
+    1. SEED VERIFIED (the thing #436 said not to build on until tested). Ten string keys into a
+       map[string]int, iterate, print:
+           ASLR ON  -> zeta,delta,alpha,...  /  beta,iota,delta,...  /  gamma,beta,eta,...  (3 distinct)
+           ASLR OFF -> zeta,delta,alpha,theta,kappa,gamma,beta,eta,iota,eps,  x3 IDENTICAL
+       So Odin's string-keyed map iteration order IS address-derived despite hashing by content.
+       That is the mechanism behind #435, now measured rather than assumed.
+
+    2. THE PORT ALREADY HAS A POLICY, and check_stmt.odin:191 breaks it. From scope.odin:902-918,
+       written for #214:
+           "SCOPE: this exists to order DIAGNOSTIC OUTPUT only. Lookup still goes through the map,
+            and every other scope iteration stays name-sorted for determinism (task #50 /
+            LEDGER 277)."
+       check_stmt.odin:191 is a RAW `for _, entity in s.elements`. It is neither the diagnostic
+       path nor name-sorted. It is an exception to a rule the codebase states about itself, which
+       is why it survived #50.
+
+    3. BUT NAME-SORTING IS PROBABLY THE WRONG FIX HERE, and this is the part to get right. This
+       site is SEMANTIC (which entities get checked, in what order -- C++ check_expr.cpp:352-366),
+       not diagnostic. C++ walks its ScopeMap in SLOT order there. So the faithful order is slot
+       order, and #214 already built the simulator: scope_map_slot_order (scope.odin:965), proven
+       against the oracle on 4 name sets + 8/8 header cases (LEDGER 353).
+       CATCH: scope_map_slot_order takes entities in INSERTION order, because Robin Hood placement
+       depends on insertion sequence -- and a raw map iteration cannot supply that. Whether Scope
+       records insertion order is the first thing to check; if it does not, that is the real work
+       here, not the call site.
+
+    NEXT, in order: (a) does Scope carry insertion order? (b) if yes, route check_stmt.odin:191
+    through scope_map_slot_order and re-run 5x -no-threads with ASLR ON -- target md5 eaaacb16ac42
+    (core/odin/checker, current tree), which is the known ASLR-off reference from #435. Stabilising
+    to a DIFFERENT md5 means deterministic but not C++-faithful, and should be treated as a partial
+    result, not a fix. (c) audit the other raw scope.elements sites against the same policy.
+
+    Bisect probe deliberately not run this tick: a plain sort would answer "is this the site?" but
+    would also be the wrong fix, and I would rather not land a deterministic-but-unfaithful order.
+
+    #438 -- #335's fix PATTERN is settled, #214 is exonerated, and a source comment is wrong.
+
+    1. #214 IS SOUND. I suspected its slot-order simulation was being fed raw map order, which
+       would have compromised it (Robin Hood placement depends on insertion order). It is not.
+       BOTH callers -- check_proc.odin:932-944 and error.odin:1992-2010 -- do the same thing:
+           collect from scope.elements  ->  slice.sort_by (file, offset, token.text)  ->
+           scope_map_slot_order(...)
+       The sort reconstructs DECLARATION order, which is the insertion order the simulator needs,
+       so the raw map read is neutralised before it can matter. Worry withdrawn.
+
+    2. THAT IS THE FIX PATTERN for check_stmt.odin:191, already proven twice in-tree. Collect,
+       sort by (file, offset, text), run scope_map_slot_order, iterate the result. No new
+       machinery, no Scope struct change -- which answers #437's open question (a): Scope carries
+       NO insertion-order field (ast.odin Scope has only `elements: map[string]^Entity`), and it
+       does not need one, because position sorting recovers the same order.
+
+    3. A SOURCE COMMENT IS WRONG, and it is the kind that justifies a fix. error.odin:1988 reads:
+           "...between runs of the same binary on the same input, and the sweep never saw it
+            because sweep_det.sh runs under `setarch -R`."
+       .claude/tools/sweep_det.sh contains NO setarch and no ASLR handling at all -- it invokes
+       `timeout 120 "$BIN" "$p"` directly (line 13). So either the comment was stale from the
+       start or the pinning was expected from the invoker; as written it is not true of the script.
+       This matters beyond tidiness: the comment is the stated REASON that class of bug went
+       unseen, and if the sweep actually runs with ASLR ON then it should be able to see
+       ASLR-dependent variance and currently is not reporting any. Worth checking whether
+       sweep_det.sh is passing for the right reason. (It compares DIAGNOSTICS, and #335's order
+       variance need not change any diagnostic, so passing is not itself contradictory -- but the
+       comment's explanation is not the one that holds.)
+
+    4. CORRECTION TO MY OWN #435 FRAMING. I presented `setarch -R` as a discriminator to adopt.
+       The project already knew about it -- this very comment names it. What is true is narrower:
+       it is not currently WIRED INTO any tool. Adopting it into sweep_det.sh or flake.sh is a
+       real improvement; "discovering" it was not.
+
+    #439 -- the #335 fix at check_stmt.odin:191 was IMPLEMENTED, MEASURED, and REVERTED. It does
+    not do the job on its own.
+
+    Change: replaced the raw `for _, entity in s.elements` with the pattern already proven twice
+    in-tree -- collect, slice.sort_by (file, offset, text) to recover declaration order, then
+    scope_map_slot_order to reproduce C++'s ScopeMap slot walk. Built clean.
+
+    MEASURED on core/odin/parser (deliberately NOT core/odin/checker, which contains the edited
+    file -- that is the #435 trap), 5 runs each, -no-threads, ASLR ON:
+        baseline dm3.bin   0cc75dfaf2f1 dde677e53ea1 f4b544be5f12 ca508d4c6f08 483d26d4a007  -- 5 distinct
+        fix439.bin         67897b4709f8 445d1a1d82ff 31fcbd95dafa 695936b21f47 445d1a1d82ff  -- 4 distinct
+        fix439 setarch -R  a903ae7ffd7e x2  -- stable, as expected
+
+    4-distinct-of-5 versus 5-distinct-of-5 is NOT evidence of improvement at n=5; one repeated
+    value is what chance looks like. So: check_stmt.odin:191 is A raw address-ordered iteration on
+    the path, but fixing it alone does not stabilise the dump. Other sites contribute.
+
+    REVERTED, md5 back to da6803bc4233b249c0f6863b8dae2d84, zero residue.
+
+    WHY REVERT SOMETHING PLAUSIBLY MORE FAITHFUL: the change is justified by INFERENCE (C++ walks
+    its ScopeMap in slot order at check_expr.cpp:352-366, by analogy with #214's finding about the
+    same structure) and it demonstrably does not fix the bug it was written for. Landing a
+    semantic-ORDER change on those terms is precisely the #185/#340 failure mode -- #185 was a
+    "cleanup" that measured -8 MATCH, and #340 I reverted on noise and had to re-apply. A change
+    that alters which entities get checked first should land with evidence, not with a story.
+
+    THE REAL SHAPE OF THIS FIX, for next time: it is a SET, not a site. The live candidates are the
+    raw scope.elements iterations that can affect entity order -- check_proc.odin:932/1491/1780,
+    check_stmt.odin:191/3225/3895/3937, scope.odin:749/767 (docs_writer:1397, docs:326 and
+    error:1992 are doc/error paths, and error:1992 already sorts). Convert them together, then
+    measure; and use n>=10 runs, because n=5 cannot distinguish 4-distinct from 5-distinct.
+
+    #440 -- #439 REVERSED. The user was right: this is multi-factor, and my metric could not see it.
+
+    THE ERROR. #439 reverted the check_stmt.odin:191 fix because distinct-md5 stayed pegged
+    (4-of-5 vs 5-of-5). But distinct-md5 is effectively BINARY: ONE surviving address-ordered
+    iteration keeps it at N/N no matter how many others were fixed. Under a multi-factor defect a
+    correct partial fix produces EXACTLY that null. I read "the instrument cannot resolve this" as
+    "the change does nothing" -- and reverted a change that was working.
+
+    THE FIX WAS TO THE INSTRUMENT. Added a GRADED metric to the new .claude/tools/dumpdet.sh:
+    moved_positions = how many entity positions differ across N runs. Then measured each arm four
+    times, because a single number is worthless without its own repeatability:
+
+        baseline   1141 1141 1130 1141     (min 1130)
+        with fix   1125 1125 1125 1125     (zero variance)
+
+    1125 sits BELOW the baseline minimum, with the fix arm perfectly repeatable. A real -16.
+    Not a fix on its own -- it does not reach 0 -- but a genuine contributing site.
+
+    RE-APPLIED and gated:
+        corpus.sh   198/198 missing=0
+        parity.sh   323/323 compared=323 excluded=0  0/0/0
+
+    NEW TOOL: .claude/tools/dumpdet.sh. Determinism screen for the MODEL, which flake.sh cannot
+    see (it screens diagnostics, so an entity-ORDER defect is invisible to it -- which is how #335
+    survived this long). Reports both dump views separately, because the insertion view is #335
+    and the sorted view is #344 and conflating them cost several ticks. Two guards earned their
+    place immediately: a vacuity check (a missing dump md5s to a constant, so absent runs would
+    read as perfectly stable) and a SELF-TARGET refusal (measuring core/odin/checker means the
+    checker's own source is the input, so a fix moves the measurement -- the #435 trap).
+
+    ALSO: my first parity.sh invocation omitted the pkglist argument and the #392 guard aborted it
+    rather than sweeping zero packages and printing a clean result. That guard was written after
+    exactly that false-green; good to see it fire.
+
+    THE LESSON, and it is not "measure more". It is: BEFORE trusting a null result, establish that
+    the instrument could have detected the effect. A binary metric cannot show partial progress on
+    a multi-factor defect, and I had already written down that this was plausibly multi-factor
+    (#436 listed ~9 candidate sites) without connecting that to what my metric could resolve.
+
+    #441 -- second candidate site measured, NO effect, reverted. Plus a CORRECTION to #440's
+    characterisation of the metric.
+
+    CANDIDATE: check_proc.odin:1780, `for _, field in struct_scope.elements` creating `using`
+    variables via alloc_entity_using_variable. Picked because it ALLOCATES ENTITIES inside a raw
+    map walk, which is the shape that should feed insertion order. Converted with the same
+    pattern, built clean, measured 3x per arm on core/odin/parser:
+        site1 only     1125 1122 1121
+        site1 + site2  1121 1122 1125
+    Indistinguishable. Reverted; check_proc.odin md5 back to 5decdc212e479089723bbd6fc9af3c40.
+
+    NOT "INERT" -- UNTESTED. core/odin/parser has only 4 `using ` occurrences in one file, so this
+    path is barely exercised on that target. The correct statement is that the measurement had no
+    power here, not that the site does not contribute. Re-test on a target that actually uses
+    struct embedding before dispositioning it. This is the same distinction #434 turned on: a null
+    from an instrument that cannot see the effect is not evidence of absence.
+
+    CORRECTION TO #440. I wrote that the fix arm had "zero variance" (1125 four times). Re-measured
+    this tick it gives 1125/1122/1121 -- a spread, not a constant. Four identical readings were a
+    small-sample artefact and I over-claimed from them. The #440 CONCLUSION still holds, because
+    the ranges do not overlap:
+        baseline    1130 .. 1141   (min 1130)
+        with fix    1121 .. 1125   (max 1125)
+    but "zero variance" was wrong and the separation is what carries the argument, not stability.
+    Lesson repeated from #439 in the opposite direction: three or four samples characterise a
+    range badly. Quote ranges, not single values, and never call something stable off n=4.
+
+    METRIC NOTE for anyone continuing: moved_positions on core/odin/parser sits around 1121-1141
+    with roughly +-10 of noise, so a site worth landing needs to move it by more than that. The
+    first site cleared it (-16 from baseline min); this one did not move it at all.
+
+    #442 -- #335's RESIDUAL characterised precisely: it is package-block INTERLEAVING, and it is
+    concentrated in core/sys/posix.
+
+    Measured on the current tree (site-1 fix in), core/odin/parser, two -no-threads runs, ASLR ON:
+        package first-appearance order   IDENTICAL (34 packages)
+        file first-appearance order      IDENTICAL (253 files)
+        per-file internal sequence       IDENTICAL -- all 253 files
+        positions differing              1121
+
+    Those four facts together are the finding. Nothing moves WITHIN a file, and no file or package
+    lands in a different slot; what varies is how the packages' entity runs INTERLEAVE with each
+    other. Concentration is extreme and not uniform:
+        posix 999   libc 69   linux 17   sync 16   c 8   reflect 3   time 1   rand 1
+    The first divergence is a contiguous block of core/sys/linux entities appearing at a different
+    point in the stream.
+
+    WHY THIS MATTERS FOR THE SEARCH. I spent two ticks converting individual scope.elements
+    iterations, which is the right shape for WITHIN-file reordering -- and within-file reordering
+    is now provably ZERO. So the remaining defect is NOT another scope-iteration site; converting
+    more of them is unlikely to move the number. The question is what decides when a dependency
+    package's accumulated entities get flushed into info.entities relative to another's.
+
+    A METHOD NOTE ON MY OWN ERROR THIS TICK: my first per-file comparison reported "0 of 253 files
+    differ" and I nearly read that as "nothing is reordered", which would have contradicted
+    moved_positions=1121. Per-file identical + file-order identical does NOT imply globally
+    identical, because two files' runs can INTERLEAVE differently while each subsequence and each
+    first appearance is preserved. The per-file instrument is blind to exactly the effect that
+    remains. Same family of mistake as #439 (metric could not see the effect) and #441 (target did
+    not exercise the path) -- three variants of "the instrument cannot answer the question asked".
+
+    NEXT: find what flushes a package's entities. posix carries 89% of the movement, so a single
+    mechanism probably explains nearly all of it -- and core/sys/posix is a heavy foreign-block,
+    heavy-`when` dependency package, which narrows the candidates. Do NOT keep converting
+    scope.elements sites on the strength of #440; that vein is measured out.
+
+    #443 -- the SINGLE producer of info.entities located, and #430 confirmed rather than corrected.
+
+    info.entities has exactly ONE ordering source in practice:
+        producer  entity_helpers.odin:644-650, in the add-entity-and-decl-info path:
+                      is_lazy := .Lazy in e.flags
+                      if !is_lazy { queue.mpsc_enqueue(&ctx.info.entity_queue, e) }
+        consumer  check_files.odin:479-481, drained once at merge time into info.entities
+        plus      check_decl.odin:614/686, the .Lazy direct appends -- measured at ZERO on this
+                  target (#430), so they contribute nothing here.
+    I missed this enqueue in two earlier greps because the call spans lines and my patterns were
+    anchored on `entity_queue` appearing next to `enqueue` on ONE line. Worth noting as a search
+    failure mode, not just an oversight: grep on a single line cannot see a wrapped call, and I
+    concluded "no enqueue exists" from it, which briefly contradicted a measurement I trusted.
+    When a grep contradicts a measurement, the grep is usually what is wrong.
+
+    So info.entities order == the order that function is CALLED. Collection calls it per package
+    per file in sorted order (#430 established both are deterministic), which cannot produce the
+    interleaving measured in #442. Therefore something calls it OUTSIDE the ordered collection
+    walk -- on demand -- and that is the remaining mechanism.
+
+    A LEAD SITTING RIGHT ABOVE THE ENQUEUE, entity_helpers.odin:622-626:
+        if pkg != nil { enqueue_exported_entity(ctx.info, pkg, identifier, e) }
+        else          { add_entity(ctx, scope, identifier, e) }
+    Exported entities are routed into pkg.exported_entity_queue and published LATER by a separate
+    per-package drain (check_import_export.odin:683). #271 already fixed that drain's publish
+    ORDER once. core/sys/posix -- which carries 89% of the movement in #442 -- is exactly the
+    shape that stresses this path: a large dependency package almost entirely made of exported
+    foreign declarations. That is a hypothesis with a matching fingerprint, NOT a finding.
+
+    NEXT: check whether the exported-entity drain runs per package in a deterministic package
+    order, and whether a package can be drained at more than one point. Test it the same way as
+    everything else here -- change one thing, then dumpdet.sh and compare moved_positions against
+    the 1121-1141 band, which is the noise floor established in #441.
+
+    #444 -- #443's export-drain lead REFUTED by reading; a better candidate found one level up.
+
+    THE #443 LEAD WAS WRONG, and the reason is worth stating because it was a one-line check I
+    should have done before writing it up. entity_helpers.odin routes exported entities at :622
+    and enqueues to info.entity_queue at :650 -- in the SAME function call, unconditionally for
+    non-lazy entities. So the export routing cannot affect info.entities order at all. The export
+    drain is also deterministic anyway: sorted_packages plus #271's (basename, offset) sort. Two
+    independent reasons it is not the cause; I had the fingerprint (posix = exported foreign
+    declarations) and let it carry an argument that the control flow does not support.
+
+    BETTER CANDIDATE, one level up. check_import_entities (check_import_export.odin:357) walks
+    packages in `package_order` from topological_sort_packages, and that function begins:
+
+        topological_sort_packages :: proc(...) {
+            for _, node in graph.nodes {        // <-- RAW MAP ITERATION, line 443
+        ...
+            // Kahn's algorithm for topological sort with priority handling
+
+    Kahn's seeding order decides how TIES are broken, so package_order is address-dependent
+    wherever the dependency graph does not force an order. And this walk is a FIXPOINT that calls
+    collect_file_decls and RESTARTS from min_pkg_index when new declarations become visible
+    (C++ checker.cpp:6214-6243) -- so it creates entities, repeatedly, in that order.
+
+    WHY THIS FITS #442's MEASUREMENT BETTER THAN ANYTHING SO FAR. Two passes create entities: the
+    ordered collection walk (sorted_packages/sorted_files, deterministic) and this fixpoint
+    (topo-ordered from a map seed). That predicts exactly what was measured -- file and package
+    FIRST-APPEARANCE stable, because the ordered pass gets there first, but INTERLEAVING varying,
+    because the fixpoint contributes entities at topo-order-dependent points. No other candidate
+    this session explains the stable-first-appearance / varying-interleave combination.
+
+    STILL A HYPOTHESIS. It has the right shape and a mechanism, which is exactly what #432 and
+    #443 also had before dying. The test is unchanged and cheap: sort the graph.nodes seed
+    (by package fullpath), rebuild, and compare moved_positions against the 1121-1141 band from
+    #441. Measure the arms 3-4x each -- one reading cannot clear that noise floor.
+
+    #445 -- #444's topological-sort hypothesis: implemented, measured, NO EFFECT, reverted.
+
+    THE DEFECT IS REAL AND I STILL BELIEVE THE READING. topological_sort_packages seeds `nodes`
+    from a raw map walk (check_import_export.odin:443), and its selection loop breaks ties by
+    (dep_count, Global, pkg.id) where the pkg.id arm fires ONLY when both nodes are Global. For two
+    NON-global packages the code comments itself as "first found wins" -- and "first found" is that
+    map order. C++ builds its node array by walking packages rather than a hash map, so its
+    "first found" is stable and its comparator never needed the tiebreak the port needs. Same
+    shape as #271: faithful comparator, nondeterministically ordered input.
+
+    MEASURED, sorting the seed by pkg.id (load order, which is what C++'s array order is):
+        before   1125 1125 1121
+        after    1125 1125 1114
+    Inside the +-10 band established in #441. No effect. Reverted; md5 back to
+    a0034e3b24d2120d0d899ead5f626d26.
+
+    WHY NO EFFECT, most likely: the tie-break may simply never be REACHED. If dep_count and the
+    Global flag already determine a total order over this package set, the seed order is irrelevant
+    and the sort is a no-op. That is a testable statement and it is the cheap next step -- a
+    counter on the "both non-global, first found wins" branch, run once. If the count is 0 the site
+    is provably inert here and can be dispositioned; if it is non-zero, the seed matters and the
+    null result needs another explanation.
+
+    KEPT THE RULE. This is the third change this session that was plausible, principled, and
+    unmeasurable (with #439's first attempt and #441). Reverting is consistent with what I wrote in
+    #439: a change that alters which entities get checked first lands with evidence, not with a
+    story. The counter-argument -- "it is a pure determinism improvement, surely harmless" -- is
+    exactly the argument #185 lost, where a plausible cleanup measured -8 MATCH.
+
+    STANDING BACK. #335's residual has now survived five targeted attempts (#429 import queue,
+    #440 check_scope_decls -- the one that DID land, #441 struct using-fields, #444/#445 topo sort).
+    The one that worked was found by asking WHICH ENTITIES MOVE (#431), not by auditing candidate
+    sites. #442 re-ran that question and got a sharper answer -- package-block interleaving,
+    89% posix -- which I have not yet converted into a "which code path" question. That is the
+    thread to pull, not more site audits.
+
+    #447 -- file ordering: fully dispositioned, and my previous answer was weaker than the truth.
+
+    Last tick I told the user file ordering is "deterministic by COVERAGE, not by construction",
+    because three raw `pkg.files` walks bypass sorted_files and pkg.files is a map (#345). Having
+    now read all three, each is individually accounted for and the answer is stronger:
+
+      package_resolver.odin:744  import queueing. Raw map order. MEASURED no effect on entity
+                                 order (#429: sorting it left insertion md5s varying in both arms).
+                                 Still a real map-vs-array divergence from C++ -- tracked as #345 --
+                                 but not a determinism leak in observable output.
+      scope.odin:560             PROVABLY INERT. It computes
+                                     total_pkg_decl_count += len(file.decls)
+                                 over the files. Addition is commutative, so iteration order cannot
+                                 change the result. No measurement needed and none should be run;
+                                 an argument settles it.
+      runtime_session.odin:99    Collects from the map then slice.sort_by(fullpath) before use.
+                                 Neutralised by the sort, same shape as error.odin:1992 and
+                                 check_proc.odin:932.
+
+    Plus the observed evidence (#442): file first-appearance order byte-identical across runs, all
+    253 files; and sorted_files' key is (basename, fullpath) where fullpath is unique, so it is a
+    TOTAL order with no ties left to break.
+
+    CONCLUSION: file ordering is deterministic, and now by ARGUMENT at every site rather than by
+    "nothing has bitten us yet". Worth the ten minutes -- "deterministic by coverage" is the kind
+    of hedge that quietly becomes a wrong assumption three months later, and two of the three sites
+    turned out to need no measurement at all.
+
+    ALSO LANDED THIS TICK: the #445/#446 topological-sort seed sort, re-applied after the user
+    challenged the revert. The challenge was right and my rule was over-applied. The distinction I
+    had missed:
+        #185-class  the change alters DEFINED behaviour        -> needs evidence, something may break
+        #446-class  the change SPECIFIES UNDEFINED behaviour   -> default to specifying it
+    Raw map order is not a behaviour the port promised, so there is nothing load-bearing to remove;
+    the only real risk was picking a deterministic order that DIVERGES from C++, and that is a gate
+    question I had simply not asked. Gated: corpus 198/198 missing=0, parity 323/323 excluded=0
+    0/0/0. Landed with the honest note in-source that it has NO measured effect on moved_positions.
+
+    #448 -- #335 MINIMAL REPRO FOUND by bisecting DEPENDENCIES rather than auditing code.
+
+    Method that finally worked: stop asking "which site is wrong" and ask "what INPUT is needed to
+    make it happen". Measured moved_positions across targets with different dependency profiles:
+
+        core/unicode/utf8   1041 entities   posix=0      moved=0
+        core/strings        1899            posix=0      moved=0
+        core/odin/tokenizer 9253            posix=1761   moved=1118
+        core/odin/parser   10850            posix=1761   moved=1125
+
+    posix presence predicted it perfectly, and the moved count was ~1120 in BOTH large targets
+    regardless of total size -- so the moving set is essentially FIXED, a property of what gets
+    loaded, not of the target. Then bisected downward:
+
+        core/sys/posix ALONE          3931   moved=0     <- posix is not the cause
+        core/c/libc ALONE             2170   moved=0
+        core/sys/linux ALONE          2343   moved=0
+        probe importing posix         3932   moved=0
+        probe importing posix+libc    3933   moved=0
+        probe importing sync          2826   moved=0
+        probe importing posix+LINUX   5515   moved=22 / 22 / 1093   <- TRIGGERS
+
+    MINIMAL REPRO: a two-line package importing core:sys/posix and core:sys/linux. Neither alone
+    moves anything; together they do. That is an INTERACTION, and it is the same shape as #335's
+    original finding (LEDGER #414): two packages competing to register the same foreign symbols,
+    where whichever arrives first decides the outcome. posix and linux both declare syscalls.
+
+    BIMODAL, and that matters: 22, 22, 1093 across three measurements. Not "22 entities move" --
+    usually a small perturbation, occasionally a large block. Two regimes is what a coin-flip
+    between two orderings looks like, not a gradual drift. Any fix must kill BOTH regimes; a change
+    that only removes the 1093 case would look like a big win on averages and leave the defect.
+
+    ERROR MADE AND CAUGHT THIS TICK: I compared two dumps with awk using a regex BACKREFERENCE
+    (`$0!~/^(.*)\t\1$/`) to find differing lines. POSIX awk has no backreferences, so the pattern
+    matched everything and I briefly read a full package histogram as "the movers" -- which
+    contradicted dumpdet.sh reporting that same target CLEAN. The validated instrument was right
+    and my one-liner was wrong. Fourth instance this session of concluding from an instrument that
+    could not answer the question; the difference is that this time the contradiction was visible
+    immediately because a trusted tool disagreed.
+
+    NEXT: with a 5515-entity two-import repro, the phase-tagging instrument that was too expensive
+    at 10850 entities is now cheap. Tag each entity with the phase that enqueued it, dump it, and
+    read off which phase emits the moving block. That answers "which code path" directly instead
+    of by elimination -- and elimination has now cost five reverted attempts.
+
+    #449 -- the movers identified precisely on the minimal repro, and #430's WHEN-BLOCK hypothesis
+    is REINSTATED. My #431 dismissal of it was too hasty.
+
+    On p_pl (posix+linux, 5515 entities) the order has three variants across 8 runs -- one dominant
+    (6/8) and two rare. Diffing dominant against each, with a correct comparison this time:
+
+        variant A (30 changed lines): a block of 14 `linux/` entities moves ~3859 -> ~4934
+            Open_Flags_Bits, compat64_arg_pair, modify_ldt, arch_prctl, ioperm, _Arch_Stat,
+            _Arch_Stat_FS, Sig_Info, _Arch_Shmid_DS, _Arch_Semid_DS, _Arch_User_Regs,
+            _Arch_User_FP_Regs, _Arch_User_FPX_Regs, EPoll_Event
+        variant B (16 changed lines): a block of 8 `c/` entities moves
+            int_fast8_t, uint_fast8_t, int_fast16_t ... uint_fast64_t
+
+    Each block moves AS A UNIT. And every one of them is an ARCH-CONDITIONAL file-scope `when`
+    declaration -- verified: core/sys/linux/types.odin:110 `_Arch_Stat` sits inside
+    `when ODIN_ARCH == .amd64` at :108, Open_Flags_Bits appears twice (bits.odin:161 and :199, two
+    arch variants), and the c/int_fast*_t block was already confirmed in #431 as
+    `when ODIN_ARCH == .amd64`.
+
+    THE CORRECTION I OWE. #430 hypothesised exactly this -- file-scope `when` blocks -- and #431
+    marked it "SUPERSEDED ... an artefact of a contaminated comparison". The contamination was
+    real: my by-global-line-index diff made every file after the first shift look different. But
+    contamination invalidated the METHOD, not necessarily the CONCLUSION, and I retired the
+    hypothesis instead of re-testing it with a sound method. It cost several ticks -- #441, #444,
+    #445 all chased other things while the right answer sat retired. When a result is thrown out
+    for a methodological flaw, the correct disposition is UNTESTED, not REFUTED.
+
+    (#431's own finding stands too and is not in conflict: on core/odin/parser the movers were
+    sibling NESTED PROCS, and #440 fixed that and measured -16. These are two distinct sub-defects
+    of #335, visible on different targets. parser exercised one, p_pl exercises the other.)
+
+    MECHANISM, now well-supported: check_collect.odin memoises a when-condition in
+    ws.is_cond_determined / ws.determined_cond, and there are TWO collection entry points
+    (collect_when_stmt_from_file:36 and check_collect_entities_from_when_stmt:736). A dependency
+    package's `when` can be collected during the ordered collection walk OR later during
+    check_import_entities' FIXPOINT (which restarts from min_pkg_index whenever new declarations
+    become visible). Which one gets there first decides where the block lands. That is a TIMING
+    difference, not an ordering one, which is why every sort I tried was inert.
+
+    NEXT: instrument which entry point collects each when-block on p_pl. Two imports, 5515
+    entities, three known variants -- the cheapest diagnostic setup this defect has ever had.
+
+    #450 -- #335 ROOT CAUSE LOCALISED to a two-package swap, by instrumenting the when-collection
+    entry points on the minimal repro.
+
+    Instrumented both `when` entry points to print (entry, file:line, is_cond_determined). On p_pl,
+    6 runs, 447 when-events every time. The when-trace md5 CORRELATES PERFECTLY with the dump md5:
+        when_md5 20390885 -> dump ebb16934   (runs 1,2,4,5)
+        when_md5 b17ca42e -> dump e0ea3ff1   (runs 3,6)
+    So the when-collection sequence fully explains the entity-order variance. No other phase needs
+    to be considered.
+
+    THE ENTIRE DIFFERENCE IS FOUR LINES. core/c/c.odin's two `when` blocks (:53 and :62) are
+    collected at sequence position 24-25 in one variant and 41-42 in the other. Same entry point
+    (A = collect_when_stmt_from_file), same determined=false in both. Reading the surrounding
+    trace:
+        variant 1:  base/runtime ... -> sys/linux (24..40) -> c/c.odin (41,42) -> c/libc (43..)
+        variant 2:  base/runtime ... -> c/c.odin (24,25)   -> sys/linux      -> c/libc
+    core/c and core/sys/linux SWAP. Whichever is walked first has its when-blocks collected first,
+    and every arch-conditional declaration inside them lands earlier or later as a block -- which
+    is exactly the block movement measured in #449.
+
+    SO IT IS PACKAGE-WALK ORDER AFTER ALL, but in the FIXPOINT, not the main collection. Entry A is
+    reached via collect_file_decls, which check_import_entities calls while walking `package_order`
+    from topological_sort_packages. That vindicates the #444 line of reasoning and explains why
+    #446's fix measured nothing: sorting the graph.nodes SEED by pkg.id was the wrong lever --
+    the tie between core/c and core/sys/linux is evidently broken somewhere else, or the seed order
+    is not what decides it. #446 stays landed (it specifies previously-undefined behaviour, gated
+    clean) but it is NOT the fix.
+
+    NEXT, and it is now a very small question: why do core/c and core/sys/linux swap in
+    package_order? Both are leaf-ish dependencies, so they plausibly tie on dep_count and on the
+    Global flag, landing in the "first found wins" arm -- the one whose input I sorted in #446.
+    Instrument package_order directly (print the resolved order, 6 runs, diff) rather than
+    reasoning about the comparator: two runs, one diff, done. The trace already proves the answer
+    is visible at that level.
+
+    Instrument reverted; check_collect.odin md5 back to 55dfcda7606112f77d22e21dfe8c180c.
+
+    #451 -- #335 ROOT CAUSE: ast.Package.id is DECLARED, READ, and NEVER WRITTEN. It is always 0.
+
+    Printed the resolved package_order with each node's tiebreak inputs on the p_pl repro. Two
+    things fell out, and the first is the answer:
+
+    1. EVERY package prints id=0.
+           PKGORD 0 runtime          dep_count=0 global=true  id=0
+           PKGORD 1 strconv_decimal  dep_count=0 global=false id=0
+           PKGORD 2 c                dep_count=0 global=false id=0
+       C++ assigns it -- parser.cpp:5842 `pkg->id = p->packages.count+1`, a 1-based registration
+       sequence. The port declares `id: int` on ast.Package (ast.odin:130) and never assigns it.
+       Same family as #103/#104: declared, read, never written.
+
+       CONSEQUENCE 1, the defect: topological_sort_packages' tertiary tiebreak is
+       `x->pkg->id < y->pkg->id`. With every id 0 that comparison is always false, so the tiebreak
+       is DEGENERATE and ties fall through to "first found wins" -- which is raw map order, which is
+       address-seeded (#437). That is why package_order varies per run.
+
+       CONSEQUENCE 2, and it retires my own #446: I "fixed" the seed by sorting nodes on pkg.id.
+       Sorting by a field that is constant 0 is a NO-OP. #446 measured no effect because it did
+       nothing at all -- not because the site was irrelevant. The reasoning behind #446 was right
+       and the implementation was inert, which is a distinction I could not have made without
+       printing the value. LESSON: when a fix keys on a field, PRINT THE FIELD before concluding
+       the site does not matter.
+
+    2. Order-only md5 (names, ignoring the id column) differs on all 6 runs, while the dump has
+       only 3 distinct values. So package_order genuinely varies more than the output does -- most
+       package pairs' relative order is immaterial, and only a few (core/c vs core/sys/linux, per
+       #450) actually move entities. Consistent, and it explains why the defect is bimodal.
+
+       INSTRUMENT NOTE: my first comparison hashed the whole PKGORD line including `id=`, and I
+       nearly read "6 distinct orders" off a field that was constant. It was constant here so the
+       conclusion survived, but the habit is wrong -- hash only the columns whose variation you are
+       actually asking about.
+
+    THE FIX, with a C++ citation: assign pkg.id at registration in load order, mirroring
+    parser.cpp:5842 (count+1). Then the existing tiebreak discriminates, package_order becomes a
+    function of load order rather than map order, and #446's sort becomes meaningful instead of
+    inert. Check for other readers of pkg.id before landing -- anything else reading it has been
+    reading 0 too.
+
+    Instrument reverted; check_import_export.odin md5 back to 16d6164598d4af91fe2e18329a564904.
+
+    #452 -- #335: pkg.id now ASSIGNED. Minimal repro goes to ZERO. Gates green.
+
+    One line in register_package (build_infrastructure.odin), citing parser.cpp:5842:
+        pkg.id = len(info.packages_ordered) + 1
+    packages_ordered is appended exactly once per package (the dedupe loop above it handles a
+    package reachable under several keys), so its length before the append IS C++'s
+    packages.count, and the result is C++'s 1-based registration sequence.
+
+    MEASURED:
+        p_pl (posix+linux, the #448 minimal repro)   22 / 22 / 1093   ->   0, DUMPDET-CLEAN 1/10
+        core/odin/parser                             1121..1141       ->   1086 1101 1101
+    The repro is FIXED outright. parser improves by a real but partial amount -- the new range does
+    not overlap the old, so it is not noise, but it is not zero either: parser has at least one
+    more contributor, consistent with #431/#440's nested-proc sub-defect being a separate thing.
+
+    GATES: corpus 198/198 missing=0; parity 323/323 excluded=0 0/0/0; modelcmp 114/114 mismatches=0.
+
+    WHAT THIS RETIRES. #446 (sorting the topo seed by pkg.id) was landed with "no measured effect"
+    -- because it was sorting by a constant 0 and did literally nothing. With ids now assigned it
+    becomes meaningful, and the two changes are complementary: #452 makes the COMPARATOR's tiebreak
+    work, #446 makes the INPUT order deterministic for whatever the comparator still cannot
+    separate. Neither alone is obviously sufficient; both are now doing their stated job.
+
+    THE SHAPE OF THIS BUG, worth remembering. A field declared and read but never written
+    (#103/#104 family) is invisible to every gate the project has: parity, corpus, modelcmp and the
+    spec suites were all green throughout, because the degenerate tiebreak produces a VALID order,
+    just not a STABLE one. It took a purpose-built determinism instrument (dumpdet.sh), a
+    dependency bisect down to a two-import repro, and finally printing the field to see it. The
+    generalisable check is cheap: for any field the port declares to mirror a C++ field, grep for
+    an assignment. #104 did that sweep once; ast.Package.id was missed because it lives in the AST
+    package rather than the checker.
+
+    STILL OPEN on #335: core/odin/parser's residual ~1090. Same method applies -- bisect its
+    dependencies to a minimal repro, then diff the movers.
+
+    #453 -- generalisable sweep for #452's bug shape: fields DECLARED and READ but NEVER WRITTEN.
+    Result is a triage list, not a finding. Filed as #347.
+
+    Motivation: #452 was exactly this shape (ast.Package.id), it defeated every gate the project
+    has, and #104 ran this sweep once but scoped it to the checker -- ast.Package.id lives in
+    core/odin/ast and was missed. So: re-run with ast/ included.
+
+    METHOD ERROR CAUGHT FIRST, and it is the same one AGAIN. My initial pattern counted
+    `\t<field>:` as an assignment -- which matches the field's OWN DECLARATION, so every field
+    scored >=1 and the sweep reported ZERO never-assigned fields. A clean sweep from an instrument
+    that cannot fail is worthless. Odin declares with `field: Type` and initialises with
+    `field = value`, so dropping the colon form is both safe and necessary. Fifth instance this
+    session of an instrument that could not have answered the question; I now check the positive
+    control FIRST (pkg.id must appear before #452's fix and vanish after -- it does).
+
+    42 of 324 ast fields are never assigned by `=`. MOST ARE LEGITIMATE and should not be touched:
+        mutexes / wait-signals / queues   deps_mutex, gen_procs_mutex, next_mutex,
+                                          proc_checked_mutex, type_info_deps_mutex, mutex,
+                                          gen_types_data_mutex, fields_wait_signal,
+                                          polymorphic_wait_signal, exported_entity_queue
+                                          -- used by ADDRESS (&x.f) and init'd via queue.*_init
+        atomics                           proc_body_checked, viral_state_flags
+                                          -- written via sync.atomic_store, invisible to `=`
+        already dispositioned             min_dep_count (#272: no reader emits a diagnostic)
+
+    THE REAL SUSPECTS are plain data fields, and the READER COUNT separates them:
+        readers=0 (dead both ways -- declared, never written, never read):
+            entity_procedure_of, ir_mangled_name, collection_name, padding_needed
+        readers>=1 (READ but never written -- the #452 shape, each returns a zero value):
+            scope_index(2), relpath(3), directive_count(2), is_anonymous(1),
+            uses_branch_location(1), defer_used(1)
+
+    The readers>=1 group is where another #452 could be hiding: a reader consuming a permanent
+    zero, producing valid-but-wrong behaviour that no gate detects. The readers=0 group is dead
+    weight -- either wire it or delete it, but it cannot currently misbehave.
+
+    NOT TRIAGED FURTHER this tick, deliberately: each needs its C++ counterpart checked to decide
+    whether the field should be written or removed, and guessing would just manufacture work.
+    Six fields, six small questions.
+
+    #454 -- #347 CLOSED: the never-written sweep converged to ZERO real defects. #452 was an
+    outlier, not the tip of an iceberg. Good news, arrived at by fixing my own instrument twice more.
+
+    THE SWEEP NARROWED 42 -> 27 -> ~7 -> 0, and each step was a blind spot in MY pattern, not a
+    property of the code:
+        1. counted `field:` as an assignment -- matched the DECLARATION, so the first run reported
+           zero never-assigned fields (a clean result from an instrument that could not fail)
+        2. missed COMPOUND assignment: scope_index, directive_count and defer_used are all written
+           with `+= 1`
+        3. missed ALIGNMENT WHITESPACE: `decl.relpath    = path` (parser.odin:5406) did not match a
+           single-space `= ` pattern
+        4. missed COLLECTION MUTATION: delayed_decls_*, imports, ignores, offsets and semicolon are
+           appended/indexed, never assigned wholesale
+
+    After all four corrections the genuinely never-written, non-mutex, non-atomic set is six dead
+    fields (arrow, debug_metadata_type, type_parameter_specialization, collection_name,
+    entity_procedure_of, ir_mangled_name -- zero writes AND zero reads, so inert) plus exactly ONE
+    read-but-never-written candidate: Entity_Procedure.is_anonymous.
+
+    is_anonymous IS NOT A DEFECT, and the C++ answer is unambiguous:
+        port    declared semantic_types.odin:572, read once name_canonicalization.odin:593, no writer
+        C++     declared entity.cpp:271, read name_canonicalization.cpp:610 (the SAME site),
+                written llvm_backend_general.cpp:3455 -- in the LLVM BACKEND
+    The port is a checker; it has no backend, so having no writer is correct. And under `odin check`
+    C++ never runs the backend either, so its is_anonymous is also false there. Behaviour matches.
+    It would become a real gap only if the port ever grows a backend -- worth remembering, not
+    worth doing.
+
+    WHY THE NEGATIVE RESULT IS WORTH THE TICK: #452 was severe (it was #335's root cause) and
+    invisible to every gate, so "how many more like it are there" is exactly the question to ask
+    after fixing one. The answer is none, which retires a whole class of worry rather than leaving
+    it as background anxiety. #104's original sweep was sound; it simply did not cover core/odin/ast,
+    and that gap is now closed.
+
+    RULE, now earned five times over this session: before trusting a sweep, run a POSITIVE CONTROL
+    through it. pkg.id must appear in the never-written list before #452's fix and vanish after. I
+    did that from step 2 onward and it caught nothing further -- but steps 2-4 were all found by
+    eyeballing the flagged list and asking "is that really unassigned?", which is the cheaper habit:
+    spot-check the first few hits of any audit before believing the count.
+
+    #455 -- #335 residual: bisected to core:os, and it is an INTERACTION again. All singles clean.
+
+    Re-measured the dependency landscape on the post-#452 binary:
+        core:strings          1900   0
+        core:unicode/utf8     1042   0
+        core:strconv          1159   0
+        core:c                 831   0
+        core:sys/linux        2343   0        <- was part of the pair #452 fixed
+        core:math/rand        1729   0
+        core:container/queue  2878   0
+        core:mem              6297   22       <- was 1110 before #452
+        core:sort             6340   22
+        core:os               8271   1093     <- the driver
+        core:path/filepath    8307   1093     (imports os)
+        core:odin/tokenizer   9254   1110     (imports os transitively)
+        core:odin/ast        10200   1092
+
+    #452's effect is visible package by package: mem fell 1110 -> 22, and every core:sys package is
+    now clean on its own. What remains concentrates in core:os, and NONE of os's imports triggers
+    it alone -- bytes, c, container/queue, io, math/rand, slice, strconv and sys/linux all measure
+    0; mem measures 22. So os is a second INTERACTION, structurally the same shape as posix+linux
+    (#448) rather than a new class of defect.
+
+    THE METHOD IS NOW PROVEN AND SHOULD BE REPEATED, not re-invented: bisect DEPENDENCIES to a
+    minimal repro (#448), diff the movers PER FILE independently (#449), instrument the implicated
+    phase on the small repro (#450), then read the field that decides the branch (#451). That chain
+    took #335 from "nondeterministic entity order across 10850 entities" to a one-line fix with a
+    C++ citation. The expensive part was never the fixing; it was the four instrument errors on the
+    way, each of which produced a confident wrong answer.
+
+    NEXT: pair-bisect core:os -- try mem+X for each other import until the pair that jumps from 22
+    to ~1093 appears. That is ~8 probes, each one dumpdet.sh run, no code changes. The residual 22
+    that mem and sort share is a separate, smaller question worth keeping distinct from the 1093.
+
+    #456 -- pair-bisect of core:os. Two results, one of them counter-intuitive.
+
+        mem alone                    22
+        mem + bytes / io / slice / strconv / container-queue / math-rand    22
+        mem + core:sys/linux          0     <- adding a package REMOVES the variance
+        mem + core:c                  0     <- same
+        core:os                    1093     <- NOT reproduced by any pair tested
+
+    RESULT 1: mem's residual 22 is the SAME posix interaction #452 addressed, not a new defect.
+    mem imports core:sys/posix; explicitly adding sys/linux or c makes it vanish. That is the
+    signature of a TIE being broken rather than a bug being avoided -- with the extra import the
+    dependency graph gains an edge, dep_count separates the packages, and the comparator never
+    reaches the arm where the remaining ambiguity lives. Adding an import cannot plausibly FIX a
+    real defect; it can only change which comparator arm decides. So 22 is residual ambiguity in
+    the same tiebreak chain, one layer below what pkg.id resolved.
+
+    RESULT 2, and it is the useful one: core:os's 1093 is NOT reproduced by mem+X for any X in its
+    import list. Every pair sits at 22 or 0. So os needs THREE OR MORE packages together, or
+    something in os's own source rather than its imports (os is large and platform-split, with
+    os_linux.odin pulling sys/unix-family declarations directly). The two-package bisect that
+    cracked #448 does not reach it.
+
+    NEXT, and I would start with the cheaper of the two: (a) check whether os's OWN files rather
+    than its imports carry the trigger -- probe a package that imports nothing but declares the
+    same foreign-heavy platform split; or (b) triple-bisect mem+X+Y, which is ~28 probes and worth
+    doing only if (a) says the imports really are implicated. Do NOT assume the #448 shape repeats
+    just because it fit last time; the pair result is evidence that it does not.
+
+    #457 -- core/os's "1093" is ONE ENTITY. Plus an instrument caveat that reframes every number
+    in #442-#456.
+
+    BRANCH (a) FROM #456 SETTLED, and it saved the 28-probe triple bisect:
+        all of core:os's imports together (no os)   7791 entities   moved_positions=0
+        core/os itself                              8270 entities   moved_positions=1093
+    The trigger is in os's OWN SOURCE, not its imports. Good thing I checked the cheap branch first
+    -- the triple-bisect would have found nothing.
+
+    THEN THE DIFF, and it is two lines:
+        6079a6080  > rand/TARGET_FEATURES
+        7171d7171  < rand/TARGET_FEATURES
+    ONE entity moves, from index 6080 to 7171. Everything between shifts by one, and moved_positions
+    counts POSITIONS THAT DIFFER -- so a single entity travelling 1091 slots reports as 1091.
+
+    THE CAVEAT, and it applies retroactively: moved_positions measures DISPLACEMENT EXTENT, not
+    number of movers. "1093 positions move" was never 1093 defective entities; it is consistent
+    with one entity moving far, or a hundred moving a little. Every #442-#456 figure should be read
+    that way. The metric was still the right choice -- it is graded, it detects partial progress
+    (#440's -16 was real), and it is what let this be bisected at all -- but I described it loosely
+    as "how many entities move" and that was wrong. It is "how far the sequence is perturbed".
+    Where a count of MOVERS is wanted, diff the sequences and count changed lines (2 here).
+
+    THE REMAINING DEFECT IS ONE CONSTANT: core/math/rand/rand_xoshiro256.odin's TARGET_FEATURES,
+    declared in BOTH arms of a file-scope `when ODIN_ARCH == .amd64 || .i386` (:12 and :15), both
+    @(private="file"). This is the same arch-conditional file-scope `when` shape as #449's movers
+    -- so the when-collection timing question is still live, just now reduced to a single constant
+    in a single file rather than blocks of dozens.
+
+    Note core:math/rand ALONE measures 0, so it is still an interaction; but with one named entity
+    and a 3-variant repro, the #450 instrument (print the when-collection trace, correlate its md5
+    with the dump md5, diff) applies directly and cheaply.
+
+    #458 -- the residual traced to the same mechanism, and it makes #429's NULL RESULT STALE.
+    A previously-inert site is now live because its consumer changed.
+
+    Instrumented the when-collection on core/os. 510 events every run, 3 variants, and the
+    when-trace md5 correlates 1:1 with the dump md5 again (62222c26<->9acf1320,
+    38dfd231<->b7beb008, b5294b72<->32e69337). Diffing the traces, four packages permute among
+    themselves in the fixpoint walk:
+        run1:  c/c.odin(53,62)  time/perf(80,96)  sync/primitives(89)  c/libc
+        run4:  time/perf(80,96) rand/xoshiro(6)   sync/primitives(89)  c/c.odin(53,62)  c/libc
+    core/c, core/time, core/math/rand and core/sync shuffle. Same class as core/c vs core/sys/linux
+    in #450 -- package_order in check_import_entities.
+
+    THE CHAIN, and this is the part worth writing down:
+        pkg.id (#452) is assigned in registration order      = len(packages_ordered)+1
+        registration order comes from the import-queue walk  = package_resolver.odin:744
+        that walk is `for _, file in pkg.files`              = RAW MAP ORDER, address-seeded (#437)
+    So pkg.id is now deterministic WITHIN a run but its SEQUENCE varies BETWEEN runs, and the
+    topological tiebreak faithfully propagates that variance into package_order.
+
+    #429 MEASURED THAT EXACT SITE AND FOUND NOTHING -- correctly, at the time. Sorting the
+    import-queue walk was inert because NOTHING CONSUMED registration order. #452 created a
+    consumer. The null result was true when taken and is false now.
+    That is a general hazard in this kind of work: a "no effect, reverted" disposition is valid
+    only against the code as it stood. Landing a fix that introduces a new consumer of some order
+    silently revives every previously-inert ordering site feeding it. Worth re-checking #429-style
+    nulls whenever a fix makes something newly load-bearing, rather than trusting the filed result.
+
+    NEXT, and it is now a one-line change with a predicted outcome: make the import-queue walk at
+    package_resolver.odin:744 deterministic (this is #345's structural gap -- pkg.files is a map
+    where C++ has an array). PREDICTION to falsify: core/os moved_positions -> 0 and the three
+    variants collapse to one. If it does not, the chain above is wrong somewhere and the trace
+    should be re-read rather than the fix retried.
+
+    #459 -- #335 RESOLVED. The import-queue walk is sorted, and the whole defect goes to ZERO.
+
+    One line at package_resolver.odin:744, `for _, file in pkg.files` -> `for file in sorted_files(...)`.
+    PREDICTION FROM #458, stated before measuring: core/os -> 0, three variants collapse to one.
+
+        core/os              22/22/1093 (pre-#452) -> 1093 (post-#452) -> 0, DUMPDET-CLEAN 1/10
+        core/odin/parser     1121..1141            -> 1086..1101       -> 0, 0, 0
+        p_pl minimal repro   22/22/1093            -> 0                -> 0
+
+    core/odin/parser -- the original target, where this started at 1121-1141 -- is now clean.
+    Prediction confirmed and then some.
+
+    GATES: corpus 198/198 missing=0; modelcmp 114/114 mismatches=0; parity 323/323 excluded=0 0/0/0.
+
+    ONE HONEST WRINKLE. The FIRST parity run reported compared=322 excluded=1. An exclusion is an
+    UNMEASURED package, not a passing one (#275), so I re-ran rather than reporting the summary --
+    and the re-run was 323/323 excluded=0. The exclusion did not reproduce. I did NOT capture which
+    package it was, so I cannot confirm it was #301's known load-dependent timeout; what I can say
+    is that it did not recur and that the first run had corpus and modelcmp competing for the
+    machine. Consistent with #301, not proven to be it. Recording the uncertainty rather than
+    rounding it to "flake".
+
+    THE COMPLETE CHAIN, for the record, because no single step was the bug:
+        pkg.files is a MAP where C++ has an ARRAY (#345)
+          -> the import-queue walk is address-seeded (#437)
+          -> so package REGISTRATION order varies between runs
+          -> so pkg.id, assigned from registration order (#452), varies
+          -> so topological_sort_packages' (dep_count, Global, pkg.id) tiebreak varies
+          -> so package_order varies in the check_import_entities FIXPOINT
+          -> so arch-conditional file-scope `when` blocks are collected at different points
+          -> so their entities land in different positions in info.entities
+    #452 fixed the middle link (id was never assigned at all, so the tiebreak was degenerate);
+    #459 fixed the head (registration order itself). Neither alone was sufficient: #452 left
+    parser at ~1090, #459 without #452 would have fed a deterministic order into a tiebreak that
+    could not use it.
+
+    WHAT MADE THIS TRACTABLE, worth keeping: dumpdet.sh (a determinism gate for the MODEL, which
+    no existing gate covered), dependency bisection to a two-import repro, per-file independent
+    diffing, and instrumenting the phase rather than reasoning about it. What made it SLOW was five
+    instrument errors, each of which produced a confident wrong answer before being caught.
+
+    #460 -- #344 RE-CHARACTERISED after #335's fixes. Still live, and it is a SET difference in
+    BOTH directions, not "threading adds entities".
+
+    Measured on core/odin/parser with f459 (both #335 fixes in):
+        threaded      counts 10855..10874, sorted-view md5 ALL SIX DIFFER
+        -no-threads   count 10850 both runs, sorted md5 IDENTICAL
+    So #344 survives #335 entirely, as expected -- #335 was ORDER, this is SET.
+
+    MY FIRST READ WAS WRONG AND I CAUGHT IT ON THE SECOND STEP. Threaded counts are uniformly
+    higher (10855-10874 vs 10850), which looks like "threading duplicates entities". Two things
+    refute the simple version:
+      1. the single-threaded control ALSO contains identically-rendering lines (23 of them;
+         threaded has 42). dump_model deliberately omits pointers and ids, so two DISTINCT entities
+         can render identically. Duplicate LINES are not evidence of duplicate ENTITIES, and I
+         nearly reported them as such.
+      2. comparing unique-line SETS: 361 lines appear only in the threaded dump and 356 appear only
+         in the single-threaded one. The sets differ in BOTH directions by similar amounts. That is
+         not addition; it is substitution.
+
+    WHAT THE DIFFERING ENTITIES ARE, and it is consistent: threaded-only lines are dominated by
+    pkg=<none> with basic types -- 72 int, 50 untyped float, 43 untyped integer, 31 string, 11
+    rune -- and the sampled positions are inside procedure bodies (filepath/i and filepath/s0 at
+    core/os/path.odin:657, an untyped-float constant in core/strconv/generic_float.odin:145). These
+    are procedure-body LOCALS. So WHICH BODIES get checked, or which instantiation of a body wins,
+    varies with worker scheduling -- matching #344's original framing and #431's finding that the
+    unstable entities are locals and constants.
+
+    NEXT: the #448 method does not transfer directly, because this is scheduling-dependent rather
+    than input-dependent -- a two-import repro will not pin a thread race. The useful analogue is
+    to find the smallest target that still shows set variance under threading, then instrument
+    which worker checks which proc body. dumpdet.sh needs a threaded mode first (it forces
+    -no-threads today); the sorted-view column is already the right SET metric, it just needs the
+    flag threaded through.
+
+    #461 -- dumpdet.sh gains a THREADED mode, and #344's repro turns out to be tiny.
+
+    TOOLING: `dumpdet.sh <BIN> [TARGET] [N] [seq|threaded]`. seq is unchanged (the #335 shape:
+    -no-threads, ASLR on vs off). threaded runs WITH the pool.
+
+    THE TWO MODES NEED DIFFERENT CONTROLS, and reusing seq's would have been wrong: under threading
+    ASLR-off is NOT expected to be stable, because scheduling varies regardless -- an unstable
+    ASLR-off arm would prove nothing either way. So threaded mode's control is a -no-threads PAIR
+    that must be byte-identical, which establishes the target is deterministic for every reason
+    EXCEPT the pool, making threaded variance attributable. If that control fails the script says so
+    and refuses to interpret the threaded numbers.
+
+    Verified three ways: seq mode regression (parser still DUMPDET-CLEAN rc=0), threaded mode on
+    parser (control 1/2 1/2, threaded 8/8 8/8, counts 10858..10874), bad-mode guard (rc=2).
+
+    THE USEFUL FINDING: I expected to bisect for the smallest target that still varies. There is
+    nothing to bisect -- EVERY target varies, down to the smallest tried:
+        core/slice        899 entities   ctl 1/2   threaded 8/8
+        core/unicode/utf8 1047           ctl 1/2   threaded 8/8
+        core/strings      1906           ctl 1/2   threaded 8/8
+        core/sys/linux    2356           ctl 1/2   threaded 8/8
+        core/os           8281           ctl 1/2   threaded 8/8
+    #344 is UNIVERSAL, not dependent on any particular package's shape. That is a much better
+    position than #335 started from: the repro is core/slice at 899 entities, an order of magnitude
+    smaller than the 10850 I was diffing before, and it needs no probe construction at all.
+
+    A CAVEAT ON THE UNIVERSALITY, worth stating: every one of these pulls base:runtime, which is
+    large and heavily threaded. "Every target varies" may really be "base:runtime varies and every
+    target contains it". Worth checking with a target that somehow avoids runtime, though there may
+    not be one -- and it does not change the practical conclusion, which is to use core/slice.
+
+    NEXT: instrument which worker checks which proc body on core/slice, and whether any body is
+    checked twice or zero times. #34 (Proc_Body_Checked assertion) and #141 (nested_proc_lits
+    missing mutex) are prior work in this exact machinery and should be re-read first.
+
+    #462 -- my own vacuity guard was INERT, and the caveat from #461 was right.
+
+    Two findings this tick, one about the defect and one about the instrument.
+
+    (1) THE CAVEAT HELD. #461 recorded a doubt: "every target varies" might really be "base:runtime
+    varies and every target contains it". Tested directly -- base/runtime ALONE varies, 760 entities,
+    8/8 sorted. So the universality is largely runtime's, and base/runtime is now the smallest real
+    repro for #344. Worth having checked rather than carrying the stronger claim forward.
+
+    (2) THE INSTRUMENT DEFECT, which is the more important half. Testing base/intrinsics returned
+    entities=0 with sorted=1/8 -- reported as STABLE. A dump with zero entities is a well-formed file
+    with a constant md5, so it is perfectly stable in exactly the way that means nothing. Same
+    false-green family as #405, one level in: whenever the metric counts DIFFERENCES, absence of
+    content is indistinguishable from stable content. Added a zero-entity guard.
+
+    THEN THE GUARD DID NOT WORK, and the way it failed is the finding. It printed DUMPDET-ABORTED and
+    the script carried on to print "DUMPDET-CLEAN rc=0" underneath it. Cause: arm() is invoked in a
+    COMMAND SUBSTITUTION, `read ... <<<"$(arm ctl)"`, so `exit 2` inside it terminates the SUBSHELL
+    and the parent continues with an empty result.
+
+    Which means THE #405 GUARD HAS BEEN INERT SINCE I WROTE IT. It has the identical `exit 2` in the
+    identical subshell context. It never fired in practice -- dumps have always been produced -- so
+    nothing measured is retroactively suspect, but the guard I wrote specifically to prevent
+    false-greens could not itself fail-stop. A guard that has never fired is a guard that has never
+    been tested, and this one would not have worked on the day it was needed.
+
+    Fixed both by signalling through a flag file (`: > "$TMP/FAIL"`) and testing it after each arm()
+    call in all three call sites. Verified: base/intrinsics now rc=2, parser seq still rc=0
+    DUMPDET-CLEAN, base/runtime threaded still rc=1.
+
+    METHOD NOTE, and it generalises past this script: I only found this because I ran the guard
+    against a target that should trip it. Adding a guard and observing that everything still passes
+    is NOT evidence the guard works -- it is consistent with the guard being dead. Every guard needs
+    a case that makes it fire, at the time it is written. base/intrinsics is now that case for
+    dumpdet, and it is cheap to re-run.
+
+    #463 -- #344 DIAGNOSED: the varying field is `pkg`, and reset_checker_context is a reimplementation.
+
+    METHOD, and the first two readings were both wrong. Raw-diffing two threaded dumps of base/runtime
+    showed whole entities apparently appearing and disappearing -- ERR_EINTR present in one run, six
+    `i` variables present in the other. That reading is an ARTEFACT OF THE SORTED VIEW: the sort key
+    is the whole rendered line, so changing ANY field moves the line, and a moved line reads as one
+    entity vanishing and another appearing. Re-keying by (position, name) and diffing field-by-field:
+
+        keys: run1=759 run2=759   only-in-run1=0   only-in-run2=0
+        entities whose rendering differs: 23
+        field-level differences: {'pkg': 23}       <-- ONE field, nothing else
+
+    Same entities, same types, same sizes, same flags, same positions. 23 of them flip between
+    pkg='runtime' and pkg='<none>' (nil). Count is stable at 760 across 10 runs, so nothing is lost
+    or duplicated -- an earlier guess at a racy append is refuted by that alone.
+
+    THE SITE. `e.pkg = ctx.pkg` (entity_helpers.odin:636) faithfully matches checker.cpp:2251. The
+    divergence is upstream, in what ctx.pkg holds. C++ reset_checker_context (checker.cpp:1709):
+
+        if (ctx == nullptr) return;                 // ctx only -- NOT file
+        mutex_lock(&ctx->mutex);
+        gb_zero_size(&ctx->pkg, sizeof(CheckerContext) - offsetof(CheckerContext, pkg));
+        ctx->file  = nullptr;
+        ctx->scope = builtin_pkg->scope;            // FLOOR: never null
+        ctx->pkg   = builtin_pkg;                   // FLOOR: never null
+        ctx->decl  = nullptr;
+        ctx->type_path = type_path; ctx->type_level = 0;
+        add_curr_ast_file(ctx, file);               // overrides file/decl/scope/pkg IF file != null
+        ctx->untyped = untyped;
+        mutex_unlock(&ctx->mutex);
+
+    The port (check_import_export.odin:888) is 12 lines and diverges six ways:
+      1. BAILS ENTIRELY on `file == nil`, where C++ proceeds and installs the builtin defaults.
+         This is the one that produces the nil. C++'s ctx->pkg is NEVER null; the port's can be.
+      2. No builtin_pkg floor for scope or pkg.
+      3. Never resets ctx.decl (C++ nulls it, then add_curr_ast_file sets file->pkg->decl_info).
+      4. Never zeroes the tail of the context, so a "reset" context inherits stale state.
+      5. No mutex, where C++ locks ctx->mutex for the whole reset.
+      6. Does not install the untyped map.
+    Also reads the scope from `ctx.info.file_scopes[file]` where C++ reads `file->scope`.
+
+    WHY IT IS NONDETERMINISTIC rather than simply wrong: an entity is created once, by whichever
+    path reaches it first. Under threading that is sometimes a body-checking worker (file set, so
+    pkg=runtime) and sometimes an on-demand resolution through a context whose file is nil (so the
+    port's early bail leaves pkg=nil). C++ cannot express the second state because of the floor.
+
+    NOT YET FIXED -- diagnosis only, deliberately. This is threading-critical code and the change is
+    six distinct divergences, not one line; landing it needs the full gate set (parity 323, corpus
+    198, modelcmp 114) and a dumpdet re-measure, which is a tick of its own. Recording first so the
+    analysis is durable, per the #458 lesson about stale dispositions.
+
+    NOTE ON #421: the dumper already special-cases polymorphic instantiations because their POSITION
+    varies by winning call site. That is the same "whichever thread gets there first stamps it"
+    shape as this. Worth re-reading once ctx.pkg is fixed -- it may be a second instance of one
+    underlying cause rather than an independent cosmetic quirk.
+
+    #464 -- reset_checker_context ported faithfully. It does NOT close #344, and that is the finding.
+
+    THE CHANGE. reset_checker_context (check_import_export.odin) was a 12-line reimplementation of
+    C++'s checker.cpp:1709-1733. Now ported: guards the CONTEXT only (not the file), locks
+    ctx.mutex, zeroes the tail from `pkg` onward via offset_of + mem.zero (C++'s gb_zero_size --
+    a field-by-field version would rot the moment a field is added), installs builtin_package as
+    the pkg/scope FLOOR, nulls ctx.decl, restores type_path, then calls the existing
+    add_curr_ast_file. The `untyped` parameter is present with a nil default -- see below.
+
+    GATES, all green: parity 323/323 compared, 0 count / 0 text / 0 attrib. corpus 198 members,
+    0 missing, 12 known exclusions. modelcmp 114 probes, 114 oracle values, 114 port values,
+    0 mismatches. Sequential dump byte-identical to the pre-fix binary, so the change is provably
+    inert single-threaded -- which is what a determinism fix should be.
+
+    IT DOES NOT FIX #344, and the way it fails is informative. Threaded base/runtime is still 8/8.
+    Re-measuring the field diff shows the nil is GONE and the variance is now:
+        pkg value pairs: {('builtin','runtime'): 27, ('runtime','builtin'): 15}
+    So the floor did exactly what C++'s floor does -- it changed what the LOSING path writes, from
+    nil to builtin_package. It never addressed the race. The mechanism I described in #463 is
+    confirmed (an entity is created by whichever path arrives first, and one of those paths has a
+    nil file), but the fix targeted the SYMPTOM's value, not its cause.
+
+    Worth being precise about what that implies: C++ has the same floor, so if C++ ever created
+    these entities through a nil-file context it would be nondeterministic too -- 'builtin' vs the
+    real package. The port must be REACHING a nil-file context where C++ does not. The entities are
+    locals inside proc bodies (i, t, p_word in print.odin / internal.odin), which should only ever
+    be created during body checking with a file set. So the next question is concrete: is pi.file
+    ever nil in check_proc_info, and if so which Proc_Infos.
+
+    IDS IN THE DUMP (Jon's suggestion, and he was right twice). The dump now renders the package as
+    `name#id`. I had first added it, then reverted it reasoning that a new column would break
+    comparability with C++ -- that reasoning was WRONG and he pushed back on it: -dump-model is
+    port-only, and modelcmp.sh compares the two checkers through DIAGNOSTIC TEXT (a printed
+    size_of), never through this file. There is no C++ format to break. modelcmp 114/114 after the
+    change confirms it. His broader point -- if it is useful tooling, have BOTH sides report ids --
+    is recorded in the code: C++ has pkg->id (parser.cpp:5842) and file->id (parser.cpp:6976), so a
+    C++-side dump should print them too.
+
+    WHAT THE IDS BOUGHT, immediately: across every run only `builtin#0` and `runtime#1` appear.
+    That RULES OUT a live alternative hypothesis the name alone could not distinguish -- two
+    distinct package objects sharing a name would have rendered identically. There is no phantom
+    third package; the whole of the variance is which of two objects an entity is attributed to.
+    (Note builtin has id 0: it is made by create_builtin_package, not register_package, so #452's
+    sequence never touched it. Consistent with C++, where builtin_pkg is not in the packages array.)
+
+    TWO THINGS FOUND ON THE WAY, both filed rather than fixed here:
+      1. Checker_Context.untyped is READ in 12 places -- including check_expr's untyped-expression
+         cache at 2811/2854/2881 -- and WRITTEN IN NONE. C++ sets it in this very function
+         (checker.cpp:1731); the port dropped the parameter, so the cache has never once operated.
+         The parameter is now in place with a nil default, preserving today's behaviour EXACTLY;
+         wiring the three call sites is a live behavioural change to a real subsystem and deserves
+         its own gate run, not a free ride on a determinism fix.
+      2. $S/triage_st/main.odin on disk was STALE -- a stripped copy missing the whole flag block
+         (no_entry_point, command_kind, -dump-model). Rebuilding from it produced a binary that
+         silently wrote no dump. Restored from bk428/main.odin. The gates were unaffected because
+         they take a prebuilt binary path, but a harness that quietly loses flags is exactly the
+         #405 false-green shape one level out, and it cost most of a tick to notice.
+
+    #465 -- #344 narrowed hard: nil-file contexts happen ONLY under threading, and it is not builtin_ctx.
+
+    INSTRUMENT (temporary, reverted; checksums verified back to 565bfc7b / 5decdc21). At the
+    `e.pkg = ctx.pkg` site in entity_helpers.odin, behind `when #config(DBG344, false)`, report every
+    entity whose creating context has ctx.file == nil -- exactly the ones that fall to the floor:
+
+        if ctx.file == nil {
+            is_builtin_ctx := ctx.checker != nil && ctx == &ctx.checker.builtin_ctx
+            fmt.eprintf("DBG344 nilfile builtinctx=%v name=%s pkg=%s pos=%s:%d:%d\n", ...)
+        }
+
+    THREE RESULTS, each ruling something out.
+
+    1. SEQUENTIAL IS ZERO. `-no-threads` produced 0 nil-file creations on every run; threaded
+       produced 25, 12, 26, 17, 23. So this is not a path that is merely rare -- it does not exist
+       single-threaded at all. That matches #344's own signature (sequential dump byte-identical)
+       and makes the nil-file context the mechanism rather than a coincidence.
+
+    2. IT PRE-EXISTS MY #464 CHANGE, and I checked because I had reason to suspect myself: the new
+       reset_checker_context zeroes the tail before add_curr_ast_file, which creates a transient
+       ctx.file == nil window that the OLD code never had (it only ever ASSIGNED file, or bailed).
+       If contexts are shared across threads that window would be a race I introduced. Rebuilt the
+       instrument against the OLD reset_checker_context: 18, 15, 20, 24, 21 -- same range as the new
+       code's 12-26. The window is not mine and I did not materially widen it. Restored the new
+       version (it is the gated one).
+       Worth stating plainly: a fix that passes every gate can still introduce a race, because no
+       gate here measures thread interleaving. Suspecting my own edit was the cheap check.
+
+    3. IT IS NOT THE SHARED builtin_ctx. That was the obvious suspect -- Checker.builtin_ctx
+       (checker.odin:1253) is a context living on the Checker, so several threads could touch one
+       object. Measured: builtinctx=false on all 58 events across 3 runs. And it would have been the
+       wrong suspect anyway: C++ has the same field (checker.hpp:852), used the same way, and its
+       file is nil BY CONSTRUCTION -- entities created through it legitimately get builtin_package in
+       both implementations. A nil file there is by design, not a defect.
+
+    SO WHAT IS LEFT. Some OTHER context, not builtin_ctx, with a nil file, only under threading.
+    In the OLD code a nil ctx.file could only mean the context was never given a file at all --
+    either never reset, or reset with `file == nil` (which the old code silently bailed on). Both
+    reduce to the same question: WHICH CALL SITE passes a nil file, and why only when threaded.
+    Candidates, in order of suspicion:
+      - check_proc.odin:660  reset_checker_context(&ctx, pi.file)   -- is pi.file ever nil?
+      - check_decl.odin:2093 reset_checker_context(ctx, decl_file)  -- get_file_from_node CAN
+        return nil; the site guards with `if decl_file != nil`, so this one looks safe
+      - check_import_export.odin:397 iterates sorted_files(pkg.files) -- non-nil by construction
+    But note the ENTITIES are file-scope declarations of base:runtime (aligned_alloc @
+    heap_allocator.odin:23, SYS_write @ os_specific_linux.odin:10, stderr, handle_error, b @
+    print.odin:187), NOT proc-body locals as #463 assumed. That points at COLLECTION, not body
+    checking, and means my earlier "these are locals inside proc bodies" reading was wrong -- I had
+    matched on names like `i` and `t` without checking what the other 19 were.
+
+    NEXT: tag the call site. Add a `site: string` parameter (or a per-context enum) so the instrument
+    reports WHO reset the context that later created the entity. That is the one fact still missing.
+
+    #466 -- #344 ROOT CAUSE FOUND: the port derives Entity.file from the CONTEXT, C++ derives it
+    from the TOKEN. That difference is self-propagating, which is why it only shows under threading.
+
+    THE CHAIN, each link measured rather than assumed:
+
+    1. WHICH CALL SITE passes a nil file? Instrumented reset_checker_context with `#caller_location`
+       (no struct change needed). One site, unambiguously:
+           threaded:   175 events / 3 runs -> check_proc.odin:660
+           sequential:   9 events / 3 runs -> check_proc.odin:660
+       That is `reset_checker_context(&ctx, pi.file)` in check_proc_info. So pi.file IS nil, and
+       ~20x more often when threaded (58/run vs 3/run).
+
+    2. WHERE DOES pi.file COME FROM? check_proc.odin:228, `pi.file = e.file`. So a fileless entity
+       produces a fileless Proc_Info produces a fileless context.
+
+    3. WHERE DOES e.file COME FROM? Port has five writes, and three of them are `= ctx.file`
+       (entity_helpers.odin:448, check_collect.odin:1081, check_type.odin:1853); the other two are
+       copies from another entity (check_poly_proc.odin:436, check_decl_helpers.odin:1786). EVERY
+       port write ultimately traces to a context.
+
+    4. C++ DOES NOT. entity.cpp:369, inside the entity-allocation macro:
+           e_->file = thread_unsafe_get_ast_file_from_id((token_).pos.file_id);
+       Every entity is stamped with its file AT ALLOCATION, derived from its own TOKEN. That value
+       does not depend on checker state at all. C++ additionally has the lazy backfill at
+       checker.cpp:2096 (`if (entity->file == nullptr) entity->file = c->file`) -- and the port HAS
+       that one, faithfully, at entity_helpers.odin:447. The backfill is not the gap. The
+       allocation-time stamp is, and the port has no equivalent anywhere.
+
+    WHY THIS EXPLAINS THE THREADING DEPENDENCE, which is the part that had me stuck. A
+    token-derived file is immune to context state: it is right even if the context is fileless. A
+    context-derived file COMPOUNDS -- a fileless context yields a fileless entity, which yields a
+    fileless Proc_Info, which yields another fileless context for that body, which yields more
+    fileless entities. Sequentially the loop barely starts (3 events/run and, measured in #465, ZERO
+    entities actually created through such a context). Under threading the seed occurs more often
+    and the feedback amplifies it to ~58/run. That is why the effect is not merely rarer
+    single-threaded but effectively absent.
+
+    THE FIX IS AVAILABLE, and #279 already built the missing piece. C++ can do the token lookup
+    because TokenPos carries a file_id; the port's tokenizer.Pos carries a file STRING, so there is
+    no id to resolve. But #279 added a GLOBAL PATH-KEYED SOURCE-FILE REGISTRY for exactly this shape
+    of problem (making parse-stage positions resolvable). Stamping e.file at creation by looking up
+    e.token.pos.file in that registry is the faithful analogue of entity.cpp:369.
+
+    NOT ATTEMPTED THIS TICK -- it is a new write on every entity in the program, so it needs its own
+    tick and the full gate set. Filed with the chain above so it can be picked up cold.
+
+    Instruments reverted; both files verified by checksum (a6be802a / 565bfc7b) and rebuilt clean.
+
+    #467 -- #344's pkg variance FIXED: Entity.file is now stamped at allocation, from the token.
+
+    THE CHANGE, one guarded lookup in alloc_entity (entity.odin), the port's single base allocator:
+        if len(token.pos.file) > 0 {
+            if f := lookup_source_file(token.pos.file); f != nil { entity.file = f }
+        }
+    This is entity.cpp:369 in Odin terms. The site previously carried a comment explaining why it
+    was left unset ("pos.file is a string path, not an ID / we don't have access to Checker_Info").
+    #279's global path-keyed registry retired that obstacle; the note had simply never been revisited.
+    It strictly ADDS information -- a miss leaves file nil exactly as before, and C++'s lazy backfill
+    (ported at entity_helpers.odin:447) still covers that case.
+
+    MEASURED, sorted view = the SET metric that defines #344:
+        base/runtime      8/8 -> 1/8    (the #344 repro; entity set now stable under threading)
+        core/slice        6/6 -> 2/6
+        core/strings      6/6 -> 6/6
+        core/os           6/6 -> 6/6
+        core/odin/parser  6/6 -> 6/6
+    GATES: parity 323 pkgs, 0 count / 0 text / 0 attrib. corpus 198 members, 0 missing. modelcmp
+    114/114. (Each parity run showed ONE timeout -- different package each time, #301 family; the
+    one attrib mismatch appeared once on gen_mnemonic_builders, did not reproduce, and is the #341
+    oracle flake. Timeouts are UNMEASURED packages, not passes, and are reported as such.)
+
+    THE RESIDUAL IS A DIFFERENT DEFECT, which is why the larger targets did not move. Re-keying
+    core/strings by (position,name): ZERO pkg differences remain. What varies now is `type` and
+    `flags`, on polymorphic procedures:
+        append_elems  type 'proc(^[dynamic]string, ..string, ...)' vs 'proc(^[dynamic]u8, ..u8, ...)'
+        append_elems  flags {} vs {Used}
+    That is instantiation identity decided by whichever call site wins the race -- the #126/#421
+    family, which #421 already documented for POSITION. Filed separately rather than folded in.
+
+    A MEMO WAS TRIED AND REJECTED, and both reasons are worth keeping. lookup_source_file takes a
+    global mutex and this runs once per entity, so a single-slot thread-local cache looked obvious.
+    Measured:
+      - PERF: no benefit. 110-122ms on utf8string and 657-676ms on parser, before and after, all
+        inside run-to-run noise. Which also retires my own earlier "+10%" reading of the same
+        numbers -- that was noise too, and the parity timeouts are not attributable to this change.
+      - CORRECTNESS: it made determinism WORSE, base/runtime 1/8 -> 2/8. The registry OVERWRITES
+        entries (error.odin:584), so one path can map to different ^ast.File objects over time; a
+        fresh lookup sees the current one, a memo returns whatever it cached, and which you get
+        depends on when that thread first touched the path.
+    The reasoning is now a DO-NOT comment at the site, so the next reader does not re-derive it.
+
+    AND I CAUGHT A REAL DEFECT IN MY OWN MEMO before measuring it: the comment said thread-local but
+    I had written only `@(private="file")` -- shared mutable globals, written by every worker. A torn
+    string read there could have produced a WRONG file, which is worse than the lock it was avoiding.
+    Writing the intent in the comment is what made the mismatch visible; had the comment been vaguer
+    I would likely have shipped it.
+
+    #468 -- CORRECTION to #467, and the residual splits cleanly in two.
+
+    FIRST, A CORRECTION I OWE. #467 reported the core/strings residual as "ZERO pkg differences
+    remain; what varies is type (7) and flags (4)". That was an ARTEFACT OF MY OWN KEY. dump_model
+    emits the literal `<instantiation>` in place of a position for polymorphic instantiations (#421),
+    so every instantiation of one generic collapses into a single (position,name) bucket -- and the
+    buckets have DIFFERENT SIZES between runs (append_elem 7 vs 6, binary_search 2 vs 4). My diff
+    zipped those lists pairwise, so it compared misaligned entities and manufactured "type" and
+    "flags" differences that were really size differences. The lesson is the one this session keeps
+    re-teaching: a key that is not unique turns a set comparison into a positional one, silently.
+
+    WHAT IS ACTUALLY THERE, measured six runs of core/strings:
+        total    1905 1903 1905 1906 1901 1899
+        inst       53   51   53   54   49   47
+        total - inst = 1852 IN EVERY RUN.
+    So the variance decomposes exactly:
+      (a) THE NUMBER OF POLYMORPHIC INSTANTIATIONS VARIES, 47..54. Not their identity -- their
+          COUNT. That is #468 proper, and it is a stronger statement than "identity varies by
+          winning call site": instantiations are being created a different number of times, which
+          smells like a cache-miss race (two workers both demanding one instantiation, both
+          creating it) rather than a naming/ordering question.
+      (b) The non-instantiation multiset is byte-identical in 5 of 6 runs.
+
+    (b)'s SINGLE OUTLIER IS A REAL pkg DIFFERENCE, so #467's "zero pkg differences" was wrong twice
+    over. The same entity, same position:
+        ZERO_WIDTH_NO_BREAK_SPACE  core/unicode/letter.odin:526:2
+        five runs: pkg=utf8#3      one run: pkg=unicode#6
+    The entity is DECLARED in core/unicode/letter.odin, so `unicode` is correct and the MAJORITY IS
+    WRONG. e.pkg is still ctx.pkg (entity_helpers.odin:636), faithful to checker.cpp:2251 -- so the
+    remaining question is why a unicode entity is created under utf8's context at all. Almost
+    certainly on-demand resolution: utf8 imports unicode and materialises the entity while checking
+    its own file, where C++ would have collected it during unicode's own pass. #467's fix removed
+    the SELF-PROPAGATING amplifier, which is why this is now 1-in-6 rather than pervasive, but the
+    seed remains.
+
+    So #344's fix stands and is large (base/runtime 8/8 -> 1/8, gates green), but "pkg no longer
+    varies" is NOT true and I should not have written it. Two residuals, now separately stated:
+      #468  instantiation COUNT varies 47..54 -- suspect a cache-miss race
+      #469  a unicode entity is attributed to utf8 in 5/6 runs -- on-demand creation under the
+            importer's context, and the majority answer is the WRONG one
+
+    #470 -- #468 dispositioned as UPSTREAM AND FAITHFUL; dumpdet taught the ceiling; a real residual
+    surfaced underneath.
+
+    DISPOSITION. The instantiation-count variance is NOT a port defect. check_poly_proc.odin is a
+    line-for-line port of check_expr.cpp:483-638, including the lock discipline: two cache scans,
+    each releasing its shared lock, then create, then an exclusive lock only around the array_add.
+    Two workers can both miss both scans and both create. Scan 2 exists AS a double-check -- the
+    race was anticipated upstream and simply not closed.
+
+    EVIDENCE IT IS DUPLICATION, not loss: sequential core:strings is a constant 47 instantiations
+    with a byte-identical dump; threaded ranges 47..57 across two samples. The sequential value is
+    the MINIMUM, so threading only ever ADDS. Filed as
+    UPSTREAM-468-polymorphic-instantiation-find-or-create-race.md, and listed in UPSTREAM-STATUS.md
+    as INFERRED rather than reproduced -- I measured the port and read the C++; I have no way to
+    count the reference compiler's instantiations, and the write-up says so and says what would
+    settle it.
+
+    TOOLING CONSEQUENCE, which matters more than the finding. dumpdet's threaded sorted view had a
+    CEILING it could never pass on any target containing polymorphic code, and it was reporting that
+    ceiling as a failure. A gate that is permanently red teaches the reader to ignore it. Threaded
+    mode now reports:
+      - sorted over everything (unchanged, informational)
+      - SORTED EXCLUDING INSTANTIATIONS -- the metric that can legitimately reach 1/N, and what rc
+        now keys off
+      - the instantiation counts seen, so the upstream race stays visible rather than hidden
+    Insertion-order variance is likewise now informational under threading: info.entities is
+    appended as entities are created, and BOTH implementations create on several workers, so append
+    order follows the scheduler in C++ too. It remains an rc-affecting signal in SEQ mode, where it
+    is the #335 metric and address order is the only remaining variable.
+
+    RE-MEASURED with the honest metric:
+        base/runtime      excl-inst 1/6   CLEAN
+        core/strings      excl-inst 1/6   CLEAN   (raw sorted 6/6 -- all instantiations)
+        core/slice        excl-inst 1/6   CLEAN
+        core/os           excl-inst 3/6   STILL VARIES
+        core/odin/parser  excl-inst 3/6   STILL VARIES
+    So #467's fix was MORE complete than the raw metric could show -- three targets are genuinely
+    clean and the raw number was masking it.
+
+    AND THE RESIDUAL ON THE OTHER TWO IS #469's SHAPE, now confirmed on a second package:
+        stream_proc  Procedure  core/c/libc/stdio.odin:275:2
+        three runs: pkg=libc#18      one run: pkg=posix#8
+    Declared in core/c/libc/stdio.odin, so `libc` is right and `posix` is the importer. Same as the
+    unicode/utf8 case: an entity is attributed to whichever importing package's context happened to
+    create it. Two packages, two independent sightings -- #469 is not a one-off.
+
+    #471 -- #469 narrowed by ELIMINATION. Four candidate causes checked, all four faithful. What is
+    left is sharper than what I started with.
+
+    INSTRUMENT (reverted, checksum verified 565bfc7b): at `e.pkg = ctx.pkg`, report ctx.pkg,
+    ctx.file.pkg and the single-threaded-stage flag for the two known misattributed entities.
+
+        run1: stream_proc ctx.pkg=posix ctx.file.pkg=posix seq_stage=false  pos=core/c/libc/stdio.odin:275
+        run2: stream_proc ctx.pkg=libc  ctx.file.pkg=libc  seq_stage=false  pos=core/c/libc/stdio.odin:275
+        run3: stream_proc ctx.pkg=libc  ctx.file.pkg=libc  seq_stage=false
+        all runs: ZERO_WIDTH_NO_BREAK_SPACE ctx.pkg=utf8 ctx.file.pkg=utf8 pos=core/unicode/letter.odin:526
+
+    TWO FACTS THAT REFRAME IT:
+      - ctx.pkg ALWAYS EQUALS ctx.file.pkg. The context is not corrupt or half-updated; it is a
+        perfectly coherent posix context. What is wrong is that a posix context is processing an AST
+        node from a libc FILE. So this is not "pkg was stamped wrong" -- it is "the wrong context is
+        looking at this declaration".
+      - seq_stage=false. It is NOT created during the single-threaded global-entity stage. C++'s
+        equivalent carries the comment "NOTE(bill): This must be single threaded" (checker.cpp:5311),
+        so whatever creates these in the port is running in a threaded phase.
+
+    ELIMINATED, each read against C++ rather than assumed:
+      1. Collection is NOT interleaved per package. Phase 3 is check_collect_entities_all over every
+         package before Phase 4/5, matching C++ checker.cpp:7313/7331/7343. My earlier "on-demand
+         during collection" hypothesis is wrong at that level.
+      2. check_decl.odin:1484 `info.file = ctx.file` when queuing a Proc_Info is FAITHFUL --
+         check_decl.cpp:1594 passes `ctx->file` in exactly the same position.
+      3. check_single_global_entity DOES re-point the context at the entity's own file:
+         `file := d.scope.file; ctx.file = file; ctx.pkg = file.pkg` (type_info.odin:723+),
+         matching C++'s `AstFile *file = d->scope->file; add_curr_ast_file(ctx, file)`.
+      4. #467's fix means e.file is stamped from the TOKEN, so the pi.file = e.file path
+         (check_proc.odin:228) also yields libc for a libc procedure.
+      So every KNOWN path that produces the context for libc's `to_stream` body yields libc.
+
+    WHAT THAT LEAVES. `stream_proc` is a NESTED procedure inside libc's `to_stream`
+    (core/c/libc/stdio.odin:275, inside `to_stream ::` at 274). A nested proc's entity is created
+    while its PARENT's body is checked. So libc's `to_stream` body is sometimes being checked by a
+    worker whose context says posix -- and both routes that build that Proc_Info demonstrably say
+    libc. The remaining explanations are narrow:
+      (a) the body-checking context is SHARED and mutated by another worker between reset and use;
+      (b) some third path queues a Proc_Info (nested_proc_lits drain? on-demand resolution during a
+          body check?) and stamps it with the running worker's file rather than the procedure's;
+      (c) the same AST node is reachable from two packages and both check it.
+    (a) is testable directly: log the ctx POINTER alongside pkg in check_proc_info and see whether
+    two workers ever hold the same address. That is the next measurement.
+
+    NOTE ON COST: this is the fourth tick on #469's family and it produced no fix. It did produce
+    four eliminations against C++, which is what makes the remaining hypothesis space small enough to
+    test. Recording that explicitly so the next tick does not re-check any of the four.
+
+    #472 -- #469 PINNED to one site. Two instruments, two clean answers, one hypothesis refuted.
+
+    (a) REFUTED: the body-checking context is NOT shared. Logged the ctx POINTER in check_proc_info;
+    every worker's address is distinct (0x7F573AFE0210 / 0x7F573F7E9210 / 0x7F573CFE4210 in one run).
+    check_proc_info makes a LOCAL context per call, so there was never a sharing story. Ruling it out
+    cost one printf and removes the most alarming of the three candidates.
+
+    THE ACTUAL SITE. Logged pi.file for every `to_stream` reaching check_proc_info. Three distinct
+    procedures are named to_stream in this target, and the third is the one that matters:
+
+        pi.file.pkg=os       tok=core/os/file_stream.odin:41
+        pi.file.pkg=strings  tok=core/strings/builder.odin:200
+        pi.file.pkg=posix    tok=core/c/libc/stdio.odin:274   <-- LIBC's to_stream, stamped POSIX
+        (run 4 of 6 showed libc here instead -- this is the varying one)
+
+    So the Proc_Info for a LIBC procedure carries a POSIX file. Then #caller_location on
+    check_procedure_later named the producer, and it is the same every run:
+
+        DBG471q libc.to_stream queued pi.file.pkg=posix from check_decl.odin:1490
+
+    check_decl.odin:1490 is `info.file = ctx.file` -- the site I had already eliminated as FAITHFUL
+    (C++ check_decl.cpp:1594 passes ctx->file identically). It is faithful, and it is still where the
+    wrong value enters, because the CONTEXT reaching it is posix's.
+
+    WHY THE PORT GETS THERE AND C++ PLAUSIBLY DOES NOT. `info.file = ctx.file` records the file of
+    whoever is RESOLVING the declaration, not the file the procedure lives in. That is harmless when
+    the resolver is the declaring package -- which is what check_single_global_entity guarantees, by
+    setting ctx from d.scope.file. It is wrong when the declaration is reached ON DEMAND from an
+    importer: check_expr.odin:455 `check_entity_decl(ctx, entity, nil, named_type)` passes the
+    CURRENT context (faithful to check_expr.cpp:1958), and C++'s check_entity_decl only does
+    `CheckerContext c = *ctx; c.scope = d->scope;` -- it copies the caller's file and pkg too
+    (check_decl.cpp:1990+). So in BOTH implementations an on-demand resolution carries the
+    importer's file into that Proc_Info.
+    The difference must therefore be in HOW OFTEN each reaches the on-demand path, not in the path
+    itself -- and the queue log showing posix 4/4 while the CONSUMED Proc_Info varies says there are
+    probably TWO Proc_Infos for libc's to_stream (one from posix's on-demand resolution, one from
+    libc's own pass), with the state machine deciding which body check wins. That is testable.
+
+    STATE. Not fixed. The candidate fix is to stamp `info.file` from the DECLARATION rather than the
+    context -- d.scope.file, or e.file now that #467 makes it token-derived. Both are available at
+    the site and both are the procedure's real file. But that is a DELIBERATE DIVERGENCE from
+    check_decl.cpp:1594, so it needs either evidence that C++ never reaches this site cross-package,
+    or an upstream write-up alongside it. Filing rather than guessing.
+
+    Instruments reverted; check_proc.odin verified back to 5decdc21 and rebuilt clean.
+
+    #473 -- #469: my "two Proc_Infos" hypothesis REFUTED. There is exactly one, and it is stamped by
+    whichever package wins the race to resolve the declaration.
+
+    I instrumented ALL THREE Proc_Info construction sites, not just the one I had filtered on last
+    tick -- check_proc.odin:127 (from raw params), check_proc.odin:228 (from an entity),
+    check_decl.odin:1490 (from a declaration). Four runs of core/os, libc's to_stream:
+
+        run1  DBG472 siteC decl  ctx.file.pkg=libc
+        run2  DBG472 siteC decl  ctx.file.pkg=posix
+        run3  DBG472 siteC decl  ctx.file.pkg=posix
+        run4  DBG472 siteC decl  ctx.file.pkg=posix
+
+    ONE line per run, always site C. So:
+      - the other two sites never fire for this procedure;
+      - there is no duplicate queuing -- #472's "probably TWO Proc_Infos, and the state machine picks
+        the winner" is wrong. I had flagged it as needing a test rather than asserting it, and the
+        test killed it. Recording that explicitly: the earlier evidence for it (queue log posix 4/4
+        vs consumed posix 3/4) was me comparing two DIFFERENT runs' samples, not one run's.
+      - the SINGLE Proc_Info's file is whatever ctx.file was when libc's `to_stream` DECLARATION was
+        first resolved, and that varies: libc when libc's own pass got there first, posix when
+        posix's on-demand resolution did.
+
+    SO THE RACE IS "WHO RESOLVES THE DECLARATION FIRST", not "who checks the body" and not "who
+    queued it twice". That is a materially different target from where this started, and it is the
+    thing to instrument next: log every entry to check_entity_decl for this entity with the caller's
+    package, and see the two contenders.
+
+    THE DISPOSITION QUESTION IS UNCHANGED and still blocks a fix. Every link is faithful
+    (check_decl.odin:1490 == check_decl.cpp:1594; check_expr.odin:455 == check_expr.cpp:1958;
+    check_entity_decl copies the caller's context in both). C++ additionally has an
+    EntityFlag_Lazy + lazy_mutex guard at the top of check_entity_decl (check_decl.cpp:1990+) that
+    the port's structure may or may not reproduce -- that is worth reading closely, because a lazy
+    flag is exactly the mechanism that would decide WHETHER an entity is resolvable on demand at all,
+    and therefore whether C++ can reach this state.
+
+    Instruments reverted; both files verified by checksum (5decdc21 / 249b2c63) and rebuilt clean.
+
+    #474 -- #469 MECHANISM COMPLETE, and it is very likely FAITHFUL. Plus a correction to #470.
+
+    THE LAZY GUARD IS REPRODUCED, so that is not the divergence. Checked every level:
+      C++  check_decl.cpp:1990   `if (e->flags & EntityFlag_Lazy) mutex_lock(&ctx->info->lazy_mutex)`
+      port check_decl.odin:589   `if .Lazy in e.flags { sync.recursive_mutex_lock(&ctx.info.lazy_mutex) }`
+      C++  checker.cpp:5315      check_all_global_entities SKIPS lazy entities
+      port check_global_init.odin:578  same skip
+      C++  checker.cpp:2078      sets EntityFlag_Lazy when the FILE has AstFile_IsLazy
+      port entity_helpers.odin:411     same, same Test/Init/Fini exemptions
+      C++  parser.cpp:6834       AstFile_IsLazy comes from the `#+lazy` file tag
+      port check_files.odin:396  mark_file_lazy from `tags.lazy` -- same source
+    So the lazy surface matches. That was the last structural candidate and it is closed.
+
+    THE COMPLETE MECHANISM, which needs no divergence at all:
+      1. Phase 3 collection is THREADED in BOTH (port check_collect.odin:459; C++ checker.cpp:5801
+         `thread_pool_add_task(check_collect_entities_all_worker_proc, f)`). So the ORDER of
+         info.entities depends on worker scheduling in both.
+      2. Phase 4 (check_all_global_entities) is SINGLE-THREADED in both and walks info.entities in
+         that order.
+      3. When it reaches libc's `to_stream` entity first, check_single_global_entity sets the context
+         from d.scope.file = libc, and the Proc_Info is stamped libc.
+         When it reaches a POSIX entity first that references libc.to_stream, the on-demand path
+         (check_expr -> check_entity_decl, both faithful) resolves it under POSIX's context, and
+         `info.file = ctx.file` stamps it posix.
+      4. Which happens first is decided by step 1's scheduling. Hence libc 1/4, posix 3/4.
+    Every step is present in C++ in the same form, so C++ should show the same variance. That makes
+    #469 the same DISPOSITION as #468: faithful reproduction of an upstream order-dependence, not a
+    port defect. I have not proved it in C++ -- same limitation as #468, there is no model dump --
+    so this is stated as "very likely", not settled.
+
+    THE CORRECTION I OWE, and it matters more than the finding. In #470 I made insertion-order
+    variance INFORMATIONAL in dumpdet's threaded mode, reasoning that "append order follows the
+    scheduler in both implementations" and was therefore cosmetic. The first half is right; the
+    conclusion was wrong. info.entities order FEEDS A SEMANTIC DECISION -- it decides who resolves a
+    cross-package declaration first, and therefore which package an entity is attributed to. It is
+    not a presentation detail. The dumpdet change is still correct as a GATE (failing on it would be
+    permanently red for a reason the port cannot fix), but the comment I wrote there is misleading
+    about WHY, and the next reader would take "expected" to mean "harmless". Fixing the comment.
+
+    #475 -- C++ side: build harness stood up and PROVEN EQUIVALENT to the oracle. No dump yet.
+
+    WHY THIS, NOW. Three consecutive investigations dead-ended at the same wall: #468 (instantiation
+    find-or-create race), #469 (cross-package entity attribution) and #421 before them all concluded
+    "very likely faithful -- but unprovable, because there is no C++ model dump". #468 is filed
+    upstream explicitly marked INFERRED, NOT REPRODUCED. That is three claims resting on code-reading
+    in a project whose whole method is measurement over inspection. Jon asked whether to keep
+    chasing the Odin side or stand this up; the Odin queue is down to one substantial item (#465)
+    plus a cleanup (#348), so the instrument is worth more than the remaining backlog.
+
+    THE HAZARD, AND HOW IT IS CONTAINED. build_odin.sh:170 ends `-o odin` -- HARDCODED. Running it
+    would overwrite ./odin, which every gate uses as the reference. A silently-modified oracle would
+    corrupt parity, corpus and modelcmp simultaneously, and nothing in the gate set would catch it,
+    because the oracle IS the thing they trust. So:
+      - build via a generated variant, `sed 's|-o odin$|-o <scratch>/odin_dump|'`, never the script;
+      - ./odin's md5 recorded before (505c4320a334) and re-checked after -- unchanged;
+      - src/ stays UNCOMMITTED per the standing constraint. This is an instrument, not a fix.
+
+    EQUIVALENCE PROVEN, and the control matters. A rebuild of UNMODIFIED src/ must behave exactly
+    like the oracle, or later differences have two possible causes instead of one:
+        core/strings, core/odin/parser, base/runtime, core/fmt   IDENTICAL
+        a deliberately-broken package (`x: int = "oops"`)         IDENTICAL, 3 diagnostic lines
+    The last row is the point. Four clean packages agreeing proves little -- both sides print
+    nothing, and md5("") == d41d8cd98f matches trivially. The erroring package makes the comparison
+    non-vacuous, which is the #405 lesson applied before it could bite.
+
+    ONE TRAP FOUND ON THE WAY: a binary outside the repo root cannot resolve the `base` collection
+    ("Internal Compiler Error: Cannot find the library collection 'base'"), because ODIN_ROOT is
+    derived from the executable's own path. Every invocation of odin_dump therefore needs
+    ODIN_ROOT=<repo root>. Missing that produced ONE identical error hash for three different
+    packages -- which is exactly what a broken instrument looks like, and why I diffed the actual
+    text instead of trusting "they differ".
+
+    Build cost: 38s release. Cheap enough to iterate on.
+
+    NEXT: mirror dump_model.odin in C++ -- the `ins`/`entity` two-view format, the tab-separated
+    entity line (pkg#id, name, kind, type, size, align, poly, flags, pos), the `<instantiation>`
+    position marker (#421), and ODIN_ROOT-relative paths. Then modelcmp gains a real model
+    comparison instead of inferring layout from printed diagnostics, and #468/#469 become settleable.
+
+    #476 -- the dump format had to become NEUTRAL before C++ could produce it. Port side done.
+
+    THE PROBLEM, found by reading the format properly rather than assuming it. dump_model.odin
+    rendered the flag set with Odin's `%v`:
+        flags=bit_set[Entity_Flag; u64]{Visited, Used}
+    That string carries the bit_set's own TYPE NAME and its BACKING INTEGER TYPE. It is Odin
+    formatting, not a fact about the model. Asking a C++ implementation to emit it verbatim would be
+    mimicry of a language detail -- and worse, it would silently encode "does C++ reproduce Odin's
+    %v" into a gate that is supposed to answer "do the two build the same model".
+    The file's own header says PORT-ONLY, so this was a reasonable choice when written; it stops
+    being one the moment a second implementation has to match it.
+
+    THE FIX: `flags=Used|Visited`, sorted, `-` when empty. Sorted because a bit_set's iteration
+    order is also a language detail, and the column's job is WHICH flags are set. Both `kind` and
+    `type` were already neutral -- an enum name and type_to_string, which C++ has too.
+
+    SAFE TO CHANGE, checked rather than assumed: nothing persists these dumps. dumpdet compares runs
+    of ONE binary to each other, so a format change is invisible to it as long as it is consistent
+    within a run; modelcmp never reads the file at all (it infers layout from printed diagnostics).
+    There are no goldens. Verified after: base/runtime and core/slice still excl-inst 1/6, seq mode
+    still DUMPDET-CLEAN.
+
+    Observed distribution on base/runtime, which is a decent sanity check that the encoding is
+    sensible rather than mangled: 323 `Used`, 190 `-`, 87 `Used|Visited`, 38 `Not_Exported|Used|
+    Visited`, 28 `For_Value|Used|Value`, 19 `Visited`.
+
+    NEXT (C++ side): needs an entity-kind name table, a flag-name table, and the existing
+    type_to_string / type_size_of / type_align_of / is_type_typed. Then the two-view emit and the
+    `-dump-model:` flag.
+
+    #477 -- side finding while building the flag mapping: the port's Entity_Flag has FIFTEEN members
+    C++ does not, and I nearly reported the comparison backwards.
+
+    THE INSTRUMENT FAILED FIRST, and loudly enough to catch. My first extraction reported
+    "C++ flags: 41   port flags: 0" and a diff listing all 41 as C++-only. Zero is not a plausible
+    answer -- the dumps have been printing `flags=Used|Visited` all session -- so the sed pattern was
+    wrong (`Entity_Flag :: enum` lives in core/odin/ast/semantic_types.odin:353, not where I looked).
+    Had the number been 39 instead of 0 I might well have believed it. The lesson is the session's
+    recurring one: an extraction that returns NOTHING is a broken instrument until proven otherwise.
+
+    THE REAL COMPARISON, normalising case and underscores on both sides:
+        C++ EntityFlag members:   41
+        port Entity_Flag members: 56
+        in C++ only:              NONE -- the port covers C++'s set completely
+        in port only:             15
+    The fifteen: autocast, custom_align, deprecated, export, foreign, invalid, no_nil,
+    optional_allocator_error, optional_ok, require_results, soa_field, swizzle, swizzle_lhs,
+    using_scope, warning.
+
+    NOT YET DISPOSITIONED, and the honest reading cuts both ways. Several look like things C++ tracks
+    under a DIFFERENT concept rather than on the entity -- `deprecated`, `warning`, `require_results`
+    and `optional_ok` are proc TAGS or attribute state in C++, and `foreign`/`export` are linkage. So
+    "not an EntityFlag in C++" is not the same as "invented". Each needs the #103/#347 treatment: find
+    where C++ keeps the same fact, or establish that the port carries a flag nothing reads.
+    Filed rather than guessed.
+
+    WHY IT MATTERS FOR #475: the neutral flags column needs ONE canonical spelling, and the two use
+    different conventions (EntityFlag_NoAlias vs .No_Alias). A C++ table has to be written by hand
+    (there is no name table for flags -- kinds have one, entity_strings[] at entity.cpp:27, generated
+    from the ENTITY_KINDS X-macro; flags have nothing). Writing that table is the moment to decide
+    what to do about the fifteen: emitting a port-only flag would make every such entity differ for a
+    reason that is not a model difference.
+
+    #478 -- #477 measured: ALL FIFTEEN port-only entity flags are never set, and three of them feed
+    doc-output bits that therefore can never be emitted.
+
+    THE FIRST MEASUREMENT WAS CONTAMINATED, and reading the matched LINES rather than the counts is
+    what caught it. A loose grep for `.Optional_Ok`, `.Deprecated` etc. found hits -- but at
+    check_type.odin:4102/4122 those are `proc_type_node.tags` (a PROC TAG), and build_settings.odin's
+    `.Deprecated` is a VET FLAG. Three different enums share member names. Counting matches without
+    looking at them would have produced a confident, wrong disposition ("these are read, so they're
+    live"). Re-scoped strictly to `e.flags`/`entity.flags`:
+
+        flag                       entity writes   entity reads
+        Auto_Cast                        0              1
+        Export                           0              1
+        Foreign                          0              1
+        the other twelve                 0              0
+        --- control, same scoped pattern ---
+        Used                            14              5
+        Visited                          7              1
+        Param                            2              8
+
+    The control is the point: the pattern DOES find writes when they exist, so zero means zero.
+
+    THE CONCRETE DEFECT. docs_writer.odin:1259-1277 maps entity flags onto Doc_Entity_Flag bits:
+        if .Foreign   in e.flags { flags |= 1 << Doc_Entity_Flag.Foreign }
+        if .Export    in e.flags { flags |= 1 << Doc_Entity_Flag.Export }
+        if .Auto_Cast in e.flags { flags |= 1 << Doc_Entity_Flag.Param_Auto_Cast }
+    None of those three entity flags is ever set, so those three doc bits are NEVER emitted. The
+    surrounding reads -- .Not_Exported, .Using, .Const_Input, .Ellipsis, .C_Var_Arg -- are all live
+    flags, so the doc writer is working apart from exactly these three holes. Same family as #51 (the
+    whole file-flag layer never written) and #312 (parser set a flag, nothing read it).
+
+    A GATE BLIND SPOT WORTH NOTING: doccmp.sh (#253) reports 60/60 STATE-MATCH. So either it does not
+    compare these bits, or C++ does not emit them either. That is the next thing to check, and it
+    decides the disposition: if C++ DOES emit Foreign/Export/Param_Auto_Cast, this is a port defect
+    with a measurable doc-output difference that doccmp is currently blind to.
+
+    The remaining twelve are inert -- declared, never written, never read. They are either
+    placeholders for C++ concepts kept elsewhere (proc tags, linkage, attribute state) or leftovers.
+    Deleting them is safe only after confirming the first; filed, not guessed.
+
+    #479 -- docs_writer's Foreign/Export now read the VARIANT, as C++ does. Landed but UNVERIFIED,
+    and the verification gap is the more useful finding.
+
+    THE DISPOSITION QUESTION FROM #478 IS ANSWERED, and it is a port defect. C++ does not use entity
+    FLAGS for these at all:
+        docs_writer.cpp:871-872   if (e->Variable.is_foreign)  { flags |= OdinDocEntityFlag_Foreign; }
+                                  if (e->Variable.is_export)   { flags |= OdinDocEntityFlag_Export;  }
+        docs_writer.cpp:892-893   same pair, from e->Procedure
+    It keeps the fact on the VARIANT -- and so does the port: is_foreign/is_export exist on both
+    Entity_Variable and Entity_Procedure (semantic_types.odin:518,565), is_foreign is set at
+    check_collect.odin:1100 (citing C++ 4614), is_export at check_decl.odin:249 and :1257. The data
+    was there all along; docs_writer.odin was reading INVENTED entity flags that nothing sets.
+    Fixed by reading the variants, per-kind inside the switch exactly as C++ does, and the two dead
+    common-flag reads removed.
+
+    THE THIRD FLAG IS NOT A DEFECT. `.Auto_Cast` fed Doc_Entity_Flag.Param_Auto_Cast -- but
+    OdinDocEntityFlag_Param_AutoCast is DECLARED in C++ (docs_format.cpp:225) and set NOWHERE in
+    src/. Both implementations never emit it. Equivalent in effect, so it stays as-is rather than
+    being "fixed" into a divergence.
+
+    IT IS UNVERIFIED, AND I CANNOT CLAIM OTHERWISE. Two separate reasons, found by trying:
+      1. I ran doccmp with the WRONG binary (triage_st, not the triage_doc harness its usage line
+         names) and got `port=0  MISSING=661` -- a vacuous before/after comparing two runs of
+         something that emits no doc entities at all. Caught only because port=0 is absurd.
+      2. Even with the right binary it would not help: doccmp compares ENTITY PRESENCE against
+         `odin doc` output, not flag BITS. Its own header says so. So no gate in the set can see
+         this fix, which is exactly why the defect survived -- and why #478's "gate blind spot"
+         guess was right.
+      3. There is no triage_doc harness in .claude/tools at all, so the doc path is currently
+         unexercised end to end.
+
+    GATED FOR NON-REGRESSION ONLY: parity 323/323 compared, excluded=0, 0 count / 0 text / 1 attrib
+    (gen_mnemonic_builders, the #341 ORACLE flake -- appeared once before, did not reproduce);
+    corpus 198 members, 0 missing. Both are diagnostic gates and this change cannot move them; that
+    is evidence of no harm, NOT evidence the bits are emitted.
+
+    KEEPING IT ANYWAY, and the reasoning matters: reading a variant field that IS set is strictly
+    better than reading a flag that never is, the C++ site is identified line-for-line, and the
+    change cannot make doc output worse than "always absent". But the honest status is
+    IMPLEMENTED-NOT-MEASURED, and the debt is a triage_doc harness plus a doccmp mode that compares
+    flag bits.
+
+    #481 -- built the missing doc-flag gate; it immediately found TWO HARD PANICS. Three instrument
+    failures on the way, all caught by the positive control.
+
+    WHAT WAS BUILT. dump_doc (core/odin/checker/dump_doc.odin) + build_context.dump_doc_path +
+    `-dump-doc:<path>` in the harness, hooked in check_package_from_path beside dump_model. It emits
+    one line per documented entity: name, kind, and the SET Doc_Entity_Flag bits by name.
+    It had to be an in-checker dump, not a harness: Package_Check_Result deliberately does NOT expose
+    the Checker (it is a stack local destroyed on return -- the #19/#218/#358 use-after-free class),
+    which dump_model.odin:110 already documents. My first attempt was a triage_doc harness reaching
+    for c.info; it could not compile, and the reason is load-bearing rather than incidental.
+
+    THREE INSTRUMENT FAILURES, each caught by asking "does a package with known foreign procs show
+    Foreign?" rather than by trusting a clean run:
+      1. `## doc-entities=0`. doc_write_entity returns 0 for any entity whose package is not in
+         w.pkg_cache (docs_writer.odin:1222), and pkg_cache is filled by doc_write_docs (:1492).
+         Calling doc_write_entity on a fresh writer yields 0 for EVERYTHING.
+      2. Still 0 after calling doc_write_docs. It collects only .Init-kind or is_extra packages
+         (:1466) -- and a package named as the check TARGET is neither. Needed All_Packages.
+      3. With All_Packages: CRASH. Which is the finding.
+    Had I stopped at (1) or (2) I would have "verified" #479's fix against an empty file -- the exact
+    false-green this session keeps producing. The control is what makes the difference; a gate that
+    reports nothing is indistinguishable from a gate that reports all-clear.
+
+    THE TWO PANICS, both in name_canonicalization.odin, both reached through the doc path:
+        core/c/libc        :1062  panic: write_type_to_canonical_string: Unknown type kind Generic
+        core/unicode/utf8  :692   panic: write_canonical_entity_name: Weird entity Odin_Arch_Type
+    Different targets, different sites. The first has no arm for a Generic type kind; the second
+    falls into a "Weird entity" catch-all on Odin_Arch_Type -- a universe-scope type name, so it is
+    not exotic input. These are hard panics (Illegal instruction, core dumped), not diagnostics.
+
+    WHY THEY WERE INVISIBLE: nothing drives the doc writer. doccmp compares package-scope PRESENCE
+    against `odin doc` and never calls the writer; no test does either. So the whole doc-output path
+    -- writer, canonical names, flag bits -- has been unexercised, and #479's two dead flags were a
+    symptom of the same gap rather than an isolated slip.
+
+    STATE OF THE TREE: dump_doc is OPT-IN (runs only when -dump-doc is passed), so every existing
+    gate is unaffected and the panics cannot fire in normal use. It is left in place deliberately --
+    it IS the repro for both panics. #479's fix is STILL UNVERIFIED, now blocked on these rather
+    than on missing tooling.
+
+#482 -- BOTH doc-path panics fixed against C++, and the gate that found them is itself vacuous
+
+    Both panics from #481 are now closed, and BOTH were genuine missing arms in the port -- not the
+    port reaching a site C++ never reaches. #481's task record required checking each against C++
+    before fixing, and that discipline mattered: the second one's premise was wrong twice over.
+
+    PANIC 1 -- "Weird entity Odin_Arch_Type". The string "Weird entity" does not appear in src/ at
+    all, and the port's cited "C++ Reference: line 530-546" points at typeid-hashing/WebKit-workaround
+    code -- a DRIFTED CITATION of the #134 family. C++'s write_canonical_entity_name has an escape
+    the port simply lacked, at name_canonicalization.cpp:689-691:
+        if (e->kind == Entity_TypeName) { goto write_base_name; }
+    Ported as an empty `else if e.kind == .Type_Name { }` before the panic, with the real citation.
+
+    PANIC 2 -- premise corrected TWICE, and the second correction was the whole finding.
+      (a) I first tried adding a `.Generic` arm. The compiler rejected it as a duplicate: `.Generic`
+          already exists at line 1036, handling normal mode only.
+      (b) Reverting revealed why I had misread it. The catch-all panic printed `type.kind` while the
+          switch dispatches on `actual_type.kind` (`actual_type := default_type(type)`, line 773).
+          THE MESSAGE NAMED THE WRONG KIND. After making it report both, the truth appeared:
+              Unknown type kind Fixed_Capacity_Dynamic_Array (from Generic)
+          on core/unicode/utf8 AND core/c/libc. The missing arm was never `.Generic`.
+    C++ HAS the arm, at name_canonicalization.cpp:812-814 -- `[dynamic;%lld]` then the elem. Ported.
+    This is the THIRD time [dynamic; N]T has been the one type kind left out of a switch (#89 in
+    is_ast_type, #309 in the compound-literal switch). Worth treating as a checklist item, not a
+    coincidence.
+
+    THE REAL FINDING: dump_doc, the instrument #481 built, WAS ITSELF VACUOUS. With both panics
+    fixed, all three targets ran to completion and emitted `## doc-entities=0`. The "OK" was empty.
+    Chasing it through instrumentation rather than inspection:
+        all_packages=true, npkgs=17, pkg_cache=9, entity_cache=3896, info.entities=2178
+        every entity: idx=0, and in_cache=2174 out_of_cache=0 -- the pkg gate PASSES for all of them
+    Those two facts contradict, which is what pointed at the cause. doc_write_item is TWO-PASS:
+        if w.state == .Preparing { t.cap += 1; return 0 }   // 0 for EVERY item during sizing
+    and doc_get_item returns nil unless state == .Writing. dump_doc called doc_write_entity AFTER
+    doc_write_docs had finished, when the writer is no longer in .Writing -- so every call returned
+    a sizing-pass 0. My `idx == 0` test conflated THREE distinct conditions: "not documented",
+    "legitimately index 0", and "wrong writer state".
+
+    So the panics were real and are fixed, but they were reached from doc_write_docs itself, not
+    from dump_doc's walk -- that walk has never once executed a real iteration. #479 remains
+    UNVERIFIED. dump_doc must be rebuilt to capture flags DURING the writing pass (a side table
+    populated inside doc_write_entity under an opt-in flag) rather than re-driving the writer after
+    the fact. Filed as #483.
+
+    A false-green of exactly the shape this session keeps producing, and caught the same way each
+    time: by refusing to accept a zero without a positive control. The header in dump_model.odin
+    already states the rule -- an empty dump diffs clean against another empty dump.
+
+#483 -- dump_doc rebuilt on the real two-pass protocol; #479 VERIFIED by A/B after being asserted
+       since it was written
+
+    CORRECTION TO #482. I wrote there that dump_doc "re-drives the writer AFTER the writing pass has
+    ended". That is wrong, and the truth is simpler and worse: THE WRITING PASS NEVER RAN AT ALL.
+    The protocol is four steps, and dump_doc performed two of them:
+
+        doc_writer_init(&w, info)      // state = .Preparing
+        doc_write_docs(&w)             // PASS 1: sizing. doc_write_item returns 0 for EVERY item
+                                       //         and merely bumps t.cap; doc_get_item returns nil
+        doc_writer_start_writing(&w)   // state = .Writing, CLEARS all caches, allocates w.data
+        doc_write_docs(&w)             // PASS 2: the one that actually writes
+
+    dump_doc called init and doc_write_docs and stopped. The writer therefore sat in .Preparing
+    forever, which is why every index came back 0 -- not a stale state, an unentered one. What
+    pointed at it was two measurements that could not both be true: every entity returned idx=0,
+    yet in_cache=2174 out_of_cache=0 said the package gate passed for all of them. The only branch
+    left between those two facts was the state machine.
+
+    THE REWRITE no longer calls doc_write_entity at all. It runs the protocol and then ENUMERATES
+    w.entities by index, resolving each Doc_String against w.data. That is strictly better as a
+    gate: it reports what the writer PRODUCED rather than a re-derivation of it. It also removes a
+    second latent bug -- the old `if idx == 0 { continue }` conflated "not documented" with
+    "legitimately index 0", so even with the state fixed it would have dropped the first entity.
+
+    #479 IS NOW VERIFIED, and by A/B rather than by inspection:
+
+        core/c/libc, WITH the fix:      396 Foreign  (284 Foreign + 112 Foreign|Private)
+        same, four variant reads neutered:  0 Foreign, entity count unchanged
+        by kind: 393 Procedure + 3 Variable
+
+    So those four sites are the ONLY producers of the bit. Export needed its own input (libc has no
+    @(export)); .claude/tools/docflag_probe covers all four (kind, bit) combinations plus a
+    NEGATIVE control:
+
+        exported_proc     Procedure  flags=Export
+        exported_var      Variable   flags=Export
+        plain_proc        Procedure  flags=-        <-- without this, "set every bit" would pass
+        some_foreign_proc Procedure  flags=Foreign
+
+    That closes a debt carried since #479 was written: it was implemented from a line-for-line C++
+    reading and marked IMPLEMENTED-NOT-MEASURED because no gate could see doc flag bits. Two ticks
+    of tooling work later, it measures.
+
+    Parity 323/323 0/0/0 over the #482 name_canonicalization fixes. riscv/tools completed in that
+    sweep, so #301 did not recur.
+
+    OBSERVATION, NOT YET A FINDING: 38 doc entities render as <blank> (zero-length name). Parameters
+    ARE emitted as doc entities -- the flag histogram shows Param_No_Alias, Param_Any_Int,
+    Param_Ellipsis -- so unnamed parameters are the likely and faithful explanation. Noted for #480
+    rather than chased, because "plausible and benign" is a hypothesis, not a measurement.
+
+#484 -- the doc writer aborts ~80% of the time, and the sizing walk is why: it CREATES types
+
+    Found while chasing #483's leftover (the 38 <blank> doc entities), which is not yet answered.
+    Adding one debug column made the run crash, which was the tell -- a formatting change cannot
+    cause a crash, so the crash was already there and my #483 runs had been lucky:
+
+        core/c/libc -dump-doc:  10/12 and 9/12 crashed, on two independently built binaries
+        docs_writer.odin:465  runtime assertion: Item tracker overflow
+        docs_writer.odin:501  assertion: w.strings.len + len(str) + 1 <= w.strings.cap
+
+    WHAT OVERFLOWS. Reporting the tracker identity and counts, then softening the assert to a
+    counter so the pass could finish:
+
+        OVERFLOW tracker T=Doc_Type len=1856 cap=1856
+        cap types=1848 ents=3888 | len types=1847 ents=3888 | overflows=0
+        cap types=1856 ents=3900 | len types=1856 ents=3900 | overflows=5
+        cap types=1859 ents=3899 | len types=1859 ents=3899 | overflows=2
+
+    ENTITIES agree exactly, every run. It is TYPES (and the strings section) that overrun, by 1-5.
+
+    ROOT CAUSE, and the measurement that settles it. Run the SIZING pass twice in a row without
+    clearing the caches between -- a pure walk over unchanged data must then add exactly zero:
+
+        SIZING PASS A=1857  PASS B=+13
+        SIZING PASS A=1856  PASS B=+14
+        SIZING PASS A=1848  PASS B=+22
+
+    A second identical walk finds 13-22 NEW type pointers. So DOC WRITING CREATES TYPES, and pass
+    1's capacity is structurally an underestimate of what pass 2 will need. The two-pass contract
+    -- "count, then write exactly what you counted" -- requires the counting pass to be free of
+    side effects, and it is not.
+
+    TWO HYPOTHESES KILLED, both worth recording so they are not re-run:
+      - THREADING. -no-threads still overflows (1, 0, 1, 1). NOT the #468 family, which is where I
+        would have looked first given #344/#468/#469 all landed there.
+      - THE INDEX-0 CONFLATION I had just fixed in dump_doc for #483. It would have been a tidy
+        story -- same bug, one layer down -- but docs_writer.odin contains no `index == 0` test at
+        all. A satisfying hypothesis is not evidence.
+
+    WHAT THIS COSTS #483: the Foreign A/B (396 -> 0) STANDS -- both sides ran to completion and
+    reported identical entity counts, so the comparison was sound. But dump_doc cannot yet be the
+    GATE #480 wants, because an instrument that aborts four times in five is not a gate. That is
+    the honest status: the measurement was valid, the tool is not yet dependable.
+
+    Filed as #484 with the remaining work: find which call allocates (write_type_to_canonical_string
+    is the prime suspect -- it runs with g_in_doc_writer set and is where #481/#482's panics lived),
+    then CHECK C++ BEFORE FIXING. src/docs_writer.cpp has the same two-pass design and the same
+    GB_ASSERT, so this is either a port-only mutation or a shared latent bug, and #481 is the
+    standing reminder not to assume which.
+
+    All instrumentation reverted; docs_writer.odin restored and verified by md5, odin check clean.
+
+#485 -- my harness was driving the doc writer wrongly; fixing that did NOT explain #484, and
+       checking C++ turned up a REPRODUCED upstream crash
+
+    Continuing #484 (find what allocates during the doc walk). Two corrections and one new finding.
+
+    CORRECTION 1 -- THE INSTRUMENT MEASURED NOTHING. A counter in alloc_type($T) guarded on
+    g_in_doc_writer reported zero allocations, which I nearly took as "the walk allocates nothing"
+    -- contradicting #484's own idempotence measurement. It was vacuous: g_in_doc_writer is set in
+    odin_doc_write (docs_writer.odin:1540), NOT in doc_write_docs, and dump_doc calls the latter.
+    The flag was false throughout. A zero from a guard that is never true is the #405 shape again,
+    in a new costume, and the only reason I caught it was that it disagreed with an earlier
+    measurement instead of confirming one.
+
+    CORRECTION 2 -- AND MY #483 REWRITE WAS INCOMPLETE. odin_doc_write already implements the exact
+    sequence I had reconstructed from doc_writer_init/doc_writer_start_writing, plus two steps I
+    had missed: g_in_doc_writer (which decides whether canonical names include default values) and
+    doc_writer_end_writing. So #483's dump_doc was measuring a configuration `odin doc` never runs.
+    The cheap lesson: there WAS a canonical caller a few lines below the pieces I was reading, and
+    reading the pieces instead of looking for the caller is how both steps went missing. dump_doc
+    now mirrors odin_doc_write exactly.
+
+    #484 SURVIVES THE CORRECTION: with the flag set and end_writing called, core/c/libc still
+    aborts 8/12. The overflow is not an artefact of driving the writer wrongly.
+
+    THE NEW FINDING. #484's task record said to check C++ before fixing. Doing so:
+
+        ./odin doc core/c/libc                        0/8 failed   (text mode -- unaffected)
+        ./odin doc core/c/libc -doc-format            6/6 ABORT
+            src/docs_writer.cpp(268): Assertion Failure: `file_index_found != nullptr`
+
+    Also aborts on core/strings and core/fmt. odin_doc_token_pos_cast looks a file up in
+    w->file_cache -- which holds only files of DOCUMENTED packages -- and asserts it is present.
+    A documented entity can carry a position in an imported file that is not. The function already
+    guards `pos.file_id != 0` and `file != nullptr`, both falling back to file_index = 0; the third
+    failure of the same kind asserts instead of taking that same fallback.
+
+    Mechanism confirmed from BOTH directions, which is what makes it a finding rather than a guess:
+
+        trivial package, no imports, -doc-format          OK
+        core/c/libc / core/strings / core/fmt -doc-format ABORT
+        core/c/libc -doc-format -all-packages             OK
+
+    -- make the documented set a superset of the referenced files (either by having no imports, or
+    by documenting everything) and the crash disappears. Written up as UPSTREAM-485, and unlike
+    #468 this one is REPRODUCED rather than inferred: the commands are in the file.
+
+    AND IT SETTLES #484's DISPOSITION. dump_doc runs with All_Packages set -- precisely the
+    configuration in which the C++ writer is HEALTHY. So the port's item-tracker overflow is a PORT
+    bug, not shared bug-compatibility: the two implementations fail on the same package for two
+    unrelated reasons, at different asserts, under different configurations. Both stay open, in
+    different files.
+
+#486 -- RETRACTION: the doc walk does NOT create types. #484's root cause was wrong.
+
+    #484 claimed "the sizing walk CREATES types, so pass 1's count is structurally an
+    underestimate". That is REFUTED by direct measurement, and the retraction matters more than the
+    original claim did, because the claim was the kind that sounds mechanical and settled.
+
+    THE MEASUREMENT. A counter on every type-creation site, guarded on g_in_doc_writer (now that
+    #485 made dump_doc actually set it), covering:
+        alloc_type($T)                     -- types.odin:26, the common entry (24 uses)
+        the 11 direct `new(Type, ...)` sites that BYPASS it -- check_decl_helpers.odin:354
+        (alloc_type_named), check_deferred.odin x3, check_type.odin x7
+    Result, on core/c/libc, single-threaded, with the asserts softened so the run completes:
+
+        DOCALLOC-TOTAL kinds=0 flag_was_set=true alloc_type_calls_TOTAL=164
+
+    Zero allocations while the doc writer is running. The two controls are the point: flag_was_set
+    proves the guard was live, and alloc_type_calls_TOTAL=164 proves the counter itself works and
+    that all 164 allocations happen BEFORE doc writing. Without those two numbers this is the same
+    unfalsifiable zero that #485 already caught me on once -- the first version of this instrument
+    reported zero for the trivial reason that the flag was never set.
+
+    SO WHAT IS THE +13-22? Still real (a second identical sizing walk over unchanged data, caches
+    warm, adds that many type items), and now UNEXPLAINED. What it is not: new types. Two further
+    candidates eliminated this tick --
+      - a cache-BYPASS path: doc_write_type has a `use_cache := true` parameter, which looked like
+        the answer, but there are ZERO callers passing false.
+      - a port-only cache-key divergence: the port keys type_cache by u64 canonical-type HASH
+        rather than by pointer, which looked wrong until I read C++ --
+        `OrderedInsertPtrMap<u64/*type hash*/, OdinDocTypeIndex> type_cache` (docs_writer.cpp:34).
+        Same design. Faithful.
+    Leading hypothesis is now that type_hash_canonical_type is not stable across walks, so the same
+    type hashes differently the second time and misses its own cache entry. That is a hypothesis,
+    not a finding, and it is shared design with C++ if true.
+
+    WHAT SURVIVES FROM #484, unchanged: the port's doc writer aborts ~80% of runs on core/c/libc
+    (item-tracker overflow); entities agree between passes while types and strings overrun by 1-5;
+    it is not threading (-no-threads reproduces); and it is a PORT bug rather than shared, because
+    C++ is healthy in exactly the configuration dump_doc uses (-all-packages).
+
+    Four wrong or unproven explanations for this one overflow so far -- threading, index-0
+    conflation, my own harness, and now type creation. The overflow itself has been reproduced
+    every time; only the stories about it keep failing. Worth remembering which of those two things
+    the evidence actually supports.
+
+    All instrumentation reverted across five files, verified by md5 and by grep for the counter
+    names; odin check clean.
+
+#487 -- #484's root cause found at last: doc_update_entities iterates a map it is inserting into.
+       C++ already guards against this and says why. PARTIAL FIX: 80% -> 25%.
+
+    Three ticks of wrong explanations (threading, index-0, my harness, type creation) ended when I
+    stopped inferring and asked the direct question: WHICH types does a second warm walk add?
+
+        WALKB-NEW kind=Proc   WALKB-NEW kind=Tuple   WALKB-NEW kind=Pointer   (x10, total_new=10)
+
+    All structural, all PRE-EXISTING (#486 proved nothing is allocated). So the true statement was
+    never "new types appear" but "the second walk REACHES types the first did not" -- which points
+    at the traversal, not at the type system. One grep later:
+
+        docs_writer.odin:1369  for e, _ in w.entity_cache { doc_write_type(w, e.type) }
+        docs_writer.odin:1374  for e, entity_index in w.entity_cache { ... doc_write_entity(...) }
+
+    and doc_write_entity does `w.entity_cache[e] = entity_index`. THE SECOND LOOP INSERTS INTO THE
+    MAP IT IS ITERATING. An insert can rehash, after which entries are revisited or skipped, so the
+    set actually walked stops being a function of the input. That is the whole of #484: the sizing
+    pass and the writing pass walk different entity sets, so pass 1's capacity does not fit what
+    pass 2 writes, and the item tracker overflows.
+
+    C++ DOES NOT HAVE THE BUG, AND SAYS WHY (docs_writer.cpp:984-992):
+
+        // NOTE(bill): Double pass, just in case entities are created on odin_doc_type
+        auto entities = array_make<Entity *>(heap_allocator(), 0, w->entity_cache.count);
+        for (auto const &entry : w->entity_cache) { array_add(&entities, entry.key); }
+        for (Entity *e : entities) { ... }
+
+    It snapshots the keys into an array and iterates THAT. The comment names the same hazard from
+    the other side. The port collapsed the snapshot into a direct iteration -- the usual shape of a
+    port defect: the C++ looks like ceremony until you know what it is defending against.
+
+    FIX: snapshot the keys, then run both loops over the snapshot. Measured on core/c/libc:
+
+        before: 8/12, 9/12, 10/12 crashed   (~80%)
+        after:  5/20 crashed                (25%)
+        four other packages x3:  4/12
+
+    PARTIAL, AND SAID PLAINLY. The fix is C++-faithful and a large real improvement, so it stays --
+    but it does NOT close #484. At least one more cause remains, and I am not going to guess at it
+    after four wrong guesses; the next tick starts from a measurement, not a hypothesis. The obvious
+    candidate to check FIRST is whether any other traversal in docs_writer iterates a live cache,
+    since this one was found by grep in about a minute once I knew what to look for.
+
+#488 -- #487's fix fully closes the TYPES and ENTITIES trackers; the residual is STRINGS ONLY
+
+    Followed my own note from #487 -- start from a measurement, and check first whether any OTHER
+    traversal iterates a live cache. It does not: after the snapshot fix, the only remaining
+    iterations over writer state are the snapshot BUILDER itself (body appends to a local array)
+    and `for _, pkg in w.info.packages` (which inserts into pkg_cache, a DIFFERENT map). So the
+    class is closed at one instance.
+
+    Then the direct measurement, pass-1 capacity vs pass-2 usage, single-threaded, core/c/libc:
+
+        cap(t=1706 e=3867 s=279643)  len(t=1706 e=3867 s=279604)  overflows=0
+        cap(t=1706 e=3867 s=279641)  len(t=1706 e=3867 s=279627)  overflows=0
+        cap(t=1706 e=3867 s=279589)  len(t=1706 e=3867 s=279587)  overflows=3
+        cap(t=1706 e=3867 s=279627)  len(t=1706 e=3867 s=279620)  overflows=2
+
+    TYPES AND ENTITIES NOW AGREE EXACTLY, every run, and the numbers are stable run-to-run (1706
+    and 3867 every time) where before they drifted. That is #487's fix doing precisely what it
+    should. The residual overflow is entirely in the STRINGS section, and the string totals still
+    drift (279643 / 279641 / 279589 / 279627) even with -no-threads.
+
+    A caution I nearly published the wrong way round: an artificial "run the sizing pass twice"
+    A/B still shows walk B adding 172 types / 50 entities after the fix, which reads as a
+    regression against #484's +13-22. It is not comparable. That construction is NOT the real
+    protocol -- pass 2 runs after doc_writer_start_writing has CLEARED every cache, so it starts
+    cold exactly as pass 1 does, whereas the double-sizing A/B keeps them warm and therefore
+    measures a different question. The real protocol is the four lines above, and it is clean for
+    two of the three trackers. Keep the instrument matched to the thing being claimed.
+
+    WHAT IS LEFT, sharply scoped: why does pass 2 want MORE STRING BYTES than pass 1 counted, when
+    both passes now walk an identical entity set? doc_write_string dedups by CONTENT, so a differing
+    total means the SET of distinct strings differs between passes -- i.e. some string's content is
+    computed differently the second time. Canonical type names are the obvious suspect (they are
+    generated text, and they are what #481/#482/#486 kept leading back to), but that is a
+    hypothesis and the next tick should start by dumping the two passes' string sets and diffing
+    them, not by reasoning about which generator is at fault.
+
+    Gates over the fix: parity 323/323 0/0/0. odin check clean, all instrumentation reverted and
+    md5-verified.
+
+#489 -- the STRINGS residual is fully explained, and PROVEN: a by-design canonical-hash collision
+       plus an order-unstable traversal
+
+    Followed #488's note exactly -- diff the two passes' string sets rather than reason about which
+    generator is at fault. Three measurements, each narrowing the last:
+
+    1. STRING SETS differ by 0-3 entries out of ~4256, and the entries are always BASIC TYPE NAMES:
+           ONLY-IN-PASS2 "f64" / "string" / "untyped bool"
+       Run to run: only_in_2 = 0, 1, 3. Nondeterministic even with -no-threads.
+
+    2. TYPE SETS ARE IDENTICAL. Diffing the written type hashes: pass1=1705 pass2=1705,
+       only_in_2=0, only_in_1=0. So the same hashes are written both times, yet a basic type NAME
+       appears in one pass and not the other. Those two facts together are the whole clue -- they
+       can only both hold if one hash corresponds to more than one type.
+
+    3. THE COLLISION, printed directly rather than deduced:
+           COLLISION hash=13829941063178534365 "untyped rune" vs "rune"
+
+    MECHANISM, end to end. type_hash_canonical_type hashes the CANONICAL string, and the canonical
+    writer resolves through default_type() (#482 found that same line the hard way). default_type of
+    `untyped rune` IS `rune`, so the two hash identically -- by design, not by accident.
+    doc_write_type's cache is keyed by that hash, so whichever member of the pair is visited FIRST
+    is the one actually written; the loser returns the winner's index. The two write DIFFERENT name
+    strings ("untyped rune" vs "rune", "untyped bool" vs "bool"). So when the traversal order
+    differs between the sizing pass and the writing pass, a different member wins, the string
+    section needs a different number of bytes than was counted, and it overflows.
+
+    That closes the story #484 opened: types and entities were the live-map mutation (#487), and
+    strings are this.
+
+    WHERE THE FIX BELONGS, and why not tonight. The COLLISION is shared with C++ -- same
+    hash-keyed type_cache (docs_writer.cpp:34), same default_type canonicalisation -- so it is not
+    the defect. What the port adds is ORDER INSTABILITY: C++ walks arrays and ordered maps, the port
+    walks hash maps, so the winner of a collision can differ between two passes of the same run.
+    That is the #345/#50 family (port uses maps where C++ uses arrays), and fixing it here in
+    isolation would be treating the symptom at one site. Filed that way rather than patched.
+
+    Five failed hypotheses on this bug, then two proven mechanisms. What changed was giving up on
+    reading code to find the answer and instead printing the two sets and diffing them -- twice,
+    at two different levels, until the contradiction (identical hashes, different names) forced the
+    only remaining explanation. Worth remembering the shape: when two measurements cannot both be
+    true under your model, the model is wrong in a way that is about to be findable.
+
+    All instrumentation reverted, md5-verified; odin check clean.
+
+#490 -- the ordering substrate WAS the defect, and it is one word in four declarations:
+       C++ uses OrderedInsertPtrMap, the port used plain maps. Doc-writer crash 80% -> 0.
+
+    #489 ended by saying the remaining fix belonged with the map-vs-array family (#345/#50) rather
+    than at the doc-writer site. Starting there this tick found something better: the divergence is
+    not pkg.files at all, it is the doc writer's own caches.
+
+        C++   docs_writer.cpp:30-33
+              OrderedInsertPtrMap<AstFile *,    OdinDocFileIndex>     file_cache;
+              OrderedInsertPtrMap<AstPackage *, OdinDocPkgIndex>      pkg_cache;
+              OrderedInsertPtrMap<Entity *,     OdinDocEntityIndex>   entity_cache;
+              OrderedInsertPtrMap<u64,          OdinDocTypeIndex>     type_cache;
+
+        port  docs_writer.odin:318-322
+              file_cache:   map[^ast.File]Doc_File_Index,
+              pkg_cache:    map[^ast.Package]Doc_Pkg_Index,
+              entity_cache: map[^Entity]Doc_Entity_Index,
+              type_cache:   map[u64]Doc_Type_Index,
+
+    The C++ container name states the contract: iterating it yields INSERTION order. An Odin map
+    does not, and for POINTER keys the order is address-seeded, so it can differ between two passes
+    of the same run. That is precisely the input to #489's collision: `untyped rune` and `rune`
+    hash identically by design, whichever is visited FIRST is written, and the two write different
+    name strings -- so an order difference becomes a byte-count difference becomes an overflow.
+
+    FIX: an entity_order array beside entity_cache, appended on insert, cleared with it, iterated
+    in place of the map. entity_cache is the only one of the four the port actually ITERATES, so it
+    is the only one that needs ordering today; the other three are lookup-only, and I left them
+    rather than change what is not measured to be wrong.
+
+    RESULT, core/c/libc -dump-doc, threaded:
+
+        original            8/12, 9/12, 10/12 crashed   (~80%)
+        after #487 snapshot 5/20                        (25%)
+        after #490 ordering 0/20                        (0%)
+
+    And across four packages, 8 runs each: 0/32. core/os, core/fmt and core/odin/parser each ran
+    clean individually (1/1 -- not a rate, stated as such).
+
+    ONE MEASUREMENT I AM NOT CLAIMING AS CLEAN: an earlier 5-package x3 sweep showed 3/15 with no
+    per-run timeout, inside a shell that then hit its own 2-minute limit. Those three may have been
+    timeout kills rather than crashes. I re-ran with per-run timeouts and got 0/32, but the honest
+    statement is that the 3/15 was not reproduced, not that it was disproven.
+
+    THE SHAPE WORTH KEEPING: three ticks of this bug were spent on the wrong layer -- allocation,
+    hashing, my own harness. The defect was a container choice, visible in a single side-by-side
+    of two declarations, and the C++ type name said what it was for. Reading the DECLARATIONS
+    against C++ would have found it before any of the instrumentation did.
+
+#491 -- CORRECTION to #490's "0%": the doc-writer crash is greatly reduced, NOT eliminated.
+       Also: the <blank> doc entities are unnamed return values, confirmed against source.
+
+    CORRECTION FIRST. #490 reported the crash rate as 0% on the strength of 0/20 and 0/32. Further
+    sampling of the SAME build after restoring instrumentation:
+
+        1/12, then 1/24     -- combined post-fix observation 2/68, about 3%
+        assert: w.strings.len + len(str) + 1 <= w.strings.cap
+
+    So the honest number is ~3%, down from ~80%, and the survivor is precisely the STRINGS section
+    -- the residual #489 identified and #490 did not claim to fix. What #490 got wrong was not the
+    mechanism but the confidence: 32 clean samples of a ~3% event is an unremarkable outcome, and I
+    reported it as elimination. A rate that low needs a denominator chosen for the rate, not
+    whatever the loop happened to run.
+
+    WHY IT SURVIVES, as far as the evidence goes: #490 made entity_cache's ITERATION order
+    insertion-stable, which removed the types and entities divergence outright. But the order in
+    which TYPES get visited also depends on the package walk, and that walk is
+    `for _, pkg in w.info.packages` -- a map -- collected then sorted by name. The port and C++ both
+    sort, so this should be deterministic; it is only ambiguous if two packages share a name, and
+    #483's instrumentation did show info.packages holding 17 entries for 9 distinct package
+    pointers. That is a CANDIDATE, not a finding, and it is the next thing to measure.
+
+    SECOND RESULT, and it closes #480's third item. The 38-65 <blank>-named doc entities are
+    UNNAMED RETURN VALUES. Confirmed by dumping their positions and reading the source at three
+    independent sites:
+
+        core/io/io.odin:139 cols 71,76   ->  `-> (i64, Error)`   two unnamed results
+        core/unicode/letter.odin:50 c30  ->  `-> rune`
+        core/c/libc/wctype.odin:61 c42   ->  `-> wctrans_t`
+
+    kind=Variable is correct for those, so this is faithful and not a defect. I had flagged it as
+    "plausible and benign" twice and refused to bank it; the measurement now supports it. Also
+    learned along the way that Doc_Entity.field_group_index is 0 for EVERY entity -- never written
+    -- so it cannot be used as a discriminator (and is a candidate for the #347 sweep).
+
+    Gates over #490: parity 323/323 0/0/0. odin check clean; all instrumentation reverted, and the
+    seven entity_order sites verified present after the revert.
+
+#492 -- two candidates REFUTED for the strings residual, and a third under proper measurement
+
+    #491 named the package walk as the leading candidate. Measured it rather than assuming:
+
+        PKGORDER n1=17 n2=17 positional_diffs=0     -- six runs, every one identical
+
+    The sorted package sequence is the SAME in pass 1 and pass 2, every time, duplicates and all.
+    REFUTED. (The 17-entries-for-9-pointers observation was real but irrelevant here: both passes
+    sort, and the sort is stable enough that the sequence matches.)
+
+    Second candidate, and a genuine divergence found on the way: C++ walks a package scope by SLOT
+    INDEX (docs_writer.cpp:1065, `for (isize i = 0; i < elements.cap; i++)` over `slots[i]`) where
+    the port does `for name, e in scope.elements` (docs_writer.odin:1469). That IS a port-vs-C++
+    difference of the #214 family and is worth its own item -- but it cannot explain THIS bug,
+    because scope.elements is not mutated between the two passes, so its iteration order is
+    identical in both. Recorded, not blamed.
+
+    Third: THREADING. Also refuted --
+
+        sequential (-no-threads):   1/40 crashed
+
+    So the residual is not the #468 family either. Three explanations down.
+
+    WHAT IS LEFT, and the reason I am not calling it yet. With ASLR disabled:
+
+        no-ASLR sequential:  0/40 crashed
+
+    0/40 against 1/40 LOOKS like the answer -- address-seeded map iteration, the discriminator this
+    session established back in #344. But at a ~2.5% rate, forty samples have better than a one in
+    three chance of showing zero by luck, which is precisely the error #490 made and #491 had to
+    retract. So this is NOT a result yet. Running 200 runs each way; the number will be in the next
+    entry, and it will say what it says.
+
+    Post-fix rate, for the record, now across three samplings: 1/12, 1/24, 1/40 sequential, plus
+    0/32 earlier -- call it ~2%, down from ~80%.
+
+#493 -- the ASLR A/B is SUGGESTIVE, NOT CONCLUSIVE; and a real slot-order divergence found beside it
+
+    The 200-run A/B #492 promised:
+
+        ASLR-ON   2/200   (1%)
+        ASLR-OFF  0/200
+
+    That LOOKS like confirmation that address-seeded map iteration drives the residual. It is not,
+    yet. If both arms truly ran at 1%, the chance of seeing zero in 200 runs is 0.99^200 ~= 13%.
+    A one-in-eight coincidence is not evidence, and calling it would be the same error as #490
+    (0/32 read as elimination) one step further along. Deciding 1% vs 0 needs roughly 1000 runs an
+    arm. Recorded as OPEN with the numbers, not resolved.
+
+    That leaves the strings residual at ~1-2% with three explanations refuted (package order,
+    threading, live-map mutation-of-the-iterated-map) and one unresolved-but-suggestive (ASLR /
+    address-seeded iteration). It is an opt-in instrument, not on any gate's path, so it does not
+    block anything except #480 wanting a dependable gate.
+
+    SEPARATE FINDING, and this one IS actionable. C++ walks a package scope by SLOT INDEX:
+
+        src/docs_writer.cpp:1065   for (isize i = 0; i < pkg->scope->elements.cap; i++)
+                                       ... elements.slots[i] ...
+
+    The port does a raw `for name, e in scope.elements` (docs_writer.odin:1465). The port ALREADY
+    HAS the right helper -- scope_map_slot_order (scope.odin:965), added by #214 -- and three sites
+    use it (check_proc.odin:944, error.odin:2010, check_stmt.odin:230), each collecting into an
+    array first and then ordering. The doc writer simply does not.
+
+    Order matters there: the entries become a Doc_Array(Doc_Scope_Entry) in the output, so the
+    walk order is the output order.
+
+    A METHOD NOTE, because I nearly filed a bigger claim. My first sweep tested "is
+    scope_map_slot_order called within 15 lines of the raw iteration" and reported 5 of 6 sites as
+    raw. Widening the window to 40 lines moved error.odin:1992 into the compliant column -- its
+    helper call is 18 lines below. The 15-line window was an arbitrary parameter of MY instrument,
+    and it was manufacturing a finding. Three sites (check_stmt.odin:3264, :3934,
+    check_proc.odin:1491) still show no nearby call, but I have not read them and they may not be
+    order-sensitive at all, so they are filed as TO AUDIT rather than as defects.
+
+#494 -- doc writer now walks a package scope in SLOT order, as C++ does. Verified by A/B.
+
+    C++ Reference: docs_writer.cpp:1065-1070 walks pkg->scope->elements by SLOT INDEX --
+        for (isize i = 0; i < elements.cap; i++) { ... elements.slots[i] ... }
+    The port did a raw `for name, e in scope.elements` (docs_writer.odin:1465): Odin map order,
+    unordered and address-seeded.
+
+    THE ORDER IS OBSERVABLE. These entries become a Doc_Array(Doc_Scope_Entry) in the output, so
+    walk order IS output order. Measured, first ten entry names of core/c/libc:
+
+        BEFORE   char,SIG_ERR,atomic_char16_t,strlen,INT64_MAX,...
+                 stderr,scalbn,toupper,isnan,nan,LC_TIME,...
+                 getwc,ATOMIC_SHORT_LOCK_FREE,int_least64_t,va_start,...
+                 fpclassify,strtof,uint_fast64_t,strerror,wctype_t,...
+                 -- four runs, four different orders
+
+        AFTER    strcoll,atomic_ptrdiff_t,MB_CUR_MAX,memset,SIGTERM,...
+                 (identical on all four runs)
+
+    THE FIX USED MACHINERY THAT ALREADY EXISTED. scope_map_slot_order (scope.odin:965) was added by
+    #214 and three sites already follow the pattern -- collect, sort deterministically, then order
+    (check_proc.odin:944, error.odin:2010, check_stmt.odin:230). The doc writer simply never did.
+    The pre-sort is load-bearing, not decoration: the slot simulation only reproduces C++'s layout
+    if its INPUT order is deterministic, and map order is not.
+
+    One detail worth stating because it is easy to get wrong: the entry NAME comes from the map KEY
+    (C++ reads elements.keys[i]), not from e.token.text. Those are not guaranteed equal -- #31 is
+    the whole task about that assertion -- so the names are carried in a side map keyed by entity
+    and looked up after ordering, rather than re-derived.
+
+    NOT A FIX FOR #484. scope.elements is not mutated between the sizing and writing passes, so its
+    iteration order was already identical in both; this could not have caused the strings overflow
+    and does not change its rate. It is a FIDELITY defect: the port was emitting doc scope entries
+    in an order no C++ run would produce, and differently on every run.
+
+    Gates: corpus 198/198 members, 0 missing. odin check clean. Parity running.
+
+#495 -- auditing #494's three deferred sites: the first is a REAL order divergence, and its
+       citation is drifted. Not fixed this tick; recorded with the evidence.
+
+    #494 filed three raw `scope.elements` iterations as TO AUDIT rather than as defects, on the
+    grounds that a proximity heuristic had already manufactured one false positive. Reading the
+    first of them:
+
+    check_stmt.odin:3264 -- the `using` expansion of a struct's fields. It walks the struct scope,
+    builds a using-variable per field, and scope_insert()s each into ctx.scope, bailing on the
+    first collision:
+        error_token(token, "Namespace collision while 'using' '%s' of: %s", name, prev.token.text)
+        return viral_flags
+
+    THE ORDER IS DIAGNOSTIC-VISIBLE. Which collision is hit FIRST decides which message is printed
+    and where checking stops. This is not the doc-writer situation (#494) where order only affected
+    output layout; here it affects what the compiler SAYS.
+
+    THE CITATION IS DRIFTED. The port cites "C++ Reference: check_stmt.cpp lines 2302-2318". That
+    range is a foreign-variable loop over entities[i] -- unrelated. The real counterpart, found by
+    grepping the diagnostic text rather than trusting the line number, is check_stmt.cpp:2375-2392:
+
+        Scope *scope = t->Struct.scope;
+        for (auto const &entry : scope->elements) {
+            Entity *f = entry.value;
+            if (f->kind == Entity_Variable) { ... scope_insert ... }
+        }
+
+    A #134-family drift. Worth noting HOW it was caught: I read the cited range expecting the
+    struct walk and found something else entirely. Following a citation to its text, rather than
+    quoting the number, is what makes drift visible.
+
+    NOTE C++ USES RANGE-FOR HERE, not the explicit slot-index loop it uses in docs_writer.cpp:1065.
+    Both are ScopeMap traversals and are probably the same order in practice, but that is an
+    assumption I have NOT verified, and it matters for choosing the port's fix: scope_map_slot_order
+    reproduces the SLOT layout specifically. Before changing this site, confirm what C++'s range-for
+    over a ScopeMap actually yields.
+
+    NOT FIXED THIS TICK. It needs the collect/sort/slot-order treatment plus a gate run, and the
+    two remaining sites (check_stmt.odin:3934, check_proc.odin:1491) are still unread. Filed on
+    #494 with this evidence so the next pass starts from the C++ reading rather than redoing it.
+
+#496 -- #494's audit finished: 2 of the 3 deferred sites are real, 1 is cleared. Reading each
+       against C++ was the whole difference.
+
+    SITE 2, check_stmt.odin:3934 -- REAL, and with an unambiguous model.
+    The `using` of an IMPORT name: walks the imported package's scope, scope_insert_with_name()s
+    each exported entity into ctx.scope, and RETURNS on the first collision. C++ check_stmt.cpp:804:
+
+        for (u32 i = 0; i < scope->elements.cap; i++) {
+            if (!scope->elements.slots[i].hash) continue;
+            Entity *decl = scope->elements.slots[i].value;
+            ...
+            if (found != nullptr) { error(...); return false; }
+        }
+
+    An EXPLICIT SLOT-INDEX loop -- the same shape as docs_writer.cpp:1065 -- and the same bail. So
+    walk order decides which collision is reported and where checking stops, and scope_map_slot_order
+    is provably the right tool here. (Its citation, unlike site 1's, is correct.)
+
+    SITE 3, check_proc.odin:1491 -- NOT A DEFECT. Cleared by reading.
+    The vet walk collects into vetted_entities and then SORTS before emitting:
+        C++   checker.cpp:818   array_sort(vetted_entities, vetted_entity_variable_pos_cmp)
+        port                    slice.sort_by_cmp(vetted_entities[:], vetted_entity_variable_pos_cmp)
+    Both sides canonicalise, so the walk order cannot reach the output. This is exactly the
+    "collect-then-sort, order-insensitive" case #494 speculated might exist among the three, and it
+    is why filing all three as defects on the strength of a grep would have been wrong.
+
+    TALLY for the three deferred sites: 2 real (one with a drifted citation, one clean), 1 cleared.
+    The proximity heuristic that found them had a 1-in-3 false-positive rate before reading, and
+    would have had a 1-in-3 rate after, in the other direction, had I trusted it.
+
+    Neither remaining fix is applied yet. Site 2 is the straightforward one -- explicit C++ model,
+    established helper, established pattern. Site 1 still needs the range-for question answered
+    first (does C++'s range-for over a ScopeMap yield slot order?), because scope_map_slot_order
+    reproduces SLOT layout specifically and applying it on a resemblance is how a fix becomes a new
+    divergence.
+
+#497 -- `using` of an import name now walks SLOT order. The port went from matching the oracle
+       about one run in six to matching it every run.
+
+    Site 2 of #494's audit, the one with no open questions. C++ check_stmt.cpp:804 walks the
+    imported package's scope by SLOT INDEX and RETURNS on the first collision:
+
+        for (u32 i = 0; i < scope->elements.cap; i++) {
+            if (!scope->elements.slots[i].hash) continue;
+            Entity *decl = scope->elements.slots[i].value;
+            ...
+            if (found != nullptr) { error(...); return false; }
+        }
+
+    The port did `for name, decl in scope.elements` -- Odin map order. Because the loop BAILS on
+    first collision, the order decides which message is printed and where checking stops.
+
+    THE PROBE took two attempts, and the first failure was informative. A package-level collision
+    does not reproduce it: `using fmt` inside a procedure inserts into the PROC's scope, which does
+    not contain package-level names, so nothing collides. The colliding names have to be locals in
+    the same scope. (The first attempt also needed `#+feature using-stmt` -- `using` as a statement
+    is otherwise rejected outright.)
+
+    MEASURED, four colliding locals, six runs each:
+
+        PORT BEFORE   printf, eprintf, println, println, tprintf, eprintf
+        PORT AFTER    tprintf, tprintf, tprintf, tprintf, tprintf, tprintf
+        ORACLE        tprintf, tprintf, tprintf, tprintf, tprintf, tprintf
+
+    So this is not just a determinism fix. Before, the port agreed with the reference compiler on
+    roughly one run in six; now it agrees on every run. The oracle column is what makes that a
+    fidelity claim rather than a stability claim -- determinism alone would have been satisfied by
+    deterministically printing the wrong one.
+
+    Gates: corpus 198/198, 0 DIFFER. odin check clean. Parity running over both #494 and this.
+
+    ONE GATE READING CORRECTED IN PASSING: the background job that ran corpus for #494 reported 197
+    FULL-MATCH where I had measured 198. Re-running gave 198 with 0 DIFFER, so the 197 was one of
+    the documented oracle-nondeterministic probes (the #197 / vt_nopkg family) landing on its odd
+    run, not a regression. Worth the re-run rather than the assumption -- a one-probe drop is
+    exactly what a real regression looks like too.
+
+#498 -- `using` a struct variable now walks SLOT order and matches the oracle. But I fixed the
+       WRONG SITE first, and the reason was my own grep pattern -- twice.
+
+    THE C++ QUESTION #495 LEFT OPEN IS ANSWERED. Site 1's blocker was "does C++'s range-for over a
+    ScopeMap yield slot order?", because scope_map_slot_order reproduces SLOT layout specifically.
+    ScopeMapIterator (checker.hpp:468-505) settles it: begin() starts at index 0 and advances to
+    the first slot with a non-zero hash, operator++ increments the index skipping empty slots, and
+    end() is index == cap. The range-for IS the explicit `for (i = 0; i < cap; i++)` loop. So the
+    helper is the right tool at every one of these sites, and #494's caution is discharged.
+
+    THEN I FIXED THE WRONG SITE. I applied the change at check_stmt.odin:3264, built a probe with
+    four colliding struct fields, and measured:
+
+        PORT BEFORE  alpha, delta, delta, delta, delta, beta, delta, gamma
+        PORT AFTER   beta, alpha, beta, delta, gamma, alpha, gamma, beta   <-- still varying
+        ORACLE       delta, delta, delta, delta
+
+    The fix had no effect because the diagnostic the probe triggers is emitted at check_stmt.odin
+    :4087, from a DIFFERENT loop at :4061. The message shapes differ too --
+    "Namespace collision while 'using' '%s' of: %s" at the site I edited versus
+    "Namespace collision while using '%s' of: '%s'" in the output -- which is what gave it away.
+    Fixing :4061 as well:
+
+        PORT AFTER (both)  delta x8, matching the oracle exactly
+
+    WHY I MISSED IT, and this is the part worth keeping. My audit grep was `in scope.elements`.
+    The site at :4061 is `in found_scope.elements`. The pattern could not match it. Widening to
+    `in [a-z_]+\.elements` turns up more still -- check_proc.odin has `in struct_scope.elements`
+    and scope.odin has two `in s.elements` -- none of which the original sweep saw. So #494's
+    "three deferred sites" was never the complete list; it was the list my regex happened to
+    describe. That is the second time this bug's investigation has been shaped by an arbitrary
+    parameter of my own tooling (the first was a 15-line proximity window in #495), and both times
+    the tool quietly under- or over-reported rather than failing.
+
+    STATUS OF THE TWO EDITS IN THIS ENTRY:
+      check_stmt.odin:4061  VERIFIED -- probe deterministic and oracle-matching.
+      check_stmt.odin:3264  UNVERIFIED -- same pattern, same C++ model, but no probe I have reaches
+                            it. Kept, and labelled as such rather than claimed.
+
+    Also corrected there: the drifted citation (2302-2318, a foreign-variable loop) replaced with
+    the real counterpart at check_stmt.cpp:2375-2392.
+
+    Gates for #494+#497: parity 323/323 0/0/0. Gates for #498: running.
+
+#499 -- the sweep #498 exposed is bigger than three sites, and a third drifted citation turned up
+       in it. Recorded, not fixed.
+
+    #498 ended by noting my audit grep (`in scope.elements`) had never been the complete list.
+    Widening to `in [a-z_]+\.elements` and subtracting the sites already handled leaves these
+    genuinely unaudited:
+
+        check_proc.odin:1780   for _, field in struct_scope.elements
+        scope.odin  (x2)       for _, entity in s.elements
+
+    FIRST OF THEM, READ. check_proc.odin:1780 builds a using-variable per struct field and appends
+    each to a using_entities array. Its cited reference is "check_decl.cpp:2082-2100"; that range
+    is dependency propagation between decl->deps and decl->parent->deps, nothing to do with struct
+    fields. The real counterpart, found again by grepping for the code (alloc_entity_using_variable)
+    rather than trusting the number, is check_decl.cpp:2189-2205 -- off by about 110 lines. Third
+    drifted citation in this sweep, after check_stmt.odin:3264 (#495) and this one; the #134 family
+    is clearly not exhausted.
+
+    ORDER-OBSERVABILITY HERE IS UNDETERMINED, and I am not going to assume it. Unlike the sites
+    fixed in #494/#497/#498, this loop has no early bail and emits no diagnostic -- it only appends
+    to using_entities. Whether the walk order escapes therefore depends on what CONSUMES that array
+    later, which I have not read. The C++ is a range-for, so it is a slot walk (#498 settled that),
+    and the port's map order differs -- but "differs" only matters if it reaches output. That is
+    the next thing to read, not the next thing to patch.
+
+    Gates for #498: corpus 198/198, 0 missing. Parity running.
+
+#500 -- fourth slot-order fix, and the first one where order-observability had to be established
+       through the CONSUMER rather than the loop.
+
+    check_proc.odin:1780 builds a using-variable per struct field and appends to using_entities.
+    #499 filed it as UNDETERMINED because the loop has no bail and emits no diagnostic -- unlike
+    #497/#498, nothing in it can print. Reading the consumers settled it:
+
+        check_proc.odin:1817   for puv in using_entities {
+                                   prev := scope_insert_no_mutex(ctx.scope, uvar)
+                                   if prev != nil { error(... "Namespace collision while 'using'
+                                       procedure argument '%s' of: %s" ...); break }
+        check_proc.odin:1858   second pass, deliberately ignores conflicts ("Don't err here")
+
+    The first consumer BREAKS on the first collision, so the order of using_entities -- which is
+    the walk order at 1780 -- decides which message is printed. Measured, four colliding parameters:
+
+        PORT BEFORE  alpha, beta, beta, alpha, gamma, delta, delta, beta
+        PORT AFTER   delta x8
+        ORACLE       delta x4
+
+    Fourth fix in this family, and the fourth to be checked against the oracle rather than merely
+    for stability.
+
+    THE CITATION WAS DRIFTED TOO: "check_decl.cpp:2086-2095" is dependency propagation between
+    decl->deps and decl->parent->deps. The real counterpart is check_decl.cpp:2189-2205, found by
+    grepping for alloc_entity_using_variable. That is the third drifted citation in this sweep
+    (after #495 and #499) and it is now corrected in place with the C++ excerpt.
+
+    WHAT #499 GOT RIGHT BY WAITING: it would have been easy to patch this site by analogy when it
+    was found -- same shape, same helper, same family. Filing it as UNDETERMINED and reading the
+    consumer first is what turned "probably observable" into a measured before/after with an oracle
+    column. The analogy happened to hold; the discipline is that it did not have to.
+
+    Remaining unaudited from the widened sweep: scope.odin has two `for _, entity in s.elements`.
+
+#501 -- the last two sites of the sweep are CLEARED, on a fixed-point argument rather than a
+       resemblance. Plus a fourth drifted citation and an upstream oddity.
+
+    scope.odin:749 / :767 are correct_type_alias_in_scope_backwards / _forwards. The port's
+    citation says checker.cpp:4797-4807 and 4808-4817; that region is attribute and builtin
+    handling. The real pair is checker.cpp:5134-5155, found by name. FOURTH drifted citation in
+    this sweep (after #495, #499, #500) -- the #134 family is comfortably still alive.
+
+    C++'s two passes really are different from each other:
+        backwards   for (u32 n = s->elements.count, i = n-1; i < n; i--) { slots[i] ... }
+        forwards    for (auto const &entry : s->elements) { ... }
+    The port's "backwards" is a plain forward map iteration -- identical to its own forwards -- and
+    its comment says so outright: "Odin maps don't preserve insertion order, so we can't iterate
+    backwards. In practice this shouldn't matter since we iterate in both directions."
+
+    THE COMMENT IS RIGHT, and here is why, which is more than the comment gives. correct_type_
+    aliases_in_scope (checker.cpp:5157) runs BOTH passes in a `for(;;)` loop until a full round
+    produces no corrections. That is a fixed-point computation: correct_single_type_alias only ever
+    turns a mis-classified alias into an alias, never back, so the set of corrections is monotone
+    and the fixed point does not depend on visit order -- only the NUMBER OF ITERATIONS does, and
+    that is not observable. So the port's degenerate backwards pass costs redundant work and
+    nothing else. CLEARED, not fixed.
+
+    AN UPSTREAM ODDITY, noted not filed: C++'s backwards pass bounds by `elements.count` while
+    indexing `elements.slots[i]`. slots is sized `cap`, and for a sparse hash table the occupied
+    slots are spread across cap, so `slots[0 .. count-1]` is an arbitrary prefix -- the backwards
+    pass visits only a subset of the entities. The `slot.hash` guard makes that safe rather than
+    wrong, and the fixed-point loop makes it inconsequential, which is presumably why it has never
+    surfaced. Recording it because "looks like it means cap" is exactly the kind of thing that
+    turns into a real bug when someone later removes the outer loop.
+
+    SWEEP CLOSED. Of the sites the widened grep turned up: four fixed and oracle-verified
+    (#494, #497, #498, #500), one fixed but unverified (check_stmt.odin:3264), three cleared with
+    reasons (check_proc.odin:1491 sorts, scope.odin x2 converge). Four citations corrected.
+
+#502 -- #345 (pkg.files map-vs-array) dispositioned by the same method, and it comes out CLEAN.
+       The representation difference is real; the consequence is not.
+
+    The claim has been open since it was filed: pkg.files is map[string]^File in the port
+    (ast.odin:133) and Array<AstFile *> in C++ (parser.hpp:199), so every raw iteration is
+    hash-ordered where C++ is insertion-ordered. Both representations re-verified today.
+
+    But the sweep that mattered is over the READERS, not the declaration. Of every
+    `for ... in ....files` in the checker:
+
+      - the great majority already go through sorted_files(pkg.files) -- 24 call sites across
+        build_infrastructure, docs_writer, package_resolver, check_files, check_collect,
+        check_import_export, docs, check_decl and check_proc. That helper is exactly the
+        collect-then-order shape #494/#497/#498/#500 had to add elsewhere; here it was already
+        being used.
+      - scope.odin:560 sums len(file.decls) to size a scope. Addition is commutative, so the walk
+        order cannot reach the result. CLEARED.
+      - runtime_session.odin:99 collects into pkg_files and then SORTS by fullpath, which its own
+        comment states. CLEARED.
+      - runtime_extractor.odin:79 is the port's runtime-session extractor (#354), port-only
+        infrastructure with no C++ counterpart. Not a parity surface. Order could in principle
+        decide which of two same-named declarations wins, so it is dispositioned rather than
+        cleared -- but nothing compares its output against C++, by construction.
+
+    So #170's old conclusion ("all six raw pkg.files iterations dispositioned by C++ sort TIMING")
+    survives re-examination, which is worth saying plainly because I flagged it as suspect when
+    widening #345 -- the reasoning behind it predates knowing this defect class existed, and it
+    could easily have been the kind of disposition that was right by luck. It was not; the readers
+    really are ordered.
+
+    THE CONTRAST WITH scope.elements IS THE POINT. Same shape of divergence, opposite outcome: for
+    pkg.files the port had already built and adopted the ordering helper everywhere it mattered,
+    and for scope.elements it had built the helper (#214) and then used it at three sites out of
+    eight. The declaration being a map is not the defect; failing to route the readers through the
+    helper is. That is a cheaper thing to check for than I had been treating it as.
+
+    #345 CLOSED, no change needed.
+
+#503 -- #465's premise has MOVED since it was filed, and the remaining gap is narrower and sharper
+       than "read in 12 places, written in none".
+
+    The task says Checker_Context.untyped is read everywhere and written nowhere. That is no longer
+    the state. #464 added the parameter and the write:
+
+        check_import_export.odin:950   ctx.untyped = untyped
+        reset_checker_context :: proc(ctx, file, untyped: ^map[^ast.Expr]^Expr_Info = nil)
+
+    WHAT IS ACTUALLY OPEN. All THREE port call sites omit the argument, so it defaults to nil:
+        check_import_export.odin:399   reset_checker_context(&ctx, file)
+        check_decl.odin:2093           reset_checker_context(ctx, decl_file)
+        check_proc.odin:660            reset_checker_context(&ctx, pi.file)
+    C++ passes a REAL map at every one of its call sites -- checker.cpp:5730, 6083, 6117, 6223,
+    6254, 6265, 6271, all `&untyped` or a forwarded `untyped`.
+
+    So in the port ctx.untyped is nil for the whole run, which means:
+      - the three guards at check_expr.odin:2811 / 2854 / 2881 are permanently FALSE, so the
+        per-context record / lookup / delete of untyped expression info never happens;
+      - add_untyped_expressions(&c.info, ctx.untyped) at check_proc.odin:742 and
+        check_collect.odin:404/486 is called with nil three times over.
+
+    THE PART THAT STOPS THIS BEING AN OBVIOUS DEFECT. C++ has BOTH mechanisms, not one:
+        src/checker.hpp:737   UntypedExprInfoMap global_untyped;
+        src/checker.hpp:862   MPSCQueue<UntypedExprInfo> global_untyped_queue;
+    and the port has the same two (checker.odin:975, checker_lifecycle.odin:254), wired and live --
+    check_files.odin:163 flushes global_untyped, check_proc.odin:818 enqueues, check_files.odin:342
+    resolves. So the port is not missing untyped-expression handling; it is missing C++'s per-file
+    accumulation map while keeping the global one.
+
+    WHETHER THAT LOSES ANYTHING IS UNMEASURED, and I am not going to infer it from the code. The
+    two paths could be equivalent in effect (the global queue catching what the per-file map would
+    have batched), or the per-file map could carry expressions the global path never sees. Both are
+    consistent with what I have read.
+
+    NEXT STEP, stated as a measurement rather than a patch: instrument how many untyped expressions
+    are resolved per run in the port, wire the three call sites to pass a real map, and compare --
+    with the gates, because this touches the checking path proper rather than an opt-in dumper.
+    A parity/corpus run is the arbiter here, not a reading.
+
+#504 -- #465 reframed by reading C++ properly: the three sites are line-for-line FAITHFUL, and the
+       fallback they take is C++'s own. This is a cost, not a correctness defect.
+
+    #503 established that the port passes nil to reset_checker_context at all three call sites while
+    C++ passes a real map at all seven, so ctx.untyped is nil for the whole run and the local branch
+    never executes. The obvious reading of that is "the port lost a mechanism". It did not.
+
+    Every one of the three guarded sites has an ELSE that falls back to the global map under the
+    mutex, and C++ has EXACTLY THE SAME SHAPE (checker.cpp:1859):
+
+        gb_internal ExprInfo *check_get_expr_info(CheckerContext *c, Ast *expr) {
+            if (c->untyped != nullptr) { ... map_get(c->untyped, expr) ... }
+            else {
+                rw_mutex_shared_lock(&c->info->global_untyped_mutex);
+                ... map_get(&c->info->global_untyped, expr) ...
+            }
+        }
+
+    check_set_expr_info has the identical if/else. So the port's else-branch is not an invention or
+    a workaround -- it is the reference implementation's own path, ported faithfully. Taking it is
+    correct by construction, which is also what the gates have been saying all along: parity
+    323/323 and corpus 198/198 with ctx.untyped nil throughout.
+
+    WHAT THE DIFFERENCE ACTUALLY COSTS. Instrumented lookups per package:
+
+        core/c/libc        ~34.5k, essentially all via the global path
+        core/strings       ~37k
+        core/odin/parser   ~74k
+
+    (Counter caveat, stated because the numbers show it: g_untyped_ops and g_untyped_global_ops are
+    plain non-atomic globals incremented from worker threads, so via_global reads slightly ABOVE
+    total in every sample -- an impossible ordering that is the races showing. Treat these as
+    magnitudes. The conclusion does not depend on the precision: it is tens of thousands, and the
+    local branch runs zero times.)
+
+    So the port takes tens of thousands of global-mutex acquisitions per package where C++ takes
+    none, on a path C++ deliberately gave a lock-free per-file fast path.
+
+    DISPOSITION CHANGED. #465 was filed as a correctness/dead-field concern and is really a
+    faithfulness-and-throughput one: the wiring is small (pass a map at three call sites), the
+    benefit is measurable in mutex traffic, and the risk is that it changes threading behaviour on
+    a hot path -- exactly the shape of #15, which measured 70 calls -> 1 lock and was still reverted
+    because it cost 3 timeouts. That precedent is why this needs the gates plus a timing comparison
+    before landing, not just a compile.
+
+#505 -- #465's wiring is NOT LANDED, and the reason is a measurement limit rather than a judgement
+       about the code. The harness cannot resolve the effect it would have.
+
+    #504 reframed #465 as throughput, not correctness, and set the next step as: wire the three
+    sites, then gate + time + repeat. I did the timing FIRST, because the baseline is needed either
+    way and is the risk-free half. It settled the question before any code changed.
+
+    EXPECTED EFFECT SIZE, from the counts in #504: ~74k lookups for core/odin/parser, each taking a
+    global RW mutex the local path would avoid. Uncontended that is tens of ns per lock, so roughly
+    4ms against a ~700ms run -- about 0.6%. Contended it could be an order of magnitude more. So
+    the honest a-priori range is "invisible" to "marginally visible".
+
+    WHAT THE HARNESS CAN ACTUALLY RESOLVE:
+
+        core/odin/parser, 7 runs   691 693 694 733 734 762 773     (~12% spread)
+        core/strings,     7 runs   179 184 188 192 195 196 211     (~18% spread)
+
+    and then, minutes later, the SAME binary on the SAME package:
+
+        core/odin/parser threaded  510 517 518 522 527
+        core/odin/parser -no-threads 586 590 592 596 599
+
+    A median of 518 against the earlier 733, for an identical binary and input. That is ~30%
+    between-batch drift on top of the within-batch spread. No amount of repetition inside a batch
+    fixes that; it is drift in the machine, not variance in the run.
+
+    So the harness cannot resolve 0.6%, and cannot reliably resolve 10% either. Wiring the three
+    sites and timing the result would produce a number I could not honestly attribute to the change.
+    NOT LANDED, and the reason recorded is the instrument, not the code.
+
+    A SECOND THING THE SAME MEASUREMENT SHOWS, worth its own look later: threading buys only
+    518 vs 592 ms on 32 cores -- about 1.14x. Whatever is limiting parallel scaling in this checker,
+    it is much larger than the untyped-map question, and #465's mutex is unlikely to be it. That is
+    a better use of effort than the wiring, and it is a measurement I now have a first data point
+    for rather than a suspicion.
+
+    THE PRECEDENT THAT APPLIES. #15 measured 70 calls -> 1 lock, looked like a clear win, and was
+    reverted when it showed 3 timeouts against a 0 baseline. The lesson there was that a hot
+    threaded path needs demonstrated benefit, not plausible benefit. Here I cannot even demonstrate
+    the benefit's SIGN with the tools to hand, which is a stronger reason to leave it alone than #15
+    had.
+
+--------------------------------------------------------------------------------------------------
+#506 ANSWERED BY MEASUREMENT: the parallel phase is only 13% of the run, and the dependency-tree
+     phase COSTS ~120 ms threaded that it does not cost sequentially. Both are FAITHFUL to C++.
+
+    The task said: START BY MEASURING WHERE THE TIME GOES, not by guessing which lock is hot. Five
+    hypotheses had already died this session from being reasoned rather than measured. So: in-process
+    phase timers around each of the seven phases in check_files.odin, then sub-timers inside the one
+    that turned out to matter. All instrumentation is REVERTED; what follows is the record.
+
+    core/odin/parser, mean of 3 runs each arm:
+
+        phase              threaded    -no-threads
+        P1_discovery            0.3          0.3
+        P2_filescopes           0.7          0.6
+        P3_collect             58.3         51.7
+        P4_globals             96.4         93.6
+        P5_bodies              43.0        252.9     <-- the parallel stage
+        P6_post               131.6          5.4     <-- 24x WORSE threaded
+        P7_validate             3.1          2.2
+        SUM                   333.3        406.9
+
+    TWO FINDINGS, and the second was invisible until the first was measured properly.
+
+    (1) THE PARALLEL STAGE SCALES FINE, AND IS SMALL. P5 goes 252.9 -> 43.0 ms, about 5.9x on 32
+    cores. But it is only ~13% of the instrumented run. P4_globals (96 ms) and P3_collect (58 ms)
+    are sequential in BOTH arms and are together more than three times P5's threaded cost. That is
+    an Amdahl ceiling, not contention: even a perfect P5 could not move the total much.
+
+    (2) P6_post IS 5.4 ms SEQUENTIALLY AND 131.6 ms THREADED. Sub-timers put all of it in ONE call,
+    check_update_dependency_tree_for_procedures: 1.2 ms sequential, 128.7 ms threaded -- 107x. It
+    submits one thread-pool task per entity (10,860 of them for core/odin/parser, each doing
+    microseconds of work). Splitting the phase further: the dispatch LOOP is the whole cost and
+    thread_pool_wait() is 0.0 ms, so this is pure task-SUBMISSION overhead, ~11.5 us per task.
+
+    An A/B with the phase forced inline, 5 interleaved rep pairs, was faster 5/5 (mean SUM 433.7 ->
+    388.6 ms). Paired 5/5 is p ~= 0.03 by sign test -- which matters, because this harness has ~30%
+    between-batch drift (#465) and a naive before/after would have proven nothing. Note the earlier
+    single-shot readings of this same phase ranged 48-128 ms; only the paired design is trustworthy.
+
+    NOT A PORT DEFECT, AND NOT TO BE "FIXED". C++ dispatches identically (checker.cpp:7566-7578, the
+    live #else branch -- the sequential version is under #if 0, so C++ has no inline path at all).
+    I then checked the submission primitive itself, expecting the port to be doing extra work:
+    thread_pool_add_task in src/main.cpp:21 is a bare push, which LOOKED like a divergence, but
+    thread_pool_queue_push (thread_pool.cpp) does the same atomic increment, the same
+    tasks_available compare-exchange and the same futex_broadcast the port does. Identical work,
+    different function. The port is faithful; the cost is shared. CLAUDE.md is explicit that the
+    objective is parity including multi-threaded operation, so the inline variant was a MEASUREMENT
+    INSTRUMENT only and was removed with everything else.
+
+    WHAT THIS SETTLES. #465 asked whether removing a mutex inside the parallel phase is worth it.
+    The parallel phase is 43 ms of a ~430 ms run. Even deleting it entirely buys 10%, and #465's
+    mutex is a fraction of that. Closed on evidence rather than on the measurement limit that
+    stalled it before -- the earlier note said the harness could not resolve the effect, and that is
+    still true, but it no longer matters because the effect has no room to be large.
+
+    WHAT I GOT WRONG ON THE WAY. Twice. First I read P5=43ms/SUM=317ms and concluded "13% parallel
+    fraction, Amdahl gives exactly 1.14x, done" -- the arithmetic matched the observed speedup so
+    well that it looked like a complete answer. It was a coincidence: the sequential arm showed the
+    non-P5 remainder was 155.9 ms, not the 275.6 ms the threaded arm implied, and 120 ms cannot hide
+    in a phase that is supposed to be identical in both arms. Chasing THAT discrepancy is what found
+    P6. Second, when the inline A/B first showed SUM going UP for one package, I guessed the deptree
+    wait was absorbing leftover body-check work -- then checked and found P5 already drains the pool
+    at check_proc.odin:516, so that was impossible. The 0.0 ms wait timer settled it. An arithmetic
+    identity that "explains" a number is not a mechanism, and a discrepancy between two arms that
+    should agree is worth more than a model that fits one arm.
+
+    CITATION DRIFT AGAIN (#134 family). check_proc.odin cited checker.cpp:7154-7212 for this
+    function; the real site is 7522-7580. Found by grepping for the function name rather than
+    trusting the line number, which is now the third time that has been the productive move.
+
+    ONE THING LEFT OPEN, recorded rather than claimed. While correcting those citations I noticed
+    the port's WORKER differs in shape from C++'s live worker, and it is not obvious which is right:
+
+        C++ (checker.cpp:7546-7558)   per child: thread_pool_add_task(worker, child), THEN
+                                      check_walk_all_dependencies(child) -- which at :7561 is
+                                      ITSELF just thread_pool_add_task(worker, child). So each
+                                      child appears to be enqueued TWICE. The parent then calls
+                                      add_deps_from_child_to_parent(decl) WITHOUT waiting for
+                                      those children.
+        port  (check_proc.odin)       the worker runs the plain bottom-up recursion: all children
+                                      fully walked, THEN the parent's add_deps. This matches C++'s
+                                      OWN #if 0 sequential form at :7522-7530.
+
+    So the port propagates strictly bottom-up; C++'s live path may propagate a parent before its
+    children have finished. Both the double-enqueue and the ordering look unintended rather than
+    designed -- but that is a reading of the code, NOT a measurement, and per the UPSTREAM-STATUS
+    method note a claim about behaviour has to be observed before it is filed. All 323 parity
+    packages are green with the port's form, so nothing is broken today. Left as a question for a
+    later tick: instrument task counts and propagation order, decide which form is correct, and
+    only then either file upstream or change the port. Deliberately NOT filed on inference alone.
+
+--------------------------------------------------------------------------------------------------
+#507 ANSWERED: BOTH halves confirmed by measurement in the replica -- the double-enqueue is real and
+     exponential, and the early parent propagation really does LOSE dependencies under threading.
+
+    #506 left this as a READING of the code, explicitly not filed. Settled it the way UPSTREAM-468
+    was settled: replicate C++'s exact worker shape in the line-for-line port and measure, since
+    neither effect is observable in the reference compiler without a debug build.
+
+    ARM 0 = the port's bottom-up worker (= C++'s own #if 0 form at checker.cpp:7522-7530).
+    ARM 1 = a replica of the live #else worker, with checker.cpp:7554's
+            check_walk_all_dependencies(child) written out as the second thread_pool_add_task it
+            expands to at :7563.
+
+    (1) DOUBLE-ENQUEUE -- CONFIRMED, and exponential in nesting depth:
+
+        target                      arm 0                arm 1              ratio
+        deep probe (14 levels)      778 tasks            66,544 tasks       ~85x
+        core:strings                1,916                2,539              1.3x
+        core:odin/parser            10,873               13,161             1.2x
+
+    Real code is shallow, so the everyday cost is ~20-30% extra tasks; the synthetic probe exists to
+    show the growth is 2^depth, not linear -- 66,544 tasks for a file with 15 procedures. The
+    redundant PROPAGATION is harmless on its own: add_deps_from_child_to_parent is a map-insert set
+    union, so repeating it is idempotent. Wasted work, not a wrong answer.
+
+    (2) EARLY PARENT PROPAGATION -- CONFIRMED, and this one is not benign. Summing len(decl.deps)
+    over all entities after the phase, deep probe, 10 runs per arm:
+
+        arm 0 threaded     5803 5803 5803 5803 5803 5810 5803 5803 5810 5811
+        arm 1 threaded     5796 5803 5803 5796 5796 5797 5796 5805 5795 5796
+        arm 1 -no-threads  5803 5803 5803
+
+    7 of 10 arm-1 runs fall STRICTLY BELOW arm 0's minimum of 5803; arm 0 never does. And the
+    sequential control is what names the mechanism: the SAME shape run single-threaded returns 5803
+    every time. So the deficit is not caused by the shape, it is caused by running that shape
+    CONCURRENTLY -- exactly what "the parent merges into the grandparent before its children have
+    merged into it" predicts. type_info_deps was constant at 2213 across every run in both arms, so
+    only the entity dep set is affected.
+
+    A SAMPLING CORRECTION I HAD TO MAKE MID-TASK. On 3 samples arm 0 looked perfectly deterministic
+    (5803, 5803, 5803) and I was about to write "arm 0 is stable, arm 1 is not". Ten samples refuted
+    it -- arm 0 ranges 5803-5811. The claim was restated as the SEPARATION between the two
+    distributions plus the sequential control, which is what actually survives the larger sample.
+    This is the #490/#491 lesson again (0/32 of a ~3% event proves nothing), and it is the second
+    time in two ticks that going from 3 samples to 10 changed what I was entitled to say.
+
+    WHY IT DOES NOT SHOW UP IN ANY GATE. decl.deps feeds generate_minimum_dependency_set and
+    min_dep_count, whose readers are the LLVM backend, main.cpp, check_unchecked_bodies and the RTTI
+    table -- #272 established that NONE of them emit a diagnostic. So a checker is bit-exact on all
+    323 parity packages under either walk shape, which is why this sat undetected behind green gates.
+    The consequence, if any, is in codegen, not in what the compiler says.
+
+    WRITTEN UP as UPSTREAM-507-dependency-walk-double-enqueue-and-early-parent.md, labelled
+    INFERRED / NOT REPRODUCED IN src/ -- same standard as #468, because the measurement is in the
+    replica and the transfer to src/ is an inference from code identity. UPSTREAM-STATUS.md row
+    added. NOT filed as a repro, and the file says what would turn it into one: count worker entries
+    and sum decl->deps.count in a debug build over a deeply nested input.
+
+    THE PORT IS UNCHANGED and stays on the bottom-up form. It matches C++'s #if 0 version, it is the
+    order that is actually correct, and it measured stable. Changing the port to match the live C++
+    shape would be importing both defects for the sake of a faithfulness that C++'s own commented-out
+    code contradicts. All instrumentation reverted (check_proc.odin md5-verified identical to its
+    pre-edit backup), odin check clean.
+
+--------------------------------------------------------------------------------------------------
+#480 DONE: three MORE doc bits were declared and assigned nowhere -- the same defect as #479, one
+     layer along. Gate built (docflag.sh); it caught my own first fix being wrong.
+
+    #479 found Foreign/Export read from entity flags nothing ever set. The obvious question was
+    whether that was the only instance, and nothing could answer it because no gate looked at doc
+    FLAG BITS at all. Enumerating Doc_Entity_Flag (18 members) against assignment sites in
+    docs_writer.odin answered it directly: THREE members had zero assignments.
+
+        Var_Thread_Local        C++ docs_writer.cpp:873-874, from Variable.thread_local_model
+        Builtin_Pkg_Builtin     C++ docs_writer.cpp:903
+        Builtin_Pkg_Intrinsics  C++ docs_writer.cpp:906
+
+    All three had their data available already -- thread_local_model has always been on
+    ast.Entity_Variable -- so these were missing READS, not missing data, exactly like #479.
+
+    I ALSO PORTED THE REST OF THE BUILTIN ARM rather than just its flag: C++ zeroes the position for
+    Entity_Builtin (docs_writer.cpp:897). Porting only the bit would have left the same switch arm
+    half-done, which is how #479 happened in the first place.
+
+    THE FIRST FIX WAS WRONG AND THE DUMP CAUGHT IT. Entity_Builtin DECLARES a `pkg` field, so the
+    natural port of C++'s `builtin_procs[e->Builtin.id].pkg` is `bi_v.pkg`. It compiles, it runs,
+    and it is silently wrong: the port's only constructor is `entity.variant = Entity_Builtin{}` at
+    entity.odin:102, which never assigns pkg, so it is permanently the zero value `.Builtin`. The
+    symptom was visible immediately -- Builtin_Pkg_Intrinsics stayed 0 across every package while
+    simd's `add`/`abs`/`bit_and` were all reported as Builtin_Pkg_Builtin. Corrected to the TABLE
+    lookup by id (builtin_proc_infos[bi_v.id].pkg), which is what C++ does and why C++ does it.
+    Now core/simd reports 84 Intrinsics / 0 Builtin, and core/fmt correctly splits -- `swizzle` is
+    Builtin_Pkg_Builtin, the intrinsics are Intrinsics. Both directions, not just one.
+
+    That vestigial `pkg` field is a #348-class item (declared, never written). Left alone rather
+    than wired, because the table is already the authority C++ reads.
+
+    THE GATE (.claude/tools/docflag.sh), three checks:
+      1. exact expected bits on docflag_probe, INCLUDING the negative control -- without a
+         declaration that must come back with no bits, a bug that sets every bit passes everything.
+      2. REACHABILITY: every declared bit must be observed somewhere across probe + 5 packages, or
+         appear on a justified-absent list. The enum is read from the source, so the gate cannot go
+         stale against it. This is the check that would have caught #479 and #480 years earlier.
+      3. determinism, because #484's writer overflow is still live at ~1-3%.
+
+    The gate immediately reported two bits as unexplained on its first run, which is the point of
+    building it. Both were my errors, not the port's: Export is proven by the probe (so the probe
+    belongs in the reachability union, and now is), and Var_Static is real but unexercised. I
+    extended the probe with @(thread_local), @(private), a bit_field, #by_ptr, $N, using, and a
+    proc-local @(static) -- that promoted Bit_Field_Field, Param_By_Ptr, Var_Thread_Local and
+    Export from absent to observed.
+
+    THREE BITS REMAIN ABSENT and the list says why, honestly:
+      Param_Auto_Cast  declared in BOTH implementations, assigned in NEITHER. A shared non-feature.
+      Var_Static       a proc-LOCAL @(static) is not a documented top-level entity, so the writer
+                       never sees it. Assigned at check_stmt.odin:3111/3138, so not a dead bit.
+      Param_Const      HAS an assignment site, probe declares `$N: int`, bit does not appear.
+                       Unconfirmed end to end -- and a real gap would look exactly like this, so it
+                       is flagged as worth resolving rather than parked.
+    I also had to TIGHTEN the list after the first pass: I had listed Param_Using, Param_C_Vararg
+    and Private as absent when the packages in fact exercise all three. A justified-absent list
+    that overclaims is worse than none, because it silences the check it exists to explain.
+
+    Gates: docflag DOCFLAG-DONE, parity 60/60 0/0/0, odin check clean.
+
+--------------------------------------------------------------------------------------------------
+#508 CLOSED as a BAD PROBE, not a dead bit -- and Var_Static's hypothesis upgraded to a verified
+     structural fact. The doc-flag surface is now 16 of 18 bits verified reachable.
+
+    #480 left Param_Const on docflag.sh's justified-absent list with the honest note that "a real
+    gap would look exactly like this". It was not a gap. The recorded method (find the read, then
+    grep the WRITERS of what it reads -- the technique that caught Entity_Builtin.pkg in #480)
+    settled it in two steps:
+
+        the port DOES write .Const_Input, at check_type.odin:5226
+        and both it and C++ (check_type.cpp:2362) trigger on FieldFlag_const -- the `#const` FIELD
+        DIRECTIVE, not on `$N: int`
+
+    `$N: int` is a POLYMORPHIC constant, a different construct entirely. My #480 probe declared the
+    wrong thing, the bit stayed absent, and that read as a possible dead bit. Changed the probe to
+    `proc(#const n: int)` and it fires immediately: `doc n Variable flags=Param_Const`.
+
+    The lesson is narrow but worth keeping: an absent bit has TWO explanations, and "the port never
+    sets it" is only one of them. #479 and #480 were the first kind, so the second kind looked like
+    the same shape. The discriminator is cheap -- check whether the flag has a writer before
+    concluding anything -- and it is the same check that stopped me shipping the wrong Builtin_Pkg
+    fix one tick earlier.
+
+    VAR_STATIC, same treatment, now VERIFIED rather than hypothesised. #480 recorded a guess
+    ("a proc-local static is not a documented top-level entity") and flagged it as a guess. The
+    setters settle it: Entity_Flag.Static is written ONLY in STATEMENT context
+    (check_stmt.odin:3111/3138, mirroring check_stmt.cpp:2262/2280), and DECLARATION context
+    explicitly CLEARS it (check_decl.odin:250, check_decl.cpp:1709). The doc writer emits
+    declaration-context entities, so the two can never meet -- in EITHER implementation. That makes
+    Var_Static the same category as Param_Auto_Cast: a shared structural non-feature, not a defect.
+    Note this also explains why file-scope `@(thread_local)` sets Var_Thread_Local but NOT
+    Var_Static, which looked inconsistent until the clear at check_decl was found.
+
+    DOC FLAG SURFACE NOW: 16 of 18 bits observed across probe + 5 packages. The 2 absent are both
+    justified with verified reasons rather than guesses, and the gate fails if either reappears
+    unexplained or if any of the 16 stops firing.
+
+    Gates: DOCFLAG-DONE, odin check clean.
+
+--------------------------------------------------------------------------------------------------
+#348 DONE: the list REGENERATED rather than trusted, five fields dispositioned, one INVENTED field
+     deleted -- and the deletion attempt is what proved my own #480 comment wrong, twice.
+
+    The task carried a stale list of "six vestigial ast fields" that was never written down. Rather
+    than hunt for it I regenerated it mechanically: 306 fields in ast/semantic_types.odin, cross-
+    referenced against every `.field` reference in core/odin. Five have ZERO references anywhere.
+
+    DISPOSITIONS, each checked against C++ rather than guessed:
+
+      Entity_Type_Name.type_parameter_specialization
+          SHARED VESTIGIAL, keep. C++ declares it at entity.cpp:235 and uses it in exactly one
+          file -- the declaration itself. Both implementations carry it dead. Faithful.
+
+      Entity_Type_Name.ir_mangled_name
+          CODEGEN-ONLY, keep. C++ reads it in llvm_backend_stmt/general only. A checker has no
+          business writing it; #272's precedent (min_dep_count) applies exactly.
+
+      Type_Fixed_Capacity_Dynamic_Array.padding_needed
+      Type_Map.debug_metadata_type
+          CHECKER-WRITTEN, CODEGEN-READ. Both are computed on the C++ CHECKER side
+          (types.cpp:4714 and check_type.cpp:2976) but every reader is llvm_backend_*. So the port
+          not computing them is a real omission with no diagnostic consequence -- the same
+          category as min_dep_count, and recorded as such rather than left blank.
+
+      Type_Struct.offsets
+          REPRESENTATIONAL, keep. C++ CACHES offsets (types.cpp:4592 via type_set_offsets_of, 25
+          readers); the port recomputes on demand in type_offset_of. Same answers by a different
+          route, and the answers are oracle-verified -- #112/#113 fixed the layout arms and
+          modelcmp gates size/align/offset through printed diagnostics.
+
+    THE ONE REAL DEFECT was not on that list, because the sweep is NAME-based and therefore
+    conservative: it only finds names used NOWHERE, so `Entity_Builtin.pkg` was invisible (the name
+    `pkg` is used constantly for e.pkg). I had it from #480 already.
+
+    C++'s Builtin variant is exactly `struct { i32 id; }` (entity.cpp:281-283). The port's `pkg`
+    field is INVENTED. Deleted, along with alloc_entity_builtin's now-pointless parameter and the
+    copy in check_decl.
+
+    AND THE DELETION IMMEDIATELY PROVED MY #480 COMMENT WRONG, TWICE. That comment asserted `pkg`
+    was "never written, the sole constructor being entity.odin:102". The compiler rejected the
+    deletion with an error at check_decl.odin:553 -- so there WAS another site. Following it
+    properly found FOUR construction sites, and that alloc_entity_builtin (entity.odin:328) DID
+    write it, correctly, from proc_info.pkg. So the field was not vestigial at all.
+
+    The real defect was different and worse-shaped: `pkg` was WRITE-ONLY. Every live reader takes
+    `.id` (check_expr.odin:461/599/5035/5356); the only reader of `.pkg` was check_decl.odin:553
+    copying it forward to nobody. And one construction path -- check_decl.odin:845's `else` arm --
+    builds `Entity_Builtin{id = ...}` and omits it, leaving the zero value `.Builtin`. That is why
+    #480's first fix labelled every intrinsic as Builtin: not because the field was never written,
+    but because it was written on one path and silently defaulted on another.
+
+    Invented + write-only + unreliable all point the same way, so: deleted. The docs_writer comment
+    that carried the wrong claim has been corrected in place rather than left to be re-read as
+    fact -- a wrong comment in the file is worse than no comment, because the next reader has no
+    reason to doubt it.
+
+    METHOD NOTE. This is the third time in four ticks that "grep the WRITERS before concluding
+    anything" changed the answer -- #480 (Entity_Builtin.pkg looked authoritative, wasn't),
+    #508 (Param_Const looked dead, was a bad probe), and now #348 (the field looked unwritten, was
+    write-only). The failure mode is always the same: reading a declaration and inferring behaviour.
+
+    Gates: odin check clean, DOCFLAG-DONE (Builtin_Pkg_* unaffected -- they read the table),
+    parity 60/60 0/0/0.
+
+--------------------------------------------------------------------------------------------------
+#477 DONE: 14 invented Entity_Flag members deleted, plus one invented READ that had been quietly
+     propping up a doc bit. Zero behaviour change, verified.
+
+    The port's Entity_Flag had 55 members to C++'s 41. Diffing them (case- and underscore-
+    insensitive, so spelling differences do not create phantom gaps) left 14 port-only members.
+
+    THE FIRST SWEEP WAS CONFOUNDED AND I NEARLY ACTED ON IT. Counting `.Name` occurrences per flag
+    made several look live -- but the hits were entirely UNRELATED identifiers sharing a name:
+    `ast.Auto_Cast` is an AST NODE, `.Optional_Ok` is an OPERAND MODE, `.Require_Results` is a
+    PARSER PROC-TAG, `.Swizzle` is a BUILTIN PROC ID, `.Foreign` is a TOKEN KIND, and
+    `Doc_Entity_Flag.Export` is a DOC bit. Every one of those would have read as "this flag is
+    used". Re-ran restricted to Entity_Flags CONTEXT only -- `.X in <expr>.flags` for reads,
+    `flags += / -= / = {... .X ...}` for writes -- and the picture inverted completely:
+
+        13 of 14: zero reads, zero writes -- fully dead
+         1 of 14: Auto_Cast -- ONE read (docs_writer.odin:1363), zero writes
+
+    That single read is the #479 shape once more: a doc bit sourced from an entity flag nothing
+    sets. But it is worse than #479's, because C++ has NO EntityFlag_AutoCast at all and
+    docs_writer.cpp has no corresponding `if` -- so the port had invented BOTH the flag and the
+    read. The bit was unsettable either way, which is exactly why Param_Auto_Cast has never
+    appeared in any dump and why docflag.sh already listed it as a shared non-feature.
+
+    ALL 14 DELETED, and the invented read with them. Enum members carry EXPLICIT values, so the
+    survivors are not renumbered -- checked before editing rather than after. The Doc_Entity_Flag
+    declaration for Param_Auto_Cast STAYS, because C++ declares it too; it is simply written by
+    neither implementation, and docflag.sh's justified-absent entry has been refined to say so
+    precisely rather than leaving the reader to infer it.
+
+    WHY THIS IS ZERO-RISK RATHER THAN MERELY LOW-RISK: a flag with no writer cannot change any
+    predicate's value, and a read of it always yields false. Removing both is provably inert. The
+    gates agree -- DOCFLAG-DONE with Param_Auto_Cast still absent for the same reason as before,
+    parity 60/60 0/0/0.
+
+    METHOD NOTE, fourth in five ticks. #480, #508, #348 and now #477 all turned on the same thing:
+    a name-based grep is not evidence about a FIELD, because names collide across namespaces. The
+    cheap fix each time was to constrain the grep to the syntactic context that actually denotes
+    the thing -- here `<expr>.flags`, in #348 the writer form, in #508 the flag's own writer. I
+    have now been wrong in this exact way often enough that it is worth stating as a rule rather
+    than a lesson: for any "is this dead?" question, grep the CONTEXT, never the NAME.
+
+--------------------------------------------------------------------------------------------------
+#484 CLOSED as NOT REPRODUCED, with a positive control proving the harness can see the failure.
+
+    The residual was last recorded at ~1-3% on core/strings ("2/200"), with the mechanism fully
+    diagnosed: type_hash_canonical_type hashes the CANONICAL string, default_type("untyped rune")
+    IS `rune`, so the pair collides by design; doc_write_type's cache is keyed by that hash, so
+    whichever member is visited FIRST wins and writes ITS name string. If the traversal order
+    differs between the sizing pass and the writing pass, a different member wins, the string
+    section needs a different byte count than was reserved, and it overflows.
+
+    MEASUREMENT, current build: 350 runs, 0 failures, and every dump byte-identical.
+
+        core/strings       200 runs, 0 failures, 1 distinct dump hash
+        core/c/libc         30 runs, 0 failures, 1 distinct
+        core/fmt            30 runs, 0 failures, 1 distinct
+        core/os             30 runs, 0 failures, 1 distinct
+        core/odin/parser    30 runs, 0 failures, 1 distinct
+        core/math/linalg    30 runs, 0 failures, 1 distinct
+
+    0/350 rejects a 3% rate at ~99.998% (0.97^350 = 2.2e-5) and bounds it below ~0.9% by the rule
+    of three. Against the last recorded 2/200 the comparison alone is only p~0.13 -- which is why
+    the sampling is not the whole argument.
+
+    THE POSITIVE CONTROL IS THE PART THAT MATTERS. A detector that has never been seen to fire
+    proves nothing by returning zero -- that is the #405 false-green shape, and this session has
+    already been burned by a vacuous doc gate (#483) and by an instrument that measured nothing
+    (#485's counter). So before trusting 0/350 I armed the failure deliberately: removed the SIZING
+    pass from dump_doc, leaving every tracker cap at 0. Result:
+
+        rc=132
+        docs_writer.odin(518:3) runtime assertion: w.strings.len + len(str) + 1 <= w.strings.cap
+
+    That is exactly #484's overflow, at exactly the string tracker, and the harness reported it as a
+    failure. So the zeros are real zeros. Control reverted, md5-verified identical to backup.
+
+    STRUCTURAL EXPLANATION for why it stopped, consistent with the numbers rather than asserted in
+    place of them: the defect needs an order-unstable traversal BETWEEN the two passes. Since #484
+    was filed, #490 gave entity_cache an insertion-ordered `entity_order` companion (mirroring
+    C++'s OrderedInsertPtrMap), and #494-#502 put the package-scope walk on scope_map_slot_order.
+    Checking now, NO cache in docs_writer.odin is iterated at all -- all four are lookup-only, and
+    the walks that drive type creation are ordered. The prerequisite is gone.
+
+    WHAT I AM NOT CLAIMING. I did not observe a failure in the current build, so I cannot point at
+    a specific commit and say "this fixed it". The honest status is: not reproducible at a rate this
+    harness can detect, with the mechanism's precondition structurally removed. #122 was closed on
+    exactly this basis (condition instrumented, 0 hits, positive control confirming the instrument),
+    and the same standard applies here.
+
+    PERMANENT SCREEN: docflag.sh's third check is a core/strings determinism comparison across two
+    runs, so a regression re-surfaces as a gate failure rather than as an intermittent crash nobody
+    is looking for.
+
+--------------------------------------------------------------------------------------------------
+#301 CLOSED as ENVIRONMENTAL, by refuting both port-side hypotheses rather than by not seeing it.
+
+    The record was: riscv/tools timed out ONCE under the 322-package vet sweep, ran 5/5 clean in
+    isolation at ~275ms, and did not recur. Two port-side explanations were possible; both are now
+    tested and dead.
+
+    HYPOTHESIS 1 -- a rare HANG (the #299/#25/#278 family, all real bugs in this codebase).
+    Note first that a 180s timeout against a ~475ms baseline is not slowness at all, it is a ~380x
+    excursion; only a hang produces that. Ran riscv/tools 400 times with a 10s cap:
+
+        runs=400  hangs=0  crashes=0  (203s wall)
+
+    The prior evidence was 5 runs. 400 is a different kind of statement: for a per-run hang
+    probability p, 0/400 bounds p below 0.75% at 95%. A once-in-322-packages event would sit near
+    0.3%, which 400 runs is only marginally powered to exclude -- so this is suggestive, not proof,
+    and is stated that way.
+
+    HYPOTHESIS 2 -- LOAD. parity.sh:47 already warns that "running two full parities at once makes
+    slow packages exceed their per-package timeout", and each port process spawns cpu_count-1 = 31
+    workers, so N concurrent checkers means 31N threads on 32 cores. That is a real oversubscription
+    story and it predicts superlinear collapse. Measured instead:
+
+        concurrent checkers   0     3     7     15
+        riscv/tools (plain) 474   546   569   702  ms
+        riscv/tools (-vet)  ~450                721  ms
+
+    1.5x at FIFTEEN-fold oversubscription. The thread pool degrades gracefully; it does not collapse.
+    To reach a 180s timeout the run would need ~380x, and 15x load buys 1.5x. REFUTED, decisively --
+    this is the one hypothesis the numbers kill outright rather than merely fail to support.
+
+    Vet mode was measured specifically because that is the sweep the event was recorded under, and
+    it behaves identically to plain -- so "vet does more work and tips it over" is refuted too.
+
+    CONCLUSION. The port neither hangs at a detectable rate nor degrades meaningfully under the load
+    the sweep can generate. A single 180s excursion that never recurred, on a machine that also
+    hosts everything else this session runs, is far better explained by something outside the
+    checker -- a scheduler stall, an I/O pause, a competing workload -- than by a defect that hides
+    from 400 consecutive runs and from 15x oversubscription.
+
+    BEARING ON #313. That item is "3 timeouts vs 0 baseline" from #15's fast-path experiment, and
+    its own note already says it "may itself be noise". The same measurement applies: if the pool
+    does not collapse under 15x load, a 3-vs-0 timeout difference between two builds is very
+    unlikely to be the builds. #313 is left open but is now much weaker; it should not be treated
+    as evidence against the reverted #15 change.
+
+    WHAT WOULD REOPEN THIS: a timeout that RECURS, or one captured with a stack (gdb -p on the hung
+    process, or SIGQUIT). A bare rc=124 in a sweep log is not diagnosable after the fact, which is
+    the real lesson -- parity.sh records that a package died but not WHY, so any future hang is
+    equally unfalsifiable unless the harness captures state at the moment it fires.
+
+--------------------------------------------------------------------------------------------------
+#301 FOLLOW-UP: the environment was CAUGHT IN THE ACT, and parity.sh now captures hang state.
+
+    Last tick closed #301 as environmental by refuting the two port-side hypotheses. This tick
+    produced the direct evidence, by accident, while A/B-ing an instrumented parity.sh against its
+    backup on the same 60 packages minutes apart:
+
+        new script  60/60 compared, 0 excluded, 17s
+        old script  59/60 compared, 1 EXCLUDED (timeout), 199s     <-- 180s timeout + 19s work
+        old script, immediately again   60/60, 0 excluded, 28s
+
+    A 180s timeout appearing and vanishing between two runs of the SAME script is #301's exact
+    signature. Checking the machine rather than the code:
+
+        /proc/loadavg  87.96 44.56 29.03        (32 cores -- ~2.7x oversubscribed, and RISING)
+        process table  many `odin check /tmp/tmp.16Iz9V3ZeM/operators/cells/...`
+                       and `/tmp/tmp.DRuPx6qz54/transmute/cells/...`
+
+    Those paths are not mine -- every run in this session targets `core/...` or my scratchpad. An
+    external workload is saturating the box. That is the environment #301 was closed on, observed
+    directly instead of inferred, and it is also the most likely explanation for the ~30% between-
+    batch timing drift that made #465 unmeasurable.
+
+    A CORRECTION I MUST STATE PLAINLY: the new script's 17s against the old script's 199s is NOT
+    evidence that the instrumentation is faster. It is the external load fluctuating between runs.
+    The old script re-run at 28s is the control that settles it. Claiming a 10x speedup from adding
+    a polling loop would have been a straightforward misreading of my own A/B.
+
+    WHAT LANDED: parity.sh's two `timeout 180` calls are now `run_guarded`, which polls instead of
+    killing blind, and on overrun dumps per-thread state BEFORE the kill:
+
+        --- threads (state, wchan = where it is blocked) ---
+          tid=2307984 state=S wchan=do_wait comm=...
+
+    /proc/<pid>/task/*/wchan is the load-bearing field: it names the kernel function each thread is
+    blocked in, which separates a futex deadlock (#299/#25/#278) from a spin from real work. It
+    needs no ptrace, so it survives ptrace_scope=1; eu-stack is attempted and expected to fail, and
+    the capture file says so rather than leaving a confusing error.
+
+    VERIFIED, not assumed:
+      - POSITIVE CONTROL: a deliberately blocking stand-in triggers capture, the file contains a
+        populated wchan, and parity.sh still reports `EXCLUDED ... port=TIMEOUT` exactly as before.
+        A capture path that has never fired is worth nothing (#484's lesson, applied immediately).
+      - REGRESSION: 60/60 0/0/0, identical verdicts to the backup script.
+      - A PERFORMANCE BUG I INTRODUCED AND FIXED: the first version polled at `sleep 1`, which adds
+        a full second to EVERY package -- about 11 minutes across a 323-package sweep -- because
+        nearly every run finishes in well under a second. Now 50ms for the first 2s, then 1s for the
+        long tail. Caught by reading my own loop, not by a gate; no gate would have flagged it,
+        because the results stay correct and only the clock changes.
+
+    NET: the next timeout in a sweep produces a diagnosable artefact instead of a bare rc=124. That
+    was the actual lesson of #301 -- not "the port is fine", but "the harness could not have told me
+    either way".
+
+--------------------------------------------------------------------------------------------------
+#313 CLOSED: the observation it rests on is NOT ADMISSIBLE EVIDENCE about a code change.
+
+    #313 has always been one number: #15's fast-path experiment showed 3 timeouts against a
+    0-timeout baseline, and that was enough to revert the change and file a suspected race. Its own
+    note already said it "may itself be noise". Three measurements since then settle what it can and
+    cannot support:
+
+      1. The port does not hang at a detectable rate -- 0 hangs in 400 consecutive runs (#301).
+      2. The port does not collapse under load -- 1.5x at FIFTEEN-fold oversubscription, where a
+         180s timeout from a ~475ms baseline needs ~380x (#301).
+      3. Spontaneous timeouts DO occur on this machine anyway. Caught one directly: the same script
+         on the same 60 packages went 60/60 in 17s, then 59/60 with a 180s timeout, then 60/60 in
+         28s -- while an EXTERNAL workload held loadavg at 88 on 32 cores.
+
+    Together those say a small timeout-count difference between two builds, measured here, carries
+    no information about the builds. Timeouts arrive from outside at a rate that swamps a 3-vs-0
+    signal, and the two mechanisms that could make them the port's fault are both refuted.
+
+    WHAT I AM NOT CLAIMING. I cannot show the external workload was present when #15 was measured;
+    that was a different day and nobody was watching the load. So this is not "the 3 timeouts were
+    proven to be noise" -- it is the weaker and defensible "that measurement cannot distinguish a
+    code change from the environment, so it should not be cited as if it could".
+
+    CONSEQUENCE FOR #15, stated so nobody reopens it on a misreading: #15's "WILL NOT DO" was
+    justified partly by those 3 timeouts, and that leg is now void. The disposition does NOT change,
+    because the other leg is independent and stronger -- the fast path was a DIVERGENCE from C++,
+    and CLAUDE.md's objective is 100% semantic parity including multi-threaded operation. A
+    faithful-but-slower path stays for the same reason #465 stayed. If anyone revisits #15, it must
+    be on faithfulness grounds, not because the timing evidence was withdrawn.
+
+    THE GENERAL LESSON, which is why this is worth writing down rather than just ticking off:
+    three separate items (#301, #313, #465) have now been decided or undecided by measurements taken
+    on a machine whose load nobody was recording. The harness measures the port; nothing measured
+    the harness's own environment. parity.sh's new hang capture (previous entry) is the first step
+    toward that -- but the cheaper habit is simply to read /proc/loadavg before trusting any timing
+    number, which cost nothing and would have saved this session at least two wrong turns.
+
+--------------------------------------------------------------------------------------------------
+#475 UNBLOCKED: the C++ reference compiler can now be built and instrumented SAFELY. Tool added.
+
+    #475 (a -dump-model in the reference compiler) and #507 (promoting the dep-tree double-enqueue
+    from INFERRED to reproduced) were both blocked on one thing, and it was never the difficulty of
+    the code -- it was that `build_odin.sh` hardcodes `-o odin` at line 170. Running it overwrites
+    the oracle that parity.sh, corpus.sh, modelcmp.sh and doccmp.sh all compare against. That is the
+    most destructive accident available in this tree, and it fails SILENTLY: an instrumented oracle
+    corrupts every number those gates report without any of them going red.
+
+    The blocker turned out to be one sed away, and the build is 45 SECONDS (unity build, a single
+    clang++ invocation), which is worth stating because "rebuilding the C++ compiler" had been
+    carried as if it were expensive. It is not; it was just dangerous.
+
+    .claude/tools/build_ref.sh now does it with two guarantees, both verified rather than asserted:
+
+      1. NEVER WRITES ./odin. Output path is checked, an absolute path is required, and the ORACLE'S
+         CHECKSUM is compared before and after -- if it moved, the script aborts with an explicit
+         "every gate is now untrustworthy" message rather than succeeding quietly.
+      2. NEVER TOUCHES THE REPO'S src/. It builds from a COPY, so instrumentation lives outside the
+         repository. This matters because the tree is routinely dirty with port changes; an edited
+         src/*.cpp sitting among them is one `git add -A` from being committed, against the standing
+         rule that C++ changes are a local instrument only.
+
+    PROVEN, not assumed:
+      - out-of-tree build succeeds; `md5sum -c` confirms ./odin untouched
+      - the built binary is BYTE-IDENTICAL to the oracle on core/strings, core/fmt, core/odin/parser,
+        core/c/libc and base/builtin (the last being syntax-error-heavy, so the error path is
+        covered too, not just clean checks)
+      - a marker inserted ONLY into the copy appears in the copy and NOT in repo src/ (`git status
+        src/` = 0), which is what actually proves the copy is the thing being compiled
+      - both refusal guards fire: overwriting ./odin, and a relative OUTBIN
+
+    ONE TRAP WORTH THE WARNING IT NOW CARRIES. The binary resolves ODIN_ROOT from its own location,
+    so a scratchpad build cannot find core/ or base/ and fails with "Cannot find the library
+    collection 'base'". That message is CONSTANT across packages -- so my first equivalence check
+    hashed it and scored all five packages "DIFFER" with an identical hash on one side and the
+    md5 of EMPTY on the other. Empty-vs-constant is the signature of a harness comparing two kinds
+    of nothing, and it would just as easily have produced a false MATCH had the oracle also been
+    silent. The tool's header now says to pass ODIN_ROOT explicitly.
+
+    WHAT REMAINS for #475 itself: write the dump in the copy, mirroring dump_model.odin's canonical
+    line format so the two outputs are diffable. That is now ordinary work with a 45s edit-build
+    loop and no risk to the oracle.
+
+--------------------------------------------------------------------------------------------------
+#475 DONE (v1): the C++ reference now dumps its semantic model, and the FIRST cross-implementation
+     diff immediately found a real defect no diagnostic gate could ever have shown.
+
+    The instrument is ~40 lines in main.cpp, hooked right after check_parsed_files and BEFORE the
+    `any_errors()` bail so it dumps for failing packages too. ENV-GATED (ODIN_DUMP_MODEL=<path>)
+    rather than flag-gated: adding a real flag means touching the argument parser, which is more
+    diff than the thing being measured. It lives in a scratchpad COPY of src/, built by
+    build_ref.sh, so the repo's src/ stays pristine and the oracle is checksum-guarded.
+
+    V1 FIELD SET IS DELIBERATELY REDUCED to pkg / name / kind / size / align. Type STRINGS are
+    excluded on purpose: the two implementations render types through independent printers, so a
+    cosmetic spelling difference would swamp the signal. Size and align are the numbers that carry
+    semantics and that NO diagnostic exposes -- which is the entire premise of #475.
+
+    FIRST RUN, core/strings: 1710 comparable entities each side, 1572 agreeing, 138 differing.
+    The first eight lines of the difference were all one shape:
+
+        C++   Allocator_Mode_Set  size=1 align=1      Odin_OS_Types  size=2 align=2
+        port  Allocator_Mode_Set  size=1 align=8      Odin_OS_Types  size=2 align=8
+
+    Every one a bit_set, every one align=8. type_align_of's `.Bit_Set` arm HAD been ported -- the
+    `underlying` branch is there and correct -- but C++'s bit-count ladder under it
+    (types.cpp:4509-4516: <=8 -> 1, <=16 -> 2, <=32 -> 4, <=64 -> 8, <=128 -> 16) had been replaced
+    by a bare `return 8 // Default`. A constant that is right for the common 64-bit case and wrong
+    for every narrower one.
+
+    That is #416's shape exactly -- #416 was type_align_of's MISSING Bit_Field arm; this is its
+    TRUNCATED Bit_Set arm -- and the #268/#294 family of C++ logic reduced to a plausible constant.
+    It is also, precisely, the class of defect modelcmp.sh cannot reach: modelcmp infers layout from
+    a printed size_of, and alignment appears in no message at all, so all 323 parity packages were
+    green with this present and would have stayed green indefinitely.
+
+    FIXED faithfully (the ladder, including C++'s own "could be an invalid range" fallback comment).
+    Model diff: agreeing 1572 -> 1580, differing 138 -> 130. The bit_sets now report align 1 and 2
+    matching C++. Gates: parity 60/60 0/0/0, DOCFLAG-DONE, odin check clean.
+
+    130 DIVERGENCES REMAIN and they are a seam worth mining rather than a failure. One already
+    visible: builtin `_clz` is size=0 align=8 in C++ and size=0 align=1 in the port -- inverted,
+    and a different mechanism (builtins carry t_invalid). Filed as the follow-up; each class needs
+    the same treatment this one got, which is to read C++'s arm rather than guess from the numbers.
+
+    THE POINT WORTH KEEPING. This defect had survived every gate in .claude/tools -- parity,
+    corpus, doccmp, modelcmp, dumpdet, flake -- because all of them are ultimately anchored on
+    TEXT the compiler prints. The first instrument that compared STATE instead of OUTPUT found it
+    in its first run, on the first package tried. That is an argument for building the state
+    comparator earlier next time, not for trusting the text gates less.
+
+--------------------------------------------------------------------------------------------------
+#509 ANSWERED: 130 of the 134 model divergences were MY INSTRUMENT, and the last 4 were MY
+     COMPARATOR. Size and align actually agree entirely; the only real residue is #468.
+
+    #475's first diff reported 134 differing entities on core/strings. Grouping them by shape first
+    (the method the task itself recorded) rather than reading them one by one:
+
+        87  builtin    align: cpp 8, port 1
+        43  procgroup  align: cpp 8, port 1
+         4  variable   size/align, assorted
+
+    THE 130 WERE NOISE I MANUFACTURED. Builtins and proc-groups carry t_invalid, and my dump
+    guarded on `is_type_typed` alone -- which returns TRUE for t_invalid in BOTH implementations,
+    because t_invalid is a Basic carrying no Untyped flag (that is LEDGER #43, already settled).
+    So both sides were asked for the alignment of an INVALID type. Neither DECIDES that value:
+    C++'s Basic switch has no Basic_Invalid case and falls through to 8, the port's falls through
+    to 1. Two fallthroughs, no semantics. Alignment of an invalid type is not a fact about the
+    model, so including it was wrong by construction. Both dumps now exclude it.
+
+    THE LAST 4 WERE MY COMPARATOR. They were `bytes.c`, `bytes.r`, `strings._`, `utf8._` -- and
+    the giveaway is the names. I was keying a dict on (pkg, name, kind), but `c`, `r` and `_` occur
+    dozens of times per package as locals, so every occurrence collapsed onto one key and the diff
+    compared two arbitrary representatives. Re-run as a MULTISET the four vanish completely.
+
+    WHAT SURVIVES, and it is a good result: with 1901 C++ entities against 1903 port entities,
+    SIZE AND ALIGN AGREE ON EVERY ONE. The entire residue is multiplicity of polymorphic
+    procedure instantiations:
+
+        threaded      excess in cpp=3  excess in port=5
+        -no-threads   excess in cpp=3  excess in port=1
+
+    Threading ADDS four port-side instantiations (make_dynamic_array, _len, _len_cap x2,
+    resize_dynamic_array) -- which is UPSTREAM-468 exactly, whose evidence was "the sequential
+    count is the MINIMUM of the threaded range; threading only ever adds". This is that finding
+    reproduced from a completely different direction, by a different instrument, on a different
+    package. The sequential residue (3 cpp-only, 1 port-only) is 4 entities in 1900 and is about
+    WHICH instantiations exist, not about any type's layout.
+
+    THREE INSTRUMENT BUGS IN ONE SESSION, ALL THE SAME SHAPE. #508 (a probe declaring `$N` when the
+    flag reads `#const`), #480's first fix (reading a field the constructor never sets), and now
+    both halves of this. Every one produced a confident, plausible, wrong answer that survived
+    until something forced a second look. The cheap defence that worked every time was to ask what
+    the instrument would report if there were NO defect -- here, that the guard lets invalid types
+    through and that a name-keyed dict cannot represent duplicates.
+
+    NET: #509 closes with no port defect found beyond #475's bit_set align fix. The model
+    comparison is now clean enough to be worth widening to more packages and, eventually,
+    promoting to a gate.
+
+--------------------------------------------------------------------------------------------------
+#509 PART 2: widening the model diff past core/strings found a SECOND missing type_size_of arm --
+     enumerated arrays measured 0 -- and it explained two symptoms at once.
+
+    modeldiff.py added (the comparator, written properly this time: multiset not dict, with both
+    #509 traps documented in its header so the next person does not re-derive them). Run across six
+    packages, core/os produced REF-ONLY singletons that were not instantiation noise:
+
+        os._errno_strings   `[Errno]string`   cpp size=2144   port size=0
+        posix.termios       a struct           cpp size=60     port size=28
+
+    ROOT CAUSE, one for both: type_size_of has arms for Basic, Pointer, Array, Slice, Dynamic_Array,
+    Map, Struct, Matrix, Enum, Bit_Set, Simd_Vector, Union, Bit_Field, Proc and Tuple -- and NONE
+    for Enumerated_Array. Every `[Enum]T` fell through the switch and measured 0.
+
+    2144 is 134 Errno members x 16 bytes per string, so C++ is plainly right. And termios follows:
+    it contains an enumerated-array field, so a struct whose member sized 0 sized short. TWO
+    symptoms, ONE arm -- worth noting because the struct one looked like an independent layout bug
+    and would have been chased separately.
+
+    THIS IS THE THIRD VISIT TO THIS FUNCTION. #86 added Enum, Bit_Set and Simd_Vector after they
+    "silently measured 0"; #87 added Union, Bit_Field, Proc and Tuple as the follow-up sweep; and
+    Enumerated_Array still slipped through BOTH. A missing switch arm in a function that returns a
+    number is invisible in a way a missing arm elsewhere is not -- there is no crash, no
+    diagnostic, just a plausible-looking 0.
+
+    PORTED FAITHFULLY, including the subtlety: C++ is NOT `count * size` like the plain .Array arm.
+    It is `align_formula(size, align) * (count-1) + size` -- the last element is not padded out to
+    the stride. Copying the .Array arm would have produced a number that is right for every
+    naturally-aligned element and wrong for exactly the cases this was found in.
+
+    AFTER: core/strings and core/os both reduce to polymorphic-instantiation multiplicity only
+    (append_elem(s), make_slice, binary_search, syscallN) -- the #468 family, already filed and
+    threading-dependent. No layout divergence remains in either package. Parity 60/60 0/0/0.
+
+    STANDING NOTE FOR THE NEXT WIDENING: core/os still shows excess_port=84 concentrated in
+    linux.syscall1..5. core/strings showed 5 threaded vs 1 sequential, so the presumption is #468 at
+    larger scale -- but that is a PRESUMPTION, and the cheap check is to re-run those packages with
+    -no-threads before treating them as known.
+
+--------------------------------------------------------------------------------------------------
+#509 PART 3: the presumption was WRONG. core/os's excess is NOT mostly #468 -- 67 of 83 survive
+     -no-threads, so the port over-instantiates DETERMINISTICALLY.
+
+    Last entry closed with an explicit caveat: core/os showed excess_port=84 concentrated in
+    linux.syscall1..5, core/strings had shown 5 threaded vs 1 sequential, "so the presumption is
+    #468 at larger scale -- but that is a PRESUMPTION, and the cheap check is -no-threads". Ran it:
+
+        threaded      port=8290  excess_ref=1  excess_port=83
+        -no-threads   port=8270  excess_ref=5  excess_port=67
+
+    Threading accounts for 16. SIXTY-SEVEN REMAIN with the thread pool disabled, and #468 cannot
+    explain those -- its whole evidence is that the sequential count is the MINIMUM and threading
+    only ever ADDS. A sequential excess is a different mechanism.
+
+    WHAT IT MEANS. For the same source, single-threaded, the port creates ~67 more instantiations of
+    linux.syscall1/2/3 than C++ does. Both implementations key the instantiation cache on
+    are_types_identical against the final proc type (the port's check_poly_proc.odin is a
+    line-for-line port of check_expr.cpp:483-638, established in #468). So either the port's
+    are_types_identical DISTINGUISHES types C++ considers identical -- producing a fresh
+    instantiation where C++ reuses one -- or the port instantiates at sites C++ does not reach.
+
+    NOT DIAGNOSED YET, and deliberately not guessed at. The measurement is the finding; the
+    mechanism needs the next step, which is specific: the dump currently prints size/align for
+    procedures (8/8 for every one, carrying no information here), so it CANNOT distinguish "67
+    duplicates of the same type" from "67 genuinely distinct instantiations". Adding the rendered
+    TYPE to procedure entries in both dumps answers that in one run -- and it is the only question
+    that matters, because duplicates point at the cache and distinct types point at the call sites.
+
+    THIS IS THE FOURTH TIME THIS SESSION that checking an assumption changed the answer -- after
+    #480 (a field that looked authoritative), #508 (a bit that looked dead), #348 (a field that
+    looked unwritten) and #509 part 1 (130 divergences that looked like defects). The pattern is
+    consistent enough to be worth stating as a habit rather than a lesson: when a result is about
+    to be recorded as "known", spend the one command that could falsify it. Here it cost a single
+    -no-threads run and overturned the conclusion.
+
+--------------------------------------------------------------------------------------------------
+#510 SHARPENED: the extra instantiations are DISTINCT, not duplicates. The port infers 41 distinct
+     $T for linux.syscall1 where C++ infers 18, and the difference has a name-shaped pattern.
+
+    #510 posed one question: are the 67 sequential-excess instantiations DUPLICATES of the same
+    type (cache under-matching) or genuinely DISTINCT types (call-site difference)? The port's dump
+    already carries the rendered type, so the port side needed no rebuild:
+
+        syscall1   port 41 entries / 41 DISTINCT types      cpp 18 entries / 18 distinct
+        syscall2   port 73 / 73                             cpp 52
+        syscall3   port 90 / 90                             cpp 74
+
+    ONE TYPE PER ENTRY ON BOTH SIDES. So the instantiation cache is working exactly as intended and
+    is not the defect -- the port simply reaches more distinct $T. That kills the cache hypothesis
+    outright and redirects the whole item.
+
+    `syscall1 :: #force_inline proc "contextless" (nr: uintptr, p1: $T) -> int`
+    (core/sys/linux/helpers.odin:19), so one instantiation per distinct argument type.
+
+    Added the rendered type to the C++ dump too (45s rebuild) to see WHICH. The port-only set is
+    dominated by a single shape -- TWELVE distinct PTrace request types:
+
+        PTrace_Attach_Type, PTrace_Cont_Type, PTrace_Geteventmsg_Type, PTrace_Getsiginfo_Type,
+        PTrace_Getsigmask_Type, PTrace_Interrupt_Type, PTrace_Listen_Type, PTrace_Peeksiginfo_Type,
+        PTrace_Seize_Type, PTrace_Setsigmask_Type, PTrace_Singlestep_Type, PTrace_Syscall_Type,
+        PTrace_Sysemu_Type, PTrace_Sysemu_Singlestep_Type
+
+    and C++ has exactly ONE of the family: PTrace_Traceme_Type. Plus a tail of int, Key, Signal,
+    Sig_Mask_Kind, Syslog_Action, [^]Poll_Fd, [^]u8, ^Time_Val, ^[1]uint.
+
+    That is a strong, specific clue rather than a diagnosis, and it is left as one. The wrappers
+    (ptrace_attach etc., core/sys/linux/sys.odin:1464+) are NOT polymorphic, so whatever differs is
+    upstream of the instantiation: either C++ converts the request argument to a common type before
+    computing the final proc type, or it does not reach those bodies at all.
+
+    A NEAR-MISS I CAUGHT AND AM RECORDING BECAUSE IT ALMOST BECAME A FINDING. Counting
+    `\tptrace_attach\t` gave cpp=1, port=2, and I very nearly wrote up "the port duplicates
+    non-polymorphic wrapper procedures" -- a much more dramatic claim than the real one. It was my
+    grep: the PORT's dump has BOTH an insertion-order section (`ins\tentity\t...`) and a sorted
+    section (`entity\t...`), while the C++ dump has only the sorted one, so a pattern without a
+    `^entity` anchor counts the port twice and C++ once. Re-anchored: 1 vs 1, no duplication.
+    modeldiff.py was right all along -- it reads only the sorted section -- and the error was in
+    the ad-hoc grep I reached for instead of the tool I had already written for this exact job.
+
+    Same correction applies to a "145 entities appear more than once" figure I computed en route:
+    the key (pkg, name, kind, type) omits POSITION, so every pair of locals named `i: int` in
+    different procedures collapses onto one key. Expected, not a defect, and not pursued.
+
+    FIFTH measurement error this session, and the first four are already written up. The pattern is
+    now unmistakable: the ad-hoc command is where the mistakes live, and the tool that was built
+    carefully for the job is where they do not.
+
+--------------------------------------------------------------------------------------------------
+#510 DIAGNOSED: the port instantiates polymorphic candidates that already FAILED the argument-count
+     check. C++ gates on `err == CallArgumentError_None`; the port gates only on missing-required.
+
+    The PTrace pattern was the clue that cracked it. `syscall` is a proc GROUP dispatching by
+    arity to syscall1..6 (core/sys/linux/helpers.odin), and the wrappers differ only in how many
+    arguments they pass:
+
+        ptrace_traceme :: proc(rq: PTrace_Traceme_Type) { syscall(SYS_ptrace, rq) }              1 arg
+        ptrace_attach  :: proc(rq: PTrace_Attach_Type, pid: Pid) {
+                              syscall(SYS_ptrace, rq, pid, 0, rawptr(nil)) }                     4 args
+        ptrace_seize   :: ...                                                                    5 args
+
+    C++ instantiates syscall1 for PTrace_Traceme_Type -- the ONE that actually has syscall1's
+    arity -- and for none of the other twelve. The port instantiates syscall1 for all of them, with
+    a two-parameter type `(uintptr, PTrace_Attach_Type) -> int` inferred from the FIRST TWO
+    arguments of a call that passes five. That is a candidate which cannot possibly match, being
+    specialised anyway.
+
+    THE GATE, and both sides of it:
+
+        C++   check_expr.cpp:6688   err = CallArgumentError_TooManyArguments   (set FIRST)
+              check_expr.cpp:6940   if (pt->is_polymorphic && !pt->is_poly_specialized &&
+                                        err == CallArgumentError_None)          <- instantiate
+              so ANY earlier failure -- too many, too few, wrong types, non-constant -- suppresses
+              the instantiation entirely.
+
+        port  check_expr.odin:10820+ computes `poly_missing_required` and skips on that alone.
+              That gate came from #255 and is correct as far as it goes: it fixed the MISSING
+              argument case, where an omitted argument arrived as a zero-valued Operand and
+              produced "Cannot determine polymorphic type from parameter: '<no type>'" with no
+              source position. But it covers exactly one of C++'s error kinds. TOO MANY arguments
+              -- which is what every ptrace wrapper does to syscall1 -- sails straight through.
+
+    So this is a NARROWER-GATE defect, not a missing one: the port has the guard, positioned right,
+    testing one condition where C++ tests all of them. #255's comment even quotes the C++ line with
+    `err == CallArgumentError_None` in it, and then implements only the ParameterMissing half.
+
+    WHY IT HAS NO DIAGNOSTIC CONSEQUENCE, which is why every gate stayed green: the surplus
+    instantiations belong to candidates that LOSE the overload resolution anyway. They are created,
+    scored, discarded. The only trace is extra entities in the semantic model -- 67 of them in
+    core/os alone -- plus the wasted work of checking each instantiated body.
+
+    NOT FIXED THIS TICK, deliberately. Proc-group resolution is a delicate area with its own
+    history (#96, #120, #255, #336), the port tracks its failure state differently from C++'s
+    single `err` variable, and a rushed widening at the end of a long tick is how #340's
+    false-regression happened. The next step is specific: establish what the port knows about
+    argument-count failure at check_expr.odin:10820, widen the skip to cover it, then re-run
+    modeldiff on core/os expecting the syscall1 count to fall from 41 toward C++'s 18 -- which is a
+    precise, falsifiable prediction rather than "the diff should improve".
+
+#510 PART 1 FIXED (direct calls), PART 2 LOCATED (proc groups). My falsifiable prediction FAILED,
+     and the failure is what found the second site.
+
+    THE FIX THAT LANDED, check_expr.odin -- the instantiation skip now covers too-many-arguments,
+    not just missing-required:
+
+        poly_too_many_args := !pt.variadic && len(positional_operands) > param_count
+        if poly_missing_required || poly_too_many_args { /* fall through to normal checking */ }
+
+    mirroring C++'s single gate (check_expr.cpp:6940 `err == CallArgumentError_None`, with
+    check_expr.cpp:6688 having already set TooManyArguments).
+
+    ORACLE-VERIFIED by A/B on a purpose-built probe, `f :: proc(x: $T) -> T` called as `f(1,2,3)`:
+
+        reference          1 entity   proc($T) -> $T          (generic only)
+        port, pre-fix      2 entities generic + proc(int) -> int  <- bogus instantiation
+        port, post-fix     1 entity   generic only            <- matches the reference
+
+    The DIAGNOSTIC is byte-identical to the oracle before and after -- "Too many arguments for 'f',
+    expected 1 arguments, got 3" either way -- which is precisely why no text-anchored gate could
+    ever have seen this. Only the model dump distinguishes the two. I built the pre-fix binary from
+    the backup specifically to establish that the edit is EXERCISED rather than merely plausible;
+    an unexercised change is a liability, and this one earned its place.
+
+    THE PREDICTION FAILED. I predicted syscall1 would fall 41 -> 18, syscall2 73 -> 52,
+    syscall3 90 -> 74. Measured after the fix: 41, 73, 90 -- completely unchanged (reference this
+    run: 19, 52, 71). The fix is real, but it does not touch the case that motivated it.
+
+    WHY, and this is the finding: the port has TWO instantiation call sites, and I patched the one
+    the ptrace wrappers do not use.
+
+        check_expr.odin:10905      direct calls           <- had #255's partial gate, now complete
+        check_proc_group.odin:768  proc-group candidates  <- NO arity gate of any kind
+
+    C++ has only ONE, because it scores every proc-group candidate through the SAME
+    check_call_arguments_internal that a direct call uses -- so its 6940 gate covers both paths for
+    free. The port duplicated that logic into two places and gave the gate to one of them. `syscall`
+    is a proc GROUP, so every ptrace wrapper takes the ungated path.
+
+    (The port's citation at check_proc_group.odin:701, "check_expr.cpp:6116-6140", is STALE -- that
+    region is selector/swizzle code. Worth correcting when part 2 is done.)
+
+    PART 2 IS NOT A MECHANICAL COPY OF PART 1, and the code says so in a comment I am taking
+    seriously: check_proc_group.odin:713-715 records that THREE earlier attempts to express an arity
+    rule at this site (max(args,param_count); exact param_count; empty slot) were all reverted. Those
+    were about SIZING the operand array and filling the variadic slot -- a different thing from
+    C++'s gate, which rejects the candidate outright -- but the site has a history of looking simpler
+    than it is. It also has a live question I have not answered: whether skipping instantiation there
+    should return false (candidate rejected, risking a diagnostic that the later count check would
+    have emitted) or fall through as the direct-call path does. That needs establishing by probe,
+    not by symmetry with part 1.
+
+    GATES, on the landed change: parity 323/323 0/0/0, corpus 198 members 0 missing.
+
+#510 PART 2 DONE -- and it was ONE missing block, not the fiddly arity rule I had braced for.
+
+    C++'s check_expr.cpp:6684-6700 is a single arity check that does TWO jobs at once:
+
+        } else if (positional_operand_count > pt->param_count) {
+            err = CallArgumentError_TooManyArguments;          // <- consumed by the 6940 gate
+            if (show_error) { "Too many arguments for '%s', expected %td arguments, got %td" }
+            return err;
+        }
+
+    C++ needs only one copy because proc-group candidates are scored through this very function --
+    the same check_call_arguments_internal a direct call uses. The port SPLIT that function in two
+    and this copy had NEITHER job. One omission, two defects:
+
+      MODEL POLLUTION (the #510 headline). Candidates the call overshoots were instantiated anyway.
+      core/os syscall1 held 41 instantiations against C++'s ~19.
+
+      AN INVENTED DIAGNOSTIC, found by the probe rather than by reading. A single-candidate proc
+      group fell through to "Too many arguments to procedure call" -- a string that appears NOWHERE
+      in src/. The oracle names the procedure and gives counts. This one WAS text-visible and no
+      gate caught it, because no package in the 323-package corpus calls a one-member proc group
+      with surplus arguments.
+
+    MY OPEN QUESTION ANSWERED, and by C++ rather than by choosing: `return err` -- the candidate is
+    rejected outright, not fallen through. That is safe precisely because show_error is false while
+    scoring a multi-candidate group, so the candidate dies silently and the group reports
+    "No procedures or ambiguous call"; a single-candidate group has show_error true and gets the
+    named message. Both arms verified byte-identical to the oracle on probe pg510.
+
+    The three reverted attempts the comment at check_proc_group.odin:713 warns about were about
+    SIZING the operand array and filling the variadic slot. This is a different thing -- rejecting
+    the candidate before instantiation -- so the warning did not apply, but reading it first was
+    still right: it is what stopped me writing a count check into the operand-filling code.
+
+    MEASURED, core/os, and stated against C++'s OWN variance rather than a single run:
+
+        syscall1   before 41   after 18   C++ 19-20 over 4 runs
+        syscall2   before 73   after 49   C++ 50-54
+        syscall3   before 90   after 69   C++ 70-73
+        total      -           8193       C++ 8198-8206
+
+    The port is now DETERMINISTIC (18/49/69 twice) and sits 1-2 BELOW C++'s range rather than at
+    double it. I am not claiming a match: a small residual remains, and it is the opposite sign from
+    the defect just fixed. C++'s own ±4 spread on syscall2 is #468 (instantiation identity varies by
+    which call site wins), so the residual is most likely the same phenomenon seen from the other
+    side, but that is a hypothesis and is recorded as one.
+
+    GATES: parity 323/323 0/0/0; corpus 198 members 0 missing; vet parity 15 count mismatches --
+    PRE-EXISTING, established by re-running the identical sweep on the pre-part-1 and pre-part-2
+    binaries and getting 15 both times. Filed separately rather than absorbed into this entry.
+
+#511 RETRACTED — NOT A DEFECT. The 15 vet-mode "under-rejections" were MY INSTRUMENT, and the
+     correction also amends #510's gate line above: vet parity is 0/0/0, not "15 pre-existing".
+
+    I ran parity_vet.sh with the PLAIN harness ($S/triage_st510b) where it requires the VET harness.
+    parity_vet.sh:5 states the requirement outright -- "The port side must be a triage_vet-style
+    harness (one that sets build_context.vet_flags to C++'s)" -- and :123 invokes `"$PORT" "$p"`
+    with NO -vet flag precisely because the harness bakes the flags in. Given a plain binary the
+    port simply does not vet, so every vet diagnostic the oracle emits shows up as a missing one.
+    Rebuilt triage_vet and re-ran: 323/323, 0/0/0.
+
+    THE METHODOLOGICAL POINT, which is the part worth keeping. I did run a control: the identical
+    sweep on THREE binaries (pre-part-1, pre-part-2, post-fix), all returning exactly 15, and I
+    reported "PRE-EXISTING, established by re-running". That control was real and its arithmetic
+    was right -- and it proved nothing, because all three binaries were the wrong KIND. A control
+    that varies the thing you changed cannot detect an error in the instrument you held fixed. The
+    consistency I read as corroboration was just the instrument being consistently wrong.
+
+    The shape of the data was telling me this and I read it as a finding instead: 12 of 15 packages
+    at port=0, a whole class at zero rather than scattered disagreement. I even wrote "a whole class
+    going missing" into the task. "The port emits none of an entire category" is far more often a
+    harness that has the category switched off than a checker that lost it -- and #178 is the same
+    lesson already in this ledger (a vet result whose cause turned out to be a missing force_use,
+    not vet scoping).
+
+    Two things it does NOT retract: my invocation of the plain binary as
+    `triage_st510b <pkg> -vet` was also wrong -- that driver takes -vet as a second TARGET, which
+    is why it printed a second `### -vet files=0` block. That stray line is what exposed the whole
+    error, so the driver's habit of echoing its targets earned its keep here.
+
+#512 modeldiff.py repaired twice, and the second repair CHANGED WHAT THE RESIDUAL MEANS.
+
+    (a) STALE PARSER. read_ref did a fixed 6-way unpack, but the reference dump grew a 7th column
+        during #510 -- the RENDERED TYPE, which is what showed the surplus syscall1 instantiations
+        were distinct types rather than duplicates. The tool crashed with a ValueError on every
+        package. It now takes fs[:6] and discards extras; types are deliberately not compared
+        (independent printers on the two sides), so trailing columns are read and dropped.
+
+    (b) THE PORT WAS RUN THREADED. This is the one that matters. #344 established that the port's
+        entity-set variance is entirely threading-driven and that -no-threads is byte-identical
+        5/5 -- and modeldiff invoked the port WITHOUT it, so BOTH sides drifted run to run.
+
+    What that cost, measured on the same three packages before and after pinning:
+
+        threaded port     strings  excess_ref 2,4,4   excess_port 1,3,4
+                          sort     excess_ref 7,5     excess_port 8,7
+                          time     excess_ref 0,1     excess_port 11,9
+
+        pinned port       strings  excess_ref 3,1     excess_port 0,0
+                          sort     excess_ref 10,21   excess_port 3,2
+                          time     excess_ref 3,10    excess_port 0,0
+                          slice    excess_ref 1,0     excess_port 0,0   (MODEL-MATCH on run 2)
+
+    With both sides moving, the numbers said "each implementation has entities the other lacks,
+    in both directions, differently every time" -- which is unreadable, and is precisely the state
+    in which noise gets written up as a divergence. #509 already lost a tick to that shape.
+
+    Pinned, the port is a FIXED point (1898 / 6262 / 2465 / 899, identical across runs) and the
+    reference is the thing that moves. excess_port collapses to 0 on three of four packages and
+    2-3 on core/sort; excess_ref ranges 1-21. So the port produces very nearly a SUBSET of what
+    C++ produces, and the surplus is C++'s, varying run to run.
+
+    That is #468 seen cleanly for the first time: C++ instantiates extra copies depending on which
+    call site wins the race, so its entity count is genuinely nondeterministic. The port, after
+    #510, is deterministic and lean. The residual left over from #510 -- "port sits 1-2 below C++'s
+    range" -- is now explained rather than merely bounded: the port is not MISSING entities, C++ is
+    ADDING duplicate instantiations that no single run agrees on.
+
+    NOT fully closed, and stated as such: core/sort still shows excess_port 2-3 even pinned, so a
+    handful of port-only entities survive on one package. That is small, stable, and worth a look
+    if the model thread is picked up again -- but it is a different question from the one #510
+    answered, and I am not asserting it is #468 without evidence.
+
+    GENERAL LESSON, and the second instrument error in two ticks (see #511 immediately above):
+    when a comparator's two sides are both nondeterministic, PIN THE ONE YOU CAN. The evidence to
+    do it here had been sitting in #344 since it was written.
+
+#513 THE LAST MODEL RESIDUAL IS A C++ PACKAGE MIS-ATTRIBUTION, not a port defect -- and it is a
+     second, DETERMINISTIC instance of #469.
+
+    Chasing core/sort's excess_port=2 (the one thing #512 left open) through four hypotheses, three
+    of which I refuted by measurement rather than by argument:
+
+      H1 "the dumps walk different entity sets" -- REFUTED. Both walk info.entities
+         (port dump_model.odin:188/203, C++ main.cpp:3813). Directly comparable.
+      H2 "C++ does not check dependency-package bodies" -- REFUTED by a purpose-built two-package
+         probe ($S/dep): an unused proc in the dependency, containing a deliberate type error, is
+         reported by BOTH compilers, byte-identical. C++ checks dependency bodies.
+      H3 "nested procs in dependency bodies do not become entities in C++" -- REFUTED by the same
+         probe with the error removed: nested_helper appears in both models, 1 and 1.
+      H4 "C++ is nondeterministic about it" -- REFUTED: 5/5 runs of core/sort, C++ has
+         stream_proc=1 and unknown_or_eof=1 every time.
+
+    C++ HAS THE ENTITIES. The dumps disagree on the PACKAGE:
+
+        C++    entity  posix     stream_proc  Procedure  size=8 align=8  proc(rawptr, ...) -> ...
+        port   entity  libc#7    stream_proc  Procedure  ... core/c/libc/stdio.odin:275:2
+
+    Every other field -- name, kind, size, align, rendered type -- is identical. The port is right:
+    the declaration is at core/c/libc/stdio.odin:275, nested inside `to_stream`, and its position is
+    carried in the port's own dump. C++ files it under `posix`.
+
+    The C++ dump reads `e->pkg->name` (main.cpp:3816), so this is C++'s own recorded attribution and
+    not something my instrumentation derived. The shape matches #469 exactly -- an entity credited
+    to a package that merely participates in reaching it rather than the one whose file declares it
+    -- except #469 was intermittent (5/6) and this is 5/5. A nested procedure's entity appears to
+    take the package of the checking context that triggered the enclosing body check.
+
+    CONSEQUENCE FOR THE COMPARATOR, and it revises a claim I made one entry ago. modeldiff keys on
+    (pkg, name, kind, size, align), so a pure attribution difference surfaces as excess on BOTH
+    sides -- one REF-ONLY and one PORT-ONLY for the SAME entity. My #512 phrasing, "the port
+    produces very nearly a SUBSET of what C++ produces", was therefore reading an attribution
+    disagreement as a presence disagreement. The subset claim stands for the syscall* families it
+    was measured on; it does not stand for these two.
+
+    STATUS: no port change. The port's attribution is the defensible one and the only gate-visible
+    effect is on my own comparator. Filed as an upstream-shaped observation alongside #469 rather
+    than written up as a separate UPSTREAM- document, because the two are almost certainly one
+    defect and should be reported together if either is.
+
+    WORTH DOING IF THIS THREAD RESUMES: teach modeldiff to detect the pair -- same
+    (name, kind, size, align), different pkg -- and report it as ATTRIBUTION rather than as excess
+    on both sides. Three ticks running, this comparator has reported instrument artefacts as
+    findings (#509 twice, #511, and now this); a named category for the one remaining known artefact
+    is cheaper than re-deriving it.
+
+#513 FOLLOW-UP: attribution detection implemented, and it RESTORES the subset claim I had just
+     withdrawn. modeldiff now pulls same-(name,kind,size,align)/different-pkg pairs out of the
+     excess counters and prints them as their own ATTRIBUTION line. Measured after:
+
+        core/sort     excess_ref=8  excess_port=0  attribution=2
+                      ATTRIBUTION x1 stream_proc    (procedure) ref_pkg=posix port_pkg=libc
+                      ATTRIBUTION x1 unknown_or_eof (procedure) ref_pkg=posix port_pkg=libc
+        core/strings  excess_ref=7  excess_port=0
+        core/slice    MODEL-MATCH
+
+    excess_port is now 0 on every package measured. So the subset claim from #512 is correct after
+    all -- the port's entity set IS a subset of C++'s -- and the two entities that appeared to
+    contradict it were the attribution artefact, not counter-examples. I withdrew that claim one
+    entry ago on the strength of those two; the withdrawal was over-cautious in the same way the
+    original was over-confident, and the fix for both was to separate the categories rather than to
+    argue about the number.
+
+    What remains on the REF-ONLY side is entirely C++ surplus: extra syscall*/runtime/datetime
+    instantiations that vary run to run, which is #468.
+
+#514 REAL DEFECT FOUND BY THE MODEL INSTRUMENT: type_align_of's Matrix arm returned the ELEMENT's
+     alignment. Every matrix in the language was mis-aligned. Fixed, oracle-verified, gate added.
+
+    This is the first genuine port defect the model comparator has produced since it became
+    trustworthy (#512/#513), and it is exactly the class it was built for: sizes agreed perfectly,
+    alignments diverged on every value, and NO diagnostic changes -- so all 323 parity packages,
+    198 corpus members and 114 modelcmp probes were green over it.
+
+    Found by sweeping modeldiff over ten varied packages. core/math/linalg came back excess_port=48,
+    including six PORT-ONLY constants that turned out not to be port-only at all -- C++ had them
+    with different alignment:
+
+        matrix[2,2]f16   C++  8   port 2        matrix[4,4]f16   C++ 32   port 2
+        matrix[2,2]f32   C++ 16   port 4        matrix[4,4]f32   C++ 32   port 4
+        matrix[2,2]f64   C++ 32   port 8        matrix[4,4]f64   C++ 32   port 8
+
+    THE PORT WAS: `case .Matrix: return type_align_of(mat.elem)`. One line, the same shape as #416
+    (Bit_Field arm missing) and #475 (Bit_Set arm truncated to a constant). Third instance of
+    "type_align_of has a plausible one-liner where C++ has an algorithm".
+
+    C++'s matrix_align_of (src/types.cpp) derives alignment from the TOTAL size -- prev_pow2 of
+    row*col*elem_size, halved until it divides that total, floored at elem_align, capped at
+    max_simd_align. Its own comment gives the reason, which is why the element alignment could never
+    have been right: the layout strategy is ZERO PADDING. Padding each column to its natural
+    alignment would be faster, and Odin deliberately trades that away so third-party libraries can
+    assume a matrix is densely packed. Alignment therefore falls out of the total size, not the
+    element. Ported with prev_pow2 (absent from the port, added as a file-private helper).
+
+    Port now returns 8/16/32/32/32/32 -- identical to C++ on all six. linalg excess_port 48 -> 0.
+
+    THE GATE THAT SHOULD HAVE CAUGHT IT DID NOT, and that is its own finding. modelcmp.sh carried
+    37 align_of probes and NOT ONE matrix -- #342's summary said it covered "layout directives, SOA
+    and polymorphic instantiation", and matrices were simply never in it. "114 probes, 0 mismatches"
+    was compatible with every matrix in the language being mis-aligned.
+
+    Added 20 matrix probes chosen to hit three distinct regimes of C++'s rule rather than to look
+    thorough: [2,2]f32 (total under the cap), [4,4]f32 (total AT the cap), [2,2]f16 (element 2 vs
+    answer 8, the widest gap), plus non-square and f64 forms where an off-by-one in the halving loop
+    would surface. VERIFIED AS A POSITIVE CONTROL, per #483's lesson about vacuous gates: the
+    pre-fix binary FAILS 9 of them, the fixed binary passes all 134.
+
+    GATES: parity 323/323 0/0/0; corpus 198 members 0 missing; vet parity 323/323 0/0/0 (run with
+    the correct triage_vet harness this time, see #511); modelcmp 134 probes 0 mismatches.
+
+#515 SYSTEMATIC AUDIT of type_align_of after #514 made it three instances. Found a FOURTH, worse
+     than the others: `[dynamic; N]T` had no arm in type_align_of OR type_size_of.
+
+    #514's write-up called it "the third instance of type_align_of carrying a plausible one-liner
+    where C++ has an algorithm" (#416 Bit_Field, #475 Bit_Set, #514 Matrix). Three is a pattern, so
+    the next move was to read every arm of the port's type_align_of against C++'s
+    type_align_of_internal rather than wait for the next one to surface.
+
+    FOUR arms looked suspicious. Three were cleared BY MEASUREMENT, not by argument:
+
+      .Simd_Vector -- port `min(total_size, 64)` vs C++ `clamp(next_pow2(size), 1, max_simd_align*2)`.
+          Looks like two divergences (next_pow2, and a hardcoded 64). Probed: #simd REQUIRES a
+          power-of-two length -- the compiler rejects `#simd[3]f32` outright -- so next_pow2 is a
+          no-op on every legal input, and max_simd_align*2 is 64 on this target. Agrees everywhere
+          reachable. The hardcoded 64 is still a LATENT target-dependence (max_simd_align is 16 on
+          some targets, making the cap 32), recorded but not changed, since nothing here can
+          observe it.
+      .Pointer/.Multi_Pointer/.Soa_Pointer -- hardcoded 8 where C++ reads ptr_size/int_size.
+          Same value on this target; same latent-only status.
+      .Slice/.Dynamic_Array/.Map -- constants matching C++'s int_size/ptr_size reads. Agree.
+
+    THE FOURTH WAS REAL, and it was not a wrong formula -- there was NO ARM AT ALL, in either
+    function. `[dynamic; N]T` fell through type_align_of's default `return 8` and through
+    type_size_of's tail. Measured against the oracle (values taken from a RUNNING binary, not from
+    the checker, so the target is the language's actual layout):
+
+        [dynamic; 4]Aligned16   align  oracle 16   port  8      (Aligned16 = struct #align(16))
+        [dynamic; 4]Aligned16   size   oracle 80   port  0
+        [dynamic; 3]u8          size   oracle 16   port  0
+        [dynamic; 2]matrix4x4   align  oracle 32   port  8
+        [dynamic; 2]matrix4x4   size   oracle 160  port  0
+
+    SIZE ZERO, not merely mis-aligned. I had characterised this as an alignment gap from reading the
+    code; the positive control corrected me.
+
+    Both arms ported from C++ (types.cpp). The size arm also writes `padding_needed`, which the port
+    DECLARED, initialised to -1, and never wrote -- the #103/#105 shape again, and load-bearing
+    rather than cosmetic since the backend needs it to place the len field.
+
+    ONE COMPOSITION EFFECT WORTH RECORDING: `[dynamic; 2]matrix[4,4]f32` could not have been
+    measured as wrong before #514. Its element measured align 4 then, so max(8, 4) = 8 -- the same
+    answer the missing arm gave by accident. Fixing matrix alignment is what made the missing arm
+    observable. Layout defects compose, and a green probe over a broken sub-computation proves
+    nothing about the computation above it.
+
+    GATE: 10 more modelcmp probes (144 total). The `Aligned16` cases are the load-bearing ones --
+    a probe using only `int` passes against a checker with no arm whatsoever, which is exactly how
+    this survived. POSITIVE CONTROL per #483: the pre-fix binary fails 8 of the 10, the fixed binary
+    passes all 144.
+
+    GATES: parity 323/323 0/0/0; corpus 198 members 0 missing; vet parity 323/323 0/0/0;
+    modelcmp 144 probes 0 mismatches.
+
+#516 SIBLING AUDIT of type_size_of. One fix landed; one SEPARATE defect found and NOT fixed.
+
+    Same method as #515, applied to the sibling function: extract both arm sets, diff them. The
+    naive diff over-reported (the port GROUPS `.Pointer, .Multi_Pointer, .Soa_Pointer` in one case,
+    and resolves Named via base_type at entry rather than with an arm), but the grouping was itself
+    the finding.
+
+    FIXED -- #soa POINTER SIZE. C++ has a SEPARATE arm:
+        case Type_MultiPointer: return build_context.ptr_size;      // one word
+        case Type_SoaPointer:   return build_context.int_size*2;    // TWO words
+    The port grouped Soa_Pointer with the ordinary pointers and returned one word. A #soa pointer
+    is {data, index} -- it cannot be a bare address, because the fields it points at live in
+    separate per-field arrays, so the index has to travel with it. Verified against a RUNNING
+    binary: size 16, align 8.
+
+    The ALIGNMENT grouping is correct and was left alone -- C++'s type_align_of_internal really does
+    return int_size for Type_SoaPointer, the same as a pointer. Only the size differs. That is
+    exactly why the grouping looked right: it IS right for one of the two functions.
+
+    EXERCISED, checked rather than assumed (the #510 habit): the pre-fix binary fails
+    `#assert(size_of(type_of(p)) == 16)` where `p := &arr[0]` on a #soa array; the post-fix binary
+    passes; the oracle passes. The path is real -- alloc_type_soa_pointer is called from
+    check_expr.odin:2571, the address-of-a-#soa-element case.
+
+    FOUND BUT NOT FIXED -- THE TYPE SYNTAX `#soa ^T` DOES NOT PRODUCE A Soa_Pointer AT ALL.
+    My first probe used the type syntax and kept failing after the fix, which is what exposed this.
+    Rendering the type in a deliberate error message shows the two implementations disagree about
+    what was even declared:
+
+        oracle   Cannot convert ... to '#soa ^#soa[]S'
+        port     Cannot convert ... to '^#soa[]S'
+
+    The port drops the `#soa` and builds a PLAIN pointer to a #soa slice. So the size arm I just
+    fixed is unreachable through that spelling, and `#soa ^T` is silently a different type. This is
+    a check_type-level gap, not a layout one, and it is filed separately rather than bolted onto a
+    size fix -- they are different defects in different phases, and #515's composition lesson
+    applies: fixing the layout is what made the syntax gap observable.
+
+    GATES: parity 323/323 0/0/0; corpus 198 members 0 missing; modelcmp 144 probes 0 mismatches.
+    (No modelcmp probe added for the #soa pointer: every spelling that would express one in a
+    constant expression goes through the broken syntax path. The probe belongs with that fix.)
+
+#517 DONE: `#soa ^T` never produced a Soa_Pointer -- the checker ignored the pointer's TAG.
+     Three branches ported; one of them closes an under-rejection.
+
+    #516 fixed type_size_of's Soa_Pointer arm but the type-syntax probe kept failing, which is what
+    exposed this. The two implementations disagreed about what had even been DECLARED:
+
+        oracle   Cannot convert ... to '#soa ^#soa[]S'
+        port     Cannot convert ... to '^#soa[]S'
+
+    WHICH PHASE, established rather than assumed -- a dropped tag could as easily have been a parser
+    defect, and the fix would then have been in another file. The port's PARSER records it
+    (parser.odin:3707, mirroring C++ parser.cpp:2466), and both ASTs carry a `tag` on the pointer
+    node. Only the port's CHECKER never read it: check_pointer_type unconditionally allocated a
+    plain pointer.
+
+    C++ check_type.cpp:3774-3791 has three branches, all now ported:
+      tag == "soa" + #soa element   -> alloc_type_soa_pointer
+      tag == "soa" + other element  -> "#soa pointers require an #soa record type as the element"
+      any other tag                 -> "Invalid tag applied to pointer, got #%s"
+    The last was an UNDER-REJECTION: the port accepted any tag on a pointer silently. Note the probe
+    for it is weaker than it looks -- `#foo ^int` is a SYNTAX error in both implementations, so the
+    branch is not reachable through the obvious spelling. Ported for faithfulness; NOT claimed as
+    verified-reachable, unlike the other two.
+
+    VERIFIED, all byte-identical to the oracle including column positions:
+        size_of/align_of on `#soa ^#soa[]S`   16 / 8, asserts pass on both
+        `#soa ^int`                            "#soa pointers require an #soa record type as the
+                                                element" at 6:13 on both
+        type RENDERING                         '#soa ^#soa[]S' on both -- the sharper instrument,
+                                               since it shows what the type IS rather than one of
+                                               its measurements
+
+    C++'s ASSERT was deliberately NOT ported. C++ does `GB_ASSERT(pt->tag->kind ==
+    Ast_BasicDirective)`; the port degrades to the plain-pointer path instead. This is a checker
+    reading a parser-produced node, and an assert there converts a parser defect into a checker
+    crash -- the #307 shape. The parser only ever stores a Basic_Directive, so the branch is
+    unreachable either way; the difference is only in what happens if that ever stops being true.
+
+    GATE: 4 modelcmp probes (148 total), including the ALIGN pair even though alignment was never
+    wrong -- they pin the asymmetry (C++ returns int_size for align, int_size*2 only for size) that
+    made grouping the two kinds look correct in the first place. POSITIVE CONTROL: the pre-#517
+    binary fails 2 of the 4.
+
+    GATES: parity 323/323 0/0/0; corpus 198 members 0 missing; modelcmp 148 probes 0 mismatches.
+
+#518 THIRD SIBLING AUDITED (type_offset_of): NEGATIVE RESULT. No defect. Coverage added anyway,
+     and the new probes are honestly weaker than the last three batches.
+
+    Completes the layout-function sweep begun at #514: type_align_of (#514/#515), type_size_of
+    (#515/#516), type_offset_of (here).
+
+    ARM SETS ARE IDENTICAL -- all 8 on both sides (Array, Basic, DynamicArray,
+    FixedCapacityDynamicArray, Slice, Struct, Tuple, Union). No missing arm, unlike its two
+    siblings.
+
+    A METHOD ERROR ON THE WAY, worth recording because it nearly produced a false finding: my first
+    extraction used `awk '/^gb_internal i64 type_offset_of\b/,/^\}/'`, and awk does not support `\b`
+    the way I assumed, so the range matched the FORWARD DECLARATION at types.cpp:845 -- which ends
+    in `;`, not `}` -- and returned an empty arm set. Read naively that says "C++ has no arms", the
+    exact shape of a spurious defect. The tell was that it was EMPTY rather than partial. Re-run
+    against the real body at 4862.
+
+    ARM PRESENCE IS NOT ARM CORRECTNESS -- #514 was a present-but-wrong arm -- so I checked values
+    too. modelcmp's 22 existing offset_of probes are ALL on structs; the other seven arms were
+    unprobed. Only one of them is reachable from user code at all:
+    intrinsics.type_fixed_capacity_dynamic_array_len_offset. The rest (Slice, Dynamic_Array, Union,
+    Tuple, Basic) are used when the compiler lowers field access, and no expression a probe can
+    write reaches them.
+
+    Measured against a RUNNING binary: [dynamic;4]int -> 32, [dynamic;3]u8 -> 8,
+    [dynamic;4]Aligned16 -> 64. Port agrees on all three, including the 16-aligned case.
+
+    THE NEW PROBES ARE NOT BACKED BY A POSITIVE CONTROL, unlike #514's, #515's and #517's, and that
+    distinction matters (#483). The pre-#515 binary PASSES them: type_offset_of's FCDA arm computes
+    from `type_size_of(ELEM)` and int_size, never from the fixed-capacity type's own size or
+    alignment, so the arms missing before #515 could not affect it. No binary I have fails these
+    three. They are regression guards over a previously-unprobed arm, and I am not claiming they
+    have been shown capable of firing.
+
+    modelcmp 148 -> 151 probes, 0 mismatches. No checker change this tick, so parity/corpus are
+    untouched and were not re-run.
+
+#519 CONSOLIDATION SWEEP after the #514-#518 arc. Two gates green, and ONE GATE IS UNRUNNABLE --
+     its harness does not exist, and it fails LOUD rather than silent, which is its own hazard.
+
+    Five ticks landed four checker fixes but each tick only re-ran the gates it needed. This ran the
+    ones untouched since before #514.
+
+        docflag.sh   PASS -- probe controls OK, every declared Doc_Entity_Flag bit either observed
+                     or on the justified-absent list (Param_Auto_Cast, Var_Static), core/strings
+                     byte-identical across 2 runs.
+        dumpdet.sh   PASS -- DUMPDET-CLEAN, deterministic under ASLR.
+        doccmp.sh    CANNOT RUN. Its harness is missing.
+
+    doccmp.sh:9 states its contract plainly: "DOC_BIN is the triage_doc harness". .claude/tools/
+    contains exactly three harness directories -- docflag_probe, triage_st, triage_vet. There is no
+    triage_doc. LEDGER #253 records this gate passing 60/60 STATE-MATCH, so the harness existed once
+    and is not in the tree now (.claude/ is untracked, so nothing in git history will explain it).
+
+    HOW IT PRESENTS, and why this is worse than a silently-skipped gate: every package reports
+    `STATE-DIFFER doc=N port=0 MISSING=N`. That is a LOUD FAILURE claiming the port's package scope
+    is empty -- for core/strings, core/os, core/math/linalg, all of them. A reader in a hurry would
+    open an investigation into a catastrophic scope regression that does not exist.
+
+    I HIT IT THREE TIMES IN ONE TICK before diagnosing it, which is the part worth recording:
+      1st  ran doccmp with triage_st -- the #511 error exactly, wrong harness kind, port=0.
+      2nd  read the header, saw "triage_doc", tried to build it, and the build silently did nothing
+           because the directory does not exist; my `&&` chain meant BUILT never printed and I did
+           not notice. Ran doccmp against a nonexistent path -- port=0 again.
+      3rd  only then listed .claude/tools/*/ and saw there are three harnesses, not four.
+    Twice I had the "port produced literally nothing" signal in front of me -- the exact shape #511
+    established as instrument-error rather than defect -- and still went one more round before
+    checking what actually exists on disk. The lesson from #511 was recorded; applying it took three
+    tries.
+
+    NOT BUILT THIS TICK, deliberately. The harness needs the Checker API (Checker, Checker_Info and
+    check_files are public per the header), a root-package-scope walk, and the INIT/FINI rosters --
+    real work, and the end of a long tick is where #340's false-regression came from. The contract
+    is fully extracted below so the next tick starts from a specification rather than a rediscovery.
+
+    HARNESS CONTRACT, read out of doccmp.sh:
+        output lines      `ENTITY <Kind> <Name>` -- doccmp greps `(?<=^ENTITY )\S+ \S+$` and takes
+                          field 2 as the NAME, so exactly two whitespace-separated fields
+        failure markers   `### LOAD-FAILED`, `### NO-ROOT-SCOPE`, `### ABS-FAILED` on stdout
+        content           sorted inventory of the ROOT package scope, plus the INIT and FINI rosters
+        direction         oracle-listed subset-of port-known. `odin doc` lists only EXPORTED
+                          declarations; the port's scope legitimately holds more (imports,
+                          @(private), file-scope names). Port-only entities are COUNTED, not failed.
+                          The failure signal is one-directional: something doc documents that the
+                          port's scope lacks.
+        entry point       checker.check_package_from_path(path) -> Package_Check_Result
+                          (package_resolver.odin:978), as triage_st/main.odin:78 uses it
+
+#520 DONE: triage_doc rebuilt from doccmp.sh's own contract; the gate runs again and PASSES,
+     29/29 STATE-MATCH -- and it is backed by a positive control this time.
+
+    The harness doccmp.sh names as its input did not exist (#519). Rebuilt at
+    .claude/tools/triage_doc/main.odin from the contract extracted last tick, so this was
+    implementation against a written specification rather than rediscovery.
+
+    WHY IT CANNOT REUSE check_package_from_path, which is the whole reason a bespoke harness is
+    needed: that function creates the Checker as a STACK LOCAL and destroys it on the way out
+    (package_resolver.odin:999-1000, whose own comment says `c` therefore cannot be returned on the
+    result). The scope inventory must be read while the checker is alive, so triage_doc drives the
+    same sequence itself -- collector before checker, load, sorted_files per package, check_files --
+    and walks the state before teardown.
+
+    THREE DECISIONS WORTH RECORDING, each of which could have produced a plausible wrong answer:
+
+      ROOT PACKAGE BY PATH, not packages[0]. The loader returns dependencies in the same slice and
+      nothing documents which lands first. Picking wrong would report a different package's
+      inventory entirely, and since doccmp's failure direction is "doc lists what the port lacks",
+      that shows up as hundreds of spurious MISSING lines -- a false catastrophe, the same shape
+      #519 was.
+
+      sorted_files, not raw map iteration. package_resolver.odin:1052-1065 explains that C++ sorts
+      each package's files by basename before checking. A harness iterating the map raw would give
+      a different inventory per run and read as a flaky gate rather than a wrong harness.
+
+      NO FILTERING of port-side entities. doccmp is deliberately one-directional (its lines 13-18):
+      `odin doc` lists only exported declarations, the scope legitimately holds more. Any filter
+      here could only manufacture false MISSING lines, so the harness over-reports on purpose.
+      Measured port-only counts bear this out and vary hugely by package -- core/os 157, core/slice
+      7 -- which is exactly the imports/@(private)/file-scope surplus the design predicts.
+
+    POSITIVE CONTROL, per #483 and demanded by #520's own acceptance note. A gate that has never
+    failed proves nothing. Built a CRIPPLED COPY of the harness in the scratchpad -- one line
+    dropping every `.Procedure` entity, the real source untouched -- and ran doccmp against it:
+
+        slice   STATE-DIFFER doc=117 port=10 MISSING=110
+                missing: advance_slices, all_of, all_of_proc, any_of, ...
+
+    The gate detects absent entities and names them. Crippled copy deleted afterwards.
+
+    BASELINE: 29/29 STATE-MATCH over the first 30 pkglist entries, 0 DIFFER, 0 DIED. (30 lines in,
+    29 verdicts out -- the list's first entry is a comment or blank, not a package.)
+
+    TWO SIGNATURE ASSUMPTIONS CAUGHT BY THE COMPILER rather than by me: filepath.abs returns an
+    os.Error not a bool, and filepath.clean returns (string, Allocator_Error) -- so my `!abs_ok`
+    and my two-argument trim_right were both wrong. Worth noting only because in a language that
+    allowed truthiness the first would have compiled and silently taken the failure branch never.
+
+#521 doccmp at FULL CORPUS for the first time: 298 STATE-MATCH, 0 STATE-DIFFER. The one non-match
+     was ENVIRONMENTAL and does not reproduce; 24 packages are honestly unmeasurable.
+
+    doccmp has existed since #253 but had only ever been run on subsets, and for some stretch not
+    at all (#519/#520: its harness was missing). First full run over all 323 pkglist entries:
+
+        STATE-MATCH   298
+        PORT-DIED       1   core/reflect, TIMEOUT
+        DOC-EMPTY      24
+        STATE-DIFFER    0   <- the verdict that would mean a real defect
+
+    THE TIMEOUT IS NOT A DEFECT, and I checked rather than assumed. Loadavg was 17.3 during the
+    sweep -- the external workload #301 documented is running again. Measured directly afterwards:
+    triage_doc completes core/reflect in under a second (158 entities), triage_st likewise, and
+    doccmp on core/reflect alone is STATE-MATCH 3/3 (doc=149 port=158). The harness timeout is 180s
+    and the real cost is sub-second, so this is three orders of magnitude of headroom being eaten
+    by contention, exactly the #301 pattern. Recorded as environmental with the numbers rather than
+    filed as a flake.
+
+    THE 24 DOC-EMPTY ARE A COVERAGE LIMIT, NOT A PASS -- and the gate says so itself, printing
+    "(nothing to compare -- NOT a pass)". They are packages where `odin doc` produces no output at
+    all: `main`-style commands (odin, example, tools, format, printer, path, rexcode...) which
+    export nothing to document. One is separately labelled DOC-EMPTY-EXPECTED: base/runtime, where
+    the oracle emits no doc but the port holds 596 entities.
+    So the honest coverage statement is 298 of 323 packages COMPARED, not "323 green". A future
+    reader tempted to quote a round number should quote 298.
+
+    WHAT THIS DOES AND DOES NOT ESTABLISH. doccmp is the only gate anchored on checker STATE rather
+    than emitted text, and it is one-directional: it can only catch entities the oracle documents
+    that the port's scope lacks. 298/298 on that axis means no package in the corpus is missing an
+    exported declaration the reference resolved -- the #286 failure class (info.init_procedures
+    never populated) is clear tree-wide. It says nothing about entities the port has and the oracle
+    does not, which is by design (imports, @(private), file-scope names) and is why port-only counts
+    range from 1 to 1196 without meaning anything.
+
+#522 CHECKER CRASH FIXED: two statements in the wrong order made a recovery branch a GUARANTEED
+     panic. Found by chasing a +1 drift in invented.py's candidate count.
+
+    HOW IT SURFACED, because the route matters. invented.py reported 507 candidates against a
+    recorded baseline of 506. That +1 is well inside the tool's noise (its own header lists four
+    reasons it over-reports, and it cannot tell code from prose), so it was not evidence of
+    anything. But checking it meant re-examining the two "Too many arguments to procedure call"
+    sites #516 identified as invented-but-unfixed -- and probing whether they were still reachable
+    is what produced the crash.
+
+    THE DEFECT, check_proc_group.odin:
+        if len(procs) == 0 {
+            copy(procs[:len(procs_slice)], procs_slice)   // procs is EMPTY here, by the guard
+            resize(&procs, len(procs_slice))              // the room is made AFTER it is needed
+        }
+    `procs[:len(procs_slice)]` on a zero-length dynamic array aborts with
+    "Invalid slice indices 0:1 is out of range 0..<0". The branch exists to restore the candidate
+    list when filtering removed everything, so it can ONLY ever execute in the state that makes it
+    crash. It was not a rare path -- it was an unreachable-by-success path that was 100% fatal
+    whenever reached. Swapped: resize, then copy.
+
+    REPRO -- ordinary code, not a corner case:
+        vari :: proc(a: int, rest: ..int) {}
+        gv   :: proc{vari}
+        gv(1, 2, 3, x = 4)              // named argument naming no parameter
+    oracle: "No parameter named 'x' for this procedure type"
+    port before: checker aborted
+    port after:  byte-identical to the oracle, column and all (4:34)
+
+    NOT MINE, verified rather than assumed. I edited this file in #510 and the crash is inside it,
+    so the first thing checked was authorship: bisected across seven binaries kept from this
+    session -- triage_base510 (pre-#510), st510 (part 1), st510b (both parts), st514, st515, st516,
+    st517 -- and ALL SEVEN crash. Pre-existing, untouched by my arity check.
+
+    ONE THING THE ARITY CHECK DID CHANGE, incidentally: the zero-parameter shape `g0(1)` used to
+    reach the invented "Too many arguments to procedure call" further down, and now hits #510's
+    ported check first and prints C++'s named message. So both invented sites at :832 and :970 may
+    now be dead. MAY BE -- I could not construct an input reaching either, but "I failed to reach
+    it" is not "it is unreachable", and the #266 precedent for deleting invented code required
+    proof. Left in place, noted here.
+
+    CITATION DRIFT at the site: the comment cited check_expr.cpp:6990-6995, which is the
+    polymorphic-variadic arm, not this restore. Removed rather than replaced with another guess.
+
+    GATES: parity 323/323 0/0/0; corpus 198 members 0 missing; modelcmp 151 probes 0 mismatches.
+
+#523 CALL-SHAPE SWEEP: 20 adversarial probes, 0 crashes, 4 divergences -- and 3 of the 4 share one
+     root cause that is the SAME STRUCTURAL PATTERN as #510, now seen a third time.
+
+    #522 came from probing one odd call shape, so this generalised it: 20 probes over proc groups
+    crossed with named arguments, variadics, defaults, polymorphic parameters and zero-argument
+    calls. Both compilers run on each; port output compared to the oracle line for line.
+
+        crashes    0/20   (the #522 class is not a family -- that was one bug, not a pattern)
+        MATCH     16/20
+        DIFFER     4/20
+
+    SANITY CHECK FIRST, because 0 crashes is exactly what a probe that never reaches the checker
+    also reports (#511/#519 twice over): probe 1 was run through both compilers and shown to
+    produce the same real diagnostic. The battery exercises what it claims to.
+
+    THE FOUR DIVERGENCES:
+      gp()                 oracle "Parameter 'x' of type '$T' is missing in procedure call"
+                           port   "Cannot determine polymorphic type from parameter: 'invalid
+                                   type' to '$T'"  AT THE DECLARATION SITE (11:15), not the call
+                                   site (23:18)
+      gpv()                identical shape
+      gpv(x = 1, rest = 2) same message, same wrong position
+      gv(rest = 1)         oracle "Parameter 'a' of type 'int' is missing"
+                           port   "Argument for parameter 'rest' has incompatible type"
+
+    ROOT CAUSE of the first three, and it is verbatim #255's failure mode: the port instantiates
+    the polymorphic candidate with a MISSING argument, so an unwritten zero-valued Operand reaches
+    determine_type_from_polymorphic, whose guard prints that message with the declaration's
+    position because operand.expr is nil. #255 fixed exactly this -- on the DIRECT-CALL path.
+
+    THE PATTERN, third instance:
+        check_expr.odin:10842-10902   poly_missing_required  AND  poly_too_many_args   <- both
+        check_proc_group.odin:729     the too-many check only                          <- one
+    #510 found the too-many gate on the direct path and absent from the proc-group path, and added
+    it. The missing-required gate has the same asymmetry and is still absent. C++ has neither
+    problem because it scores proc-group candidates through the same
+    check_call_arguments_internal a direct call uses -- one function, one gate, both paths. The
+    port's split of that function into two is the standing hazard, and this is now the third gate
+    found on only one side of it.
+
+    NOT FIXED THIS TICK, deliberately, and for the reason #510 part 2 was also deferred: the fix is
+    ~30 lines walking the parameter tuple, into a function whose operand construction differs from
+    the direct-call path (it fills the variadic slot synthetically -- check_proc_group.odin:713-715
+    records three earlier attempts at count logic there that had to be reverted). Landing that at
+    the end of a long tick is how #340's false regression happened. Filed with the diagnosis,
+    the four repros and the template.
+
+    gv(rest = 1) is NOT obviously the same cause -- naming the variadic parameter explicitly -- and
+    is recorded as a separate question rather than assumed to fall out of the gate fix.
+
+#524 DONE (the unambiguous subset): #255's missing-required gate ported to the proc-group path.
+     Probe battery 16/20 -> 18/20 MATCH. The two survivors are the named-argument case the gate
+     deliberately does not cover, and that restriction is the interesting part.
+
+    THIRD instance of the split-function asymmetry, now closed for this gate:
+        check_expr.odin      poly_missing_required (#255)  +  poly_too_many_args (#510)
+        check_proc_group.odin  too-many (#510)  +  missing-required (here)
+
+    FIXED: `gp()` and `gpv()` -- a polymorphic proc group called with no arguments. The port
+    instantiated with an UNWRITTEN operand (mode .Invalid, type nil, expr nil), which reached
+    determine_type_from_polymorphic and printed
+        Cannot determine polymorphic type from parameter: 'invalid type' to '$T'
+    AT THE DECLARATION'S POSITION (11:15) rather than the call's (23:18) -- because operand.expr
+    was nil, so there was no call site to point at. Both now byte-identical to the oracle:
+        Parameter 'x' of type '$T' is missing in procedure call   at 23:18
+
+    THE RESTRICTION, and why it is a subset rather than a shortcut. C++ runs this check AFTER
+    ordering named arguments into ordered_operands, so it knows which parameters a NAME supplies.
+    This path does not: named arguments are mapped to parameter indices in a later block
+    (`len(named_operands) > 0`), so at gate time a parameter supplied only by name is
+    indistinguishable from one never supplied. Gating on it would report a missing parameter that
+    was in fact provided -- an over-rejection manufactured by the fix. So the gate runs only when
+    len(named_operands) == 0, where the answer is unambiguous and identical to C++'s. Everything
+    else is left exactly as it was.
+
+    TWO PROBES STILL DIFFER, both named-argument, both stated rather than hidden:
+        gpv(x = 1, rest = 2)   the case the restriction excludes -- unchanged, not worsened
+        gv(rest = 1)           naming the VARIADIC parameter; flagged in #523 as a separate
+                               question and it did not fall out of this fix, which is what I said
+                               would need checking rather than assuming
+
+    C++'s OTHER TWO ARMS NOT PORTED: it has three (type parameter / an already-valued constant,
+    which it ignores / the general case). Only the general one is written. The other two need a
+    repro first -- #266 is the standing lesson about implementing branches nothing reaches.
+
+    GATES: parity 323/323 0/0/0; corpus 198 members 0 missing; modelcmp 151 probes 0 mismatches;
+    vet parity 323/323 0/0/0.
+
+#525 THE `gv(rest = 1)` RESIDUAL IS TWO DEFECTS, NOT ONE -- and the DIRECT-call path is wrong too,
+     which #524's probe battery could not see because it only exercised proc groups.
+
+    #524 left `gv(rest = 1)` open, flagged as "may or may not be the same gate". It is neither: it
+    is two separate defects, and testing the DIRECT call alongside the group call is what separated
+    them. `vari :: proc(a: int, rest: ..int)` called with only `rest` named:
+
+        vari(rest = 1)   DIRECT
+            oracle  "Parameter 'a' of type 'int' is missing in procedure call"   (5:2)
+                    "Cannot convert untyped value '1' to '[]int' ..."            (5:14)
+            port    the first only -- the conversion error is NOT reported
+
+        gv(rest = 1)     GROUP
+            oracle  the same PAIR                                                (6:2, 6:12)
+            port    "Argument for parameter 'rest' has incompatible type"        (6:2)
+                    -- neither of C++'s two, and one message where C++ has two
+
+    DEFECT 1, UNDER-REPORTING ON THE DIRECT PATH. C++ does NOT stop after a missing parameter: the
+    loop sets `err = CallArgumentError_ParameterMissing` (check_expr.cpp:6856) and execution
+    continues into eval_param_and_score for the arguments that WERE supplied, so the bad `rest`
+    conversion is still reported. The port reports the missing parameter and goes no further. Note
+    this corrects a phrase in #255's own comment, which says C++ "reports ... and stops" -- it sets
+    err and continues; only INSTANTIATION is suppressed, not the remaining checks.
+
+    DEFECT 2, TWO MORE INVENTED MESSAGES. "has incompatible type" appears NOWHERE in src/:
+        check_proc_group.odin:995   "Argument for parameter '%s' has incompatible type"
+        check_proc_group.odin:1102  "Argument %d has incompatible type"
+    Same class as the "Too many arguments to procedure call" pair #516 found in this file, and the
+    third and fourth invented strings now known in it.
+
+    NOT FIXED THIS TICK. Defect 1 changes control flow on the hot argument-checking path -- making a
+    check stop suppressing its successors is exactly the kind of edit that looks one-line and
+    cascades -- and defect 2 needs C++'s actual emission at that point traced before the invented
+    text is replaced rather than merely deleted (#252's lesson: sometimes the port's fallback is
+    itself the invention and C++ falls through silently). Filed with both repros.
+
+    WHAT THIS SAYS ABOUT THE #523 BATTERY: it compared only the first diagnostic line per probe, so
+    a port that emits ONE of C++'s TWO errors scored as a plain DIFFER rather than as
+    under-reporting. Worth remembering when reading that 18/20 -- the two survivors are understood,
+    but the metric itself is coarser than it looks.
+
+#526 THE REAL SCOPE OF #525: check_proc_group.odin has TWO REDUCED COPIES of C++'s
+     eval_param_and_score, and the faithful one lives in check_expr.odin. FOURTH instance of the
+     split-function hazard -- and this time the split is not a missing gate but a missing HALF of
+     the function.
+
+    C++ has ONE lambda, check_expr.cpp:6860-6900, called at :6984 (positional) and :7018 (variadic).
+    The port has THREE argument-scoring sites:
+        check_expr.odin:11293-11319       FAITHFUL -- calls check_assignment with C++'s exact
+                                          context string "procedure argument", and cites :6860
+        check_proc_group.odin:992         REDUCED
+        check_proc_group.odin:1099        REDUCED
+
+    WHAT THE TWO REDUCED COPIES ARE MISSING, measured against the lambda line by line:
+      1. THE DIAGNOSTIC ITSELF. C++ calls check_assignment(o, param_type, "procedure argument"),
+         which produces "Cannot convert untyped value '1' to '[]int' from 'untyped integer'". The
+         port substitutes its own summary text -- the two invented strings from #525.
+      2. IT DOES NOT RETURN. C++ sets `err = CallArgumentError_WrongTypes` and falls through, so the
+         missing-parameter loop still runs and BOTH errors are reported. The port's `return false`
+         at :999 skips report_missing_parameters at :1004 entirely. This is why the oracle prints
+         two errors and the port prints one.
+      3. THE SUCCESS-PATH check_assignment -- C++'s `else if (show_error)` arm at :6882 runs
+         check_assignment even when assignability SUCCEEDED, which is what converts/retypes untyped
+         operands. This is precisely the defect class #194 fixed at a different site; the same
+         omission survived here.
+      4. allow_array_programming / the #no_broadcast diagnostic (:6870-6874).
+      5. The EntityFlag_ConstInput check and its "Expected a constant value for the argument '%s'".
+      6. The Entity_Constant-holding-a-proc-type check that follows it.
+
+    CORRECTION TO #525. I wrote there that the DIRECT path "stops after missing-param where C++
+    continues". That framing is wrong: the direct call routes through this same shared
+    report_missing_parameters (the only three emitters of that message are all in
+    check_proc_group.odin), so it is not a separate early-return. The direct case's missing
+    conversion error has a different and still-unproven cause -- the likely one is that a NAMED
+    variadic argument is scored ELEMENT-wise (is_variadic_param=true) when C++ requires the whole
+    slice type, but I have not demonstrated that and am not asserting it.
+
+    STILL NOT FIXED, and the reason is now stronger rather than weaker: this is not a message swap,
+    it is porting a 40-line function that two call sites reduced. CLAUDE.md's standing instruction
+    is that simplified versions are not acceptable, so the fix is to port the lambda once and route
+    both sites through it -- a real change to the argument-checking path, deserving its own tick
+    with full gates rather than a tail-end edit.
+
+#527 DONE (the two proc-group copies): both invented messages replaced by C++'s check_assignment,
+     and both `return false` bails replaced by C++'s set-and-continue. The group case is now
+     byte-identical to the oracle; the DIRECT case is not, and that is a different defect.
+
+    Implements the first two items of #526's six. check_proc_group.odin:992 (named path) and :1099
+    (positional path) each had:
+        error_node(call_node, "Argument for parameter '%s' has incompatible type", ...)   INVENTED
+        error_node(call_node, "Argument %d has incompatible type", i + 1)                 INVENTED
+        return false                                                                      WRONG
+    Now each calls check_assignment(ctx, &operand, param_type, "procedure argument") under
+    show_error -- C++'s exact call with C++'s exact context string -- and sets a `had_wrong_types`
+    flag that is consulted AFTER report_missing_parameters, mirroring C++'s `err` which is set and
+    then fallen through (check_expr.cpp:6879-6881).
+
+    MEASURED, on `vari :: proc(a: int, rest: ..int)` called as `gv(rest = 1)`:
+        before   Argument for parameter 'rest' has incompatible type        (one error, invented)
+        after    Parameter 'a' of type 'int' is missing in procedure call   (6:2)
+                 Cannot convert untyped value '1' to '[]int' from ...       (6:12)
+        oracle   identical, both lines, both positions
+    Emission order was not a concern: diagnostics are position-sorted, and 6:2 precedes 6:12 even
+    though the argument loop runs before the missing-parameter report.
+
+    THE DIRECT CALL `vari(rest = 1)` IS STILL WRONG and is NOT fixed by this. It emits the missing
+    parameter and not the conversion. That path does not go through either site edited here, so
+    #526's correction stands: it is a separate defect, still with no proven cause. Not asserted,
+    not bundled into this entry's claim.
+
+    NOT YET PORTED -- items 3-6 of #526, deliberately left: the SUCCESS-path check_assignment
+    (#194's class), allow_array_programming/#no_broadcast, EntityFlag_ConstInput, and the
+    constant-proc check. These change behaviour on every successful argument of every candidate
+    rather than only on the failing ones, so they are staged separately with their own gates.
+
+    BATTERY, now compared as FULL SETS rather than first lines (the coarseness #525 flagged):
+    MATCH=19 DIFFER=1, the survivor being the direct-call case above.
+
+    GATES: parity 323/323 0/0/0; corpus 198 members 0 missing; modelcmp 151 probes 0 mismatches;
+    vet parity 323/323 0/0/0.
+
+    ONE FLAKE, STATED RATHER THAN SMOOTHED: the first vet-parity run reported compared=322
+    excluded=1. Re-run with the SAME binary gave 323/0 with the previously-excluded package
+    compared and matching. That is the transient-timeout signature #301 documented on this host,
+    not a crash introduced here -- but the first number is recorded because "I re-ran until it was
+    green" is only honest if the first result is visible too.
+
+#529 PIECE B OF #528, DIAGNOSED: the direct-call path has TWO defects, and one of them is an
+     UNDER-REJECTION -- the port ACCEPTS code the oracle rejects. #526's element-vs-slice
+     hypothesis is now CONFIRMED rather than merely plausible.
+
+    Probe $S/vd contains NO proc group -- every call is direct -- which is what makes it a clean
+    instrument for this path. `vari :: proc(a: int, rest: ..int)`, `nonv :: proc(a, b: int)`:
+
+        vari(rest = 1)        oracle  missing 'a'  +  Cannot convert '1' to '[]int'
+                              port    missing 'a' only
+        vari(a = 1, rest = 2) oracle  Cannot convert '2' to '[]int'
+                              port    NOTHING -- ACCEPTED
+        vari(1, rest = 2)     oracle  Cannot convert '2' to '[]int'
+                              port    NOTHING -- ACCEPTED
+        nonv(b = "s")         oracle  missing 'a'  +  Cannot convert '"s"' to 'int'
+                              port    missing 'a' only
+        nonv(a = 1, b = "s")  oracle  Cannot convert '"s"' to 'int'
+                              port    IDENTICAL -- this shape is correct
+
+    DEFECT B1, AN UNDER-REJECTION. A NAMED argument bound to the variadic parameter is never type
+    checked. Scored against the ELEMENT type (int), `2` is assignable and passes silently; C++
+    scores it against the SLICE type ([]int) and rejects. This is exactly the mechanism #526
+    guessed at and explicitly declined to assert -- the guess was right, and it is worse than a
+    lost message: invalid code compiles. Note check_proc_group.odin:1085-1096 performs precisely
+    this element-type substitution deliberately, with a comment explaining why the POSITIONAL path
+    needs it (#120). The named path must not inherit it.
+
+    DEFECT B2. When any parameter is missing, the conversion errors for the arguments that WERE
+    supplied are dropped. `nonv(b = "s")` is the minimal repro and is not variadic at all, so B2 is
+    independent of B1. The contrast with `nonv(a = 1, b = "s")`, which is byte-identical to the
+    oracle, isolates it to the missing-parameter interaction rather than named handling generally.
+
+    #527's BLAST RADIUS, BOUNDED BY MEASUREMENT: the pre-#527 binary (triage_st524) and the
+    post-#527 binary produce BYTE-IDENTICAL output on this group-free file. So #527 changed nothing
+    for direct calls -- it is confined to proc-group resolution, as intended. A negative control
+    worth having, since #527 touched a function reachable from several call sites.
+
+    ROUTING STILL UNRESOLVED, and I am not going to guess it a third time. The missing-parameter
+    message exists ONLY in check_proc_group.odin, and its two callers are both inside
+    check_call_arguments_single -- yet edits to that function's argument loops demonstrably do not
+    affect these direct calls. Something routes around the loops before reaching them. The next
+    step is temporary stderr instrumentation at the three candidate points, not more reading:
+    two successive readings of this control flow have now produced two wrong conclusions.
+
+#530 ROUTING SETTLED BY INSTRUMENTATION, after two wrong readings -- plus a CORRECTION to #524's
+     own write-up. Four markers, built, run, removed, restore verified by md5.
+
+    MEASURED on $S/vd (five direct calls, no proc group). 20 x MARK-A, and NOTHING else:
+        [MARK-A] enter internal named=0 pos=2 show=...   x20  (4 entries per call site)
+        [MARK-B] named-loop fail                          NEVER
+        [MARK-C] positional-loop fail                     NEVER
+        [MARK-D] report_missing_parameters emitting       NEVER
+
+    THREE FACTS, none of which I would have got by reading:
+
+    1. NAMED ARGUMENTS ARE ALREADY FOLDED INTO POSITIONAL by the time
+       check_call_arguments_internal is entered on the direct path: `vari(rest = 1)` arrives as
+       named=0, pos=2. The named/positional distinction I had been reasoning about does not exist
+       at this point in this path.
+
+    2. report_missing_parameters IS NOT THE EMITTER. MARK-D never fired, yet "Parameter 'a' of type
+       'int' is missing in procedure call" was printed. By elimination over the three known
+       emitters, it is check_proc_group.odin:857 -- the gate I added in #524.
+
+    3. NEITHER ARGUMENT LOOP RUNS, which is the direct explanation for #529's observation that
+       #527 was byte-for-byte inert on this file. The :857 gate returns false first.
+
+    B1/B2 ARE PRE-EXISTING, NOT MY DOING -- checked rather than assumed, because fact 2 pointed at
+    my own code. triage_st517 and triage_base510 (both pre-#524) produce output BYTE-IDENTICAL to
+    the current binary on this probe. #524 changed which line emits the message, not the behaviour.
+
+    CORRECTION TO #524. I described its `len(named_operands) == 0` restriction as confining the
+    gate to calls without named arguments, and listed two probes as "the named-argument cases the
+    restriction excludes". That is wrong as stated: on the DIRECT path named arguments are
+    pre-folded, so named_operands is empty and the gate fires for them too -- `vari(rest = 1)` is
+    gated by it right now. The restriction is only meaningful on the PROC-GROUP path, where
+    check_procedure_group_call builds named_operands explicitly (:1747) and passes them through.
+    #524's measurements were all taken on group calls, so its numbers stand; its description of
+    the restriction's scope does not.
+
+    FIX DIRECTION FOR B2, now concrete: :857 must set an error and continue, exactly as #527 did
+    for the two loops, instead of `return false`. C++ sets err and keeps checking the arguments
+    that were supplied. B1 (named variadic scored element-wise) remains separate.
+
+#531 B2 FIXED -- and #530's fact 2 was WRONG, caused by my own truncated grep. Both corrected here.
+
+    THE INSTRUMENT ERROR FIRST. #530 concluded "by elimination over the three known emitters" that
+    check_proc_group.odin:857 printed the missing-parameter message for direct calls. The
+    elimination was over a TRUNCATED LIST: the grep that enumerated the emitters ended in `head -5`,
+    which cut off exactly the two that mattered. There are FIVE, not three:
+        check_proc_group.odin:857, 1210, 1213
+        check_expr.odin:11192, 11195      <-- cut off by head -5, and these are the real ones
+    :857 is inside `if pt.is_polymorphic && !pt.is_poly_specialized`, so it cannot fire for `vari`
+    at all. Two of my three wrong readings of this control flow trace to that one truncation.
+    The routing is simple and was never exotic: DIRECT calls are handled entirely by check_expr.odin,
+    proc-GROUP calls by check_proc_group.odin. That is also why #527 was inert on direct calls.
+
+    B2, THE ACTUAL DEFECT: check_expr.odin's missing-parameter block sets data.error correctly and
+    does NOT return -- but eleven lines later, BEFORE the "Type check each argument" loop, sits
+        if data.error { data.result_type = pt.results; return data }
+    C++ has no such bail between its missing-parameter loop (check_expr.cpp:6835-6857, which sets
+    err and falls through) and the argument checking that follows. So every conversion error for
+    the arguments that WERE supplied was dropped whenever any parameter was missing.
+
+    FIX: a dedicated `missing_param_error` flag, set alongside data.error in that one block, and
+    the bail relaxed to `if data.error && !missing_param_error`. Deliberately NOT a blanket removal
+    of the early return -- every other error kind still bails exactly as before, so the change is
+    confined to the one case measured. The type-check loop already `continue`s past Invalid slots,
+    so the un-filled parameters it now walks over are handled, not merely tolerated.
+
+    MEASURED, `nonv :: proc(a, b: int)` called as `nonv(b = "s")`:
+        before   Parameter 'a' of type 'int' is missing        (8:2)
+        after    Parameter 'a' of type 'int' is missing        (8:2)
+                 Cannot convert '"s"' to 'int' from 'untyped string', got "s"   (8:11)
+        oracle   identical
+    B1 IS UNCHANGED AND STILL OPEN, as scoped: the three variadic probes (5, 6, 7) still differ,
+    because the type-check loop `continue`s the variadic slot outright. `vari(a = 1, rest = 2)` is
+    still ACCEPTED where the oracle rejects it -- the under-rejection stands.
+
+    GATES: parity 323/323 0/0/0; corpus 198 members 0 missing; modelcmp 151 probes 0 mismatches;
+    vet parity 323/323 0/0/0. Group battery 19/20, unchanged from #527 -- #524's and #527's results
+    are preserved.
+
+    ONE NOISY FIRST RUN, RECORDED: the first parity run reported attrib_mismatches=2. Re-run gave
+    0, AND a control run of the PRE-531 binary also gave 0 -- so the 2 was the #341 oracle-side
+    ATTRIB flake, not this change. #340 is the standing lesson about reverting a good change on one
+    noisy sweep; the control is what makes the dismissal legitimate rather than convenient.
+
+#532 B1 FIXED ON THE DIRECT PATH: the named-variadic UNDER-REJECTION is closed. All seven lines of
+     the repro are now byte-identical to the oracle, and a positive control proves no
+     over-rejection was traded for it.
+
+    THE DEFECT. check_expr.odin's argument type-check loop opened with a blanket
+        if pt.variadic && i == variadic_index { continue }
+    justified by a comment saying the variadic slot "was already checked above". That is true for
+    POSITIONAL variadic arguments -- the pass above checks expanded ones against the slice type and
+    unexpanded ones element-by-element -- but that pass iterates `positional_operands`, which a
+    NAMED argument never enters. A named variadic argument was therefore skipped by BOTH passes and
+    never type-checked at all:
+        vari :: proc(a: int, rest: ..int)
+        vari(a = 1, rest = 2)   oracle rejects, port ACCEPTED
+    An under-rejection, not a lost message: invalid code compiled.
+
+    FIX: a `named_filled: []bool` recorded where named arguments land, and the skip narrowed to
+        if pt.variadic && i == variadic_index && !named_filled[i] { continue }
+    Nothing else changed. param_types[variadic_index] IS the slice type (the expansion block above
+    names it expected_slice_type), so the ordinary check_assignment the slot now falls through to
+    produces C++'s exact text and position -- no new message was written for this.
+
+    VERIFIED BOTH DIRECTIONS, which matters because the fix removes a skip:
+      NEGATIVE ($S/vd, 7 diagnostics): port now byte-identical to the oracle on ALL seven lines,
+        including the three variadic ones that were silently accepted before.
+      POSITIVE ($S/vok, NEW): five VALID spellings -- named-variadic-given-a-slice, positional
+        variadic, empty variadic, `..s` expansion, and both-named-out-of-order. Oracle 0 errors,
+        port 0 errors. Without this control a fix that simply rejected all named variadic arguments
+        would have looked identical on the negative probe.
+
+    GATES: parity 323/323 0/0/0; corpus 198 members 0 missing; modelcmp 151 probes 0 mismatches;
+    vet parity 323/323 0/0/0. Group battery 19/20, unchanged.
+
+    THE GROUP PATH IS NOT FIXED, and I am not claiming it is. Battery probe p20 is
+    `gpv(x = 1, rest = 2)` -- a POLYMORPHIC PROC GROUP with named arguments, which routes through
+    check_proc_group.odin and is exactly the case #524's `len(named_operands) == 0` restriction
+    excludes. It still diverges, and differently: the port reports two "Cannot determine polymorphic
+    type" errors (one at the DECLARATION, 12:15) where the oracle reports one conversion error at
+    the call. That is the polymorphic-instantiation-with-named-args problem, a harder shape than
+    this one, and it remains open.
+
+#533 PIECE 1 DONE: polymorphic proc group + named arguments. The call-shape battery is 20/20 for
+     the first time -- the last known divergence in it is closed.
+
+    THE DEFECT. check_proc_group.odin's polymorphic arm built its instantiation operand array
+    `ops` from positional_operands ONLY. Named arguments were mapped to parameter indices in a
+    LATER block, so at instantiation time a parameter supplied only by name held an unwritten
+    Operand. `gpv(x = 1, rest = 2)` on `polyv :: proc(x: $T, rest: ..$T)` therefore produced
+        (12:15) Cannot determine polymorphic type from parameter: 'invalid type' to '$T'
+        (23:18) Cannot determine polymorphic type from parameter: 'untyped nil' to '[]$T'
+    -- two errors where the oracle gives one, and the first at the DECLARATION rather than the
+    call, because the unwritten operand had no expr to point at. Same wrong-position signature
+    #524 fixed for the zero-argument case; this is its named-argument sibling.
+
+    FIX: map named arguments into their parameter slots BEFORE the instantiation block, recording
+    which slots they filled. C++ does this ordering ahead of its polymorphic arm
+    (check_expr.cpp:6322-6361), which is why it never had the problem. With `x` present, $T binds
+    to int, []$T specialises to []int, and `rest = 2` then fails an ordinary conversion -- giving
+    the oracle's single error at the oracle's position:
+        (23:36) Cannot convert untyped value '2' to '[]int' from 'untyped integer'
+    Byte-identical, position included.
+
+    AND IT RETIRES #524's RESTRICTION. That gate carried `len(named_operands) == 0` because a
+    parameter supplied by name was indistinguishable from one never supplied. Now that named
+    arguments are mapped first, the gate consults `named_filled[i]` and runs unconditionally --
+    the restriction existed only because of the ordering this fix corrects. The two messages the
+    later ordering block owns (unknown name, duplicate name) are deliberately NOT emitted from the
+    new pass, so they are not doubled.
+
+    GATES: corpus 198 members 0 missing; modelcmp 151 probes 0 mismatches; vet parity 323/323
+    0/0/0. Battery 20/20 (was 19/1). $S/vd byte-identical to the oracle on all 7 diagnostics and
+    $S/vok still 0/0 -- #531 and #532 are not regressed.
+
+    PARITY TOOK THREE RUNS AND I AM RECORDING ALL THREE, not just the green one:
+        run 1  323/323  attrib_mismatches=2
+        run 2  322 compared, 1 EXCLUDED (timeout), attrib 0
+        run 3  323/323  0/0/0
+        control, PRE-533 binary (triage_st532)  323/323  0/0/0
+    Two of three runs of the new binary are clean and the count in the dirty one (2) matches #341's
+    documented ORACLE-side ATTRIB flake, which #341 established by an oracle-vs-oracle control. The
+    single clean control run is NOT by itself proof -- an intermittent fault can pass once -- so
+    the evidence here is the pair (2 of 3 clean, count matches the known flake), not the control
+    alone. Stated this way because #340 is the standing lesson in both directions: do not revert a
+    good change on one noisy sweep, and do not bless one on one lucky sweep either.
+
+#534 DONE: eval_param_and_score ported ONCE and both reduced copies routed through it. THREE more
+     under-rejections closed -- and one of them was in the copy I had called "faithful".
+
+    The chain #525->#534 is now complete. C++ has one lambda (check_expr.cpp:6860-6921); the port
+    had three partial transcriptions of it. There is now one helper, `eval_param_and_score` in
+    check_proc_group.odin, carrying C++'s structure and cited line by line, called from both
+    scoring loops in that file.
+
+    PROBE FIRST, THEN IMPLEMENT -- and the probe changed the plan. $S/ep exercises each item on
+    BOTH the direct and the proc-group path. Oracle 6 diagnostics, port 2:
+        item 3  enum-from-untyped-int    direct OK   group MISSING
+        item 4  #no_broadcast            direct OK   group MISSING
+        item 5  #const with a non-const  direct MISSING   group MISSING
+    That last row is the finding. #526 recorded check_expr.odin's copy as FAITHFUL and used it as
+    the model; it is faithful for items 1-3 but has never had the ConstInput check either. So
+    `fci :: proc(#const n: int)` called with a runtime value was ACCEPTED by BOTH paths. Had I
+    ported "the missing items" to the group sites alone, as filed, that under-rejection would have
+    survived and I would have called the task done.
+
+    WHAT LANDED:
+      - New shared helper with items 3-6: success-path check_assignment (#194's class, and the
+        under-rejection behind item 3), allow_array_programming + the '#no_broadcast' diagnostic,
+        EntityFlag_ConstInput, and the Entity_Constant-holding-a-proc-type check.
+      - Both check_proc_group.odin loops now call it. The positional site keeps passing
+        `effective_type` -- #120's variadic element-type substitution is that path's own and is
+        preserved deliberately.
+      - check_expr.odin gets the two missing constant checks inline. NOT restructured to use the
+        helper: extracting its copy would touch the one argument-checking path that was already
+        working, and that is a separate risk from the one this task was about.
+
+    C++'s TAIL (:6911-6919 -- add_type_info_type for any/typeid params, add_type_and_value,
+    update_untyped_expr_type) IS NOT PORTED. Partly it is already covered elsewhere:
+    check_distance_between_types (check_equivalence.odin:521-533) calls add_type_info_type for the
+    type->typeid case, reached through the same scoring call. The rest needs a repro before it is
+    written -- #266 remains the standing lesson, and I have no probe that reaches it.
+
+    MEASURED: $S/ep 6/6 byte-identical to the oracle (was 2/6).
+    GATES: parity 323/323 0/0/0 first run; corpus 198 members 0 missing; modelcmp 151 probes 0
+    mismatches; vet parity 323/323 0/0/0. Regressions checked, all three held: battery 20/20,
+    $S/vd byte-identical, $S/vok 0/0.
+
+#535 #507 ANSWERED BY OBSERVATION, not inference: C++'s dep-tree worker really does enqueue every
+     child twice, and the cost is 2^depth. Written up as UPSTREAM-507. The port is NOT changed --
+     its form is the correct one.
+
+    #507 was filed as a READING and explicitly refused to file upstream on inference alone. The
+    reading holds and is not ambiguous: checker.cpp:7551-7552 is
+
+        thread_pool_add_task(check_walk_all_dependencies_worker_proc, child);
+        check_walk_all_dependencies(child);
+
+    and check_walk_all_dependencies (:7561) is nothing but that same thread_pool_add_task with the
+    same proc and the same data. The two statements are the same operation written two ways.
+
+    THE OBSERVATION #507 ASKED FOR, obtained WITHOUT instrumenting C++. A double-enqueue per level
+    is a behavioural prediction -- 2^depth tasks -- so it can be measured as time against nesting
+    depth. Generated files of d nested proc literals whose whole body is `x := 1`:
+
+        depth   oracle     port
+        16       88 ms     28 ms
+        18      280 ms     27 ms
+        20     1020 ms     28 ms
+        21     2146 ms     28 ms
+        22     4389 ms     27 ms
+
+    2.10x then 2.05x per single level. That is the doubling, seen directly. The port -- which runs
+    the plain bottom-up recursion inside one task, matching C++'s OWN #if 0 form at :7522-7530 --
+    is flat across the same range. At depth 22 the reference takes 160x longer on a file containing
+    one integer assignment.
+
+    Deciding a timing experiment could substitute for a task counter is the whole trick here: the
+    claim was about how many tasks are created, and task count is exactly what wall-clock exposes
+    when the per-task work is trivial and the growth is exponential. No C++ rebuild was needed.
+
+    THE SECOND HALF IS STILL UNOBSERVED AND SAID SO IN THE WRITE-UP. add_deps_from_child_to_parent
+    runs without waiting for the children just enqueued, so a parent can propagate before its
+    children. I have no observation of a consequence and did not claim one -- 323 parity packages
+    are green either way. It is in the file as an adjacent note for whoever fixes the enqueue, not
+    as a second defect.
+
+    PORT UNCHANGED, deliberately. Its form is both faithful to C++'s sequential original and the
+    one that does not compound. Changing it to match the threaded form would import the defect.
+
+#536 POST-CHAIN VERIFICATION, no findings. After #527-#535 (five landed fixes in the argument-
+     checking path, plus the shared helper), ran the two checks the gate set does NOT cover:
+        ./odin check core/odin/checker -vet -strict-style -no-entry-point   -> clean, no output
+        ./odin test core/odin/checker/tests                                 -> 146 tests, ALL PASS
+     146/146 matches #321's figure, so the chain did not disturb the suite. Recorded because the
+     gates I had been running (parity, corpus, modelcmp, vet parity) are all reference-comparison
+     instruments -- none of them lints the port's own source or runs its unit tests, and the new
+     eval_param_and_score helper had been through neither until now.
+
+     OBSERVED BUT NOT ACTED ON: the test run prints tracking-allocator leak lines, overwhelmingly
+     ast clone.odin:11 new_from_positions plus a few parser sites. The suite still reports success,
+     these are not new (nothing in #527-#534 touched clone or the parser), and #4 was the last
+     deliberate leak sweep. Noting the observation without inflating it into a finding.
+
+#537 SELF-CHECK on #534's new strings, no findings. This project's most repeated defect class is
+     the invented message (#516, #525/#526 found four in one file), and #534 added three new error
+     strings, so they were checked against the reference rather than trusted:
+        "Expected a constant value for the argument '%s'"            src/check_expr.cpp x1
+        "Expected a constant procedure value for the argument '%s'"  src/check_expr.cpp x1
+        "'#no_broadcast' disallows automatic broadcasting ..."       src/check_expr.cpp x1
+     All three present in C++ and now at both port sites. Nothing invented.
+
+     invented.py's full sweep reports 505 candidates. NOT a worklist and not acted on: the tool's
+     own header says it cannot tell code from prose, counts Suggestion/continuation text that is
+     assembled differently on the two sides, and flags messages C++ owns from parser.cpp rather
+     than the checker. Recorded as a BASELINE so a future sweep can tell movement from noise --
+     a number this large is only meaningful as a delta.
+
+#538 THE MODEL IS NOW CROSS-CHECKED CORPUS-WIDE, and the qualification I was carrying is gone.
+     modelsweep.sh built; 323/323 packages compared, ZERO layout disagreements. Proven by a
+     full-corpus positive control, not by the green number alone.
+
+    WHAT WAS ACTUALLY TRUE BEFORE. Asked whether the dump model had been fully cross-checked, the
+    honest answer was NO: modeldiff.py was a manual tool pointed at named packages, and about 11 of
+    323 had ever had a full dump-to-dump comparison (core/strings, core/os, core/math/linalg, plus
+    a ten-package sweep). modelcmp's "151 probes, 0 mismatches" is a DIFFERENT instrument -- it
+    covers what someone thought to write down.
+
+    THE REASON THAT GAP MATTERED IS #514, AND IT IS NOT HYPOTHETICAL. At that point modelcmp had
+    114 probes green, parity 323/323 green and corpus 198 green, while EVERY matrix type in the
+    language was mis-aligned. The defect emitted no diagnostic, so every text-anchored gate was
+    structurally blind, and the probe set happened to contain no matrix.
+
+    THE REAL WORK WAS CLASSIFICATION, not coverage. Because the multiset key includes size and
+    align, ONE entity whose alignment disagrees appears as TWO excess entries, one per side, and is
+    indistinguishable by COUNT from two unrelated presence differences -- which is exactly how #514
+    was described at the time ("six PORT-ONLY constants that turned out not to be port-only at all
+    -- C++ had them with different alignment"). Meanwhile #468 instantiation multiplicity produces
+    excess on both sides in MOST packages. Swept naively, 220 packages come back "differing" and a
+    real defect is invisible in the noise. split_layout() now pulls same-(pkg,name,kind)/
+    different-(size,align) pairs out first, giving three verdicts: LAYOUT-DIFFER (a defect),
+    MULTIPLICITY (#468, expected, reported but not judged), MODEL-MATCH.
+    ORDER MATTERS and is commented: layout is extracted BEFORE attribution, because
+    split_attribution matches across DIFFERENT packages and would otherwise pair half a layout
+    disagreement with an unrelated entity elsewhere.
+
+    RESULT, clean binary:
+        MODELSWEEP-DONE packages=323 compared=323 excluded=0
+                        layout_packages=0 layout_entities=0
+                        multiplicity_packages=220 model_match_packages=103
+
+    POSITIVE CONTROL AT FULL SCALE, which is the part that makes the zero mean something (#483: a
+    gate that has never failed proves nothing). Reverted #514's matrix arm to the old one-liner,
+    rebuilt, swept all 323 again:
+        layout_packages=7  layout_entities=283
+        core/math/linalg, core/math/linalg/glsl, core/math/linalg/hlsl,
+        vendor/box3d, vendor/raylib, vendor/raylib/rlgl, vendor/wasm/WebGL
+    SEVEN packages, where the ten-package hand sweep that originally found #514 saw ONE. That is
+    the coverage gain, measured rather than asserted. Source restored from backup and verified by
+    md5 (3e8bede8...), zero markers left.
+
+    TWO VACUITY TRAPS CHECKED RATHER THAN ASSUMED:
+      - 103 MODEL-MATCH packages could have been empty-vs-empty, which reads as agreement and is
+        #475's trap in another form. Sampled: base/runtime 760/760, base/sanitizer 830/830,
+        container/avl 936/936, container/rbtree 947/947. No zeros.
+      - If the comparator were inert everything would be MODEL-MATCH. 220 MULTIPLICITY packages
+        prove it is actively finding and classifying differences.
+
+    ALSO GUARDED: modelsweep refuses a REF_BIN of ./odin. That binary has no -dump-model, so every
+    package would come back EXCLUDED and the run would read as an environment problem rather than
+    misuse. Excluded packages are named and counted separately from agreement (#275).
+
+    KNOWN LIMITATION, stated: the script prints nothing until it finishes (~3 min for 323), so a
+    long run gives no progress. Not fixed here; noted so the next person does not read silence as
+    a hang.
+
+    WHAT CAN NOW BE SAID WITHOUT QUALIFICATION: across all 323 packages, every entity the two
+    implementations share agrees on SIZE and ALIGN. The remaining difference is which polymorphic
+    instantiations exist (#468), which is about identity, not layout.
+
+#539 modelsweep.sh's silence fixed -- and the second full run exposed which of its numbers are
+     STABLE and which are not, which matters more than the fix.
+
+    THE FIX. The script printed nothing for the ~3 minutes it takes to sweep 323 packages, and
+    silence that long is indistinguishable from a hang -- the failure mode being a run killed and
+    then reported as a timeout that never happened. Progress is now one line per package on STDERR:
+
+        [  1/323] base/runtime                       MODEL-MATCH
+        [323/323] vendor/zlib                        MODEL-MATCH
+
+    ON STDERR SPECIFICALLY, and the split is the point. STDOUT is what a gate reads -- the
+    MODELSWEEP-DONE line and any LAYOUT detail -- so 323 progress lines mixed into it would break
+    every consumer that greps the summary. Verified all three ways: stderr carries the progress,
+    stdout alone still yields exactly the one gate line, and MODELSWEEP_QUIET=1 silences stderr
+    (0 lines). Excluded packages are announced as they happen too, since those are what a silent
+    run hides longest.
+
+    THE MORE USEFUL RESULT, from comparing the two full runs:
+
+        run A   layout_packages=0  multiplicity=220  model_match=103
+        run B   layout_packages=0  multiplicity=211  model_match=112
+
+    NINE PACKAGES MOVED between MULTIPLICITY and MODEL-MATCH, with the same two binaries. That is
+    not noise in the gate, it is #468 showing through: the port is pinned with -no-threads and is
+    the fixed side, while the REFERENCE is threaded, so which polymorphic instantiations it
+    produces varies run to run. #509 measured exactly this ("threaded excess in cpp=3 ... threading
+    only ever adds").
+
+    SO: layout_packages is the number to gate on and it is STABLE at 0 across both runs.
+    multiplicity_packages and model_match_packages are REPORTED, NOT JUDGED, and anyone reading a
+    delta between two sweeps as a regression would be reading reference-side threading. Worth
+    stating plainly because a +9/-9 swing looks alarming and means nothing.
+
+    The header's "KNOWN LIMITATION" note about silence is replaced by the description of the new
+    behaviour rather than left stale next to the fix.
+
+#540 PINNING THE REFERENCE TO ONE THREAD: a large improvement that did NOT reach determinism, and
+     the distinction matters more than the win.
+
+    #539 found the multiplicity counts wandering by NINE packages between two sweeps with identical
+    binaries, because the port is pinned (-no-threads, #344) while the REFERENCE was not, and
+    #468/#509 establish that threading only ever ADDS instantiations on the C++ side. The obvious
+    symmetry was available all along: odin_dm3 takes -thread-count:1.
+
+    MEASURED FIRST, on core/bufio, before changing anything:
+        ref default (threaded)   1707 entities
+        ref -thread-count:1      1703
+        port -no-threads         1704
+    So pinning moves the reference by 4 and lands it 1 BELOW the port -- it removes the variance,
+    it does not close the gap. That was visible before the sweep and is why the entry below does
+    not claim the gap was closed.
+
+    FULL-CORPUS EFFECT, and it is large:
+        unpinned  multiplicity=220/211   model_match=103/112   (two runs)
+        pinned    multiplicity=138/139   model_match=185/184   (two runs)
+    77 more packages now compare as EXACT MODEL-MATCH. The variance across two runs fell from NINE
+    packages to ONE.
+
+    BUT ONE PACKAGE STILL MOVES, so this is NOT deterministic and I am not going to call it that.
+    138/185 vs 139/184 with the same two binaries. The honest summary is: pinning the reference
+    removed ~90% of the run-to-run noise and most of the apparent multiplicity, and a residue
+    remains that I have not chased. Both runs report layout_packages=0, which is the number the
+    gate actually decides on and which was stable even BEFORE this change.
+
+    KEPT, NOT REVERTED. The standing instruction was to revert if the change bought nothing; it
+    bought 77 packages of exactness and an 9x reduction in noise, so it stays. What it did not buy
+    is the word "deterministic".
+
+    NOT DONE, and cheap if it ever matters: identifying WHICH package moves. Both runs were made
+    with MODELSWEEP_QUIET=1, so no per-package record survives to diff -- re-running without it
+    would name the package in ~6 minutes. Not chased because layout_packages is the gating number,
+    it is stable at 0, and a one-package swing in a count that is explicitly reported-not-judged
+    does not change any decision.
+
+#542 THE 13 PRESENCE ENTITIES, INVESTIGATED. Two unrelated phenomena, and the smaller one is a
+     REAL port defect that every diagnostic gate is blind to: a polymorphic CONSTANT parameter
+     `$W: uint` is not recognised as polymorphic, so the procedure is never instantiated and its
+     body's locals never exist.
+
+    #541's presence/multiplicity split surfaced presence_packages=6 presence_entities=13, identical
+    across two full sweeps. Split by cause:
+
+    TEN OF THIRTEEN ARE ATTRIBUTION, NOT ABSENCE (#469's family). Five crypto packages -- ecdh,
+    ecdsa, noise, _weierstrass, x509 -- each show the SAME pair:
+        REF-ONLY  ('field_p384r1', 'fe', variable, size=8, align=8)
+        PORT-ONLY ('_weierstrass', 'fe', variable, size=8, align=8)
+    A variable `fe` that C++ files under the instantiating field package and the port files under
+    the DECLARING package. split_attribution() catches one such pair per package (it reports
+    `fe ref_pkg=field_p256r1 port_pkg=_weierstrass`) and the p384r1 one falls through because the
+    port has only one `_weierstrass` entry left to pair with. Not a missing entity; the port's
+    attribution is the defensible one, same as #469.
+
+    THREE OF THIRTEEN ARE A GENUINE GAP, all in core/hash/xxhash:
+        ('xxhash', 'u32xW', typename, size=8,  align=8)
+        ('xxhash', 'u64xW', typename, size=16, align=16)
+        ('xxhash', 'i',     variable, size=8,  align=8)
+    Those are exactly the locals declared INSIDE a polymorphic body:
+        XXH3_accumulate_512_simd_generic :: #force_inline proc(..., $W: uint) {
+            u32xW :: #simd[W]u32
+            u64xW :: #simd[W]u64
+            #no_bounds_check for i in uint(0)..<XXH_ACC_NB/W {
+
+    ROOT CAUSE, from the entity lines rather than inference:
+        C++   entity xxhash XXH3_accumulate_512_simd_generic Procedure ... proc([]u64,[]u8,[]u8, $W: uint = 2)
+              entity xxhash XXH3_accumulate_512_simd_generic Procedure ... proc([]u64,[]u8,[]u8, $W: uint)
+        port  entity xxhash#2 XXH3_accumulate_512_simd_generic Procedure proc([]u64,[]u8,[]u8, uint) ... poly=false
+    C++ has TWO entities -- the polymorphic declaration and an instantiation at W=2. The port has
+    ONE, renders the parameter as plain `uint` rather than `$W: uint`, and flags it poly=false. So
+    the port does not see `$W: uint` as making the procedure polymorphic, never instantiates it,
+    and never checks the body in a context where W is a bound constant -- which is why u32xW,
+    u64xW and i do not exist on the port side at all. Same shape for
+    XXH3_scramble_accumulator_simd_generic and XXH3_init_custom_secret_simd_generic (ref=2 port=1
+    each), plus XXH64_read64_simd / XXH64_write64_simd (ref=3 port=1).
+
+    WHY NO GATE SAW THIS. The code is CORRECT, so checking it produces no diagnostic; parity is
+    323/323 0/0/0 over this package. An unchecked body and a body that checks clean are
+    indistinguishable to every text-anchored instrument. `#simd[W]u32` needs W to be a constant, so
+    if the port really is treating W as a runtime uint the body would be expected to fail -- it
+    does not, which suggests the body is not being checked at all rather than checked loosely.
+    NOT YET CONFIRMED; that is the next question, not a conclusion.
+
+    RELATED, CHECK BEFORE ASSUMING NEW: #57 "Polymorphic constants are not bound as constants
+    inside procedure bodies" is recorded as completed. This may be a surviving case it did not
+    cover ($W on a #force_inline proc consumed only via #simd), or a regression. Establish which
+    before writing a fix.
+
+    A CORRECTION I MADE MID-INVESTIGATION: I first said the three presence entities were the
+    _simd_generic PROCEDURES. Wrong -- those keys exist on both sides (ref 2, port 1), so they are
+    multiplicity. I had conflated the REF-ONLY excess lines with the presence set. Computing the
+    presence keys directly gave the locals instead, which is what pointed at the uninstantiated
+    body. The distinction #541 built is exactly what made the difference visible.
+
+## #543 DONE -- and #542's stated cause was WRONG: it is `intrinsics.has_target_feature`, a hardcoded `false`
+
+**#543's premise, which I filed and which the first probe overturned.** The task said "`$W: uint`
+polymorphic constant parameter not recognised". That was inferred from `poly=false` in the model
+dump. The minimal repro tested three shapes -- `$N: int` with `[N]u32`, `$W: uint` with
+`#simd[W]u32`, and the same `#force_inline` -- and gave **ref=2 port=2 for all three**. The port's
+polymorphic machinery is fine; #57 is not regressed and no case survives it. The dump's
+`poly=false` was a CONSEQUENCE, not the cause.
+
+**The actual root cause, two linked defects.**
+
+1. `check_builtin_has_target_feature` (check_builtin.odin:7262) returned
+   `exact_value_bool(false)` unconditionally, under the comment "The actual value would be
+   determined by checking target features" -- a stub of exactly the kind CLAUDE.md forbids.
+   `enabled_target_features` / `target_feature_is_enabled` / `default_microarchitecture` /
+   `microarch_default_features` did not exist at all, so there was nothing it *could* consult.
+
+2. `check_decl_helpers.odin:1106` grouped `require_target_feature` and `enable_target_feature` into
+   a shared arm that VALIDATED the value was a string and then `continue`d -- it never assigned
+   `ac.require_target_feature` / `ac.enable_target_feature`. C++ stores both
+   (checker.cpp:4202-4219). Because `ac` stayed empty, the ENTIRE target-feature block at
+   check_decl.odin:1209 was dead: no validity diagnostic, nothing written to `Type_Proc`, and so
+   the proc-type branch of `has_target_feature` could never see a procedure's features and
+   `matched_target_features` always scored 0. This is the #138/#139 "validated, not stored" family
+   for the third time.
+
+Also fixed while there: `matched_target_features` (check_proc_group.odin:608) carried a note
+claiming it needed `target_features_set`. C++ (types.cpp:3599) scores on
+`check_target_feature_is_valid_for_target_arch` -- validity, not enablement -- so the note named the
+wrong predicate. Two real divergences went with it: the port trimmed whitespace (C++ does not, so
+" sse2" is invalid to C++) and it SKIPPED empty elements where C++ BREAKS on the first one.
+
+**The consequence chain, and why every gate was blind.** `has_target_feature` false ->
+`XXH_NATIVE_WIDTH` = 1 (xxhash_3_intel.odin:10) -> `when XXH_NATIVE_WIDTH > 1` false
+(xxhash_3.odin:839) -> the SIMD calls are never checked -> the polymorphic procs are never
+instantiated -> their body locals `u32xW`, `u64xW`, `i` never exist. Those are precisely the 3
+presence entities #542 isolated. The guarded code is CORRECT, so not checking it emits no
+diagnostic, and an unchecked body is indistinguishable from a clean one to every text-anchored
+instrument. Only the presence/multiplicity split built in #541 could see it.
+
+**Scope stated rather than implied.** `microarch_default_features` reproduces the entries reachable
+as a DEFAULT (x86-64, x86-64-v2, generic-rv64, generic) -- every microarch selectable without an
+explicit `-microarch:`, so all of what any gate here exercises. C++ carries the full generated table
+(build_settings_microarch.cpp, 2241 lines, LLVM-version-gated). An unlisted microarch returns "" and
+answers false for everything -- the old behaviour, now confined to a case that no longer silently
+covers the default path. Extending it is a copy of one row per microarch.
+
+**Verification.** Six probes, all MATCH against the oracle: htf (the two asserts that used to fail),
+htf2 (9 assertions -- sse2/sse4.2/popcnt true, avx2/avx512f false, comma-lists, and `+`/`-` prefix
+semantics, so a fix that returned `true` for everything would fail it), htf3 (proc-type branch, both
+require_ and enable_), htf4 (all three error paths byte-identical incl. positions), htf5 (proc body,
+which ruled out an ordering explanation), htf6 (invalid feature name on a declaration -- the probe
+that exposed defect 2, port emitted nothing where the oracle errors).
+core/hash/xxhash: presence 3 -> 0, MODEL-MATCH, ref=952 port=952.
+
+### #543 follow-on: fixing has_target_feature made xxhash's SIMD bodies reachable, and they exposed TWO MORE defects
+
+This is the point of the whole exercise, so it is worth stating plainly: the moment the guarded code
+started being CHECKED, parity went red on core/hash/xxhash (oracle=0 port=1) and surfaced defects
+that had been sitting behind the stub. They were not caused by the fix; they were REVEALED by it.
+
+**Defect 3 -- `simd_extract` / `simd_replace` over-reject a non-constant index.** Both
+(check_builtin_simd.odin:653, :696) gated on `value < 0`. C++ (check_builtin.cpp:1298, :1324) gates
+on `max_count < 0` -- the VECTOR's element count. `value` is initialised to -1 and stays -1 whenever
+the index is not a constant, so the port turned "index is not constant" into an error while C++
+ACCEPTS a runtime index and keeps the message only for a malformed vector. It rejected
+`intrinsics.simd_replace(seedVec, j, ...)` at xxhash_3.odin:827 where `j` is a loop variable.
+Verified: xxhash 1 -> 0 errors, matching the oracle, with a probe passing a runtime `i` that both
+now accept.
+
+**Defect 4 -- an invented message.** The type-mismatch text was "expected a type to insert that
+matches element type". C++ names both types. Now byte-identical on two shapes (`distinct u32`
+and `u64`): "'simd_replace' expected a type of 'u32' to insert, got 'My'".
+
+**A MISTAKE I MADE AND CAUGHT, recorded because the first reading was wrong.** On first probing
+Defect 4 the port printed NOTHING where the oracle printed two errors, and I was about to file it as
+an under-rejection. It was not: I had written `defer delete(et)` on the `type_to_string` results,
+which crashed the checker with `free(): invalid pointer` before any diagnostic flushed. That is
+EXACTLY the mistake LEDGER #142 records ("the crash was my own delete() on a type_to_string
+result") and I repeated it. Removing the frees made both messages appear and match. The convention
+at every other call site (e.g. check_builtin.odin:3680) is not to free; the fix now says so in a
+comment at the site.
+
+**A measurement error worth recording too.** I first ran `modelcmp.sh $REF $PORT`; it takes only
+`<PORT_BIN>`, so it used the C++ reference as the port and reported
+`MODEL-ABORTED reason=no-values oracle=151 port=0`. That is the script correctly REFUSING to score
+an unmeasured run (#275's rule), not a gate failure. Re-run correctly: 151/151, 0 mismatches.
+Separately, I overwrote the harness binary while a parity sweep was executing it; that run was
+discarded rather than reported, and the gates were re-run against freshly built, distinct paths.
+
+## #544 dump-model SCHEMA v2 -- port side landed; and #545, a real over-rejection it found before it ran
+
+**WHAT v1 ACTUALLY COMPARED, which is worse than "flags are missing".** The concern raised was that
+the dump lacked some flags. It did not -- `dump_model_flags` iterates the whole `Entity_Flag` enum,
+so the port emitted every set flag. The real limit was the COMPARATOR: `modeldiff.py` builds its key
+as `(pkg, name, kind, size, align)` and discards everything else. C++ emitted no flags at all, no
+state, no position, no poly marker; both sides' type strings are deliberately not compared
+(independent printers). So the cross-implementation model gate was **four facts per entity**:
+name, kind, size, align. That is why it caught #514/#416 (pure layout) and why #543 -- a constant
+with the WRONG VALUE -- reached it only as a third-order presence side-effect.
+
+**BINARY FORMAT: considered, rejected, with numbers.** One package is 293 KB at 157 B/line; full
+state always-emitted would be ~3.5x, so ~324 MB per corpus sweep. Binary might reach ~80 MB. Not
+worth it: there is no shared struct to standardise on (C++ Entity and Odin Entity differ in field
+order, padding, enum width and string representation, so binary needs a THIRD serialisation struct
+plus two hand-written writers -- the same enumeration, with endianness and padding added as new
+SILENT divergence modes); strings dominate the payload, so the fixed-width win evaporates exactly
+where the semantics are; and every finding this instrument has produced came from grepping these
+lines (#483: a gate that is awkward to inspect stops being inspected). The one property a shared
+struct would have bought -- neither side able to quietly drop a field -- is instead enforced by a
+`## schema v2 <fields>` header that BOTH sides emit and modeldiff refuses to compare across.
+MEASURED RESULT of omit-when-default: **180 B/line, a 15% increase, not 3.5x.**
+
+Flag vocabularies reconcile: both enums have the same 41 members, differing only in spelling
+(`Array_Elem`/`ArrayElem`, `Custom_Linkage_Link_Once`/`CustomLinkage_LinkOnce`). Strip-underscore
++ lowercase is injective over all 41 on both sides, so the column is comparable for the first time.
+
+VERIFIED (port side): entity SET identical between v1 and v2 (diff = 0), 952 entities, byte-identical
+3/3 runs. `XXH_NATIVE_WIDTH value=2` is now a directly visible fact -- pre-#543 it would have read
+`value=1`, a one-line first-order diff instead of the inference chain that was actually needed.
+
+**A MEASUREMENT ERROR I MADE AND CAUGHT.** I first saw 953 -> 952 entities and started chasing a
+lost entity. `triage_st` takes `-no-threads` as a FLAG and I had invoked it bare, so both runs were
+THREADED; the varying entities were `copy_slice`, `XXH64_read64_simd`, `XXH64_write64_simd` -- the
+#468 instantiation-multiplicity family, exactly what #344 says is threading-driven. With
+`-no-threads` (which modelsweep always passes, and says so in its header) both binaries give 952
+every run. Nothing was lost; the instrument was mis-driven.
+
+### #545 FIXED: `@(static)` locals captured by a nested procedure were wrongly REJECTED
+
+Found by enumerating the state to emit, before schema v2 ever ran. `Entity_Variable.is_static` has
+**two readers and zero writers** anywhere in the checker, and C++ has no such field at all. The
+live reader is check_expr.odin:379, whose condition `if !variable.is_static` was therefore ALWAYS
+true. C++ (check_expr.cpp:1909) tests the FLAG: `(e->flags & EntityFlag_Static) == 0`. Fixed to
+`.Static not_in entity.flags`.
+
+A/B proof: the pre-fix binary rejects `@(static) s: int` captured by a nested proc with "Nested
+procedures do not capture its parent's variables: s"; post-fix it is accepted, 0 errors, matching
+the oracle. Negative control (capturing a NON-static local) stays byte-identical on both sides.
+
+This is the #347/#348 read-but-never-written family, which #347 closed as a NEGATIVE RESULT ("zero
+real read-but-never-written defects"). That conclusion was wrong, or the sweep that produced it did
+not cover Entity variant payloads -- worth re-running that audit over the variants specifically.
+
+## #544 continued: C++ side of schema v2 landed, and the first full-state comparison
+
+Both implementations now emit `## schema v2 <fields>` and the two lines are BYTE-IDENTICAL. The C++
+emitter is in the scratchpad ref tree (never in the repo's src/, per build_ref.sh's rule).
+
+**A C++ DETAIL THAT WOULD HAVE SILENTLY MISLABELLED EVERY FLAG.** EntityFlag's bits are NOT dense:
+C++ skips 14, 34-39 and 45-49, and puts Overridden at 63. The Odin port numbers its enum densely, so
+from PolyConst onward the two DIVERGE (port Poly_Const=14 vs C++ bit 15; port Proc_Body_Checked=20
+vs C++ bit 21). A name table indexed by declaration position would have mislabelled every flag past
+bit 13 while looking perfectly plausible. The C++ table is keyed by EXPLICIT BIT.
+Note also that the port's comment on Proc_Body_Checked claims "the ordinal is kept so the set stays
+aligned with C++'s EntityFlag_ProcBodyChecked" -- it is NOT aligned (20 vs 21). The claim is false.
+It is INERT (no raw flag word is ever exchanged between implementations) but the comment asserts
+something untrue and should be corrected.
+
+**MEASURED, core/hash/xxhash, 695 comparable keys:**
+| stage | identical | differing |
+|---|---|---|
+| first full-state run | -- | flags 415, value 26, pos 10, poly 10, instr 10 |
+| after 3 fixes        | 680 | 15 (all `flags`) |
+
+1. **flags 415 -> 15 was a REPRESENTATION difference, not 415 defects.** `procbodychecked` is in
+   C++'s flag word but lives in `Entity.proc_body_checked` on the port (semantic_types.odin:282 --
+   publishing it into the shared word raced with ~108 non-atomic `flags +=` sites). Same FACT,
+   different storage. The port's dump now folds it back into the emitted column.
+2. **pos**: C++ emitted absolute paths; now strips ODIN_ROOT as the port does.
+3. **#546 FIXED, a real defect that also affects DIAGNOSTICS.** `exact_value_to_string`'s Compound
+   and Procedure arms passed `shorthand=TRUE` where C++ (exact_value.cpp:1145,1147) passes FALSE,
+   and write_expr_to_string's Comp_Lit arm renders `...` instead of the elements when shorthand is
+   set. Every compound constant printed `{...}` where C++ prints `{7, 7, 7, 7}`. Not dump-only:
+   exact_value_to_string feeds error messages (#144), so any diagnostic naming a compound
+   constant's value was losing it. Verified `_ROT_7L` now `{7, 7, 7, 7}` on both sides.
+
+**A COMPARATOR BUG I MADE AND CAUGHT -- the #509 shape, again.** My first analysis keyed on
+(pkg,name,kind) and read `[0]` of the list. For a name with BOTH a generic declaration and an
+instantiation, each side's `[0]` was a DIFFERENT entity, which manufactured 10 poly + 10 instr + 10
+pos "mismatches". They appeared to "resolve" only because folding procbodychecked in changed the
+port's sort order. Redone as a proper MULTISET comparison per key, never indexing a multi-entry key.
+Had I not re-checked, I would have recorded three categories as fixed that were never broken.
+
+**RESIDUAL: 15 entities, all in `runtime`, all the flags column, and it splits in TWO:**
+  - `require` on ref, absent on port: gnu_f2h_ieee, extendhfsf2, gnu_h2f_ieee. The port DOES set
+    `.Require` (check_decl.odin:240,1313,1332,1351; entity_helpers.odin:767) so this is a COVERAGE
+    gap against C++'s check_decl.cpp:1439, not a missing feature.
+  - `used` on ref, absent on port: cstring_to_string, type_assertion_check2_contextless,
+    multi_pointer_slice_expr_error, truncdfhf2, cstring_ne. Runtime support procedures C++ marks
+    used, presumably through the runtime required-procedure dependency walk.
+  NOT yet investigated -- filed, not guessed at.
+
+**STILL TO DO on #544:** modeldiff.py must be taught the v2 schema (parse keyword fields, ENFORCE
+the schema-line match, classify value/flags mismatches as their own categories rather than folding
+them into layout), then a full 323-package sweep to establish the new baseline. Until that lands the
+corpus-wide model gate is still running the v1 four-field comparison.
+
+## #544 part 3: comparator taught schema v2, and the 15-entity residual traced to ONE function
+
+**modeldiff.py rewritten for v2.** The two readers collapsed into ONE `read_dump` (both sides now
+share the positional prefix), plus:
+  - **SCHEMA ENFORCEMENT.** If the two `## schema` lines disagree the comparison REFUSES rather
+    than silently comparing a smaller model and reporting agreement. That is the property a shared
+    binary struct would have given, and #405's false-green shape applied to the schema itself.
+  - **A new STATE-DIFFER class**, ranked between LAYOUT (higher severity, #514's signature) and
+    MULTIPLICITY (the accepted #468 residue). v1 had no way to express "same entity, wrong constant
+    value" or "same entity, different flags" -- #546 lived exactly in that blind spot.
+  - `split_state` compares per key as a MULTISET and only attributes per-FIELD blame when the two
+    counts agree. The guard is not defensive coding: indexing `[0]` of a multi-entry key is what
+    manufactured 30 phantom mismatches earlier in #544.
+
+**BOTH POSITIVE CONTROLS PASS (#483: a gate that has never failed proves nothing).**
+  - Doctored one dump's schema line to `v3` -> comparison refuses, both lines printed.
+  - Perturbed one `value=` inside the SORTED section -> state 15 -> 16, attributed to the right
+    entity and the right field. NOTE: my first attempt at this control perturbed a line in the
+    port's INSERTION-ORDER section (prefix `ins\t`), which read_dump deliberately skips, so it
+    detected nothing and briefly looked like the detector was blind. The control had to be aimed at
+    a line the reader actually reads.
+
+modelsweep.sh now reports `state_packages` / `state_entities` / `schema_mismatch`. STATE is
+REPORTED, NOT GATED, for the same reason multiplicity is: it currently carries a real open finding
+(below), and a gate that is red on a known issue stops working as a regression detector. Promote it
+once that closes.
+
+### The 15-entity residual: ONE root cause, not two
+
+`used` and `require` looked like two separate gaps. They are the same function.
+C++ `add_package_dependency` (checker.cpp:954) sets `EntityFlag_Used` UNCONDITIONALLY, sets
+`EntityFlag_Require` when its `required` argument is true, and then adds the dependency. Every one
+of the 15 -- cstring_to_string, memset, matrix_bounds_check_error, multi_pointer_slice_expr_error,
+gnu_h2f_ieee, extendhfsf2 ... -- is a runtime procedure reached through it.
+
+Also worth recording: `RUNTIME_REQUIRE` is `false` on BOTH sides (checked directly in the dumps --
+schema v2 can answer that question now, v1 could not), so the `@(require=RUNTIME_REQUIRE)`
+attribute is NOT the source of the `require` flag. The attribute path is a red herring.
+
+The port's `add_package_dependency` (entity_helpers.odin:732) is otherwise FAITHFUL -- it sets
+`.Used`, sets `.Require` under `required`, calls `add_dependency`, with correct C++ line citations.
+But it has a structural divergence that matters:
+
+    C++ : GB_ASSERT_MSG(e != nullptr, "%s", name);   // crashes loudly, names the entity
+    port: if entity == nil { return }                 // silently does nothing
+
+Two of the port's five early returns stand where C++ ASSERTS. A failed lookup therefore produces no
+Used, no Require and no dependency edge, silently. That is a defect in its own right regardless of
+this residual -- it converts a loud, self-identifying failure into an invisible one.
+
+TWO HYPOTHESES, NOT YET DISCRIMINATED -- do not assume the first:
+  (a) the lookups ARE failing and the silent return hides it; or
+  (b) the port never REACHES those call sites for these packages, so the dependency is never
+      requested at all.
+Evidence bearing on it: the port DOES set `used` on some runtime procs (extendhfsf2 has it), so the
+mechanism works in general. The discriminating test is to make the nil-entity path LOUD (matching
+C++'s assert) and see whether it fires. That is the next step, not a conclusion.
+
+## #544 BASELINE: first full-corpus sweep under schema v2
+
+    MODELSWEEP-DONE packages=323 compared=323 excluded=0
+                    layout_packages=0 layout_entities=0
+                    state_packages=323 state_entities=17955 schema_mismatch=0
+                    presence_packages=5 presence_entities=10
+                    multiplicity_packages=0 model_match_packages=0
+
+**#543 CONFIRMED CORPUS-WIDE: presence_entities 13 -> 10.** Exactly the three xxhash body locals
+(u32xW, u64xW, i) that #542 isolated and #543 predicted would return once has_target_feature
+stopped answering false. A prediction made before the fix, verified after it, at corpus scale.
+
+**layout stays 0 across 323 packages** -- schema v2 added ~35 comparable fields without disturbing
+the property the gate already had.
+
+**17955 state entities sounds enormous; it is TWO FIELDS.** Measured field distribution over four
+packages (core/strings, core/fmt, core/os, core/math): `flags` 85, `value` 32, nothing else. So the
+whole corpus figure is the two findings below, at scale -- not a wall of unrelated noise.
+
+  1. `flags` -- dominated by `used`, traced to add_package_dependency (see the previous entry).
+  2. `value` -- NEW, and NOT yet understood. See below.
+
+### A REPORTING DEFECT IN MY OWN SWEEP, stated because the numbers look better than they are
+
+`multiplicity_packages=0 model_match_packages=0` is NOT good news and NOT a measurement. Status is
+assigned one-per-package most-specific-first, and STATE-DIFFER outranks both, so while state is
+non-zero those two counters are structurally unreachable. The sweep has stopped measuring
+multiplicity and model-match entirely. They should be counted INDEPENDENTLY of the headline status
+rather than shadowed by it. Do not read this line as "multiplicity went to zero".
+
+### OPEN: `value` divergence on i32-backed bit_set constants -- neither side matches the arithmetic
+
+    core/sys/linux MAP_HUGE_16GB   type (BOTH sides) = bit_set[Map_Flags_Bits; i32]
+        source            u32(34) << MAP_HUGE_SHIFT(26)  =  2281701376  = 0x88000000
+        correct i32 wrap                                 = -2013265920
+        PORT reports                                     =  2281701376  (raw u32, UNWRAPPED)
+        REF  reports                                     = -2013625920  = 0x87fa81c0  (neither)
+
+Siblings that FIT in i32 agree exactly (MAP_HUGE_64KB 1073741824, MAP_HUGE_1MB 1342177280), so the
+divergence is confined to values exceeding the backing type's positive range.
+
+The port not wrapping to the i32 backing type is the obvious suspect. But the REFERENCE value is not
+the correct wrap either, and 0x88000000 - 0x87fa81c0 = 360000 exactly -- a suspiciously round
+decimal, which smells like a RENDERING artefact rather than a computed value. I do NOT know which
+side is wrong, or whether one of them is an upstream bug, and I am not going to guess: an attempt to
+force the value into a diagnostic failed because the message prints the NAME
+("Cannot assign value 'linux.MAP_HUGE_16GB' ...") and both compilers emit it byte-identically.
+NEXT STEP: get the value out of each side independently of the dump -- e.g. `#assert` arithmetic
+that must fail with the value inlined, or a size_of/transmute trick -- before attributing blame.
+
+## #548 SOLVED — and it was never a value divergence: UPSTREAM-554, big_int_to_string scrambles negatives
+
+**The two checkers AGREE on the values. The REFERENCE misprints them.** I nearly filed this as a
+port defect; the previous entry's own caution ("I do NOT know which side is wrong") is what stopped
+that, and it was justified.
+
+**Root cause, src/big_int.cpp:635** (the repo's OWN unmodified source, NOT my instrument — verified
+by diffing the scratchpad copy against src/, identical in that region). `big_int_to_string` emits
+digits least-significant-first then reverses in place:
+
+    for (isize i = first_word_idx; i < buf.count/2; i++) {
+        isize j = buf.count + first_word_idx - i - 1;
+
+`j` is computed correctly for the sub-range [first_word_idx, count), but the BOUND is the midpoint
+of the WHOLE buffer. When a '-' has been pushed first_word_idx==1, so the loop stops one swap early
+-- or never runs at all. POSITIVES ARE UNAFFECTED (first_word_idx==0 makes count/2 correct), which
+is exactly why this has stayed invisible.
+
+Simulating the loop reproduces every observed value: -14→-41, -37→-73, -12→-21, -1021→-1201,
+-2147483648→-2147843648, -292277022399→-292270722399, -2013265920→-2013625920. `-2` survives only
+because one digit has nothing to reverse.
+
+**REACHABLE AND USER-FACING** (the #169/#174 standard: demonstrated, not inferred). `a[-14]` gives
+
+    Error: Index '-14' cannot be a negative value, got -41
+
+-- the same number, in one sentence, printed both correctly (from the AST text) and scrambled
+(through big_int_to_string). Filed: UPSTREAM-554-big-int-to-string-reverses-negative-digits.md,
+with a fix verified on 16 cases (bound by first_word_idx + (count-first_word_idx)/2).
+
+**INDEPENDENT CONFIRMATION THAT THE VALUES AGREE**, obtained before attributing blame: both
+compilers accept `#assert(MAP_HUGE_16GB == transmute(Map_Flags)((u32(32)<<26)|(u32(2)<<26)))`, i.e.
+both hold 0x88000000. Getting there needed three attempts -- `transmute(i32)` of a bit_set is not
+constant-foldable in the reference, and `card()` folds in neither -- and the failures are worth
+recording because each looked like a result: the oracle "erroring" on the transmute probe was a
+property of the probe, not of the value.
+
+**CONSEQUENCE FOR THE v2 BASELINE.** The `value` half of the 17955 corpus state differences (~5000)
+is ENTIRELY this upstream bug. The port is correct on every one. Only the `flags` half (#547)
+remains a genuine port-side question. This substantially improves the real state of the model
+comparison: of the two categories the new instrument surfaced, one is an upstream defect the port
+does not share.
+
+**A SECOND, SMALLER FINDING from the same probe** (split to #555): the port's message is
+"Index cannot be a negative value" -- no quoted expression, no `got` suffix. A reduction of C++'s,
+the #258/#287 family. Porting it carries a trap worth stating in advance: once ported it will
+DISAGREE with the reference on every negative index, because the reference scrambles the digits.
+That disagreement is UPSTREAM-554 and must not be "fixed" by making the port reproduce the bug.
+
+### #554 local consequence closed: reference instrument patched, and it uncovered a REAL port defect (#556)
+
+The scratchpad reference now carries a one-line fix for UPSTREAM-554 (build_ref.sh exists to be
+pointed at a patched copy; the repo's src/ is untouched). The SEPARATION is deliberate and worth
+stating: the MODEL instrument runs the PATCHED reference so the `value` column measures semantics;
+the DIAGNOSTIC gates (parity.sh, corpus.sh) still run the REAL ./odin with the bug present, because
+the port's messages must match the compiler that exists, not the one we wish existed.
+
+MEASURED over core/fmt, core/os, core/sys/linux, core/math:
+    before patch:  flags=84  value=35
+    after  patch:  flags=84  value=6      (6 occurrences of just 2 distinct entities)
+
+**And the two survivors invert the picture.** With UPSTREAM-554's noise removed:
+    MAP_HUGE_16GB / MFD_HUGE_16GB   ref=-2013265920 (correct i32 wrap)   port=2281701376 (raw u32)
+
+My FIRST instinct in the previous entry -- "the port not wrapping to the i32 backing type is the
+obvious suspect" -- was correct all along; it was simply unprovable while the reference scrambled
+its own negatives. Filed as #556. Not a dump artefact: the port CONSTANT-FOLDS
+`transmute(i32)MAP_HUGE_16GB` (the reference refuses to) and folds it to 2281701376, so the port
+genuinely holds the unsigned value.
+
+LESSON, and it cuts both ways from #509. #509's rule was "suspect your instrument first". That was
+right here too -- the bulk WAS an instrument-side (reference) bug. But the instrument bug was
+MASKING a real port defect, so "it's the instrument" would have been the wrong place to stop.
+Removing known noise is what turns a 5000-line category into a 2-entity finding.
+
+---
+
+## #556 DONE: constant transmute never re-expressed the value across a signedness boundary
+
+`check_transmute`'s constant arm (check_expr.odin:9540) was a stub. Three divergences in one block,
+against C++ check_expr.cpp:4066-4098:
+
+1. **No wrap at all.** The comment said *"the value can be kept as-is since sizes match / the
+   underlying bits remain the same"* -- true of the bits, false of the VALUE. An `Exact_Value` holds
+   a SIGNED big integer, so `transmute(Map_Flags)u32(0x88000000)` must become -2013265920, not
+   2281701376. C++ computes `smax = 2^(bits-1)-1` and `umax = 2^bits` from the SOURCE size and
+   subtracts/adds `umax` when the signedness differs.
+2. **A third arm that C++ does not have.** The port accepted `bit_set -> integer`. C++ has only
+   `integer -> integer` and `integer -> bit_set`; a bit_set source falls out of the constant block
+   and the operand becomes a non-constant Value. This was a real UNDER-REJECTION, and it is exactly
+   why the port constant-folded `transmute(i32)MAP_HUGE_16GB` while the reference rejected it.
+3. **No `types_have_same_internal_endian` guard.**
+
+The citation on the block (`check_expr.cpp:3730-3780`) was also drifted; the site is 4066.
+
+**A/B control, because a probe that agrees on both sides proves nothing (#483).** Built the pre-fix
+port and ran both:
+
+| | pre-fix port | post-fix port | reference |
+|---|---|---|---|
+| `BACK :: transmute(i32)BS_C` | ACCEPTED (errors=0) | rejected | rejected |
+| `transmute(BS)u32(0x88000000)` | 2281701376 | -2013265920 | -2013265920 |
+| `transmute(BS)u32(0xFFFFFFFF)` | 4294967295 | -1 | -1 |
+| `transmute(i32)u32(0x80000000)` | 2147483648 | -2147483648 | -2147483648 |
+
+The probe discriminates in both directions, and it caught the under-rejection I had not gone looking
+for.
+
+**A second upstream bug fell out of the boundary test.** Before landing, I probed the `>= smax`
+comparison against the real oracle rather than assuming. C++ wraps `v >= smax` where smax is the
+LARGEST REPRESENTABLE signed value, so the single value `2^(bits-1)-1` wraps when it should not:
+`transmute(i32)u32(0x7FFFFFFF)` yields **-2147483649**, outside i32 entirely. Its neighbours
+0x7FFFFFFE and 0x80000000 are both correct -- the off-by-one signature. **Reproduced deliberately**
+in the port (commented at the site) because bit-exact parity is the objective, and filed as
+UPSTREAM-557.
+
+### The measurement lesson: BOTH of my summary instruments were truncating
+
+I first read the residual off modelsweep's detail block and was about to record *"the value column is
+entirely closed; only `flags` remains"*. That was **wrong**. `modeldiff.py` prints
+`sorted(state.items())[:10]` and `modelsweep.sh` prints `head -60` of that -- both capped by ENTITY
+NAME, not by field. Anything alphabetically later than the first ten names is invisible.
+
+Built `statefields.py` (scratchpad) to get the untruncated corpus-wide breakdown, deliberately
+IMPORTING modeldiff's own `read_dump`/`split_state` rather than re-deriving them -- a second
+comparator is precisely how #509's phantom divergences were manufactured. The real picture:
+
+| field | entities | packages | |
+|---|---|---|---|
+| `objcsel` | 7680 | 4 | NEW -- ref=object, port=None -> #558 |
+| `flags` | 7427 | 323 | #547, known |
+| `value` | 49 | 4 | all `MATRIX*_IDENTITY`, ref=1.00000000000000000 port=1 -> #559 |
+| `pos` | 2 | 1 | sibling `_fiat` packages -> #560 |
+
+So #556 closed the integer-value class (17955 -> 15158 state entities), but the `value` column is
+NOT empty and I would have reported that it was. The largest remaining divergence in the whole model
+(`objcsel`, 7680) had been sitting behind an alphabetical cap the entire time modelsweep has existed.
+
+**Rule this establishes:** a capped list is a sample, not a summary. Any gate that prints `[:N]` must
+either report the total per CATEGORY or be treated as a pointer to detail, never as the detail.
+
+GATES, all green with the fix in:
+    parity      323/323 compared, 0/0/0
+    parity_vet  323/323 compared, 0/0/0
+    corpus      198 members, 0 missing, 12 excluded
+    modelcmp    151 probes, 151/151, 0 mismatches
+    modelsweep  323/323, layout_packages=0, presence 5/10, schema_mismatch=0
+    docflag     all checks passed;  doccmp 28 STATE-MATCH + 1 DOC-EMPTY-EXPECTED
+
+---
+
+## #559 DONE: matrix constants were stored with the WRONG EXACT-VALUE KIND, not merely rendered oddly
+
+The 49 residual `value` divergences (`MATRIX*_IDENTITY`, `ref=1.00000000000000000 port=1`) looked
+like float formatting. They were not. A minimal probe settled it in one run:
+
+| constant | ref | port (before) |
+|---|---|---|
+| `f32(1)` | 1.000… | 1.000… |
+| `complex64(1)` | 1.000…+0i | 1.000…+0i |
+| `M2f32(1)` | 1.000… | **1** |
+
+Plain float and complex conversions agreed, so the port's float RENDERING was never in question --
+only the matrix path, which stored an INTEGER where C++ stores a float. `MATRIX2F32_IDENTITY ::
+Matrix2f32(1)` is a conversion of the integer 1 to a matrix, and the constant must be re-expressed
+in the element type.
+
+TWO defects, one upstream of the other:
+
+1. **`is_type_constant_type` was missing its `.Simd_Vector` and `.Matrix` arms** (types.cpp:1475-1478).
+   So `is_type_constant_type(matrix[2,2]f32)` was FALSE in the port and TRUE in C++, which sent
+   `check_cast_internal` down the wrong OUTER branch entirely.
+2. **`check_cast_internal` had two branches where C++ has three** (check_expr.cpp:3842-3861). The
+   missing middle branch is the one that converts a Basic constant to the ELEMENT type of an
+   aggregate: `check_representable_as_constant(x->value, elem, &x->value)`.
+
+### The fix I applied first was WRONG, and the probe caught it
+
+With both of the above in, `M2f32(1)` became correct -- and `A2f32(1)` (a distinct `[2]f32`) started
+being ACCEPTED, where the reference rejects it as "not a compile-time known constant". The pre-fix
+port had agreed with the reference. I had introduced an under-rejection while closing a value gap.
+
+Reasoning about C++ did not resolve it -- both array and matrix appeared to take the same branch. So
+I instrumented the reference (`ODIN_TRACE_CCI`, since removed) and printed the predicates:
+
+    CCI target=M2f32 xtype=untyped integer const=1 cty=1 ... coreBtBasic=0 elemkind=1 ident=0
+    CCI target=A2f32 xtype=untyped integer const=1 cty=1 ... coreBtBasic=0 elemkind=1 ident=0
+
+**Identical.** C++ takes the same branch for both, which proved the asymmetry was somewhere I had
+not read. It was the tail of `check_cast` (check_expr.cpp:3986-3990), never ported:
+
+```cpp
+// In this case, the cast involves array programming
+// so the operand needs to be a computed value
+if (!is_type_array_like(x->type) && is_type_array_like(type)) {
+    x->mode = Addressing_Value;
+}
+```
+
+`is_type_array_like` is array-or-enumerated-array and deliberately EXCLUDES matrix and simd vector.
+That single predicate is the whole difference between `M2f32(1)` being a constant and `A2f32(1)` not
+being one. With it added, both match the oracle byte-for-byte.
+
+**Why it had been invisible:** the block was INERT before this task. The port never produced a
+constant for an array cast anyway, because the missing branch (2) made it fall through to the arm
+that clears the value. Fixing (2) made a previously-dead omission load-bearing. A missing piece of a
+port can be harmless right up until an adjacent fix activates it.
+
+### Measurement
+
+    modelsweep  323/323, layout_packages=0, schema_mismatch=0, presence 5/10
+    state_entities  15158 -> 15109  (-49, exactly the value column)
+    statefields (untruncated, whole corpus):  value = GONE
+        objcsel 7680 (4 pkgs, #558)   flags 7427 (323 pkgs, #547)   pos 2 (1 pkg, #560)
+
+    parity      323/323, 0 count / 0 text / 1 attrib
+    parity_vet  323/323, 0/0/0
+    corpus      198 members, 0 missing, 12 excluded
+    modelcmp    151/151, 0 mismatches
+
+The single attrib mismatch is the KNOWN #341 oracle flake on
+`core/rexcode/isa/mos65816/tools`, not a regression: running parity.sh on that package six times
+with the PRE-#559 binary and six times with the POST-#559 binary gave the same 1/6 flake rate on
+both. (Under plain `odin check` both compilers emit the diagnostic 8/8; it is the `odin build` path
+that is unstable, exactly as parity_vet.sh's own header records.)
+
+---
+
+## #558 DONE: the largest divergence in the whole model was MY INSTRUMENT — one missing emit line
+
+`objcsel` -- 7680 entities across the four darwin packages, the biggest apparent disagreement
+anywhere in the dump-model comparison -- was not a port defect at all. The port STORES the objc
+selector correctly (`check_decl_helpers.odin:2210`, `proc_ent.objc_selector_name = objc_selector`).
+`dump_model.odin`'s Procedure arm simply never emitted it, where C++'s does
+(`main.cpp:3975`). One line:
+
+```odin
+dump_model_kv_str(sb, "objcsel", v.objc_selector_name)
+```
+
+Discriminating "not stored" from "not emitted" took one grep and settled it before any code changed.
+#509's rule paid for itself again: suspect the instrument first.
+
+### Why the v2 schema check could not catch this, and what now does
+
+The schema enforcement I built for #544 compares the `## schema` LINE. That line is a hardcoded
+string CONSTANT on both sides. It therefore detects "the two schemas disagree" and is structurally
+blind to the failure that actually occurred:
+
+    a field DECLARED in the schema string that the emitter never WRITES.
+
+`objcsel` was in `DUMP_MODEL_SCHEMA` from the day schema v2 was written. Both sides declared it
+identically, the schema check passed every run, and the comparison dutifully reported
+`ref=<selector> port=None` 7680 times. #405's false-green shape, one level up: a declared-but-
+unwritten field reads as agreement forever.
+
+Built `.claude/tools/schemacov.py` to close it. It runs both compilers over a spread of packages,
+collects the keys each side ACTUALLY emits, and reports:
+
+    REF-ONLY / PORT-ONLY   emitted by one side only  -- the #558 signature. FAILS (exit 1).
+    EXTRA                  emitted but not in the schema -- schema is stale. FAILS.
+    NEITHER                in the schema, emitted by neither. REPORTED, never gated: most fields
+                           are omit-when-default, so absence just means no sampled entity set one.
+
+PROVEN, not assumed (#483): run against the PRE-fix port it reports `REF-ONLY: ['objcsel']` and
+exits 1; against the fixed port, `none` and exit 0.
+
+The `NEITHER` set is 18 of 43 fields over the current 14-package sample (4 of those are the
+positional columns entity/pkg/name/kind, which are not `k=` pairs at all). That is an honest
+statement of this instrument's coverage limit, not a clean bill of health: for those fields the
+state comparison can say nothing either way. Widening the sample shrinks it.
+
+### Measurement
+
+    state_entities  15109 -> 7429   (-7680, exactly the objcsel count)
+    statefields (untruncated, whole corpus):
+        flags 7427 (323 pkgs, #547)    pos 2 (1 pkg, #560)    -- value and objcsel both GONE
+
+    modelsweep  323/323, layout_packages=0, schema_mismatch=0, presence 5/10
+    parity      323/323, 0/0/0        parity_vet  323/323, 0/0/0
+    corpus      198 members, 0 missing, 12 excluded
+    modelcmp    151/151, 0 mismatches
+
+Two of the four residual dump-model columns are now closed (#559 value, #558 objcsel). What is left
+is `flags` (#547) and `pos` (#560) -- and #547 is the last thing standing between the `state` column
+and being promoted from reported to GATED (#553).
+
+---
+
+## #547 PART 1: the `flags` residual is an add_package_dependency AUDIT, not one defect
+
+#547's title said "used/require missing on runtime procs, plus silent-return-vs-assert". The first
+half is right; the framing was incomplete, and it was incomplete BECAUSE of truncation again --
+every view of this column cut the flag string at 40-44 chars, so
+`ref=customlinkagestrong|customlinkname|procb port=customlinkagestrong|customlinkname|procb` read
+as identical while the differing bits sat past the cutoff. Built `flagsdiff.py` (scratchpad) for the
+untruncated bit-level picture, again importing modeldiff's own read_dump/split_state.
+
+BASELINE: 7427 divergences, ALL on `procedure` entities, across just 48 distinct runtime entities.
+Only two bits ever differ -- and one pattern runs the OTHER WAY:
+
+    x4887  ref has `used`,           port does not
+    x1424  ref has `require`,        port does not
+    x 981  ref has BOTH,             port has neither
+    x 135  PORT has `used`, ref does NOT    <-- over-marking, missed by the original framing
+
+### The audit
+
+Extracted every `add_package_dependency(pkg, name, required?)` call site from both sides and diffed:
+
+    distinct (pkg,name):  cpp=94  port=69
+    39 names C++ registers that the port NEVER does
+    14 names the port registers that C++ does not (incl. STALE names: the port calls
+       `type_assertion_check` / `type_assertion_check2` where C++ calls the four
+       `_contextless` / `_with_context` variants)
+     6 names where C++ passes REQUIRE and the port passes nothing
+
+### Two sites fixed, both verified
+
+**(a) check_cast's conversion helpers** (check_expr.cpp:3939-3955). The port had the block but
+diverged FOUR ways at once: no `required` argument anywhere; missing `floattidf_unsigned`,
+`fixunsdfdi` and `gnu_f2h_ieee` entirely; C++'s two DIRECTIONAL f16 branches collapsed into one
+merged `src == F16 || dst == F16` that registered all four helpers in both directions (an
+over-marking as well as an under-marking -- the source of the reverse-direction 135); and an
+invented `both types are Basic` gate that C++ does not have.
+    7427 -> 5548, entities 48 -> 39, the entire f16 family gone.
+
+**(b) check_binary_expr_dependency did not exist in the port at all** (check_expr.cpp:4319-4372,
+called twice at :4580-4581 on BOTH operand base types). Sixteen helper names live in that one
+function: quo_complex×3, quo_quaternion×3, mul_quaternion×3, divti3/modti3/udivti3/umodti3, and
+the three wasm-only shift/mul helpers.
+    5548 -> 4994. **The `require` bit is now entirely gone from the corpus.**
+
+**VALIDATION_PARITY_CHECKLIST.md marked check_binary_expr_dependency `[x]` DONE**, justified as
+"via add_entity_use -> add_declaration_dependency" -- an unrelated mechanism. A grep for any of the
+sixteen names returned nothing. The checklist entry was simply false, and it is the same false-green
+shape as #558's schema line and #483's vacuous gate: a claim of coverage that nothing tests. Any
+remaining `[x]` in that file justified by a MECHANISM rather than by a MEASUREMENT should be treated
+as unverified.
+
+### Where it stands
+
+    state_entities  7429 -> 4996      flags 7427 -> 4994      entities 48 -> 30
+    `require` bit:  CLOSED            `used` bit: 4859 ref-only + 135 port-only
+
+    parity 323/323 0/0/0   parity_vet 323/323 0/0/0   corpus 198/0 missing   modelcmp 151/151
+    modelsweep layout_packages=0 schema_mismatch=0 presence 5/10
+
+STILL OPEN, and deliberately not attempted blind: ~37 further dependency names across many call
+sites (type_assertion_check_* ×4, matrix_bounds_check_error, multi_pointer_slice_expr_error,
+memory_compare_zero, cstring/cstring16 comparisons, cstring_to_string, map internals,
+objc_msgSendSuper2, string16_ge/gt), plus the 14 port-only names that need dispositioning as stale
+vs legitimate, plus the port's FIVE silent early-returns in add_package_dependency where C++ has
+GB_ASSERT_MSG. Several of the remaining entities (matrix_bounds_check_error, memory_compare_zero,
+cstring_ne, memset) are called by BOTH sides, so those are reachability or silent-return cases
+rather than missing calls -- and the discriminating test for them is to make the nil paths loud.
+
+---
+
+## #547 PART 2: the silent-return guard was ONE guard, and it was firing on STALE NAMES
+
+PART 1 left the "silent-return-vs-assert" concern stated broadly: the port's add_package_dependency
+has FIVE early returns where C++ has GB_ASSERT_MSG/GB_ASSERT. Rather than reason about which might
+matter, I made all five loud in a throwaway build and counted. Over core/fmt, core/os, core/net and
+core/reflect:
+
+    324  APDGUARD entitynil  type_assertion_check
+    324  APDGUARD entitynil  type_assertion_check2
+     14  APDGUARD entitynil  __write_bits
+     14  APDGUARD entitynil  __read_bits
+
+**Only ONE of the five guards ever fires, and only on four names.** No pkgnil, scopenil, declnil or
+ctxnil at any point. So my PART 1 framing was broader than reality: the other four guards are inert
+on this corpus, and the entity-nil guard is not a general hazard -- it is a *symptom* of the port
+asking for identifiers that do not exist.
+
+### Both are stale/invented names, and both were therefore NO-OPS
+
+`type_assertion_check` / `type_assertion_check2` are **absent from base:runtime entirely**. The real
+symbols are four variants at base/runtime/error_checks.odin:140-184. C++ (check_expr.cpp:11708-11723)
+picks between them on a `has_context` test:
+
+```cpp
+if ((c->state_flags & StateFlag_no_type_assert) == 0) {
+    bool has_context = true;
+    if (c->proc_name.len == 0 && c->curr_proc_sig == nullptr)      has_context = false;
+    else if ((c->scope->flags & ScopeFlag_ContextDefined) == 0)    has_context = false;
+    if (has_context) { ..._with_context; ..._2_with_context; }
+    else             { ..._contextless;  ..._2_contextless;  }
+}
+```
+
+The port had neither the real names nor the has_context selection, AND read `node.state_flags` where
+C++ reads `c->state_flags`. Three divergences at one site. Note C++ has GB_ASSERT_MSG on the failed
+lookup -- the same mistake would have aborted the reference on the first type assertion it ever
+checked, which is exactly why a silent return is the wrong shape for this helper.
+
+`__write_bits` / `__read_bits` are also absent from base:runtime, C++ registers NO bit-field
+dependency anywhere in src/, and the port's citation (check_expr.cpp:5833-5836) points at
+check_entity_decl and a GB_ASSERT_MSG. Fabricated citation over dead code; removed. Deleting it
+changes no measurement precisely because the lookup already failed -- same family as #266's 253
+invented lines.
+
+    state_entities 4996 -> 4060      flags 4994 -> 4058      entities 30 -> 28
+    `used` is now the ONLY differing bit: 3923 ref-only + 135 port-only.
+
+### GATE HONESTY: this run was 322/323, not 323/323
+
+    parity      323 packages, 322 COMPARED, 1 EXCLUDED  (core/odin/checker/tests/spec_indexing,
+                port=TIMEOUT) -- reproduced on an immediate re-run
+    parity_vet  323/323, 0 excluded, 0/0/0
+    corpus      198 members, 0 missing, 12 excluded
+    modelcmp    151/151, 0 mismatches
+    modelsweep  323/323, layout_packages=0, schema_mismatch=0, presence 5/10
+
+The exclusion is UNMEASURED, not agreement (#275), so it is reported as such rather than folded into
+a "green". Dispositioned as ENVIRONMENTAL (#301 family) on direct evidence, not on precedent:
+
+    standalone -no-threads : 0.55 s   (oracle 0.16 s)   -- against parity's 180 s cap, a ~300x margin
+    threaded   x12         : 0/12 timeouts   on the CURRENT binary
+    threaded   x12         : 0/12 timeouts   on st556, the pre-#547 binary
+    single-threaded        : completes on st547c, st547b AND st556
+
+Both full-sweep runs that excluded it were at loadavg ~17-18 from an external workload, and
+parity.sh's own header documents this exact failure mode (a prior instance on
+mips/tablegen/generated that ran in ~1 s standalone). No port binary, old or new, hangs on this
+package under any threading mode I could construct -- so it is not a regression from this work. It
+remains an unmeasured package in that run, and that is the honest statement.
+
+---
+
+## #547 PART 3 (DIAGNOSIS ONLY, no code changed): my audit was wrong twice, and there is a SECOND mechanism
+
+Applying PART 2's technique -- *a dependency name absent from base:runtime means the call is a silent
+no-op and the name is stale* -- to the remaining port-only names produced an unexpected answer: every
+one of them (default_hasher*, string_decode_rune, string16_decode_rune, ...) **does** exist. So they
+are not stale, and the calls do register. That contradicted the audit, which had called them
+port-only. The audit was wrong.
+
+### TWO defects in my own extraction, both false
+
+1. **The regex required the C++ context variable to be named `c`.** C++ uses BOTH `c` and `ctx` --
+   e.g. `add_package_dependency(ctx, "runtime", "default_hasher_cstring")` at check_type.cpp:2997 and
+   `..."string_decode_rune")` at check_stmt.cpp:1851. Every site using `ctx` was invisible, which
+   inflated "port-only" and "missing".
+2. **The required-ness check looked for the literal `true`.** After PART 1 the port passes the named
+   constant `REQUIRE`, so all 16 sites I had just fixed still reported as differing.
+
+Corrected, accepting any context identifier and both truthy spellings:
+
+    was:  cpp=94  port=69   39 missing   14 port-only   6 required-ness differ
+    now:  cpp=104 port=88   16 missing    0 port-only   0 required-ness differ
+
+**0 port-only and 0 required-ness differences.** The "14 stale port-only names" I put on the task
+after PART 1 did not exist as a category -- 4 of them were the genuinely stale ones PART 2 fixed, and
+the other 10 were my regex. The remaining real gap is 16 names, not 37.
+
+This is the third instrument error in this stretch (#558's dump omission, #559's truncated view,
+now this), and the pattern is consistent: **every number I derive from a hand-written extractor needs
+a control before it is used to scope work.** The control that caught it here was cheap and should
+have been first -- take a name the tool calls port-only and check whether C++ really lacks it.
+
+### A SECOND MECHANISM, absent from the port entirely
+
+C++ does not register every runtime dependency through add_package_dependency. `checker.cpp:3111`,
+inside `generate_minimum_dependency_set`, has a `FORCE_ADD_RUNTIME_ENTITIES(condition, ...)` macro
+that force-adds a roster directly via `force_add_dependency_entity`:
+
+    always:            Source_Code_Location, Context, Allocator, Logger, __init_context,
+                       _cleanup_runtime, memset, memory_equal, memory_compare, memory_compare_zero
+    no_crt:            memcpy, memmove
+    arm32:             aeabi_d2h
+    wasm:              __ashlti3, __multi3, __lshrti3
+    !no_rtti:          Type_Info, type_table, __type_info_of
+    !no_entry_point:   (further globals)
+
+The port references NONE of memory_compare_zero / memory_equal / memory_compare / __init_context /
+_cleanup_runtime anywhere, and has no force_add_dependency_entity equivalent. Two of the 28 remaining
+divergent entities (memory_compare_zero, memset) are in this roster, so an unknown share of the
+residual is this mechanism rather than the 16 missing call sites.
+
+**An audit scoped to one mechanism cannot bound a residual produced by two.** PART 1's "~37 names"
+worklist was wrong in both directions at once: too many names (regex) and too few mechanisms.
+
+NO CODE WAS CHANGED IN THIS PART. The tree remains at the PART 2 state (st547c), which is the build
+the gates were run against.
+
+---
+
+## #547-B DONE: the SECOND dependency mechanism, ported — flags 4058 -> 2919
+
+C++ registers runtime dependencies through TWO mechanisms. PART 3 found the second one:
+`FORCE_ADD_RUNTIME_ENTITIES` (checker.cpp:3111-3202), a build-condition-gated roster inside
+`generate_minimum_dependency_set` that force-adds entities via `force_add_dependency_entity`, NOT
+via add_package_dependency. The port had no equivalent and referenced none of the roster's names.
+
+### Confirmed before it was written, not after
+
+The cheap discriminator first: force-add ONLY `memory_compare_zero` and `memset`, then re-measure.
+Over four packages the `used` divergence went 70 -> 65 and BOTH entities dropped out of the residual.
+That established the mechanism as the cause before a line of the real roster existed. With the full
+roster in: 70 -> 57 on the same four, and corpus-wide:
+
+    state_entities  4060 -> 2921        flags 4058 -> 2919        entities 28 -> 24
+
+### Why this does NOT reopen #272
+
+C++'s force_add_dependency_entity does two things: `e->flags |= EntityFlag_Used` and
+`add_dependency_to_set(c, e)`. #272 scoped the dependency SET out of a checker on evidence -- every
+min_dep_count reader is codegen, a race backstop, or the RTTI table, and none emits a diagnostic.
+That holds and the set is still not built. What #272 could not have weighed is the FLAG: the
+dump-model comparison did not exist then, and `used` is entity state the model compares directly.
+So the flag half is ported and the set half deliberately is not, stated at both the call site and
+the helper.
+
+Roster ported with its conditions intact: always / no_crt / arm32 / wasm / !no_rtti /
+!no_entry_point / (no_crt && !wasm) / !no_bounds_check. The last of those carries
+matrix_bounds_check_error and multi_pointer_slice_expr_error, two more of the residual entities.
+C++'s commented-out extended-data-type block is left commented out; `cstring_to_string` is commented
+out in C++'s always-list and is omitted here too.
+
+### GATES, and a second environmental exclusion
+
+    parity      323/323 compared, 0 excluded, 0/0/0     <- clean, INCLUDING spec_indexing
+    parity_vet  323 packages, 321 compared, 2 EXCLUDED  (core/encoding/entity,
+                core/odin/checker/tests/spec_builtins, both port=TIMEOUT)
+    corpus      198 members, 0 missing, 12 excluded
+    modelcmp    151/151, 0 mismatches
+    modelsweep  323/323, layout_packages=0, schema_mismatch=0, presence 5/10
+
+Dispositioned ENVIRONMENTAL on direct evidence, same as the previous one:
+
+    core/encoding/entity                  standalone 0.085 s,  threaded x8: 0/8 timeouts
+    core/odin/checker/tests/spec_builtins standalone 0.497 s,  threaded x8: 0/8 timeouts
+
+Against parity's 180 s cap that is a 300-2000x margin. The decisive point is that **the excluded
+package CHANGES between runs**: last tranche it was spec_indexing under PLAIN parity, this tranche
+it is two different packages under VET parity while plain parity ran clean over the very same 323
+including spec_indexing. A package-specific defect does not migrate; a loaded machine does. Both
+runs sat behind an external workload at loadavg 12-18.
+
+Recorded rather than folded into a pass: 2 packages in that run were UNMEASURED, not agreeing.
+
+CUMULATIVE #547: flags 7427 -> 2919 (-61%), entities 48 -> 24, `require` bit closed, silent-guard
+class closed, two mechanisms now ported.
+
+---
+
+## #547 PART 5 — the flags column closes: three defects, 2919 -> 6
+
+Three defects, all in the `add_comparison_procedures_for_fields` / dependency-registration layer,
+all found by `flagsdiff.py` over the 323-package corpus against `odin_ref556`.
+
+### 1. The live C++ call site was never wired
+
+`add_comparison_procedures_for_fields` is called from THREE places in the C++ source but only TWO
+of them compile. The live ones are its own Struct recursion (`check_expr.cpp:3164`) and
+**`check_comparison`'s accepted branch** (`:3278`):
+
+    } else {
+        Type *comparison_type = x->type;
+        if (x->type == err_type && is_operand_nil(*x)) {
+            comparison_type = y->type;
+        }
+        add_comparison_procedures_for_fields(c, comparison_type);
+    }
+
+The port reached the function ONLY from `type_info.odin`. So a bare `a == b` on two strings — a
+comparison whose type is not a struct, and which therefore never travels the type-info path —
+registered nothing at all. This was the whole `cstring_ne` / `cstring16_ne` / `string_ne` ref-only
+class. Wired in `check_expr.odin` at the point where the port's error block returns, which is
+exactly C++'s `defined` else-branch.
+
+`err_type` is C++'s snapshot of `x->type` taken before the operator switch and nothing reassigns
+`x->type` in between, so `x->type == err_type` is unconditionally true. Reproduced rather than
+folded away so the two sites read alike.
+
+### 2. check_is_castable_to had the acceptance rule without the registration
+
+`check_expr.cpp:3722-3735` — the cstring->string and cstring16->string16 arms each register a
+runtime conversion when the operand is NOT constant:
+
+    if (are_types_identical(src, t_cstring) && are_types_identical(dst, t_string)) {
+        if (operand->mode != Addressing_Constant) {
+            add_package_dependency(c, "runtime", "cstring_to_string");
+        }
+        return true;
+    }
+
+The port had both arms and neither registration. 440 of the residual.
+
+### 3. TWO port call sites that C++ does not have — one modelling `#if 0`, one invented
+
+This is the port-only over-marking, and it is the interesting one.
+
+**`checker.cpp:2303` opens `#if 0` and `:2532` closes it.** The LIVE `add_type_info_type_internal`
+(defined at 2297) is only its first two statements:
+
+    if (t == nullptr || c == nullptr) return;
+    add_type_info_dependency(c->info, c->decl, t);
+
+Everything after that — the Named unwrap, the entire per-kind recursive registration walk, the
+Struct arm, and its `add_comparison_procedures_for_fields(c, bt)` at **2483** — is compiled out and
+exists in no C++ binary. The port implements that walk as live code and had the call in it.
+
+The SECOND port site, in `add_min_dep_type_info`, was invented outright. Its citation read
+"C++ line 2537-2538" — which is not in that function at all: the live `add_min_dep_type_info`
+starts at `checker.cpp:2576` and has no such call; 2537 points into the `#if 0` block of a
+DIFFERENT function. Same class as #266 (invented helpers with fabricated citations).
+
+Both removed. That was `runtime.string_ne` marked `used` by the port in 135 of 323 packages.
+
+### MEASURED, corpus-wide
+
+    session start                      7427   (earlier parts of #547)
+    after PARTS 1-4                    2919
+    fix 1 (comparison call site)         581   entities 5
+    fix 2 (cstring conversions)          141   entities 3
+    fix 3 (remove the two dead sites)      6   entities 2
+    port-only over-marking             135 -> 0
+
+Residual 6 = `type_assertion_check_with_context` (3) + `type_assertion_check2_with_context` (3),
+split to **#561**. Both sides have the same `has_context` selection; the port's extra `scope != nil`
+guard would make it register with_context MORE often, so it is not the cause — this is a
+`Context_Defined` scope-flag propagation question, a different subsystem.
+
+### depnames.py — a CONTROLLED roster audit, replacing an ad-hoc regex
+
+`.claude/tools/depnames.py` compares the `add_package_dependency` roster between the two trees.
+It exists because the inline regex it replaces had three defects that each manufactured findings:
+it matched only the `c` context spelling (inflating "missing" and inventing 14 port-only names);
+it tested required-ness against the literal `true` where the port passes a named constant
+(16 false differences); and it matched `add_package_dependency(` as a SUBSTRING of
+`try_to_add_package_dependency(`, conflating two functions that differ in exactly the way that
+matters. All three are the same mistake — an extractor tuned to one spelling of the same thing —
+and the script now prints raw call counts first so a broken regex shows as an implausible total
+rather than as a confident list of defects.
+
+    cpp_calls=134 cpp_distinct=104   port_calls=122 port_distinct=96
+    missing=8  port_only=0  req_diff=0  tol_diff=9
+
+This number disagrees with the "16 missing" I reported from the ad-hoc regex earlier in #547. The
+controlled instrument is the one to trust. The 8 and the 9 are dispositioned as **#564** (the
+map/dynamic-array helper family: wrong branch of a build-context test, a dead helper, a missing
+helper, and a discarded return value) and **#563** (the port has no `try_to_add_package_dependency`
+at all; its single function silently takes the tolerant path for ~95 sites where C++ asserts).
+
+MEASUREMENT LIMIT recorded with #564: the flags column shows NO map-related divergence even though
+the wrong-branch defect is live, because those runtime procedures are marked `used` through ordinary
+runtime-internal references either way. A green flagsdiff is not evidence there.
+
+### The checklist claim was false, and now says so
+
+`VALIDATION_PARITY_CHECKLIST.md` header said "100% verified (~560 of ~560 functions)".
+`add_comparison_procedures_for_fields` was `[x]` with a faithful body while its live call site had
+never been wired and two port-only sites existed. `add_map_*_dependencies` was `[x]` "(2
+implemented)" while one of the two was dead code. `check_binary_expr_dependency` was `[x]` in
+PART 1 and did not exist at all.
+
+The header now states what `[x]` asserts — a counterpart EXISTS and its body was read — and states
+explicitly that it does NOT assert the function is called from the same places, or called at all,
+with these three as the worked examples. A row being `[x]` is not evidence.
+
+### GATES, and a fifth environmental exclusion
+
+    parity      323 pkgs, 322 compared, 1 EXCLUDED (core/strconv, port=TIMEOUT), 0/0/0
+    parity_vet  323 pkgs, 322 compared, 1 EXCLUDED (core/container/xar, port=TIMEOUT), 0/0/0
+    corpus      198 members, 0 missing, 12 excluded
+    modelcmp    151/151, 0 mismatches
+    docflag     all checks passed, determinism OK
+    flagsdiff   323 pkgs: ref-only 6, port-only 0
+
+Both exclusions dispositioned ENVIRONMENTAL on direct evidence:
+
+    core/strconv          standalone 0.095 s, repeated x8: 0/8   (identical on the PREVIOUS binary)
+    core/container/xar    standalone 0.046 s, repeated x8: 0/8
+
+Against parity's 180 s cap those are ~1900x and ~3900x margins. The decisive point remains that the
+excluded package MIGRATES: spec_indexing, then core/encoding/entity + spec_builtins, now
+core/strconv under plain parity and core/container/xar under vet parity — five distinct packages
+across five runs, each fast in isolation. A package-specific defect does not migrate. Both runs here
+overlapped a full-corpus flagsdiff sweep of my own making, which is the load.
+
+Recorded rather than folded into a pass: 1 package per harness was UNMEASURED, not agreeing.
+
+CUMULATIVE #547: flags 7427 -> 6 (-99.9%), port-only over-marking 135 -> 0, the `require` bit and
+the silent-guard class closed, both dependency mechanisms ported, and the roster audit now runs on
+a controlled instrument.
+
+### modelsweep corroborates from an independent instrument
+
+    modelsweep  323/323 compared, 0 excluded
+                layout_packages=0 layout_entities=0
+                state_packages=4  state_entities=8
+                schema_mismatch=0 presence 5/10
+                multiplicity_packages=139 model_match_packages=180
+
+`state_entities` is the same quantity flagsdiff measures, computed by a different comparator on a
+different code path. It reads 8 where flagsdiff reads 6 — the extra 2 are #560 (two crypto/_fiat
+entities attributed to a different FILE), which is a `pos` divergence, not a `flags` one. The two
+instruments agree on the flags residual.
+
+Trajectory of `state_entities` across the session: 17955 -> 2921 -> **8**.
+
+That clears the precondition on **#553** (promote dump-model `state` from reported to GATED). It is
+not yet gateable: #561 (6) and #560 (2) must land first, or the gate is red on day one — which is
+the #483 failure mode inverted. #548 also remains open, but it is an upstream rendering bug rather
+than a state divergence.
+
+---
+
+## #565 — Session: the checked model can now outlive the call
+
+Requested by the `mir` backend work (rexcode-mir/docs/request-checker-session-api.md; reply
+alongside it). `check_package_from_path` returned diagnostics and counts and destroyed the model
+inside the call, so a consumer that needed entities/types/scopes had to reproduce the driving
+sequence itself. Now:
+
+    session_check_package(path, allocator) -> (^Session, bool)   // model stays alive
+    session_destroy(s)
+    check_package_from_path(path, allocator)                     // unchanged behaviour
+
+All three share ONE body (`_check_package`), so the sequence cannot drift between them — which was
+the actual complaint, not the missing handle.
+
+### What had to change, and what did not
+
+`c := &Checker{}` was a STACK local, and the comment on the dump-model defer said so explicitly:
+"any pointer handed back would be a use-after-free". It is now `new(Checker, allocator)` and
+ownership passes to the caller. That is the whole structural change.
+
+The error collector did NOT need to become session-scoped. Its lifetime stays wholly inside
+`_check_package`: `harvest_check_diagnostics` DETACHES the diagnostics onto the result
+(`take_error_values` is a detach, not a copy) before `destroy_error_collector` runs, so a surviving
+checker does not need a surviving collector. One less thing coupled to the handle.
+
+### The guard, and why it is not optional
+
+`destroy_checker` calls `reset_runtime_type_globals` (checker_lifecycle.odin:281) — mandatory,
+because those globals are resolved out of the owning checker's scopes and allocated from its
+allocator. The consequence is that destroying session A nils the type universe session B is
+mid-check against. There was no live-checker count anywhere (init_mutex guards one-time init
+only), so a second session would not have degraded — it would have corrupted silently.
+
+`session_check_package` therefore refuses a second concurrent session, returning ok=false rather
+than panicking (a library must not kill its host — CPP_DEVIATIONS.md [EMBED-1]). The counter is
+scoped to EXPLICIT sessions: `check_package_from_path` does not go through it, so existing
+(possibly concurrent) callers of that entry point are untouched.
+
+### Verified, not assumed
+
+    probe: model alive after return    10 pkgs, 55 files, 2865 entities, ALL typed, 1759 procs
+    probe: second session              refused, as designed
+    probe: sequential x3               2865 / 2865 / 2865 entities, 0 diagnostics each
+    probe: interleaved with one-shot   neither entry point poisons the other
+
+That third and fourth line are the #368 hazard tested directly: a leaked
+`reset_runtime_type_globals` would have shown as a differing entity count or spurious diagnostics
+on run 2 (#368 measured exactly that shape: 0 errors -> 37).
+
+    parity      323 pkgs, 322 compared, 1 EXCLUDED (spec_indexing, port=TIMEOUT), 0/0/0
+    corpus      198 members, 0 missing, 12 excluded
+    modelcmp    151/151, 0 mismatches
+
+Parity is the strong result here: 323 sequential create/destroy/free cycles through the new
+wrapper, byte-identical to the oracle. The exclusion is the SIXTH distinct package to time out
+across recent runs (spec_indexing 2.178 s standalone, 0/8 under repetition, against a 180 s cap) —
+environmental, and recorded as UNMEASURED rather than folded into the pass.
+
+### Deliberately NOT in this cut
+
+`entity_symbol_name`, the `session_entities` ordering guarantee, and the four-state write-up were
+scoped out to keep the change small; the four-state semantics are documented on `Session.result`
+instead. The three PRECONDITIONS (one live session per process, one build configuration per
+process, destroy invalidates shared type globals) are documented at the Session block and are all
+consequences of process-global state — #566 deletes them, along with this guard.
+
+Design rule for #566, stated on the Session block so it cannot be lost: this is the API surface we
+want AFTER de-globalisation; only the preconditions differ. Phase 2 deletes preconditions, not
+signatures.
+
+---
+
+## #561 — `.?` never reached the type-assertion dependency site; flags column closes at ZERO
+
+The last 6 divergences in the dump-model flags column, and the end of #547.
+
+### Two wrong hypotheses first, both killed by measurement
+
+I filed this as "Context_Defined propagation". Instrumenting the port showed `ctxdef=false` at all
+three sites it reaches -- but those three are `print_any_single`, `print_type`,
+`write_write_type`, every one declared `proc "contextless"` (base/runtime/print.odin).
+has_context=false is CORRECT for them. Nothing was mis-propagating.
+
+I then read identical `procbodychecked|used` flags on `_set_name` /
+`_select_context_for_thread` and inferred their bodies were never checked. Also wrong. They are
+checked.
+
+### What it is
+
+Instrumenting BOTH sides at the same site, core/thread:
+
+    reference visits 6:  print_any_single, print_type, write_write_type, strerror,
+                         _set_name (has_context=1), _select_context_for_thread (has_context=1)
+    port visits 3:       print_any_single, print_type, write_write_type
+
+`_select_context_for_thread` (core/thread/thread.odin:592) opens with
+
+    ctx, ok := init_context.?
+
+Minimal positive control -- one union, two contextful procs, one `m.?` and one `m.(int)`:
+
+    reference  fires for BOTH
+    port       fires for `.(int)` ONLY
+
+C++ routes `.?` through check_type_assertion and reaches the dependency block after its `end:`
+label. The port's `.?` branch transcribed C++'s TWO exits into that block as plain `return kind`:
+
+    C++ `goto end` (check_expr.cpp:11641)        -> port `return kind`   (type_hint fast path)
+    C++ falls out of the optional-ok branch      -> port `return kind`   (single-variant path)
+
+Odin has no `goto`, and both jumps became returns, so both `.?` success paths skipped the
+registration entirely.
+
+### Fix
+
+The tail is now `add_type_assertion_dependencies`, called from all three paths -- the two `.?`
+successes and the ordinary `x.(T)` fall-through -- which is exactly the fan-in C++ gets from one
+`end:` label. EXTRACTED, not copied three times, for #534's reason: a block duplicated per call
+path is a block that gets fixed on one path and not the others. That is the third time in #547
+alone that a registration site was reachable from some paths and not all.
+
+### MEASURED
+
+    flagsdiff, 323 packages:   ref-only 0, port-only 0, distinct entities 0
+
+The flags column is CLOSED. Cumulative across #547: **7427 -> 0**.
+
+    parity      323 pkgs, 323 compared, 0 excluded, 0/0/0
+    corpus      198 members, 0 missing, 12 excluded
+    modelcmp    151/151, 0 mismatches
+    modelsweep  323/323, layout 0/0, schema_mismatch=0, state_packages=1 state_entities=2
+
+`state_entities` 8 -> 2, and the 2 are #560's `pos` divergence (crypto/_fiat, one package) -- an
+independent instrument agreeing that the flags residual is gone.
+
+Trajectory of modelsweep `state_entities` this session: 17955 -> 2921 -> 8 -> **2**.
+
+### #553 is now one task away
+
+Its precondition was "#547 and #548 close". Flags are 0. The only remaining state divergence is
+#560 (2 entities, `pos`, one package). #548 is an upstream rendering bug, not a state divergence.
+So promoting dump-model `state` from reported to GATED needs #560 and nothing else.
+
+---
+
+## #553 — the dump-model `state` column is now GATED, with a proven positive control
+
+Precondition met by #561: the `used`/`require` residual that kept state report-only reached ZERO
+corpus-wide (7427 -> 0 across #547).
+
+### One comparator defect had to be fixed first
+
+`split_state` already refused to attribute per-field blame when the two sides' entity counts
+DIFFER under a key -- its docstring explains why, citing 30 phantom mismatches during #544. But
+when the counts were EQUAL and greater than one it fell through to `zip(sorted(a), sorted(b))`,
+which pairs by sort order and therefore pairs ARBITRARILY. Same manufacture-a-difference, one case
+further along.
+
+#560 is the worked example, and it consumed three characterisations before yielding:
+
+    key (_weierstrass, fe, Variable, 8, 8) carries TWO entities on each side -- `for fe in arg1`
+    locals in four byte-identical bodies across four _fiat field packages. The FOUR POSITIONS ARE
+    IDENTICAL on both sides. Only the pairing differed, and the zip reported that as a `pos`
+    divergence. It was never one.
+
+Entity `pkg` is context-derived in BOTH implementations: `e->pkg = c->pkg` at checker.cpp:2251 is
+the ONLY Entity pkg assignment in all of src/, and INTERNAL_ENTITY_INIT never sets it from the
+file. So for a body reachable from two packages the attribution follows check order and NEITHER
+SIDE IS CANONICALLY RIGHT. There is no rule to port.
+
+Fix: attribute per-field blame only where a key carries exactly ONE entity per side. Everything
+else is counted as `unpairable` and REPORTED -- not silently dropped, because `ma != mb` already
+told us those keys differ; what is missing is attributable blame, not the fact of difference.
+
+### Two retractions, both mine, both instrument errors
+
+  1. "#560 is a `pos` bug"           -- the position is identical on both sides.
+  2. "#560 is a multiplicity        -- FALSE. The port's dump emits TWO listings of the same
+      difference, 4 records vs 2"      entities (`ins` = insertion order, `entity` = sorted); the
+                                       reference emits only the sorted one. I compared the port's
+                                       `ins` lines against the reference's `entity` lines. Counts
+                                       match exactly. #509's rule, broken by me.
+
+Also documented at the emit site (dump_model.odin): the port decorates every package name with
+`#<pkg.id>`. modeldiff strips it so no gate is affected, but it makes raw dumps uncomparable by eye
+and is what made `_weierstrass#3` read as an instantiation marker. Kept -- dumpdet.sh's
+port-vs-port check needs the id to tell same-named packages apart -- but no longer a trap for the
+next reader.
+
+### The gate, and its control
+
+    [ "$layout_pkgs" -eq 0 ] && [ "$state_entities" -eq 0 ]
+
+    NEGATIVE control  st561 (current)      GATE_RC=0   state_packages=0 state_entities=0
+    POSITIVE control  st547g (pre-#561)    GATE_RC=1   state_packages=3 state_entities=8
+
+The positive control is the point. #483's lesson is that a gate which has never failed proves
+nothing, and this one is now shown to go RED on a real, previously-fixed defect. (My first attempt
+at that control reported GATE_RC=0 because I piped through `grep` and read grep's status -- the
+same false-green shape the gate exists to prevent. Re-run capturing the real exit code.)
+
+    FULL CORPUS, gated:  323/323 compared, 0 excluded, layout 0/0, state 0/0,
+                         schema_mismatch=0, presence 5/10, unpairable=35
+
+`unpairable=35` is REPORTED, never judged. It is the honest name for "these keys differ but blame
+is not attributable", and it is the uncovered axis -- #468 is where it lives. Recording it means
+the exclusion is visible rather than a silent narrowing of what the gate covers.
+
+---
+
+## #564 — the map / dynamic-array dependency helper family: four defects, one of them shared
+
+C++ has THREE map helpers (check_expr.cpp:321, :330, :346); the port had two, and both were wrong.
+
+### 1. The branch was never ported
+
+    if (build_context.dynamic_map_calls) { __dynamic_map_get }
+    else                                 { map_desired_position; map_probe_distance }
+
+`dynamic_map_calls` is zero-initialised and set ONLY by `-dynamic-map-calls` (main.cpp:1589), so
+the DEFAULT arm is the `else`. The port registered `__dynamic_map_get` / `__dynamic_map_set`
+unconditionally -- i.e. the wrong arm for every ordinary build. The field did not exist in the
+port's Build_Context at all; it is added here with that note attached, because the defaulting is
+the whole point and is easy to get backwards.
+
+### 2. __dynamic_map_reserve was folded into the set helper
+
+C++ gives it its own `add_map_reserve_dependencies`. This is why the NAME-keyed roster audit
+(depnames.py) could not see the defect: the name was present and required, just registered from
+the wrong function and unconditionally. A roster is a set, and a set cannot express "by which
+caller, under which condition".
+
+### 3. add_map_set_dependencies had ZERO call sites
+
+Dead since it was written. C++ calls it twice -- at the map compound literal (:11425) and at the
+map index expression (:11906). The port had the get at both matching sites and the set at neither.
+
+### 4. check_for_dynamic_literals' RESULT was discarded -- at BOTH literal sites
+
+This is the same defect as #303, and it turned out to be the same site as (2)+(3):
+
+    if (check_for_dynamic_literals(c, node, cl)) {      // map,   :11423
+        add_map_reserve_dependencies(c); add_map_set_dependencies(c); }
+    if (check_for_dynamic_literals(c, node, cl)) {      // array, :11022
+        add_package_dependency(c, "runtime", "__dynamic_array_reserve");
+        add_package_dependency(c, "runtime", "__dynamic_array_append"); }
+
+The port called the predicate for its DIAGNOSTIC only and threw the bool away, so a dynamic map
+or array literal registered nothing. Both sites now gate on the result.
+
+### What the evidence does and does not show
+
+  depnames.py     port_only 0, missing 2, req_diff 0.  All map/array names now register with
+                  C++'s required-ness. The residual 2 missing + 9 variant differences are ONE
+                  family -- the objc/blocks `try_to_` names -- which is #563's scope, not this.
+
+  modelsweep      unpairable 35 -> 27 across 323 packages, same reference, same comparator, both
+                  sides deterministic (ref -thread-count:1, port -no-threads). 8 keys that
+                  previously disagreed now agree. This is the empirical evidence.
+
+  parity 0/0/0, modelsweep gate green (layout 0/0, state 0/0, schema 0).
+
+A DUMP-PRESENCE PROBE WAS TRIED AND IS WORTHLESS -- recorded so nobody repeats it. Grepping the
+model dump for `map_desired_position` etc. shows count 1 on both sides... and ALSO count 1 on
+st561, the binary from BEFORE this fix. The dump enumerates entities parsed out of base:runtime,
+not the registered dependency set, so presence there is independent of what any helper registered.
+The `state` column is equally blind here for the same reason and was 0 before and after.
+
+Two instrument errors on the way, both mine, both the #405 shape:
+  - `-dump-model: <path>` with a space, grepping STDOUT. Both binaries write to a FILE (the
+    reference via ODIN_DUMP_MODEL=, the port via `-dump-model:<path>`, no space) and send stdout
+    to /dev/null. Every count read 0 on BOTH sides, which looks like agreement and is measurement
+    of nothing. Read modeldiff.py:237-256 for the invocation that actually works.
+  - counting raw dump lines: the port emits `ins` AND `entity` listings, the reference only
+    `entity`, so everything reads 2-vs-1 uniformly. #560's exact trap, hit again one session later.
+
+---
+
+## #563 — the tolerant dependency variant, and two defects #564 should have caught
+
+C++ has TWO registration functions (checker.cpp:954 and :969) differing in exactly one line:
+
+    add_package_dependency         GB_ASSERT_MSG(e != nullptr, "%s", name);   // hard abort
+    try_to_add_package_dependency  if (e == nullptr) { return; }              // silent, by design
+
+The port had ONE function, silently tolerant, whose comments CITED the GB_ASSERTs while doing the
+opposite:
+
+    // C++ line 930: GB_ASSERT_MSG(e != nullptr, "%s", name);
+    if entity == nil { return }
+
+So ~95 sites where C++ treats a missing runtime entity as impossible would instead drop the
+dependency without a trace. The eleven objc/blocks names are the ones that legitimately may be
+absent -- base:runtime declares them only on darwin -- which is precisely why C++ gives THEM the
+tolerant variant and nothing else.
+
+`try_to_add_package_dependency` is now ported and the nine present objc/blocks sites route through
+it. depnames: tol_diff 9 -> 0, req_diff 0, port_only 0.
+
+### Two further defects, both found while reading the call sites for #563
+
+  1. `_NSConcreteGlobalBlock` / `_NSConcreteStackBlock` -- C++ picks exactly ONE
+     (check_builtin.cpp:683-688) on `is_global_block = capture_arg_count == 0 &&
+     calling_convention != ProcCC_Odin`. The port registered BOTH, unconditionally, so every block
+     literal pulled in a runtime symbol it does not use. Both operands were already in scope in the
+     port; this was portable and is now ported.
+
+  2. #564 WAS INCOMPLETE, my error. C++'s add_map_set_dependencies and add_map_reserve_dependencies
+     both open with `init_core_source_code_location(c->checker)`, which I omitted. Worse, the port's
+     helpers carried a `ctx.decl == nil` guard C++ does NOT have, placed BEFORE that call -- so a
+     nil decl silently skipped loading Source_Code_Location. Guard removed (add_package_dependency
+     checks decl itself), init call added at both sites.
+
+     C++ ALSO builds `t_map_set_proc` there. DELIBERATELY NOT PORTED: grep finds exactly one reader
+     in all of src/ -- llvm_backend.cpp:837 -- so it is backend-only state the checker fills in for
+     the backend. The port has no backend; allocating a proc type nothing reads would be invented
+     state that could perturb the model dump.
+
+### Open, and NOT claimed as clean
+
+  `objc_msgSendSuper2` / `objc_msgSendSuper2_stret` (check_builtin.cpp:260-261) remain the last 2
+  depnames `missing`. They are gated on `args[0]->tav.objc_super_target`, which the port
+  deliberately does not model -- check_expr.odin:10838 argues it feeds only the backend's
+  objc_msgSend_types map. That argument covers the TYPE path but NOT this one: a dependency
+  registration is a checker-side effect on the min-dep set. So the flag is backend-only for one
+  purpose and semantically load-bearing for another, and the port currently cannot register these
+  two. Filed rather than faked.
+
+  modelsweep `unpairable` moved 27 -> 32. Both sides are deterministic, so this is attributable to
+  this change, and the only piece with semantic effect is the init_core_source_code_location the
+  port now performs -- i.e. the port doing MORE of what C++ does, which changes the entity set.
+  Every GATED column stays 0 (layout 0/0, state 0/0, schema 0) and parity is 0/0/0, so nothing
+  regressed that any gate covers. But an unpairable RISE is not self-evidently progress and is not
+  being reported as such: it is 5 more keys whose difference cannot be attributed. Left open.
+
+---
+
+## #562 — 269 lines of the port modelled C++ dead code, and the misreading is on the record
+
+C++'s live `add_type_info_type_internal` (checker.cpp:2297) is THREE lines:
+
+    gb_internal void add_type_info_type_internal(CheckerContext *c, Type *t) {
+        if (t == nullptr || c == nullptr) { return; }
+        add_type_info_dependency(c->info, c->decl, t);
+    #if 0                                   // <-- :2303
+        ... type_info_set, type_info_map, the ENTIRE per-kind recursive walk,
+            Named/Pointer/Slice/.../Generic, and a default GB_PANIC ...
+    #endif                                  // <-- :2532, last line before the closing brace
+    }
+
+The `#if 0` opens on the line AFTER add_type_info_dependency and closes at the END of the
+function. Everything between is dead.
+
+The port implemented 269 lines of it, and its own comment records exactly how:
+
+    // The C++ version has a disabled type_info_map tracking block (C++ line 2110-2147)
+    // We skip this #if 0 block as it's not active in the reference
+    // Process nested types based on kind (C++ line 2148-2334)
+
+The `#if 0` was read as covering only the map block, so the walk that follows was ported as
+though it were live. It is not: the `#endif` is past all of it.
+
+Two consequences the old code had:
+
+  1. Every nested type reachable from `t` received a type-info dependency C++ never registers.
+     This is a semantic difference in the dependency set, not a cosmetic one.
+  2. The port needed an INVENTED early return -- `if t in ctx.decl.type_info_deps { return }`,
+     commented "avoid infinite recursion" -- with no counterpart in the live C++ at all. It
+     existed solely to make the dead recursion terminate. An invention required only to support
+     other invented code is a good smell for this whole class.
+  3. It ended in a live `panic()` modelling C++'s dead `GB_PANIC`. #23 -- "BAD ENUM VALUE /
+     use-after-free in add_type_info_type_internal" -- was a crash inside code that should never
+     have existed.
+
+Deleting it is what makes the port FAITHFUL. It is not a simplification, and the standing rule
+against "simplified versions of functions" does not protect code the reference does not run.
+
+    parity      323/323, 0/0/0
+    modelsweep  gate green -- layout 0/0, state 0/0, schema 0
+    unpairable  32 -> 29
+
+The unpairable improvement is the interesting number: removing dependencies C++ never registered
+moved the port's entity model TOWARD the oracle's. That is the direct evidence the old walk was
+not merely redundant but actively divergent.
+
+POLICY, stated by the user this session and adopted: where the port is wrong and the divergence is
+not deliberate and documented, FIX IT rather than filing it. Filing is for genuine blockers.
+
+---
+
+## CORRECTION — modelsweep's unpairable / multiplicity / model_match are NOT admissible evidence
+
+Control run this session, SAME port binary (st568), SAME reference, back to back:
+
+    RUN1  multiplicity_packages=136  model_match_packages=187  unpairable=32
+    RUN2  multiplicity_packages=137  model_match_packages=186  unpairable=32
+
+These counters move WITHOUT ANY CODE CHANGE. The source is almost certainly the oracle's own
+nondeterminism in polymorphic instantiation identity and package attribution (#468, #469) -- the
+same family as #197 and #341, where oracle-vs-oracle controls reproduced the variance.
+
+### Two claims made earlier in THIS session are hereby retracted
+
+  #564  "modelsweep unpairable 35 -> 27 ... same reference, same comparator, both sides
+        deterministic ... This is the empirical evidence."
+        RETRACTED. I asserted determinism instead of measuring it. The delta is not attributable
+        to the fix. #564's defects are real and remain fixed -- the C++ citations and the depnames
+        roster carry that -- but the unpairable movement was never evidence for them.
+
+  #562  "unpairable 32 -> 29 ... direct evidence the old walk was not merely redundant but
+        actively divergent."
+        RETRACTED, same reason. The 269-line deletion is justified by the `#if 0` spanning
+        checker.cpp:2303-2532, which is a fact about the reference source, not a measurement.
+        That justification stands on its own and needs no counter delta.
+
+This is #49's lesson recurring ("the sweep error-count total has ~±700 noise and cannot resolve
+small deltas") in a new column, and #483's ("a gate that never fails proves nothing") inverted:
+a NUMBER that moves on its own proves nothing either.
+
+### What remains admissible
+
+    GATED and trustworthy:   layout_packages/entities, state_packages/entities, schema_mismatch
+                             -- all 0, and state has a proven positive control (#553).
+    parity.sh                323/323, 0/0/0 -- byte-level diagnostic comparison.
+    depnames.py              missing=0 port_only=0 req_diff=0 tol_diff=0 -- a set comparison
+                             against src/, with no runtime component to be noisy.
+
+    NOT admissible for small deltas: unpairable, multiplicity_packages, model_match_packages.
+    They are REPORTED, never gated, and must not be cited as before/after evidence for a change
+    without a same-binary repetition control establishing the noise floor first.
+
+modelsweep.sh's header should say this, and modelsweep should ideally report a repetition control.
+Filed as #569.
+
+---
+
+## #555 — negative-index diagnostic: two divergences, and the blocker I feared was imaginary
+
+C++ check_expr.cpp:5387:  "Index '%s' cannot be a negative value, got %.*s"   (expr, value)
+Port before:              "Index cannot be a negative value"                   (neither)
+
+I stopped before editing because C++ renders the value with `big_int_to_string`, and #548 found
+that scrambles negative integers -- and this message ONLY ever prints negatives. Printing the true
+value looked like it would break byte-parity.
+
+THE CONCERN WAS UNFOUNDED, and one probe settled it where reasoning had not:
+
+    ORACLE  Index '-3' cannot be a negative value, got -3
+            Index '-1' cannot be a negative value, got -1
+            Index '-12345' cannot be a negative value, got -12345
+            Index '-9223372036854775807' cannot be a negative value, got -9223372036854775807
+
+The oracle prints correct negatives here, including a 19-digit one. #548's scrambling does not
+reach this path. The lesson is the cheap one: RUN THE ORACLE before theorising about what it
+prints. I had the binary the whole time.
+
+Port output is now byte-identical on all four cases.
+
+### A second divergence at the same site, found while reading for the first
+
+The predicate tested `operand.type`; C++ tests `index_type` (check_expr.cpp:5383), which is t_int
+or the type_hint (:5350-5352). The port ALREADY had that local, at check_expr.odin:5670-5672,
+mirroring C++ exactly -- it just wasn't used two lines later. They coincide only when the
+convert_to_typed at :5674 succeeded, so on a failed conversion the port could take the wrong branch.
+
+### A third thing I expected to find and did NOT
+
+I predicted the port was missing C++'s `operand.mode == Addressing_Constant &&
+!(state_flags & no_bounds_check)` gate. It has it, at check_expr.odin:5710. Prediction wrong;
+recorded because a wrong prediction that goes unstated tends to get repeated.
+
+    parity  323/323, 0/0/0        corpus  198 members, 0 missing
+
+## Citation hygiene: 568 stale absolute paths normalised
+
+`/mnt/c/odin/src/foo.cpp:123` -> `foo.cpp:123`, and `/mnt/c/odin/core/...` -> `core/...`, across
+checker/, ast/ and parser/. 568 -> 0. These are another machine's absolute paths; they had drifted
+into the majority form in some files (types.odin 102, check_expr.odin 101) while the house style
+elsewhere is bare `file.cpp:line`.
+
+Comments only -- verified before the rewrite that no occurrence sat inside a string literal (the
+one line carrying a quote was `types.cpp:537-562 (the "// Endian" block ...)`, a comment). Vet
+green after.
+
+---
+
+## #550 — variant-payload audit: 1 real defect, 4 explained, and 2 harness tools I had silently broken
+
+### First: I broke two tools in #553 and didn't notice
+
+#553 changed `modeldiff.split_state` to return `(out, unpairable)`. Two dependents still unpacked
+it as a single value:
+
+    statefields.py:44   state = modeldiff.split_state(...)          -> state.items() on a tuple
+    flagsdiff.py:45     for k, v in modeldiff.split_state(...).items()
+
+flagsdiff is the tool that verified #547 and #561. It has been dead since #553 and I never re-ran
+it. Not a false green -- it would raise AttributeError -- but a gate you cannot run is a gate you
+do not have. Both repaired and smoke-tested to prove they execute again.
+
+LESSON: changing a shared helper's return type is an API break. Grep for callers.
+
+### The audit: variantfields.py
+
+New tool. Extracts every Entity_* variant payload field and counts writes vs reads, counting BOTH
+Odin assignment forms -- `e.field =` and composite-literal `Entity_X{ field = ... }`. Missing the
+second would manufacture false "never written" hits, since many entities are built entirely by
+literal.
+
+POSITIVE CONTROL (#483): injecting a dummy field into Entity_Label makes the audit report it
+(5 -> 6 never_written), and the injection was reverted, verified 0 occurrences remain.
+
+    81 fields over 10 structs, 5 never written.
+
+### 4 of the 5 are explained, not defects
+
+    gen_procs_mutex               a MUTEX -- locked, never assigned. Same in C++.
+    is_anonymous                  C++ writes it ONLY in the backend (llvm_backend_general.cpp:3455).
+                                  At CHECK time it is false in C++ too, so the port matches.
+    ir_mangled_name               same shape: backend-written (llvm_backend_general.cpp:1790).
+    type_parameter_specialization DEAD IN C++ TOO -- entity.cpp:235 is its only occurrence in all
+                                  of src/. The port faithfully mirrors a dead field.
+
+### The 5th was real: uses_branch_location was never written
+
+The port carried a "NOT PORTED" comment making TWO claims, both false:
+
+    "no such field"          -- Entity_Procedure.uses_branch_location EXISTS, and
+                                dump_model.odin emits it as `branchloc`. The port was dumping a
+                                field it never set.
+    "read only by backend"   -- C++ WRITES it in the CHECKER, check_expr.cpp:9764. The backend
+                                only reads it (llvm_backend_proc.cpp:140).
+
+I missed that write on my first pass because the grep was truncated by `head -6` -- the identical
+trap as #530, where a `head -5` produced a wrong claim about an emitter. Two occurrences of the
+same self-inflicted error now.
+
+Fix mirrors C++'s structure exactly (the write lives in an `else if (c->curr_proc_decl)`, so it
+does NOT fire on the error path).
+
+    ORACLE        branchloc=true on `uses_it`     1 entity
+    PORT (fixed)  branchloc=true on `uses_it`     1 entity      <- matches
+    PORT (before) branchloc=true                  0 entities    <- control: the fix is the cause
+
+### On #347's negative result
+
+#347 concluded this class was empty. That was wrong then and the reason is now visible: the fields
+it would have caught (#348's Entity_Builtin.pkg, Entity_Procedure.body, #545) have since been
+found and removed by other work, and #347 appears not to have descended into variant payloads at
+all. The class was never empty -- the audit was.
+
+---
+
+## #551 — three Entity_Procedure fields: all three CHECKER-written, all three were being dropped
+
+C++ Entity::Procedure minus the port's = exactly three: `link_section`, `fast_math_flags`,
+`no_sanitize_thread`. All three are written by the CHECKER, not the backend:
+
+    check_decl.cpp:1485   e->Procedure.no_sanitize_thread  = ac.no_sanitize_thread;
+    check_decl.cpp:1487   e->Procedure.fast_math_flags     = ac.fast_math_flags;
+    check_decl.cpp:1494   e->Procedure.link_section        = ac.link_section;
+
+so all three belong in the port. The port's application block was C++'s minus exactly those lines.
+
+GOOD NEWS FIRST: the port already PARSES and VALIDATES all three attributes, including
+`link_section`'s "Invalid link section" diagnostic and the allowlists. So there was never an
+over-rejection -- `@(link_section=...)`, `@(fast_math=...)`, `@(no_sanitize_thread)` all checked
+cleanly before this change. The defect was narrower: validate-then-drop, the #138/#139 shape.
+
+The chain was broken in three different places:
+  no_sanitize_thread   Attribute_Context had NO FIELD. The parse switch even said so:
+                       "C++ has ac->no_sanitize_thread but Attribute_Context here has no such
+                       field, so there is nothing to store yet."
+  fast_math_flags      Attribute_Context had no field, and the parse case type-checked the value
+                       against t_fast_math_flags and then threw it away (C++ stores it via
+                       exact_value_to_u64, checker.cpp:4277).
+  link_section         ac HAD the field, and VARIABLES stored it (check_decl.odin:311) -- only
+                       PROCEDURES dropped it.
+
+Five edits: 2 Attribute_Context fields, 3 Entity_Procedure fields, the no_sanitize_thread store,
+the fast_math_flags store, and the three entity assignments.
+
+### VERIFICATION IS LIMITED, AND THAT IS STATED, NOT IMPLIED
+
+None of the three is observable through any instrument here. C++'s main.cpp dumps `linksec` for
+VARIABLES only, and dumps neither fast_math_flags nor no_sanitize_thread at all. So the model
+comparator is structurally blind to this fix. Extending the PORT's dump to emit them would make
+the two schemas disagree and trip schema_mismatch -- worse than no signal.
+
+What is verified: parity 323/323 0/0/0 (no regression); an oracle probe of all four attribute
+forms is byte-identical (both silent, including `@(link_section="bad section!")`, so C++'s
+is_foreign_name_valid accepts it); and the code now matches check_decl.cpp:1483-1495 line for line.
+That is citation-and-no-regression, not behavioural proof, and it is the same evidentiary standing
+#138/#139 had.
+
+## #552 — the Proc_Body_Checked comment was wrong about WHY the slot is kept
+
+It read: "The ordinal is kept so the set stays aligned with C++'s EntityFlag_ProcBodyChecked."
+That reads as numeric equality and is false: C++ is `1ull<<21`, the port is `20`.
+
+The real relationship is that the port's ordinals are uniformly C++'s BIT INDEX MINUS ONE across
+the entire enum --
+
+    Const_Input 16 / 1<<17   Static 17 / 1<<18   Implicit_Reference 18 / 1<<19
+    Soa_Ptr_Field 19 / 1<<20   Proc_Body_Checked 20 / 1<<21   Cold 25 / 1<<26
+
+-- so nothing is specially misaligned at this flag. The slot is worth keeping because deleting it
+would renumber everything after it and break that uniform correspondence, making side-by-side
+reads against entity.cpp harder. And nothing compares the values numerically anyway: dump_model
+emits flag NAMES (dump_model.odin:315), so only the SEQUENCE matters.
+
+Comment rewritten to say that. The "UNUSED - do not read or set" half was correct and is kept.
+
+---
+
+## #569 — modelsweep --repeat=N: the ungated counters now carry their measured floor
+
+Built after two of my own claims were retracted for quoting a single value of a noisy counter as
+before/after evidence. A header warning relies on the next reader noticing it; this makes the
+harness state the floor.
+
+Design: `--repeat=N` is stripped from the args BEFORE the positional REF/PORT/PKGLIST are read, so
+it may appear anywhere; the script then self-invokes the REAL sweep N times and aggregates. No
+internal restructuring, so the repeated thing is exactly the thing being gated.
+
+Reporting splits by whether the column is gated:
+
+    GATED    single value. If one ever shows a RANGE that is itself a finding -- the run says so
+             and exits non-zero, because a gated column that moves means the gate is unsound.
+    UNGATED  reported as lo..hi (spread N). A bare number cannot be quoted by accident.
+
+### The control, 3 runs, one binary, full 323-package corpus
+
+    GATED    layout_packages/entities 0, state_packages/entities 0, schema_mismatch 0
+             spread 0 on every one -- the gated columns ARE deterministic, as claimed.
+    UNGATED  unpairable             24..28   spread 4
+             multiplicity_packages  136..138 spread 2
+             model_match_packages   185..187 spread 2
+             presence_packages/entities      spread 0 IN THIS SAMPLE -- not proof of determinism,
+                                             and they stay ungated because 3 runs cannot establish it.
+
+NON-VACUOUS: the spread is non-zero on exactly the counters previously measured to move.
+
+### Two things this quantifies
+
+1. N=2 IS NOT ENOUGH. The earlier 2-run control reported unpairable spread 0. Three runs give 4.
+   A control that samples too few times manufactures a false floor -- the #483 failure mode wearing
+   a different hat, and I had already published a number off the back of it.
+
+2. THE RETRACTED CLAIMS ARE NOW QUANTIFIED, NOT JUST WITHDRAWN. #564's "unpairable 35 -> 27" was a
+   delta of 8 spanning DIFFERENT binaries, against a within-binary floor of at least 4. It was
+   never separable from noise. Values seen this session across binaries -- 35, 32, 29, 27, and now
+   24..28 -- do not even share a common window, which is the whole point: the counter tracks the
+   ORACLE's instantiation/attribution nondeterminism (#468, #469), not the port's correctness.
+
+The gated columns remain the only thing modelsweep asserts. That has not changed and is what the
+exit status still tests.
+
+---
+
+## #549 — the shadowing is real but LATENT, and the counters are a severity partition
+
+modeldiff assigns ONE status per package by an elif chain ranked by severity
+(modeldiff.py:297-302): LAYOUT-DIFFER > STATE-DIFFER > MODEL-MATCH / MULTIPLICITY. modelsweep then
+increments multi_pkgs / match_pkgs from that single label. So a package that HAS multiplicity and
+ALSO has a state divergence is counted as STATE-DIFFER and appears in neither counter.
+
+That is a genuine reporting defect -- but it is LATENT, not active: it can only bite while
+state_packages or layout_packages is non-zero, and the #553 gate now holds both at 0 corpus-wide.
+
+PROOF THAT THE PARTITION IS EXACT TODAY, from #569's 3-run control:
+
+    run A   multiplicity 136 + model_match 187 = 323 = compared
+    run B   multiplicity 138 + model_match 185 = 323 = compared
+
+The two are COMPLEMENTARY and their sum is invariant at `compared` even as each one moves. So the
+run-to-run movement is packages MIGRATING BETWEEN THE TWO BUCKETS, never entering or leaving the
+pair -- which is exactly what LEDGER #539 observed ("nine packages moved between MULTIPLICITY and
+MODEL-MATCH"). Nothing is being dropped.
+
+FIX: annotate rather than restructure. Renaming the emitted keys would be churn -- grep confirms
+NO other tool consumes them -- and rebuilding the counters from facts rather than the severity
+label would add a second classification path, which is how #509's phantom divergences were
+manufactured. The comment now states plainly that these two partition BY TOP FINDING, that they
+are exact only while the gated columns are 0, and that if the gate ever goes red they must be
+treated as undercounts until it is green again.
+
+Both counters remain UNGATED and noisy (#569: spread 2 each), so nothing asserts on them either
+way. This closes the reporting ambiguity without pretending the numbers carry more than they do.

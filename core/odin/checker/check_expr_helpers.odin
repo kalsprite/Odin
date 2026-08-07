@@ -6,7 +6,7 @@ import "core:odin/tokenizer"
 import "core:strings"
 
 // elem_type_can_be_constant checks if an element type can participate in constant compound literals
-// C++ Reference: /mnt/c/odin/src/types.cpp:2549-2564
+// C++ Reference: types.cpp:2549-2564
 //
 // IMPORTANT: Almost all types CAN be constant! This includes:
 // - Pointers (nil is a valid constant pointer)
@@ -47,7 +47,7 @@ elem_type_can_be_constant :: proc(t: ^Type) -> bool {
 }
 
 // elem_cannot_be_constant checks if an element type CANNOT be used in constant compound literals
-// C++ Reference: /mnt/c/odin/src/types.cpp:2566-2577
+// C++ Reference: types.cpp:2566-2577
 //
 // IMPORTANT: This is NOT the inverse of elem_type_can_be_constant!
 // Returns true only for:
@@ -81,7 +81,7 @@ elem_cannot_be_constant :: proc(t: ^Type) -> bool {
 }
 
 // check_is_operand_compound_lit_constant checks if an operand can be used in a constant compound literal
-// Reference: /mnt/c/odin/src/check_expr.cpp:8678-8701
+// Reference: check_expr.cpp:8678-8701
 //
 // Returns true if:
 // - Operand is nil
@@ -136,7 +136,7 @@ check_is_operand_compound_lit_constant :: proc(ctx: ^Checker_Context, o: ^Operan
 }
 
 // expr_to_string converts an AST expression to a string representation
-// Reference: /mnt/c/odin/src/check_expr.cpp:11945-12575 (write_expr_to_string/expr_to_string)
+// Reference: check_expr.cpp:11945-12575 (write_expr_to_string/expr_to_string)
 //
 // Handles most common expression types for readable error reporting.
 expr_to_string :: proc(expr: ^ast.Node, allocator := context.allocator) -> string {
@@ -167,7 +167,7 @@ expr_to_string_shorthand :: proc(expr: ^ast.Node, allocator := context.allocator
 }
 
 // write_expr_to_string recursively writes an expression to a string builder
-// Reference: /mnt/c/odin/src/check_expr.cpp:11945-12564 (write_expr_to_string)
+// Reference: check_expr.cpp:11945-12564 (write_expr_to_string)
 //
 // shorthand: if true, use "..." for compound literals instead of full contents
 write_expr_to_string :: proc(builder: ^strings.Builder, node: ^ast.Node, shorthand: bool) {
@@ -812,7 +812,7 @@ write_field_flags :: proc(builder: ^strings.Builder, field: ^ast.Field) {
 }
 
 // is_constant_string checks if an expression is a constant string value
-// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:253-260
+// C++ Reference: check_builtin.cpp:253-260
 //
 // Parameters:
 //   ctx: Checker context
@@ -848,7 +848,7 @@ is_constant_string :: proc(ctx: ^Checker_Context, builtin_name: string, expr: ^a
 }
 
 // is_ise_expr checks if a node is an implicit selector expression (.Foo)
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:3814-3817
+// C++ Reference: check_expr.cpp:3814-3817
 is_ise_expr :: proc(node: ^ast.Node) -> bool {
 	n := unparen_expr(node)
 	if n == nil {
@@ -859,7 +859,7 @@ is_ise_expr :: proc(node: ^ast.Node) -> bool {
 }
 
 // can_use_other_type_as_type_hint determines if a type can be used as a type hint
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:3819-3824
+// C++ Reference: check_expr.cpp:3819-3824
 //
 // This is used in binary expressions to determine if the RHS type can be used as
 // a hint for the LHS, when use_lhs_as_type_hint is true.
@@ -871,7 +871,7 @@ can_use_other_type_as_type_hint :: proc(use_lhs_as_type_hint: bool, other_type: 
 }
 
 // check_matrix_type_hint checks if a type hint is compatible with a matrix type
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:3826-3850
+// C++ Reference: check_expr.cpp:3826-3850
 //
 // Returns the appropriate type hint for a matrix, considering:
 // - Exact type match returns the hint
@@ -922,7 +922,7 @@ check_matrix_type_hint :: proc(matrix_type: ^Type, type_hint: ^Type) -> ^Type {
 }
 
 // make_operand_from_node creates an operand from an AST node that has type/value info
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:4468-4476
+// C++ Reference: check_expr.cpp:4468-4476
 //
 // Extracts the type and value information that was previously stored in the node's
 // tav (Type And Value) field during earlier checking phases.
@@ -949,7 +949,7 @@ make_operand_from_node :: proc(node: ^ast.Node) -> Operand {
 }
 
 // convert_exact_value_for_type converts an exact value to match a target type
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:4649-4665
+// C++ Reference: check_expr.cpp:4649-4665
 //
 // Performs conversions like:
 // - Boolean types: (currently commented out in C++)
@@ -982,7 +982,7 @@ convert_exact_value_for_type :: proc(v: Exact_Value, type: ^Type) -> Exact_Value
 }
 
 // unselector_expr strips selector expressions to get the innermost selector field
-// C++ Reference: /mnt/c/odin/src/parser.cpp:1891-1900
+// C++ Reference: parser.cpp:1891-1900
 //
 // Example: a.b.c -> c
 // Returns the rightmost identifier in a chain of selector expressions
@@ -1009,7 +1009,7 @@ unselector_expr :: proc(node: ^ast.Node) -> ^ast.Node {
 }
 
 // check_is_not_addressable checks if an operand cannot have its address taken
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:2584-2618
+// C++ Reference: check_expr.cpp:2584-2618
 //
 // Returns true if the operand is not addressable, meaning you cannot use & on it.
 // This includes:
@@ -1089,7 +1089,7 @@ check_is_not_addressable :: proc(ctx: ^Checker_Context, o: ^Operand) -> bool {
 }
 
 // exact_bit_set_all_set_mask computes the mask for a fully populated bit set
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:2620-2695
+// C++ Reference: check_expr.cpp:2620-2695
 //
 // Returns an ExactValue containing a BigInt mask with bits set for all valid
 // values in the bit set range. This is used for validating bit set operations.
@@ -1197,7 +1197,7 @@ exact_bit_set_all_set_mask :: proc(type: ^Type) -> Exact_Value {
 
 // ======================================================================================
 // RANGE EXPRESSION CHECKING
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:8578-8676
+// C++ Reference: check_expr.cpp:8578-8676
 // ======================================================================================
 
 // check_range validates range/interval expressions (e.g., 0..<10, 1..=100)
@@ -1331,7 +1331,7 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 
 // ======================================================================================
 // DIRECTIVE HELPERS
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp:140-152
+// C++ Reference: check_expr.cpp:140-152
 // ======================================================================================
 
 // is_load_directive_call checks if an expression is a #load directive call
@@ -1648,7 +1648,7 @@ calling_convention_to_string :: proc(cc: Calling_Convention) -> string {
 // their types are not known until instantiation, so hinting with them would be
 // wrong.
 //
-// C++ Reference: /mnt/c/odin/src/check_expr.cpp populate_proc_parameter_list
+// C++ Reference: check_expr.cpp populate_proc_parameter_list
 populate_proc_parameter_list :: proc(ctx: ^Checker_Context, proc_type: ^Type, allocator := context.temp_allocator) -> []^Entity {
 	if proc_type == nil || proc_type == t_invalid {
 		return nil

@@ -6,7 +6,7 @@ Package helper functions for accessing package-level metadata.
 These helpers provide safe access to package metadata stored directly on ast.Package.
 This achieves perfect parity with C++ AstPackage structure.
 
-C++ Reference: /mnt/c/odin/src/parser.hpp:193-215 - struct AstPackage
+C++ Reference: parser.hpp:193-215 - struct AstPackage
 */
 
 import "core:container/queue"

@@ -75,20 +75,20 @@ Stmt_Flag_Bit :: enum {
 
 // State_Flag tracks context-level flags that affect checking behavior
 // These propagate downward from parent to child statements
-// C++ Reference: StateFlag enum in /mnt/c/odin/src/parser.hpp:323-333
+// C++ Reference: StateFlag enum in parser.hpp:323-333
 // NOTE: Use AST types directly now that they're available
 State_Flag :: ast.Node_State_Flag
 State_Flags :: ast.Node_State_Flags
 
 // Viral_State_Flag tracks properties that propagate upward through the AST
 // These "go viral" from child to parent expressions during checking
-// C++ Reference: ViralStateFlag enum in /mnt/c/odin/src/parser.hpp:335-339
+// C++ Reference: ViralStateFlag enum in parser.hpp:335-339
 // NOTE: Use AST types directly now that they're available
 Viral_State_Flag :: ast.Node_Viral_State_Flag
 Viral_State_Flags :: ast.Node_Viral_State_Flags
 
 // Ast_File_Flag controls file-level behavior
-// C++ Reference: enum AstFileFlag in /mnt/c/odin/src/parser.hpp:91-98
+// C++ Reference: enum AstFileFlag in parser.hpp:91-98
 // NOTE: These types are NOT present in core:odin/ast. We track them externally in Checker_Info.
 // C++ uses bit positions (1<<0, 1<<1, etc.), we use enum values for bit_set
 File_Flag :: ast.File_Flag
@@ -121,8 +121,8 @@ Exact_Value_Typeid :: ast.Exact_Value_Typeid
 Exact_Value_String16 :: ast.Exact_Value_String16
 
 // Exact_Value is re-declared from ast.Exact_Value
-// The canonical definition lives in /mnt/c/odin/core/odin/ast/semantic_types.odin
-// C++ Reference: struct ExactValue in /mnt/c/odin/src/exact_value.cpp:37-52
+// The canonical definition lives in core/odin/ast/semantic_types.odin
+// C++ Reference: struct ExactValue in exact_value.cpp:37-52
 Exact_Value :: ast.Exact_Value
 
 // Expr_Info stores information for untyped expressions
@@ -134,14 +134,14 @@ Expr_Info :: struct {
 }
 
 // Raddbg_Type_View stores type debugging information for RadDbg
-// C++ Reference: struct RaddbgTypeView in /mnt/c/odin/src/checker.hpp:436-439
+// C++ Reference: struct RaddbgTypeView in checker.hpp:436-439
 Raddbg_Type_View :: struct {
 	type: ^Type, // C++ line 437: Type *type
 	view: string, // C++ line 438: String view
 }
 
 // Load_File_Tier represents the level of file information cached
-// C++ Reference: enum LoadFileTier in /mnt/c/odin/src/checker.hpp:387-391
+// C++ Reference: enum LoadFileTier in checker.hpp:387-391
 Load_File_Tier :: enum {
 	Invalid,
 	Exists,   // Only checked if file exists
@@ -149,7 +149,7 @@ Load_File_Tier :: enum {
 }
 
 // Load_File_Cache stores cached file loading results for #load and #exists directives
-// C++ Reference: struct LoadFileCache in /mnt/c/odin/src/checker.hpp:393-400
+// C++ Reference: struct LoadFileCache in checker.hpp:393-400
 Load_File_Cache :: struct {
 	tier:       Load_File_Tier,
 	exists:     bool,
@@ -170,7 +170,7 @@ File_Error :: enum {
 }
 
 // Load_Directory_Cache stores cached directory loading results for #load_directory
-// C++ Reference: struct LoadDirectoryCache in /mnt/c/odin/src/checker.hpp:408-412
+// C++ Reference: struct LoadDirectoryCache in checker.hpp:408-412
 Load_Directory_Cache :: struct {
 	path:       string,
 	file_error: File_Error,
@@ -178,7 +178,7 @@ Load_Directory_Cache :: struct {
 }
 
 // Untyped_Expr_Info pairs an expression with its untyped info for queue processing
-// C++ Reference: struct UntypedExprInfo in /mnt/c/odin/src/checker.hpp:364-367
+// C++ Reference: struct UntypedExprInfo in checker.hpp:364-367
 Untyped_Expr_Info :: struct {
 	expr: ^ast.Expr, // C++ line 365: Ast *expr
 	info: ^Expr_Info, // C++ line 366: ExprInfo *info
@@ -208,7 +208,7 @@ Deferred_Procedure_Kind :: ast.Deferred_Procedure_Kind
 Deferred_Procedure :: ast.Deferred_Procedure
 
 // Instrumentation_Flag controls procedure instrumentation
-// C++ Reference: /mnt/c/odin/src/checker.hpp:112-116
+// C++ Reference: checker.hpp:112-116
 Instrumentation_Flag :: enum i32 {
 	Enabled  = -1,
 	Default  = 0,
@@ -219,7 +219,7 @@ Instrumentation_Flag :: enum i32 {
 // to avoid duplication. See build_settings.odin:261-286
 
 // Attribute_Context stores declaration attributes
-// C++ Reference: /mnt/c/odin/src/checker.hpp:118-167
+// C++ Reference: checker.hpp:118-167
 Attribute_Context :: struct {
 	link_name:                  string, // C++ line 119
 	link_prefix:                string, // C++ line 120
@@ -245,6 +245,8 @@ Attribute_Context :: struct {
 	instrumentation_exit:       bool, // C++ line 141
 	no_sanitize_address:        bool, // C++ line 142
 	no_sanitize_memory:         bool, // C++ line 143
+	no_sanitize_thread:         bool, // C++ line 144
+	fast_math_flags:            u64,  // C++ line 166
 	rodata:                     bool, // C++ line 144
 	ignore_duplicates:          bool, // C++ line 145
 	optimization_mode:          u32, // C++ line 146 (ProcedureOptimizationMode)
@@ -283,16 +285,16 @@ Proc_Checked_State :: ast.Proc_Checked_State
 Entity_State :: ast.Entity_State
 
 // Variadic_Reuse_Data is re-declared from ast.Variadic_Reuse_Data
-// C++ Reference: struct VariadicReuseData in /mnt/c/odin/src/checker.hpp:197-200
+// C++ Reference: struct VariadicReuseData in checker.hpp:197-200
 Variadic_Reuse_Data :: ast.Variadic_Reuse_Data
 
 // Decl_Info is re-declared from ast.Decl_Info
-// The canonical definition lives in /mnt/c/odin/core/odin/ast/semantic_types.odin
+// The canonical definition lives in core/odin/ast/semantic_types.odin
 // NOTE: Checker-specific fields like variadic_reuses are stored externally in maps
 Decl_Info :: ast.Decl_Info
 
 // Proc_Tag defines procedure attribute tags
-// C++ Reference: enum ProcTag in /mnt/c/odin/src/parser.hpp:272-279
+// C++ Reference: enum ProcTag in parser.hpp:272-279
 // NOTE: Values are bitmasks (1<<n), not sequential indices, to support bit testing
 Proc_Tag :: ast.Proc_Tag // NOTE: Uses bit_set for tag flags (refactored from bitfield)
 Proc_Tags :: ast.Proc_Tags
@@ -316,13 +318,13 @@ Scope_Flag_Bit :: ast.Scope_Flag_Bit
 DEFAULT_SCOPE_CAPACITY :: 32
 
 // Scope is re-declared from ast.Scope to ensure type compatibility
-// The canonical definition lives in /mnt/c/odin/core/odin/ast/semantic_types.odin
+// The canonical definition lives in core/odin/ast/semantic_types.odin
 // NOTE: This MUST match the AST definition exactly for type equivalence
 Scope :: ast.Scope
 
 // Entity is re-declared from ast.Entity to ensure type compatibility
-// The canonical definition lives in /mnt/c/odin/core/odin/ast/semantic_types.odin
-// C++ Reference: struct Entity in /mnt/c/odin/src/entity.cpp:162-296
+// The canonical definition lives in core/odin/ast/semantic_types.odin
+// C++ Reference: struct Entity in entity.cpp:162-296
 // NOTE: This MUST match the AST definition exactly for type equivalence
 Entity :: ast.Entity
 
@@ -336,55 +338,55 @@ Entity_Flag :: ast.Entity_Flag
 Entity_Flags :: ast.Entity_Flags
 
 // Entity_Variant is re-declared from ast.Entity_Variant
-// The canonical definition lives in /mnt/c/odin/core/odin/ast/semantic_types.odin
+// The canonical definition lives in core/odin/ast/semantic_types.odin
 Entity_Variant :: ast.Entity_Variant
 
 // Parameter_Value_Kind categorizes parameter default values
-// C++ Reference: enum ParameterValueKind in /mnt/c/odin/src/entity.cpp:102-109
+// C++ Reference: enum ParameterValueKind in entity.cpp:102-109
 Parameter_Value_Kind :: ast.Parameter_Value_Kind
 
 // Parameter_Value stores parameter default value information
-// C++ Reference: struct ParameterValue in /mnt/c/odin/src/entity.cpp:111-118
+// C++ Reference: struct ParameterValue in entity.cpp:111-118
 Parameter_Value :: ast.Parameter_Value
 
 // Entity_Constant_Flag defines flags for constant entities
-// C++ Reference: enum EntityConstantFlags in /mnt/c/odin/src/entity.cpp:130-131
+// C++ Reference: enum EntityConstantFlags in entity.cpp:130-131
 Entity_Constant_Flag :: ast.Entity_Constant_Flag
 
 Entity_Constant_Flags :: ast.Entity_Constant_Flags
 
 // Entity_Constant is re-declared from ast.Entity_Constant
-// The canonical definition lives in /mnt/c/odin/core/odin/ast/semantic_types.odin
-// C++ Reference: Entity.Constant struct in /mnt/c/odin/src/entity.cpp:202-209
+// The canonical definition lives in core/odin/ast/semantic_types.odin
+// C++ Reference: Entity.Constant struct in entity.cpp:202-209
 Entity_Constant :: ast.Entity_Constant
 
 // Entity_Variable is re-declared from ast.Entity_Variable
-// The canonical definition lives in /mnt/c/odin/core/odin/ast/semantic_types.odin
-// C++ Reference: Entity.Variable struct in /mnt/c/odin/src/entity.cpp:210-234
+// The canonical definition lives in core/odin/ast/semantic_types.odin
+// C++ Reference: Entity.Variable struct in entity.cpp:210-234
 Entity_Variable :: ast.Entity_Variable
 
 // Type_Name_ObjC_Metadata_Entry represents a name/entity pair in ObjC metadata
-// C++ Reference: struct TypeNameObjCMetadataEntry in /mnt/c/odin/src/entity.cpp
+// C++ Reference: struct TypeNameObjCMetadataEntry in entity.cpp
 Type_Name_ObjC_Metadata_Entry :: ast.Type_Name_ObjC_Metadata_Entry
 
 // Type_Name_ObjC_Metadata stores Objective-C class metadata for type names
-// C++ Reference: struct TypeNameObjCMetadata in /mnt/c/odin/src/entity.cpp
+// C++ Reference: struct TypeNameObjCMetadata in entity.cpp
 // This structure holds methods and properties that can be accessed on ObjC classes
 Type_Name_ObjC_Metadata :: ast.Type_Name_ObjC_Metadata
 // Objc_Method_Data stores Objective-C method registration data
-// C++ Reference: struct ObjcMethodData in /mnt/c/odin/src/checker.hpp:382-385
+// C++ Reference: struct ObjcMethodData in checker.hpp:382-385
 Objc_Method_Data :: struct {
 	ac:     Attribute_Context, // C++ line 383: AttributeContext ac
 	entity: ^Entity, // C++ line 384: Entity *entity
 }
 
 // Entity_Type_Name represents type name entities
-// C++ Reference: Entity.TypeName struct in /mnt/c/odin/src/entity.cpp:235-246
+// C++ Reference: Entity.TypeName struct in entity.cpp:235-246
 // Entity_Type_Name is re-declared from ast.Entity_Type_Name
 Entity_Type_Name :: ast.Entity_Type_Name
 
 // Procedure_Optimization_Mode controls procedure optimization level
-// C++ Reference: enum ProcedureOptimizationMode in /mnt/c/odin/src/entity.cpp:134-138
+// C++ Reference: enum ProcedureOptimizationMode in entity.cpp:134-138
 Procedure_Optimization_Mode :: ast.Procedure_Optimization_Mode
 
 // Gen_Procs_Data stores specialized polymorphic procedure instances
@@ -392,7 +394,7 @@ Procedure_Optimization_Mode :: ast.Procedure_Optimization_Mode
 Gen_Procs_Data :: ast.Gen_Procs_Data
 
 // Entity_Procedure represents procedure entities
-// C++ Reference: Entity.Procedure struct in /mnt/c/odin/src/entity.cpp:247-269
+// C++ Reference: Entity.Procedure struct in entity.cpp:247-269
 // Entity_Procedure is re-declared from ast.Entity_Procedure
 Entity_Procedure :: ast.Entity_Procedure
 
@@ -415,7 +417,7 @@ Entity_Import_Name :: ast.Entity_Import_Name
 Entity_Library_Name :: ast.Entity_Library_Name
 
 // Type is re-declared from ast.Type to ensure type compatibility
-// The canonical definition lives in /mnt/c/odin/core/odin/ast/semantic_types.odin
+// The canonical definition lives in core/odin/ast/semantic_types.odin
 // NOTE: This MUST match the AST definition exactly for type equivalence
 Type :: ast.Type
 
@@ -426,11 +428,11 @@ Type_Flag :: ast.Type_Flag
 Type_Kind :: ast.Type_Kind
 
 // Type_Variant is re-declared from ast.Type_Variant
-// The canonical definition lives in /mnt/c/odin/core/odin/ast/semantic_types.odin
+// The canonical definition lives in core/odin/ast/semantic_types.odin
 Type_Variant :: ast.Type_Variant
 
 // Type_Basic is re-declared from ast.Type_Basic
-// The canonical definition lives in /mnt/c/odin/core/odin/ast/semantic_types.odin
+// The canonical definition lives in core/odin/ast/semantic_types.odin
 Type_Basic :: ast.Type_Basic
 
 // Gen_Types_Data stores specialized polymorphic type instances
@@ -438,7 +440,7 @@ Type_Basic :: ast.Type_Basic
 Gen_Types_Data :: ast.Gen_Types_Data
 
 // Type_Named is re-declared from ast.Type_Named
-// The canonical definition lives in /mnt/c/odin/core/odin/ast/semantic_types.odin
+// The canonical definition lives in core/odin/ast/semantic_types.odin
 Type_Named :: ast.Type_Named
 
 // Type_Pointer is re-declared from ast.Type_Pointer
@@ -458,7 +460,7 @@ Type_Fixed_Capacity_Dynamic_Array :: ast.Type_Fixed_Capacity_Dynamic_Array
 Type_Map :: ast.Type_Map
 
 // Struct_Soa_Kind defines structure-of-arrays layout types
-// C++ Reference: enum StructSoaKind in /mnt/c/odin/src/types.cpp:129-133
+// C++ Reference: enum StructSoaKind in types.cpp:129-133
 Struct_Soa_Kind :: runtime.Type_Info_Struct_Soa_Kind
 
 // Type_Struct is re-declared from ast.Type_Struct
@@ -504,7 +506,7 @@ Type_Simd_Vector :: ast.Type_Simd_Vector
 Type_Matrix :: ast.Type_Matrix
 
 // Basic_Kind is re-declared from ast.Basic_Kind
-// The canonical definition lives in /mnt/c/odin/core/odin/ast/semantic_types.odin
+// The canonical definition lives in core/odin/ast/semantic_types.odin
 Basic_Kind :: ast.Basic_Kind
 
 // Basic_Flag is re-declared from ast.Basic_Flag
@@ -522,7 +524,7 @@ BASIC_FLAG_CONSTANT_TYPE :: Basic_Flags{.Boolean, .Integer, .Float, .Complex, .Q
 BASIC_FLAG_SIMPLE_COMPARE :: Basic_Flags{.Boolean, .Integer, .Pointer, .Rune}
 
 // Calling_Convention defines procedure calling conventions
-// C++ Reference: enum ProcCallingConvention in /mnt/c/odin/src/parser.hpp
+// C++ Reference: enum ProcCallingConvention in parser.hpp
 Calling_Convention :: ast.Calling_Convention
 
 // Alias for compatibility
@@ -532,7 +534,7 @@ Builtin_Proc_Id :: ast.Builtin_Proc_Id
 
 // Builtin_Proc_Info stores metadata for each builtin procedure
 // Note: Expr_Kind is already defined earlier in this file
-// C++ Reference: struct BuiltinProc in /mnt/c/odin/src/checker.hpp:62-70
+// C++ Reference: struct BuiltinProc in checker.hpp:62-70
 Builtin_Proc_Info :: struct {
 	name:           string,
 	arg_count:      int,
@@ -544,7 +546,7 @@ Builtin_Proc_Info :: struct {
 }
 
 // builtin_proc_infos maps builtin IDs to their metadata
-// C++ Reference: gb_global BuiltinProc builtin_procs[] in /mnt/c/odin/src/checker_builtin_procs.hpp:369-728
+// C++ Reference: gb_global BuiltinProc builtin_procs[] in checker_builtin_procs.hpp:369-728
 builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Invalid = {name = "", arg_count = 0, variadic = false, kind = .Stmt, pkg = .Builtin},
 	.Len = {name = "len", arg_count = 1, variadic = false, kind = .Expr, pkg = .Builtin},
@@ -575,14 +577,14 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	// Data access
 	.Raw_Data = {name = "raw_data", arg_count = 1, variadic = false, kind = .Expr, pkg = .Builtin},
 	// Math operations
-	// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:3744-4258
+	// C++ Reference: check_builtin.cpp:3744-4258
 	.Min = {name = "min", arg_count = 1, variadic = true, kind = .Expr, pkg = .Builtin},
 	.Max = {name = "max", arg_count = 1, variadic = true, kind = .Expr, pkg = .Builtin},
 	.Abs = {name = "abs", arg_count = 1, variadic = false, kind = .Expr, pkg = .Builtin},
 	.Clamp = {name = "clamp", arg_count = 3, variadic = false, kind = .Expr, pkg = .Builtin},
 
 	// Bit manipulation intrinsics
-	// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5193-5336
+	// C++ Reference: check_builtin.cpp:5193-5336
 	.Count_Ones = {name = "count_ones", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Count_Zeros = {name = "count_zeros", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Count_Trailing_Zeros = {name = "count_trailing_zeros", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -593,30 +595,30 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Byte_Swap = {name = "byte_swap", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Overflow-checking arithmetic
-	// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5338-5380
+	// C++ Reference: check_builtin.cpp:5338-5380
 	.Overflow_Add = {name = "overflow_add", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Overflow_Sub = {name = "overflow_sub", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Overflow_Mul = {name = "overflow_mul", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Saturating arithmetic
-	// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5382-5423
+	// C++ Reference: check_builtin.cpp:5382-5423
 	.Saturating_Add = {name = "saturating_add", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Saturating_Sub = {name = "saturating_sub", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Floating-point intrinsics
-	// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:5425-5500
+	// C++ Reference: check_builtin.cpp:5425-5500
 	.Sqrt = {name = "sqrt", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Fused_Mul_Add = {name = "fused_mul_add", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Fixed-point arithmetic
-	// C++ Reference: /mnt/c/odin/src/check_builtin.cpp:6078-6150
+	// C++ Reference: check_builtin.cpp:6078-6150
 	.Fixed_Point_Mul = {name = "fixed_point_mul", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Fixed_Point_Div = {name = "fixed_point_div", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Fixed_Point_Mul_Sat = {name = "fixed_point_mul_sat", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Fixed_Point_Div_Sat = {name = "fixed_point_div_sat", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Atomic operations
-	// C++ Reference: /mnt/c/odin/src/checker_builtin_procs.hpp:369-728
+	// C++ Reference: checker_builtin_procs.hpp:369-728
 	.Atomic_Type_Is_Lock_Free = {name = "atomic_type_is_lock_free", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Atomic_Thread_Fence = {name = "atomic_thread_fence", arg_count = 1, variadic = false, kind = .Stmt, pkg = .Intrinsics},
 	.Atomic_Signal_Fence = {name = "atomic_signal_fence", arg_count = 1, variadic = false, kind = .Stmt, pkg = .Intrinsics},
@@ -643,7 +645,7 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Atomic_Compare_Exchange_Weak = {name = "atomic_compare_exchange_weak", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Atomic_Compare_Exchange_Weak_Explicit = {name = "atomic_compare_exchange_weak_explicit", arg_count = 5, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	// Objective-C runtime builtins
-	// C++ Reference: /mnt/c/odin/src/checker_builtin_procs.hpp:350-356
+	// C++ Reference: checker_builtin_procs.hpp:350-356
 	.Objc_Send = {name = "objc_send", arg_count = 3, variadic = true, kind = .Expr, pkg = .Intrinsics},
 	.Objc_Find_Selector = {name = "objc_find_selector", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Objc_Find_Class = {name = "objc_find_class", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -654,7 +656,7 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Objc_Super = {name = "objc_super", arg_count = 1, variadic = true, kind = .Expr, pkg = .Intrinsics},
 
 	// SIMD operations
-	// C++ Reference: /mnt/c/odin/src/checker_builtin_procs.hpp:507-586
+	// C++ Reference: checker_builtin_procs.hpp:507-586
 	.Simd_Add = {name = "simd_add", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Sub = {name = "simd_sub", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Mul = {name = "simd_mul", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -916,7 +918,7 @@ Import_Graph_Node :: struct {
 }
 
 // Package_Exported_Entity represents an exported entity from a package
-// C++ Reference: struct AstPackageExportedEntity in /mnt/c/odin/src/parser.hpp:188-191
+// C++ Reference: struct AstPackageExportedEntity in parser.hpp:188-191
 // NOTE: This type is NOT present in core:odin/ast. We track exported entities externally.
 // Used for multi-threaded package processing via MPSC queues.
 Package_Exported_Entity :: ast.Package_Exported_Entity
@@ -926,7 +928,7 @@ Package_Exported_Entity :: ast.Package_Exported_Entity
 Ast_Call_Expr :: ast.Call_Expr
 
 // Foreign_Context tracks foreign declaration state
-// C++ Reference: struct ForeignContext in /mnt/c/odin/src/checker.hpp:343-351
+// C++ Reference: struct ForeignContext in checker.hpp:343-351
 Foreign_Context :: struct {
 	curr_library:    ^ast.Expr, // C++ line 344
 	default_cc:      Calling_Convention, // C++ line 345
@@ -1026,7 +1028,7 @@ Checker_Info :: struct {
 	// Flags are now stored directly on AST nodes:
 	//   - node.state_flags (Node_State_Flags) - downward-propagating flags
 	//   - node.viral_state_flags (Node_Viral_State_Flags) - upward-propagating flags
-	// See: /mnt/c/odin/core/odin/ast/ast.odin lines 28-44
+	// See: core/odin/ast/ast.odin lines 28-44
 
 	// When statement condition memoization deleted - now stored directly on When_Stmt
 
@@ -1158,7 +1160,7 @@ Checker_Info :: struct {
 
 	// Type resolution cache - DELETED
 	// Type and value information is now stored directly on AST nodes: node.tav
-	// See: /mnt/c/odin/core/odin/ast/ast.odin line 55
+	// See: core/odin/ast/ast.odin line 55
 
 	// Instrumentation support (C++ check_decl.cpp:1300-1321)
 	// Tracks special @(instrumentation_enter/exit) procedures
@@ -1204,7 +1206,7 @@ Checker_Context :: struct {
 
 	// Type and value storage - DELETED
 	// Type and value information is now stored directly on AST nodes: node.tav
-	// See: /mnt/c/odin/core/odin/ast/ast.odin line 55
+	// See: core/odin/ast/ast.odin line 55
 	stmt_flags:                        Stmt_Flag,
 	in_enum_type:                      bool,
 	allow_polymorphic_types:           bool,
