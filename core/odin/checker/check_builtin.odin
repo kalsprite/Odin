@@ -3576,12 +3576,18 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		// continuation prints BEFORE the diagnostic it belongs to.
 		begin_error_block()
 		defer end_error_block()
-		// C++ Reference: check_builtin.cpp:2666-2669. C++ requires EXACTLY one argument; the
-		// port tested `> 1`, so `#panic()` was accepted and reported as a panic with no
-		// message where C++ rejects the call outright. C++ also errors at the CALL, not at its
-		// closing paren.
+		// C++ Reference: check_builtin.cpp, the `name == "panic"` arm. C++ requires EXACTLY one
+		// argument; the port tested `> 1`, so `#panic()` was accepted and reported as a panic
+		// with no message where C++ rejects the call outright.
+		//
+		// #574: all three errors in this arm pass the CALL (`call_expr`), not the CALLEE
+		// (`call_expr.expr`). C++ passes `call` to every one. The callee is just the `#panic`
+		// directive, so the caret spanned 6 characters instead of the whole call expression --
+		// visible as `^~~~~^` against the oracle's full-width span. An earlier note here said
+		// "C++ errors at the CALL, not at its closing paren", which was the right intent
+		// attached to the wrong node.
 		if len(call_expr.args) != 1 {
-			error(call_expr.expr, "'#panic' expects 1 argument, got %d", len(call_expr.args))
+			error(call_expr, "'#panic' expects 1 argument, got %d", len(call_expr.args))
 			return false
 		}
 
@@ -3594,14 +3600,14 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		if !is_type_string(msg_op.type) && msg_op.mode != .Constant {
 			arg_str := expr_to_string(call_expr.args[0])
 			defer delete(arg_str)
-			error(call_expr.expr, "'%s' is not a constant string", arg_str)
+			error(call_expr, "'%s' is not a constant string", arg_str)
 			return false
 		}
 
 		// C++ Reference: check_builtin.cpp:2677. One form only, always carrying the value;
 		// the port had three branches and two of them dropped the message.
 		msg_str, _ := msg_op.value.(string)
-		error(call_expr.expr, "Compile time panic: %s", msg_str)
+		error(call_expr, "Compile time panic: %s", msg_str)
 
 		// C++ Reference: check_builtin.cpp:2678-2682 -- same continuation as #assert.
 		// NOTE: no `delete` on the type_to_string result. type_to_string does not always

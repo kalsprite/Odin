@@ -1519,6 +1519,17 @@ check_cast_error_suggestion :: proc(ctx: ^Checker_Context, operand: ^Operand, ta
 		}
 	} else if are_types_identical(src, t_string) && is_type_u8_slice(dst) {
 		error_line("\tSuggestion: a string may be transmuted to %s\n", b)
+	} else if check_integer_exceed_suggestion(ctx, operand, target_type) {
+		// C++ Reference: check_expr.cpp check_cast_error_suggestion -- the FINAL arm, which the
+		// port was missing. C++ calls check_integer_exceed_suggestion from BOTH
+		// check_assignment_error_suggestion AND check_cast_error_suggestion; the port had only
+		// the assignment one. So `i64(1e100)` printed the "cannot be represented" line but not
+		// the "The maximum value that can be represented by 'i64' is ..." note that follows it,
+		// while `x: i64 = 1e100` printed both.
+		//
+		// INVISIBLE TO parity.sh: the missing text is a CONTINUATION line, and #155 established
+		// the comparator cannot see those. Corpus-wide parity was 0/0/0 with this live.
+		return
 	}
 }
 

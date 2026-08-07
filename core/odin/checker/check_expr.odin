@@ -9839,12 +9839,16 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 					big.int_shl(&umax, &one, bits)
 
 					if is_type_unsigned(src_t) && !is_type_unsigned(dst_t) {
-						// C++ tests `>= smax`, so the single value 2^(bits-1)-1 wraps
-						// when it should not: transmute(i32)u32(0x7FFFFFFF) yields
-						// -2147483649, which is not representable in i32 at all.
-						// Reproduced deliberately -- the oracle does this and parity is
-						// the objective. Filed as UPSTREAM-557.
-						if c, err := big.int_cmp(&v, &smax); err == nil && c >= 0 {
+						// C++ Reference: check_expr.cpp:4085 -- `big_int_cmp(&v, &smax) > 0`.
+						//
+						// FIXED UPSTREAM (PR #7244, merged). The bound used to be `>= smax`,
+						// which wrapped one value too many: transmute(i32)u32(0x7FFFFFFF)
+						// yielded -2147483649, not representable in i32 at all. The port
+						// reproduced that deliberately, because parity with the compiler that
+						// EXISTS was the objective and it was filed as UPSTREAM-557 rather
+						// than silently corrected. Upstream has now taken the fix, so the
+						// faithful bound is `>` and the port follows.
+						if c, err := big.int_cmp(&v, &smax); err == nil && c > 0 {
 							big.int_sub(&v, &v, &umax)
 						}
 					} else if !is_type_unsigned(src_t) && is_type_unsigned(dst_t) {
