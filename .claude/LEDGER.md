@@ -17366,3 +17366,119 @@ mis-triaged, which is the same courtesy #577's tail was carried for.
 
 Steps 2-5 (drop the globals, delete the reset list, rewrite ~164 references, thread 6 procedures)
 are indivisible -- the tree does not build between them -- and are the next unit of work.
+
+### #566 EXECUTION ATTEMPT 1: reverted at 36 errors, with the inventory the next attempt needs
+
+Ran steps 1-3 end to end, then **reverted to the pre-566 backup rather than leave a broken tree**.
+The tree is green again (`-vet -strict-style` RC=0, resetaudit missing=0 spurious=0). What the
+attempt bought is a measured inventory, not code.
+
+**The mechanical part works.** A rewriter keyed on the enclosing procedure's signature converted
+**144 of 170** references to `c.t_*` / `ctx.checker.t_*` automatically, leaving exactly the 26 in
+procedures that have no Checker.
+
+**Deleting the globals FIRST is the load-bearing safety net, and it must stay that way.** While the
+globals still exist a missed rewrite compiles silently and the migration is half-done with no
+signal. With them gone the compiler enumerates every miss. That is what produced this:
+
+    total 36 errors -- entity_helpers 16, checker_lifecycle 11, types 5, check_type 3, check_decl 1
+    of which exactly 1 is a rewriter bug; the other 35 are the expected threading work
+
+**Rewriter bug, for the next attempt.** `sig` goes stale when a procedure header spans multiple
+lines: the `^([a-zA-Z_]\w*)\s*::\s*proc\s*\(([^)]*)` capture stops at the first `)`, so a later
+procedure whose header did not match inherits the previous one's signature. It wrote
+`ctx.checker.t_source_code_location` into check_decl.odin:1304, which has no `ctx`. One occurrence.
+Fix by tracking paren depth across lines rather than assuming a single-line header.
+
+**A measurement bug this exposed, which had been silently inflating the plan.** I had been testing
+`"^Checker" in sig` -- which SUBSTRING-MATCHES `^Checker_Info` and `^Checker_Context`. So procedures
+taking a Checker_Info were counted as already having a Checker. The real count is **7 procedures
+needing threading, not 6**: `populate_builtin_package_scope` takes `^Checker_Info` and had been
+misbucketed. Corrected regex: `\^Checker(?![_a-zA-Z])`.
+
+**Shell trap hit again**, the #553 family in a new form: `./odin check ... 2>&1 > log` sends stderr
+to the TERMINAL and stdout to the file, so `grep -c Error: log` read an empty file and reported 0
+errors on a tree with 36. Correct form is `> log 2>&1`. Third distinct instance of "the pipeline
+did not measure what I thought" this session.
+
+**Two edits worth keeping verbatim when this is redone** (they are already written and correct):
+the destroy_checker note explaining why there is nothing left to reset, and the acquire_runtime_session
+note explaining that re-resolution returns the same `^Type` objects so sharing is by construction.
+Both are in the reverted diff; recover them from $S/pre566 comparison rather than rewriting.
+
+### #566 tooling: globalmove.py, and THREE bugs it caught before touching a file
+
+Attempt 1's rewrite logic was correct (144/170) but lived in a shell heredoc. Promoted to
+`.claude/tools/globalmove.py` so attempt 2 does not re-derive it -- re-deriving is where the bugs
+come back. It defaults to `--report` and only rewrites under `--apply`; that default is what saved
+the tree three times in a row.
+
+**Bug A -- argv leak across an import.** `resetaudit` resolves its `CHECKER` from `sys.argv[1]` at
+MODULE level. Importing it made it read globalmove's own flag, `"--report"`, as a directory; the
+glob matched nothing, every global looked unassigned, and **all 162 were classified checker-owned
+instead of 89**. Under `--apply` that would have rewritten the target-derived basics -- `t_int`,
+`t_bool`, every endian variant -- into `c.t_*`, which the ~200 procedures that DO have a Checker
+would have compiled without complaint. Caught only because `--report` prints `owned=`; that number
+is the canary and the tool now says so.
+
+**Bug B -- multi-line procedure headers.** `^(\w+)\s*::\s*proc\s*\(([^)]*)` stops at the first `)`,
+so a procedure whose parameter list spans lines left `sig` stale and the NEXT reference inherited
+the PREVIOUS procedure's receiver. That is the one wrong rewrite in attempt 1
+(`ctx.checker.` into check_decl.odin:1304, which has no `ctx`). Now accumulates until parens balance.
+
+**Bug C -- anchor too narrow, introduced BY the fix for B.** Passing the whole header line as `sig`
+means the FIRST parameter is preceded by `(`, not by `^` or `,`. The old anchor therefore matched
+nothing for almost every procedure, reporting **32 procedures needing threading instead of 7**.
+Widened to `(?:^|[(,])`. A fix that creates a new defect in the same function is worth naming: B and
+C are one edit apart and only the second measurement distinguished them.
+
+**Convergence check.** The tool now reports `owned=89, procs_needing_threading=7` with the counts
+14/3/3/2/2/1/1 = 26 -- identical to the manual analysis done independently earlier in the session.
+Agreement between a tool and a measurement it did not produce is the point; a tool that only agrees
+with itself proves nothing (#483 again, in a new costume).
+
+**Cascade still to price in.** `lookup_field_with_selection`'s 2 references are `t_allocator` at
+types.odin:3371/3382, where it synthesises the built-in `allocator` field (#88). Threading it
+reaches `lookup_field` and its **11 call sites** across 4 check_* files -- all of which have a ctx,
+so mechanical, but it is 11 sites the 7-procedure figure does not include.
+
+### #566 ATTEMPT 2: my own tool destroyed the package. Recovered; guard now REFUSES.
+
+Attempt 2 got further than attempt 1 -- all 8 procedures threaded (26 call sites + 14 receiver
+corrections), tree green at 0 errors, then `globalmove.py --apply` rewrote 170 references and the
+globals were deleted, leaving 22 errors. Then I re-ran `--apply` to pick up a comment-scanning fix,
+and it **destroyed every file in the package**.
+
+**The mechanism.** By that point types.odin's declarations were already gone, so `owned_globals()`
+correctly returned the EMPTY SET. An empty set makes the alternation `(' + "" + ')` -- a regex that
+matches the **empty string at every position**. `pat.sub` therefore inserted `ctx.checker.` between
+every pair of characters:
+
+    ctx.checker.	ctx.checker.	loaded_type ctx.checker.:ctx.checker.=ctx.checker. check_type(...)
+
+Recovered from `$S/pre566b`, taken minutes earlier. Tree is green: RC=0, resetaudit missing=0
+spurious=0.
+
+**The part that matters is not the regex.** I had already written into that file's header, in
+capitals, that `owned=` is the canary and must be read every time -- after Bug A taught me exactly
+this. Then I ran `--apply` one step later without reading it. **A safeguard that depends on the
+operator noticing is not a safeguard.** The tool now REFUSES: `owned < 50` returns 2 and writes
+nothing. Verified by reproducing the exact failing state (delete the declarations, run --apply):
+`GUARD_RC=2`, no files written.
+
+**Also fixed, and it is what I was re-running for:** `strip_comments` looked for `/*` before `//`,
+so a LINE comment containing `/*` -- entity_helpers.odin:43,
+`// core/crypto/aes and core/crypto/_aes/* became an undeclared name.` -- was read as an
+unterminated block comment and swallowed the rest of the file. 17 references there were silently
+skipped while the tool reported `still_need_threading=0`. Now scans left-to-right for whichever
+delimiter comes first. The pattern also gained `(?<![a-zA-Z_0-9.])` so a second pass cannot turn
+`c.t_type_info` into `c.c.t_type_info`.
+
+**Five tool bugs across two attempts** (argv leak, multi-line headers, narrow anchor, comment order,
+empty-set catastrophe). Every one was in MY instrumentation, none in the checker. The migration
+logic itself has been correct since attempt 1 -- 144/170 then 170/170. That ratio is the real
+lesson: on a change this mechanical, the risk is concentrated entirely in the tooling, so the
+tooling needs the same positive controls the checker gates get.
+
+Attempt 3 should re-run the same sequence with the guard in place. The threading step (8 procedures,
+40 edits) is known-good and reproducible from this entry.
