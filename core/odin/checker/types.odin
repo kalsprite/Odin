@@ -267,6 +267,7 @@ t_raw_map_ptr: ^Type // ^Raw_Map
 // C++ Reference: types.cpp:750-751
 t_equal_proc: ^Type // proc(rawptr, rawptr) -> bool {contextless}
 t_hasher_proc: ^Type // proc(rawptr, uintptr) -> uintptr {contextless}
+t_map_get_proc: ^Type // proc(map, hash, key) -> rawptr {contextless} (checker.cpp:1143)
 
 // Mutex to protect runtime type globals during reset
 // This is needed because tests may run in parallel, creating/destroying multiple checkers
@@ -404,6 +405,21 @@ reset_runtime_type_globals :: proc() {
 	t_source_code_location_ptr = nil
 	t_atomic_memory_order = nil
 
+	// t_fast_math_flags was MISSING from this list until #566's derived audit. It is built by the
+	// block immediately after Atomic_Memory_Order's in populate_builtin_package_scope
+	// (checker_lifecycle.odin:1236-1264) and is checker-owned in every respect the one above is:
+	// create_scope(builtin_scope, allocator), alloc_entity_type_name(..., allocator), and a
+	// scope_insert into that checker's intrinsics_scope. Two adjacent declarations
+	// (types.odin:248-249), two identical construction blocks, and only one of them was reset.
+	//
+	// Not caught earlier because the omission is benign on the common path: the block is guarded
+	// on `intrinsics_scope != nil`, not on the global, so a second checker OVERWRITES the dangling
+	// pointer before anything reads it. The failure needs a second checker whose intrinsics_scope
+	// is nil -- then the block is skipped, the stale pointer survives, and the sole reader
+	// (check_decl_helpers.odin:1184, @(fast_math) attribute values) dereferences freed memory.
+	// That is exactly the shape #368 documents above for Atomic_Memory_Order.
+	t_fast_math_flags = nil
+
 	// Reset load directory file types
 	t_load_directory_file = nil
 	t_load_directory_file_ptr = nil
@@ -418,8 +434,13 @@ reset_runtime_type_globals :: proc() {
 	t_raw_map_ptr = nil
 
 	// Reset comparison/hashing procedure types
-	t_equal_proc = nil
-	t_hasher_proc = nil
+	// t_equal_proc / t_hasher_proc / t_map_get_proc are NOT reset here, and must not be. Before
+	// #577 they were in this list, which was harmless only because nothing ever assigned them.
+	// Now that init_basic_types builds them (types.odin, from the default allocator alongside the
+	// basics), resetting them would be an outright bug: init_basic_types is reached through the
+	// `t_int == nil` guard at checker_lifecycle.odin:206, so nil'ing these on session teardown
+	// would leave them permanently nil for every later checker in the process -- t_int stays
+	// non-nil, so nothing would ever rebuild them. They are process-lifetime, like the basics.
 }
 
 // init_basic_types initializes the basic type singletons
@@ -543,6 +564,28 @@ init_basic_types :: proc(allocator := context.allocator) {
 	t_untyped_rune = make_basic(.Untyped_Rune, 0, allocator)
 	t_untyped_nil = make_basic(.Untyped_Nil, 0, allocator)
 	t_untyped_uninit = make_basic(.Untyped_Uninit, 0, allocator)
+
+	// LEDGER #577. The three runtime helper procedure types. C++ builds these in init_universal
+	// (checker.cpp:1135-1144), immediately after the basic-type loop and in the same one-shot
+	// routine -- so they belong HERE, alongside the basics, not on a per-Checker path.
+	//
+	// The port had t_equal_proc and t_hasher_proc DECLARED and READ (check_builtin.odin, the
+	// type_equal_proc / type_hasher_proc builtins) but never written, so both builtins produced an
+	// operand with a nil type: the oracle printed
+	//     'proc "contextless" (rawptr, rawptr) -> bool'
+	// where the port printed '<no type>'. t_map_get_proc was absent from the port entirely.
+	//
+	// context.allocator is pinned to `allocator` for the block because alloc_type_proc_from_types
+	// allocates its parameter entities and tuple through the CONTEXT allocator, not through a
+	// passed one. Without this, these types would be owned by whatever allocator the caller
+	// happened to have installed -- the #358 defect exactly, and these are process-lifetime
+	// singletons reached through the `t_int == nil` guard, so they must not be.
+	{
+		context.allocator = allocator
+		t_equal_proc = alloc_type_proc_from_types(nil, {t_rawptr, t_rawptr}, {t_bool}, false, .Contextless)
+		t_hasher_proc = alloc_type_proc_from_types(nil, {t_rawptr, t_uintptr}, {t_uintptr}, false, .Contextless)
+		t_map_get_proc = alloc_type_proc_from_types(nil, {t_rawptr, t_uintptr, t_rawptr}, {t_rawptr}, false, .Contextless)
+	}
 }
 
 // Type checking utilities
@@ -4368,15 +4411,24 @@ alloc_type_multi_pointer_to_pointer :: proc(c: ^Checker, mp_type: ^Type) -> ^Typ
 
 // alloc_type_tuple_from_field_types creates a tuple type from field types
 // C++ Reference: types.cpp:4755-4773
-alloc_type_tuple_from_field_types :: proc(c: ^Checker, types: []^Type) -> ^Type {
+// must_be_tuple mirrors C++'s FOURTH parameter (types.cpp alloc_type_tuple_from_field_types). The
+// port had dropped it, so the single-type shortcut fired unconditionally. That was invisible while
+// alloc_type_proc_from_types had no callers -- every other caller wants the shortcut and passes
+// false, which is why the default is false and all five existing call sites are untouched. The
+// moment #577 gave the proc builder a caller, an unwrapped Type_Basic reached a Type_Tuple
+// assertion (check_expr.odin:8934) and crashed the checker.
+//
+// C++'s `is_packed` parameter is deliberately NOT modelled: all 13 call sites across src/ pass
+// false, so it has no reachable behaviour to reproduce. Add it if a caller ever needs true.
+alloc_type_tuple_from_field_types :: proc(c: ^Checker, types: []^Type, must_be_tuple := false) -> ^Type {
 	_ = c
 
 	// Handle edge cases
 	if len(types) == 0 {
 		return nil
 	}
-	// Single type doesn't need tuple wrapper
-	if len(types) == 1 {
+	// Single type doesn't need tuple wrapper -- unless the caller requires one
+	if !must_be_tuple && len(types) == 1 {
 		return types[0]
 	}
 
@@ -4393,12 +4445,25 @@ alloc_type_tuple_from_field_types :: proc(c: ^Checker, types: []^Type) -> ^Type 
 }
 
 // alloc_type_proc_from_types creates a procedure type from parameter and result types
-// C++ Reference: checker.cpp:2075-2110
-alloc_type_proc_from_types :: proc(c: ^Checker, params: []^Type, results: []^Type, variadic: bool) -> ^Type {
-	param_tuple := alloc_type_tuple_from_field_types(c, params)
-	result_tuple := alloc_type_tuple_from_field_types(c, results)
+// C++ Reference: types.cpp alloc_type_proc_from_types -- which takes the calling convention as its
+// last parameter. The port hardcoded `.Odin` and, having had NO callers at all, nothing exposed it.
+// Both of C++'s uses in init_universal pass ProcCC_Contextless, so a caller using the old signature
+// would have produced `proc(...)` where the reference prints `proc "contextless" (...)` -- a second
+// divergence sitting behind the missing-writer one (#577).
+alloc_type_proc_from_types :: proc(
+	c: ^Checker,
+	params: []^Type,
+	results: []^Type,
+	variadic: bool,
+	calling_convention := Calling_Convention.Odin,
+) -> ^Type {
+	// must_be_tuple=true on BOTH, exactly as C++ does (types.cpp:5200 for the params, :5204 for the
+	// results after its `results->kind != Type_Tuple` test -- which is the same wrap, expressed as
+	// a guard because C++ receives a single Type* rather than a slice).
+	param_tuple := alloc_type_tuple_from_field_types(c, params, true)
+	result_tuple := alloc_type_tuple_from_field_types(c, results, true)
 
-	return alloc_type_proc(nil, param_tuple, result_tuple, len(params), len(results), variadic, .Odin)
+	return alloc_type_proc(nil, param_tuple, result_tuple, len(params), len(results), variadic, calling_convention)
 }
 
 // ============================================================================

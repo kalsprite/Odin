@@ -17043,3 +17043,266 @@ same treatment. `UPSTREAM-575-*.md`, registered in `UPSTREAM-STATUS.md`.
 **Port change: none.** The port is already the deterministic side. This is one more member of the
 #197/#341 class where port-vs-oracle cannot converge because the oracle has no single answer — but
 unlike its predecessors it has a named site, a clean control and a two-line fix.
+
+### #575 follow-up: prev/found were BACKWARDS in my write-up, and n>2 is not fixed by the PR
+
+Two corrections, both found by probing the n>2 case rather than reasoning about it.
+
+**1. The anchor direction was inverted.** I wrote that `prev` is the entity already in the scope. It
+is not. `add_entity_with_name` (`checker.cpp:2089-2092`) calls
+`scope_insert(scope, entity)`, which returns the **incumbent** on collision, then
+`redeclaration_error(name, entity, ie)` — so `prev` is the **new** declaration (the anchor) and
+`found` is the **incumbent** (the `at` line). The parameter names invert their meaning, which is how
+I got it wrong reading the emitter alone.
+
+This also retracts the "argues against basename order" remark: with the direction corrected, the
+majority outcome IS basename order — `dump_verify_input` is the incumbent because it sorts first.
+The remark was an artefact of the inverted reading and is deleted, not merely softened.
+
+Also checked and NOT claimed: `scope_insert_with_name` (`:479`) holds an **exclusive**
+`rw_mutex_lock` across `scope_map_get` and `scope_map_insert`, so there is no double-insert window.
+I had begun forming that hypothesis and the source refuted it before it reached the write-up.
+
+**2. n>2 is not fixed by the positional swap.** Jon's point, confirmed by probe. Three files each
+declaring `main`, oracle threaded, 40 runs:
+
+| outcome (`anchor→at` per error) | runs |
+|---|---|
+| `bbb→aaa`, `ccc→aaa` | 39 |
+| `bbb→aaa`, `ccc→bbb` | 1 |
+
+The incumbent appears in EVERY pair, so when it changes the whole set moves — `{aaa,bbb},{aaa,ccc}`
+vs `{aaa,bbb},{bbb,ccc}`. Sorting a pair normalises orientation, not membership. **Sorting a pair
+cannot fix a set.** PR #7253 stabilises n=2, which is the common case; closing the class needs
+deterministic collection order.
+
+**Open question, deliberately not answered.** The outlier names TWO different incumbents in one run
+(`aaa` for `bbb`, then `bbb` for `ccc`). Under a single exclusive-locked scope that should be
+impossible. Candidates not yet distinguished: the three distinct call sites reaching this emitter
+(`checker.cpp:2092`, `:2113`, `check_type.cpp:3217`) operating on different scopes, or the
+`in_single_threaded_checker_stage` flag at `:526` selecting the `_no_mutex` variant mid-flight.
+Recorded as unexplained rather than given a plausible-sounding cause.
+
+Port change: still none. UPSTREAM-575 and UPSTREAM-STATUS.md updated with the corrected direction,
+the PR number and the n>2 limits.
+
+## #566 part 1 / #572 condition 3: the reset list is now DERIVED, and deriving it found two defects
+
+mir's third condition was "derive the reset list rather than trust it". Trusting it had already cost
+a defect, and the derivation immediately found a second, larger one.
+
+**Scope, measured rather than assumed.** 161 `t_*: ^Type` package globals (not the ~113 the earlier
+note estimated -- multi-name declaration lines like `t_i8, t_i16, ...: ^Type` were undercounted),
+1,251 references across the package. 90 were reset, 71 not.
+
+**Defect 1 -- t_fast_math_flags was missing from the reset list.** FIXED. The rule: a global must be
+reset iff it is assigned anywhere other than `init_basic_types` (which builds the target-derived
+basics from build_context alone and legitimately outlives a Checker). Deriving that partition put 70
+of the 71 non-reset globals in init_basic_types and left exactly one outlier:
+`t_fast_math_flags`, built in `populate_builtin_package_scope` from the checker's allocator
+(`create_scope(builtin_scope, allocator)`, `alloc_entity_type_name(..., allocator)`) and inserted
+into that checker's `intrinsics_scope`.
+
+Its sibling `t_atomic_memory_order` -- the block IMMEDIATELY above it, the adjacent declaration at
+types.odin:248 -- is reset. Two identical construction blocks, one reset. Benign on the common path
+because the block is guarded on `intrinsics_scope != nil` rather than on the global, so the next
+checker overwrites the dangling pointer; the failure needs a second checker whose intrinsics_scope
+is nil, after which the sole reader (check_decl_helpers.odin:1184, `@(fast_math)` values) reads freed
+memory. Exactly #368's documented shape.
+
+**Tool: `.claude/tools/resetaudit.py`.** Keys on the ENCLOSING PROCEDURE, not on whether the
+assignment line mentions `allocator` -- construction is spread over several statements and a
+line-text rule would have missed this one again. Reports counts, not just a verdict (#483: a gate
+that never fails proves nothing).
+
+**Defect 2, found by the same run and PROVEN against the oracle -- filed as #577.** The audit also
+reported 29 globals declared *and reset* but never assigned anywhere. They are NOT invented: C++
+declares all 29 too. But C++ also ASSIGNS them, and for two of them the port has the READER and not
+the WRITER:
+
+    a: int = intrinsics.type_equal_proc(int)
+    ORACLE: 'proc "contextless" (rawptr, rawptr) -> bool'      PORT: '<no type>'
+    ORACLE: 'proc "contextless" (rawptr, uintptr) -> uintptr'  PORT: '<no type>'
+
+`check_builtin.odin:5577/:5603` set `operand.type = t_equal_proc / t_hasher_proc`, matching
+check_builtin.cpp:8251/:8274 exactly, while C++ builds both in `init_universal`
+(checker.cpp:1137/1140). Also: `t_map_get_proc` is absent from the port entirely, and
+`alloc_type_proc_from_types` (types.odin:4412) has zero callers AND hardcodes `.Odin` where C++
+takes a ProcCC -- so the obvious fix would silently produce `proc(...)` instead of
+`proc "contextless" (...)`, a second divergence behind the first. Scoped in #577, not fixed here.
+
+**Method note.** `grep -n t_map_get_proc *.odin | head -3 || echo ABSENT` printed nothing and proved
+nothing -- the pipeline's status is `head`'s. Same trap as #553's GATE_RC and #530/#550's truncated
+greps. Re-checked with `if grep -q`; it is genuinely absent.
+
+### #578: the parity gate went 0/0/0 -> 1 COUNT + 2 ATTRIB, and all three are the redeclaration family
+
+Investigated rather than reverted (#340's lesson: I once reverted a good change on one noisy sweep).
+All three mismatches are `Redeclaration of 'main'` in `core/rexcode/isa/*/tools`:
+
+- ppc/tools, rsp/tools -- ATTRIB, same text different site. #575's anchor swap, nondeterministic.
+- x86/tools -- COUNT, oracle=2 port=3. **Deterministic on both sides** (oracle 2 in 25/25, port 3 in
+  3/3), so NOT the race. Four files declare `main`; the port reports every duplicate against one
+  incumbent (3 errors, correct for n=4), the reference reports 2, names two different incumbents,
+  and never reports `verify_tables.odin` at all. **A real duplicate goes undiagnosed upstream.**
+
+Mechanism NOT established and deliberately not guessed: `scope_insert_with_name` never replaces an
+incumbent, so an incumbent changing implicates something outside it. Filed as #578, added to
+UPSTREAM-575's Limits (PR #7253 covers only the n=2 anchoring).
+
+**My change is exonerated by direct A/B, not by argument**: x86/tools yields 3 errors with BOTH the
+pre-fix binary (st574) and the post-fix one (st576). The reset-list edit only nils a global at
+destroy time and cannot affect a single-package check.
+
+**What I am NOT claiming.** That parity was 0/0/0 immediately before this. An earlier run in this
+session reported that, but x86/tools is deterministic on both sides, so it could not have agreed
+then either -- meaning either the corpus changed under me or I misread that line. Unresolved, and
+recorded as unresolved rather than smoothed over. corpus.sh is 198/198 FULL-MATCH, missing=0.
+
+## #577 DONE: the missing writers -- and the fix crashed the checker before it worked
+
+`t_equal_proc` / `t_hasher_proc` were declared and READ but never assigned, so both builtins handed
+back an operand with a nil type:
+
+    a: int = intrinsics.type_equal_proc(int)
+    ORACLE 'proc "contextless" (rawptr, rawptr) -> bool'    PORT '<no type>'
+
+C++ builds all three in `init_universal` (checker.cpp:1135-1144), immediately after the basic-type
+loop, so the port now builds them at the end of `init_basic_types` -- the same one-shot,
+default-allocator routine. `t_map_get_proc`, absent from the port entirely, was added with them.
+Both probe lines are now byte-identical to the oracle, `"contextless"` included.
+
+**Three things this needed that inspection alone would not have produced.**
+
+1. **The reset list had to change in the OTHER direction.** t_equal_proc/t_hasher_proc were IN it.
+   That was harmless only while nothing assigned them; once assigned from the default allocator,
+   resetting them is an outright bug -- `init_basic_types` is reached through the `t_int == nil`
+   guard, so a nil'd global is never rebuilt and stays nil for every later checker in the process.
+   Removed, with the reason recorded at the site.
+
+2. **The first attempt CRASHED the checker** -- `Invalid type assertion from Type_Variant to
+   Type_Tuple, actual type: Type_Basic` (check_expr.odin:8934). Cause: the port's
+   `alloc_type_tuple_from_field_types` had C++'s single-type shortcut with C++'s `must_be_tuple`
+   guard DROPPED, so it always fired and returned an unwrapped `t_bool` as the proc's results.
+   C++ passes must_be_tuple=true from alloc_type_proc_from_types and false from every
+   check_builtin.cpp site -- so the parameter is restored with a `false` default, leaving all five
+   existing port callers byte-for-byte unchanged. Verified by grepping both sides: 13 C++ call
+   sites, 5 port ones. C++'s `is_packed` is deliberately not modelled (false at all 13) and that
+   omission is stated in the comment rather than left silent.
+
+3. **The calling convention was a second divergence hiding behind the first.**
+   `alloc_type_proc_from_types` hardcoded `.Odin`; C++ takes a ProcCC and passes Contextless. With
+   zero callers, nothing had ever exposed it. Had I only added the writers, the port would have
+   printed `proc(...)` against the oracle's `proc "contextless" (...)` and I would have "fixed" the
+   defect into a quieter one.
+
+**resetaudit.py made non-vacuous.** Gating on `missing` OR `spurious` would have left it permanently
+red on 27 never-assigned `t_type_info_*_ptr` globals -- red-always proves as little as green-always
+(#483). It now gates on `missing` (dangling) and `spurious` REDEFINED as reset-though-target-derived
+(the #577 bug shape), and reports never-assigned as a NOTE. Clean run missing=0 spurious=0 RC=0;
+positive control (delete the t_fast_math_flags reset) goes missing=1 RC=1.
+
+**Deliberately NOT done, and why.** The 27 `t_type_info_*_ptr` slots are assigned by C++ in
+`init_core_type_info` but read only by `llvm_backend_stmt.cpp` -- measured: 29 checker.cpp hits are
+all assignments, exactly one genuine read, in the backend. They are inert in a checker-only port.
+Porting them is mechanical (the port has init_core_type_info and the base types), but it is its own
+verifiable unit and is left on #577's tail rather than bundled in unverified.
+
+### #577 tail DONE: the 27 type-info pointers, and the reset partition is now exact
+
+C++ closes `init_core_type_info` with 27 `alloc_type_pointer` assignments (checker.cpp:3539-3566).
+The port declared all 27, RESET all 27, and assigned none. Ported.
+
+They have no reader in this port and exactly one in the reference (`llvm_backend_stmt.cpp`) --
+measured, not assumed: of 29 `t_type_info_*_ptr` occurrences in checker.cpp, all 29 are
+assignments. Carried anyway, for two reasons stated at the site: they are checker-WRITTEN state a
+backend consumer reaches through the model (mir is a real one), and a global that is declared and
+reset but never written is indistinguishable from a defect until someone re-derives it -- a cost
+#577 has already paid once.
+
+**resetaudit now partitions exactly**: declared=162, checker_owned=89, target_derived=73,
+89+73=162, unassigned=0, missing=0, spurious=0, and the 89 checker-owned are precisely the 89 reset.
+The NOTE list is empty for the first time.
+
+**One gap deliberately left, and it is CONSISTENT rather than half-done.** C++ also resolves
+`Type_Info_Fixed_Capacity_Dynamic_Array` (:3537) and its pointer (:3566). The port declares NEITHER,
+so there is no dangling half to trip over. The type does exist in base/runtime (core.odin:230), so
+it is a genuine gap -- inert, with no reader on either side. Not added here because it needs a new
+find_core_type lookup whose failure mode has not been measured, and bundling an unmeasured lookup
+into a verified change is how #577's own crash got introduced.
+
+## #566 SCOPED by derivation: 57 consumer references, 17 of them in two procedures
+
+The standing estimate was "88 runtime-derived slots, ~332 references" -- a number carried forward
+from an early reading. Re-derived from resetaudit's own partition, which is the same rule the reset
+list is now built on, so the scope and the correctness invariant cannot drift apart:
+
+| | globals | references |
+|---|---|---|
+| MUST MOVE onto Checker (checker-owned) | **89** | 399 |
+| STAY GLOBAL (target-derived, from build_context alone) | 73 | 890 |
+
+**294 of the 399 are in types.odin (185) and type_info.odin (109)** -- declarations, the reset list,
+init_basic_types and init_core_type_info. Those move mechanically with the fields; they are not
+call sites to be threaded.
+
+**The real consumer surface is 57 references**, and only 17 of them need any threading at all:
+
+| what is in scope at the reference | refs |
+|---|---|
+| `^Checker_Context` (already has `ctx.checker`) | 28 |
+| `^Checker` directly | 12 |
+| **NEITHER -- needs a parameter** | **17** |
+| file scope | 0 |
+
+The 17 are not scattered: `init_objc_intrinsics_types` (14) and `init_c_va_list_type` (3). Both
+already take a scope and an allocator, so both take one more parameter and the class is closed.
+
+**Method correction, made twice against myself.** The first count said 105 consumer references; the
+second, after stripping `//`, said 78; the third, after also stripping `/* */`, says 57. **48 of the
+original 105 -- 46% -- were inside comments**, most of them in this project's own long explanatory
+blocks, which name these globals constantly. A scope estimate built on a raw grep would have been
+nearly twice the real work. Recorded because the same trap will catch the next measurement of
+anything in this codebase.
+
+Remaining #572 conditions, unaddressed: (1) enforce the split with differing access syntax --
+satisfied automatically once the 89 become `c.t_*` and the 73 stay bare `t_*`, but worth asserting
+rather than assuming; (2) name the build_context coupling as a precondition, since it stays a
+package-level global and so still forbids two sessions with different targets.
+
+### #566 design finding: the move DISSOLVES the reset list rather than relocating it
+
+Checked before editing, because the whole premise of runtime_session.odin is that these globals are
+a process-wide cache shared across checkers -- if that were load-bearing, per-Checker fields would
+break it.
+
+It is load-bearing, and it is the bug. `init_core_type_info` (type_info.odin) opens with a
+mutex-guarded `if t_type_info != nil { return }`. Because t_type_info is a GLOBAL, that guard is
+process-wide, so:
+
+  - checker A loads base:runtime and resolves ~40 runtime types from ITS scopes into the globals;
+  - checker B calls `adopt_runtime_session`, which copies only `runtime_package` and one entry of
+    `package_scopes` -- NOT the types;
+  - B then calls init_core_type_info, hits the guard, and silently REUSES A's types.
+
+Sharing by cache, not by construction. That is precisely the #368 shape ("one checker's types
+escaped into the next check"), and `reset_runtime_type_globals` exists only to paper over it.
+
+**Moving the 89 onto Checker removes the mechanism, not just the storage.** B's fields start nil, so
+B re-resolves through `find_core_type` against the SAME shared scope -- which returns the same
+`^Type` objects A got, because they hang off the shared package scope. The types stay shared by
+CONSTRUCTION; what disappears is the cross-checker cache, the process-wide guard, and with them the
+entire reason `reset_runtime_type_globals` exists. resetaudit's checker_owned set becomes empty and
+the tool's whole `missing` column becomes vacuously clean -- so the tool must be retargeted or
+retired as part of the same change, not left to report green on nothing (#483).
+
+**Consequence for verification.** This changes behaviour for a checker that adopts the session but
+whose scope lookup fails: it used to inherit A's types, and would now get nil. More correct, but not
+inert -- so parity.sh and corpus.sh are NOT sufficient here. The 432-test spec suite is the session's
+motivating consumer and must run, plus the 146-test root suite that #368/#321 stabilised.
+
+Staging, in dependency order: (1) 89 fields onto Checker; (2) types.odin -- drop those declarations,
+keep the 73, delete the reset list; (3) type_info.odin -> c.t_*, and the guard becomes
+`c.t_type_info != nil`, which is now per-checker and correct; (4) thread
+init_objc_intrinsics_types and init_c_va_list_type; (5) the 40 remaining consumer sites;
+(6) retarget resetaudit; (7) parity + corpus + spec suite + root suite.

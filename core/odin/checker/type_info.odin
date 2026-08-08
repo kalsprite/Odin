@@ -126,6 +126,52 @@ init_core_type_info :: proc(c: ^Checker) {
 	t_type_info_matrix = find_core_type(c, "Type_Info_Matrix")
 	t_type_info_soa_pointer = find_core_type(c, "Type_Info_Soa_Pointer")
 	t_type_info_bit_field = find_core_type(c, "Type_Info_Bit_Field")
+
+	// LEDGER #577 tail. C++ closes init_core_type_info with exactly this block
+	// (checker.cpp:3539-3566); the port declared all 27 globals, RESET them, and never assigned
+	// one -- found by resetaudit.py, not by reading.
+	//
+	// They have NO reader in this port, and only one in the reference: llvm_backend_stmt.cpp.
+	// (Measured: of 29 `t_type_info_*_ptr` occurrences in checker.cpp, all 29 are assignments.)
+	// They are carried anyway because they are checker-WRITTEN state that a backend consumer
+	// reaches through the model -- mir is a real such consumer -- and because a global that is
+	// declared and reset but never written is indistinguishable from a defect until someone
+	// re-derives this, which is the cost #577 already paid once.
+	t_type_info_named_ptr = alloc_type_pointer(t_type_info_named)
+	t_type_info_integer_ptr = alloc_type_pointer(t_type_info_integer)
+	t_type_info_rune_ptr = alloc_type_pointer(t_type_info_rune)
+	t_type_info_float_ptr = alloc_type_pointer(t_type_info_float)
+	t_type_info_quaternion_ptr = alloc_type_pointer(t_type_info_quaternion)
+	t_type_info_complex_ptr = alloc_type_pointer(t_type_info_complex)
+	t_type_info_string_ptr = alloc_type_pointer(t_type_info_string)
+	t_type_info_boolean_ptr = alloc_type_pointer(t_type_info_boolean)
+	t_type_info_any_ptr = alloc_type_pointer(t_type_info_any)
+	t_type_info_typeid_ptr = alloc_type_pointer(t_type_info_typeid)
+	t_type_info_pointer_ptr = alloc_type_pointer(t_type_info_pointer)
+	t_type_info_multi_pointer_ptr = alloc_type_pointer(t_type_info_multi_pointer)
+	t_type_info_procedure_ptr = alloc_type_pointer(t_type_info_procedure)
+	t_type_info_array_ptr = alloc_type_pointer(t_type_info_array)
+	t_type_info_enumerated_array_ptr = alloc_type_pointer(t_type_info_enumerated_array)
+	t_type_info_dynamic_array_ptr = alloc_type_pointer(t_type_info_dynamic_array)
+	t_type_info_slice_ptr = alloc_type_pointer(t_type_info_slice)
+	t_type_info_parameters_ptr = alloc_type_pointer(t_type_info_parameters)
+	t_type_info_struct_ptr = alloc_type_pointer(t_type_info_struct)
+	t_type_info_union_ptr = alloc_type_pointer(t_type_info_union)
+	t_type_info_enum_ptr = alloc_type_pointer(t_type_info_enum)
+	t_type_info_map_ptr = alloc_type_pointer(t_type_info_map)
+	t_type_info_bit_set_ptr = alloc_type_pointer(t_type_info_bit_set)
+	t_type_info_simd_vector_ptr = alloc_type_pointer(t_type_info_simd_vector)
+	t_type_info_matrix_ptr = alloc_type_pointer(t_type_info_matrix)
+	t_type_info_soa_pointer_ptr = alloc_type_pointer(t_type_info_soa_pointer)
+	t_type_info_bit_field_ptr = alloc_type_pointer(t_type_info_bit_field)
+
+	// NOT ported, and the absence is CONSISTENT rather than half-done: C++ also resolves
+	// Type_Info_Fixed_Capacity_Dynamic_Array here (checker.cpp:3537) and its pointer (:3566). The
+	// port declares NEITHER the base nor the pointer, so there is no dangling half. The type does
+	// exist in base/runtime (core.odin:230), so this is a genuine gap rather than a stale C++
+	// reference -- it is just an inert one, with no reader on either side of the port. Filed on
+	// #577's tail rather than added here, because adding it means a new find_core_type lookup
+	// whose failure mode has not been measured.
 }
 
 // ======================================================================================
