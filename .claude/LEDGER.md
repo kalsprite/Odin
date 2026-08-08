@@ -17306,3 +17306,63 @@ keep the 73, delete the reset list; (3) type_info.odin -> c.t_*, and the guard b
 `c.t_type_info != nil`, which is now per-checker and correct; (4) thread
 init_objc_intrinsics_types and init_c_va_list_type; (5) the 40 remaining consumer sites;
 (6) retarget resetaudit; (7) parity + corpus + spec suite + root suite.
+
+### #566 feasibility COMPLETE: 23 references in 6 procedures is the entire threading cost
+
+The question that decides whether #566 is a weekend or a month is not how many references there are
+-- it is how many sit in procedures that cannot reach a Checker. Measured, and it is small.
+
+**types.odin + type_info.odin** (185+109 refs, the bulk of the change) -- excluding the declarations
+themselves and the reset list:
+
+    references in procs that ALREADY take a ^Checker : 107
+    references in procs with NO Checker              :   6
+
+The 6 are in four procedures: `init_map_internal_types` (2), `lookup_field_with_selection` (2),
+`is_type_objc_object` (1), `type_offset_of_from_selection` (1). Plus the two from the consumer
+sweep, `init_objc_intrinsics_types` (14) and `init_c_va_list_type` (3).
+
+**Six procedures, 23 references, and 14 call sites between them** (2/6/2/2/1/1). No cascade.
+
+Declaration lines split cleanly at line granularity: 89 lines move, 38 lines (73 names) stay, and
+**zero mixed lines** -- no declaration mentions both a checker-owned and a target-derived global, so
+the split needs no hand-editing of individual declarations.
+
+**One divergence being accepted deliberately.** C++ keeps ALL of these global, so
+`is_type_objc_object(Type *t)` reads `t_objc_object` directly. Threading a Checker into an Odin
+predicate is a departure from C++'s shape. That is in scope: #566 is a port-only architectural
+change ("the checker should be a library"), not a semantic-parity item, and CLAUDE.md's parity
+requirement is over semantic analysis. Worth stating explicitly so a later citation audit does not
+read it as drift.
+
+Execution order (steps 1-3 are indivisible -- the tree does not build between them):
+  1. 89 fields onto Checker (block pre-generated from the real declarations, $S/fields.txt)
+  2. types.odin: drop the 89 declaration lines, keep the 38, DELETE reset_runtime_type_globals
+  3. type_info.odin -> c.t_*, and its once-guard becomes `c.t_type_info != nil` (per-checker, correct)
+  4. thread the 6 procedures / 14 call sites
+  5. the remaining consumer references -> c.t_* / ctx.checker.t_*
+  6. retarget resetaudit (its checker_owned set becomes empty -- do not leave it green on nothing)
+  7. parity + corpus + spec suite (432) + root suite (146)
+
+Backup of all 49 files taken to $S/pre566 before any edit.
+
+### #566 STEP 1 LANDED: 89 fields on Checker, tree green
+
+`checker.odin` gains the 89 checker-owned type slots as fields, generated FROM the real declaration
+lines (not retyped), so the names and their trailing comments carry over exactly. `-vet
+-strict-style` clean.
+
+Caught immediately: the generator emitted global-declaration syntax, and struct fields need a
+trailing comma BEFORE the line comment. Restored checker.odin from the pre-566 backup and
+regenerated rather than patching 89 lines in place.
+
+**This step is deliberately inert.** The globals still exist and every reference still reads them;
+nothing reads a field yet. That is what makes step 1 landable alone.
+
+**It also creates, on purpose, a state my own tools would flag as a defect**: 89 struct fields
+declared and never written -- the exact #347/#348 shape. That is a scaffold, not a finding, and it
+disappears at step 3. Recording it so a sweep run against this intermediate commit is not
+mis-triaged, which is the same courtesy #577's tail was carried for.
+
+Steps 2-5 (drop the globals, delete the reset list, rewrite ~164 references, thread 6 procedures)
+are indivisible -- the tree does not build between them -- and are the next unit of work.
