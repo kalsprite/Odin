@@ -343,3 +343,4 @@ core/odin/checker/tests/spec_advanced/spec_advanced
 core/odin/checker/tests/spec_conversions/spec_conversions
 core/odin/checker/tests/spec_directives/spec_directives
 core/odin/checker/tests/spec_semantics/spec_semantics
+vendor/box3d/lib/box3d_wasm.o
