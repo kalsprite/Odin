@@ -30,7 +30,7 @@ package main
 			`,
 			tags = {},
 			matching_targets = {
-				{{.Windows, .amd64, "foo"}, true},
+				{{os = .Windows, arch = .amd64, project_name = "foo"}, true},
 			},
 		}, {// [2]
 			src = `
@@ -51,10 +51,10 @@ package main
 				},
 			},
 			matching_targets = {
-				{{.Linux,   .amd64, "foo"}, false},
-				{{.Linux,   .arm64, "foo"}, true},
-				{{.Windows, .amd64, "foo"}, false},
-				{{.Windows, .arm64, "foo"}, false},
+				{{os = .Linux, arch = .amd64, project_name = "foo"}, false},
+				{{os = .Linux, arch = .arm64, project_name = "foo"}, true},
+				{{os = .Windows, arch = .amd64, project_name = "foo"}, false},
+				{{os = .Windows, arch = .arm64, project_name = "foo"}, false},
 			},
 		}, {// [3]
 			src = `
@@ -72,7 +72,7 @@ package main
 				ignore             = true,
 			},
 			matching_targets = {
-				{{.Linux, .amd64, "foo"}, false},
+				{{os = .Linux, arch = .amd64, project_name = "foo"}, false},
 			},
 		}, {// [4]
 			src = `
@@ -88,9 +88,9 @@ package main
 				},
 			},
 			matching_targets = {
-				{{.JS, .wasm32,    "foo"}, true},
-				{{.JS, .wasm64p32, "baz"}, true},
-				{{.JS, .wasm64p32, "bar"}, false},
+				{{os = .JS, arch = .wasm32, project_name = "foo"}, true},
+				{{os = .JS, arch = .wasm64p32, project_name = "baz"}, true},
+				{{os = .JS, arch = .wasm64p32, project_name = "bar"}, false},
 			},
 		}, {// [5]
 			src = `
@@ -104,9 +104,9 @@ package main`,
 				},
 			},
 			matching_targets = {
-				{{.Freestanding, .wasm32,    ""}, true},
-				{{.Freestanding, .wasm64p32, ""}, true},
-				{{.Freestanding, .arm64,     ""}, false},
+				{{os = .Freestanding, arch = .wasm32, project_name = ""}, true},
+				{{os = .Freestanding, arch = .wasm64p32, project_name = ""}, true},
+				{{os = .Freestanding, arch = .arm64, project_name = ""}, false},
 			},
 		},
 	}
