@@ -1514,7 +1514,7 @@ doc_add_pkg_entries :: proc(w: ^Doc_Writer, pkg: ^ast.Package) -> Doc_Array(Doc_
 
 	// SLOT ORDER, not map order. LEDGER #494.
 	//
-	// C++ Reference: docs_writer.cpp:1065-1070 --
+	// C++ Reference: docs_writer.cpp odin_doc_add_pkg_entries:1065-1070 --
 	//     for (isize i = 0; i < pkg->scope->elements.cap; i++) {
 	//         if (!pkg->scope->elements.slots[i].hash) continue;
 	//         auto interned = pkg->scope->elements.keys[i];
@@ -1632,7 +1632,7 @@ doc_write_docs :: proc(w: ^Doc_Writer) {
 
 		// Write files.
 		//
-		// C++ Reference: docs_writer.cpp:1161. C++ iterates pkg->files, the array sorted by
+		// C++ Reference: docs_writer.cpp odin_doc_write_docs:1161. C++ iterates pkg->files, the array sorted by
 		// basename in check_create_file_scopes; doc writing runs after checking, so the sort has
 		// happened. Map order here would decide the Doc_File_Index numbering, i.e. the order
 		// entries land in the binary .odin-doc.
@@ -1674,10 +1674,10 @@ doc_write_to_file :: proc(w: ^Doc_Writer, filename: string) -> bool {
 }
 
 // odin_doc_write is the main entry point for writing .odin-doc files
-// C++ Reference: docs_writer.cpp:1153-1175
+// C++ Reference: docs_writer.cpp odin_doc_write_docs:1153-1175
 odin_doc_write :: proc(info: ^Checker_Info, filename: string) -> bool {
 	// Set doc writer mode for canonical string generation
-	// C++ Reference: docs_writer.cpp:1155
+	// C++ Reference: docs_writer.cpp odin_doc_write_docs:1155
 	g_in_doc_writer = true
 	defer { g_in_doc_writer = false }
 

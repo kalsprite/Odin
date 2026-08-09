@@ -115,7 +115,7 @@ are_types_identical_unique_tuples :: proc(x, y: ^Type) -> bool {
 // The check_tuple_names parameter controls whether tuple parameter/field names
 // must match (used for unique type_info entries) or can differ (normal identity check).
 //
-// C++ Reference: types.cpp:2954-3191
+// C++ Reference: types.cpp are_types_identical_internal:3195-3432
 are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bool {
 	if x == y {
 		return true
@@ -126,47 +126,47 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 	}
 
 	// Note: Type aliases are already unwrapped by the caller (are_types_identical)
-	// C++ Reference: types.cpp:2963-2979 (commented out in C++)
+	// C++ Reference: types.cpp are_types_identical_internal:3208-3224 (commented out in C++)
 
 	#partial switch x.kind {
 	case .Generic:
-		// C++ Reference: types.cpp:2982-2983
+		// C++ Reference: types.cpp are_types_identical_internal:3227-3228
 		x_gen := x.variant.(Type_Generic)
 		y_gen := y.variant.(Type_Generic)
 		return are_types_identical(x_gen.specialized, y_gen.specialized)
 
 	case .Basic:
-		// C++ Reference: types.cpp:2985-2986
+		// C++ Reference: types.cpp are_types_identical_internal:3230-3231
 		x_basic := x.variant.(Type_Basic)
 		y_basic := y.variant.(Type_Basic)
 		return x_basic.kind == y_basic.kind
 
 	case .Enumerated_Array:
-		// C++ Reference: types.cpp:2988-2990
+		// C++ Reference: types.cpp are_types_identical_internal:3233-3235
 		x_ea := x.variant.(Type_Enumerated_Array)
 		y_ea := y.variant.(Type_Enumerated_Array)
 		return are_types_identical(x_ea.index, y_ea.index) && are_types_identical(x_ea.elem, y_ea.elem)
 
 	case .Array:
-		// C++ Reference: types.cpp:2992-2993
+		// C++ Reference: types.cpp are_types_identical_internal:3237-3238
 		x_arr := x.variant.(Type_Array)
 		y_arr := y.variant.(Type_Array)
 		return x_arr.count == y_arr.count && are_types_identical(x_arr.elem, y_arr.elem)
 
 	case .Matrix:
-		// C++ Reference: types.cpp:2995-2999
+		// C++ Reference: types.cpp are_types_identical_internal:3240-3244
 		x_mat := x.variant.(Type_Matrix)
 		y_mat := y.variant.(Type_Matrix)
 		return x_mat.row_count == y_mat.row_count && x_mat.column_count == y_mat.column_count && x_mat.is_row_major == y_mat.is_row_major && are_types_identical(x_mat.elem, y_mat.elem)
 
 	case .Dynamic_Array:
-		// C++ Reference: types.cpp:3001-3002
+		// C++ Reference: types.cpp are_types_identical_internal:3246-3247
 		x_da := x.variant.(Type_Dynamic_Array)
 		y_da := y.variant.(Type_Dynamic_Array)
 		return are_types_identical(x_da.elem, y_da.elem)
 
 	case .Fixed_Capacity_Dynamic_Array:
-		// C++ Reference: types.cpp:3244-3246. Capacity is part of the identity, as in C++.
+		// C++ Reference: types.cpp are_types_identical_internal:3249-3251. Capacity is part of the identity, as in C++.
 		//
 		// NOTE: an earlier version of this comment claimed this arm fixed the 13-per-package
 		// "Overloaded procedure has the same type as another procedure in the procedure group"
@@ -177,13 +177,13 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		return x_fc.capacity == y_fc.capacity && are_types_identical(x_fc.elem, y_fc.elem)
 
 	case .Slice:
-		// C++ Reference: types.cpp:3004-3005
+		// C++ Reference: types.cpp are_types_identical_internal:3253-3254
 		x_slice := x.variant.(Type_Slice)
 		y_slice := y.variant.(Type_Slice)
 		return are_types_identical(x_slice.elem, y_slice.elem)
 
 	case .Bit_Set:
-		// C++ Reference: types.cpp:3007-3015
+		// C++ Reference: types.cpp are_types_identical_internal:3256-3264
 		x_bs := x.variant.(Type_Bit_Set)
 		y_bs := y.variant.(Type_Bit_Set)
 
@@ -196,7 +196,7 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		return false
 
 	case .Enum:
-		// C++ Reference: types.cpp:3018-3049
+		// C++ Reference: types.cpp are_types_identical_internal:3267-3298
 		if x == y {
 			return true
 		}
@@ -224,7 +224,7 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 			}
 			assert(a.kind == b.kind)
 			assert(a.kind == .Constant)
-			// C++ Reference: types.cpp:3043
+			// C++ Reference: types.cpp are_types_identical_internal:3292
 			a_const := a.variant.(Entity_Constant)
 			b_const := b.variant.(Entity_Constant)
 			same := compare_exact_values(.Cmp_Eq, a_const.value, b_const.value)
@@ -236,13 +236,13 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		return true
 
 	case .Union:
-		// C++ Reference: types.cpp:3051-3069
+		// C++ Reference: types.cpp are_types_identical_internal:3300-3318
 		x_union := x.variant.(Type_Union)
 		y_union := y.variant.(Type_Union)
 
 		if len(x_union.variants) == len(y_union.variants) && x_union.kind == y_union.kind {
 			// Check alignment compatibility
-			// C++ Reference: types.cpp:3055-3059
+			// C++ Reference: types.cpp are_types_identical_internal:3304-3308
 			if x_union.custom_align != y_union.custom_align {
 				if type_align_of(x) != type_align_of(y) {
 					return false
@@ -250,7 +250,7 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 			}
 
 			// NOTE: zeroth variant is nil for normal unions
-			// C++ Reference: types.cpp:3061-3066
+			// C++ Reference: types.cpp are_types_identical_internal:3312-3317
 			for variant, i in x_union.variants {
 				if !are_types_identical(variant, y_union.variants[i]) {
 					return false
@@ -260,14 +260,14 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		}
 
 	case .Struct:
-		// C++ Reference: types.cpp:3071-3109
+		// C++ Reference: types.cpp are_types_identical_internal:3320-3358
 		x_struct := x.variant.(Type_Struct)
 		y_struct := y.variant.(Type_Struct)
 
 		if x_struct.is_raw_union == y_struct.is_raw_union && len(x_struct.fields) == len(y_struct.fields) && x_struct.is_packed == y_struct.is_packed && x_struct.is_all_or_none == y_struct.is_all_or_none && x_struct.soa_kind == y_struct.soa_kind && x_struct.soa_count == y_struct.soa_count && are_types_identical(x_struct.soa_elem, y_struct.soa_elem) {
 
 			// Check alignment compatibility
-			// C++ Reference: types.cpp:3079-3083
+			// C++ Reference: types.cpp are_types_identical_internal:3329-3333
 			if x_struct.custom_align != y_struct.custom_align {
 				if type_align_of(x) != type_align_of(y) {
 					return false
@@ -275,7 +275,7 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 			}
 
 			// Check all fields match
-			// C++ Reference: types.cpp:3085-3105
+			// C++ Reference: types.cpp are_types_identical_internal:3335-3355
 			for i in 0 ..< len(x_struct.fields) {
 				xf := x_struct.fields[i]
 				yf := y_struct.fields[i]
@@ -292,14 +292,14 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 					return false
 				}
 				// Check subtype flags (using subtype)
-				// C++ Reference: types.cpp:3100-3103
+				// C++ Reference: types.cpp are_types_identical_internal:3350-3353
 				xf_flags := (xf.flags & Entity_Flags_Is_Subtype)
 				yf_flags := (yf.flags & Entity_Flags_Is_Subtype)
 				if xf_flags != yf_flags {
 					return false
 				}
 			}
-			// C++ Reference: types.cpp:3352 (VERIFIED 2026-08-01; the old 3106-3109 citation
+			// C++ Reference: types.cpp are_types_identical_internal:3356-3358 (RE-VERIFIED; the 3352 citation was stale AGAIN -- 3352 is the subtype-flag test
 			// was stale -- that range is lookup_subtype_polymorphic_selection, another function)
 			// ARCHITECTURAL NOTE: The C++ code has a commented-out check for polymorphic_params:
 			//   return are_types_identical(x->Struct.polymorphic_params, y->Struct.polymorphic_params)
@@ -313,31 +313,31 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		}
 
 	case .Pointer:
-		// C++ Reference: types.cpp:3112-3113
+		// C++ Reference: types.cpp are_types_identical_internal:3362-3363
 		x_ptr := x.variant.(Type_Pointer)
 		y_ptr := y.variant.(Type_Pointer)
 		return are_types_identical(x_ptr.elem, y_ptr.elem)
 
 	case .Multi_Pointer:
-		// C++ Reference: types.cpp:3115-3116
+		// C++ Reference: types.cpp are_types_identical_internal:3365-3366
 		x_mp := x.variant.(Type_Multi_Pointer)
 		y_mp := y.variant.(Type_Multi_Pointer)
 		return are_types_identical(x_mp.elem, y_mp.elem)
 
 	case .Soa_Pointer:
-		// C++ Reference: types.cpp:3118-3119
+		// C++ Reference: types.cpp are_types_identical_internal:3368-3369
 		x_soa := x.variant.(Type_Soa_Pointer)
 		y_soa := y.variant.(Type_Soa_Pointer)
 		return are_types_identical(x_soa.elem, y_soa.elem)
 
 	case .Named:
-		// C++ Reference: types.cpp:3121-3122
+		// C++ Reference: types.cpp are_types_identical_internal:3371-3372
 		x_named := x.variant.(Type_Named)
 		y_named := y.variant.(Type_Named)
 		return x_named.type_name == y_named.type_name
 
 	case .Tuple:
-		// C++ Reference: types.cpp:3124-3145
+		// C++ Reference: types.cpp are_types_identical_internal:3374-3395
 		x_tuple := x.variant.(Type_Tuple)
 		y_tuple := y.variant.(Type_Tuple)
 
@@ -349,14 +349,14 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 					return false
 				}
 				// Check parameter names if required (for unique type_info)
-				// C++ Reference: types.cpp:3133-3136
+				// C++ Reference: types.cpp are_types_identical_internal:3383-3386
 				if check_tuple_names {
 					if xe.token.text != ye.token.text {
 						return false
 					}
 				}
 				// Check constant values for polymorphic procedures
-				// C++ Reference: types.cpp:3138-3141
+				// C++ Reference: types.cpp are_types_identical_internal:3388-3391
 				if xe.kind == .Constant {
 					xe_const := xe.variant.(Entity_Constant)
 					ye_const := ye.variant.(Entity_Constant)
@@ -369,7 +369,7 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		}
 
 	case .Proc:
-		// C++ Reference: types.cpp:3147-3154
+		// C++ Reference: types.cpp are_types_identical_internal:3397-3401
 		x_proc := x.variant.(Type_Proc)
 		y_proc := y.variant.(Type_Proc)
 		return(
@@ -383,13 +383,13 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		)
 
 	case .Map:
-		// C++ Reference: types.cpp:3156-3158
+		// C++ Reference: types.cpp are_types_identical_internal:3402-3404
 		x_map := x.variant.(Type_Map)
 		y_map := y.variant.(Type_Map)
 		return are_types_identical(x_map.key, y_map.key) && are_types_identical(x_map.value, y_map.value)
 
 	case .Simd_Vector:
-		// C++ Reference: types.cpp:3160-3164
+		// C++ Reference: types.cpp are_types_identical_internal:3406-3410
 		x_sv := x.variant.(Type_Simd_Vector)
 		y_sv := y.variant.(Type_Simd_Vector)
 		if x_sv.count == y_sv.count {
@@ -397,29 +397,29 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		}
 
 	case .Bit_Field:
-		// C++ Reference: types.cpp:3166-3187
+		// C++ Reference: types.cpp are_types_identical_internal:3412-3433
 		x_bf := x.variant.(Type_Bit_Field)
 		y_bf := y.variant.(Type_Bit_Field)
 
 		if are_types_identical(x_bf.backing_type, y_bf.backing_type) && len(x_bf.fields) == len(y_bf.fields) {
 			// Check all field properties match
-			// C++ Reference: types.cpp:3172-3183
+			// C++ Reference: types.cpp are_types_identical_internal:3415-3430
 			for i in 0 ..< len(x_bf.fields) {
 				a := x_bf.fields[i]
 				b := y_bf.fields[i]
-				// C++ Reference: types.cpp:3175-3176
+				// C++ Reference: types.cpp are_types_identical_internal:3418-3419
 				if !are_types_identical(a.type, b.type) {
 					return false
 				}
-				// C++ Reference: types.cpp:3177-3178
+				// C++ Reference: types.cpp are_types_identical_internal:3421-3422
 				if a.token.text != b.token.text {
 					return false
 				}
-				// C++ Reference: types.cpp:3179-3180
+				// C++ Reference: types.cpp are_types_identical_internal:3424-3425
 				if x_bf.bit_sizes[i] != y_bf.bit_sizes[i] {
 					return false
 				}
-				// C++ Reference: types.cpp:3181-3182
+				// C++ Reference: types.cpp are_types_identical_internal:3427-3428
 				if x_bf.bit_offsets[i] != y_bf.bit_offsets[i] {
 					return false
 				}
@@ -428,7 +428,7 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		}
 	}
 
-	// C++ Reference: types.cpp:3190
+	// C++ Reference: types.cpp are_types_identical_internal:3436
 	return false
 }
 
@@ -518,14 +518,14 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		return -1
 	}
 
-	// C++ Reference: check_expr.cpp:681-690
+	// C++ Reference: check_expr.cpp check_distance_between_types:681-690
 	if operand.mode == .Type {
 		if is_type_typeid(type) {
 			if is_type_polymorphic(operand.type) {
 				return -1
 			}
 			// Register type info for RTTI when converting type to typeid
-			// C++ Reference: check_expr.cpp:686
+			// C++ Reference: check_expr.cpp check_distance_between_types:686
 			if c != nil {
 				add_type_info_type(c, operand.type)
 			}
@@ -540,7 +540,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 
 	s := operand.type
 
-	// C++ Reference: check_expr.cpp:697-699
+	// C++ Reference: check_expr.cpp check_distance_between_types:697-699
 	if are_types_identical(s, type) {
 		return 0
 	}
@@ -548,12 +548,12 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 	src := base_type(s)
 	dst := base_type(type)
 
-	// C++ Reference: check_expr.cpp:704-706
+	// C++ Reference: check_expr.cpp check_distance_between_types:704-706
 	if is_type_untyped_uninit(src) {
 		return 1
 	}
 
-	// C++ Reference: check_expr.cpp:708-713
+	// C++ Reference: check_expr.cpp check_distance_between_types:708-713
 	if is_type_untyped_nil(src) {
 		if type_has_nil(dst) {
 			return 1
@@ -561,7 +561,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		return -1
 	}
 
-	// C++ Reference: check_expr.cpp:714-823
+	// C++ Reference: check_expr.cpp check_distance_between_types:714-823
 	if is_type_untyped(src) {
 		if is_type_any(dst) {
 			// NOTE: Anything can cast to 'Any'
@@ -572,12 +572,12 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		if dst_core != nil && dst_core.kind == .Basic {
 			if operand.mode == .Constant {
 				// Check if the constant value can be represented in the destination type
-				// C++ Reference: check_expr.cpp:722
+				// C++ Reference: check_expr.cpp check_distance_between_types:722
 				if !check_representable_as_constant(c, operand.value, dst) {
 					return -1
 				}
 				// Check type compatibility for typed destinations
-				// C++ Reference: check_expr.cpp:723-763
+				// C++ Reference: check_expr.cpp check_distance_between_types:723-763
 				if is_type_typed(dst) && src.kind == .Basic {
 					src_basic := src.variant.(Type_Basic)
 					#partial switch src_basic.kind {
@@ -614,11 +614,11 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 						}
 					}
 				}
-				// C++ Reference: check_expr.cpp:765
+				// C++ Reference: check_expr.cpp check_distance_between_types:765
 					return 3
 			}
 			// Non-constant untyped values
-			// C++ Reference: check_expr.cpp:769-821
+			// C++ Reference: check_expr.cpp check_distance_between_types:769-821
 			if src.kind == .Basic {
 				d := base_array_type(dst)
 				score: i64 = -1
@@ -669,7 +669,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:832-838. The in_enum_type gate is part of the
+	// C++ Reference: check_expr.cpp check_distance_between_types:832-838. The in_enum_type gate is part of the
 	// condition, not optional: C++ only treats an enum and its own base type as
 	// distance-3 assignable while checking an enum's own body. Dropping the gate makes
 	// the port accept base-type values as that enum everywhere.
@@ -682,14 +682,14 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:834-839
+	// C++ Reference: check_expr.cpp check_distance_between_types:834-839
 	// Subtype checking for using-based inheritance
 	subtype_level := check_is_assignable_to_using_subtype(operand.type, type)
 	if subtype_level > 0 {
 		return i64(4 + subtype_level)
 	}
 
-	// C++ Reference: check_expr.cpp:841-860
+	// C++ Reference: check_expr.cpp check_distance_between_types:841-860
 	// rawptr <- ^T
 	if are_types_identical(type, t_rawptr) && is_type_pointer(src) {
 		return 5
@@ -715,7 +715,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:862-867
+	// C++ Reference: check_expr.cpp check_distance_between_types:862-867
 	// Polymorphic type assignability
 	if is_type_polymorphic(dst) && !is_type_polymorphic(src) {
 		modify_type := c != nil && !c.no_polymorphic_errors
@@ -724,7 +724,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:869-911
+	// C++ Reference: check_expr.cpp check_distance_between_types:869-911
 	if is_type_union(dst) {
 		union_type := dst.variant.(Type_Union)
 		for vt in union_type.variants {
@@ -772,13 +772,13 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:913-924
+	// C++ Reference: check_expr.cpp check_distance_between_types:913-924
 	if is_type_proc(dst) {
 		if are_types_identical(src, dst) {
 			return 3
 		}
 		// Check if source is a polymorphic procedure that can be instantiated to match dst
-		// C++ Reference: check_expr.cpp:918-923
+		// C++ Reference: check_expr.cpp check_distance_between_types:918-923
 		if c != nil && is_type_proc(src) {
 			if src_proc, ok := base_type(src).variant.(Type_Proc); ok {
 				if src_proc.is_polymorphic && !src_proc.is_poly_specialized {
@@ -791,7 +791,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:926-931
+	// C++ Reference: check_expr.cpp check_distance_between_types:926-931
 	if is_type_complex_or_quaternion(dst) {
 		elem := base_complex_elem_type(dst)
 		if are_types_identical(elem, base_type(src)) {
@@ -799,7 +799,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:933-962
+	// C++ Reference: check_expr.cpp check_distance_between_types:933-962
 	if allow_array_programming {
 		if is_type_array(dst) {
 			elem := base_array_type(dst)
@@ -818,7 +818,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:951-962
+	// C++ Reference: check_expr.cpp check_distance_between_types:951-962
 	if is_type_matrix(dst) {
 		if are_types_identical(src, dst) {
 			return 5
@@ -833,17 +833,17 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:965-975
+	// C++ Reference: check_expr.cpp check_distance_between_types:965-975
 	if is_type_any(dst) {
 		if !is_type_polymorphic(src) {
 			// Check if trying to convert context to Any (not allowed)
-			// C++ Reference: check_expr.cpp:967-969
+			// C++ Reference: check_expr.cpp check_distance_between_types:967-969
 			if operand.mode == .Context && are_types_identical(operand.type, c.checker.t_context) {
 				return -1
 			}
 			// NOTE: Anything can cast to 'Any'
 			// Register type info for RTTI when converting to Any
-			// C++ Reference: check_expr.cpp:973
+			// C++ Reference: check_expr.cpp check_distance_between_types:973
 			if c != nil {
 				add_type_info_type(c, s)
 			}
@@ -851,7 +851,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:977-986
+	// C++ Reference: check_expr.cpp check_distance_between_types:977-986
 	// Handle auto_cast expressions - they can be cast to any compatible type
 	if operand.expr != nil {
 		if _, is_auto_cast := operand.expr.derived.(^ast.Auto_Cast); is_auto_cast {
@@ -867,7 +867,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:988
+	// C++ Reference: check_expr.cpp check_distance_between_types:988
 	return -1
 }
 
@@ -876,7 +876,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 
 // check_is_assignable_to checks if an operand can be assigned to a target type.
 // Wrapper around check_is_assignable_to_with_score that discards the score
-// C++ Reference: check_expr.cpp:1037-1040
+// C++ Reference: check_expr.cpp check_is_assignable_to_with_score:1037-1040
 check_is_assignable_to :: proc(c: ^Checker_Context, operand: ^Operand, type: ^Type, allow_array_programming := true) -> bool {
 	score: i64 = 0
 	return check_is_assignable_to_with_score(c, operand, type, &score, false, allow_array_programming)
@@ -924,7 +924,7 @@ base_complex_elem_type :: proc(t: ^Type) -> ^Type {
 			return t_untyped_float
 		}
 	}
-	// C++ Reference: types.cpp:1985 - GB_PANIC("Invalid complex type")
+	// C++ Reference: types.cpp base_complex_elem_type:1985 - GB_PANIC("Invalid complex type")
 	assert(false, "Invalid complex type passed to base_complex_elem_type")
 	return t_invalid
 }

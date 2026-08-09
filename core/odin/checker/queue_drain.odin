@@ -552,7 +552,7 @@ thread_pool_destroy :: proc(pool: ^Thread_Pool) {
 }
 
 // thread_pool_add_task submits a task to the thread pool for execution
-// C++ Reference: thread_pool.cpp:154-161, main.cpp:21-23
+// C++ Reference: thread_pool.cpp:154-161, main.cpp thread_pool_add_task:21-23
 //
 // Pushes task to current thread's work deque (bottom, LIFO)
 // Increments global tasks_left counter
@@ -588,7 +588,7 @@ thread_pool_add_task :: proc(task_proc: Worker_Task_Proc, data: rawptr) -> bool 
 }
 
 // thread_pool_wait blocks until all submitted tasks complete
-// C++ Reference: thread_pool.cpp:163-184, main.cpp:24-26
+// C++ Reference: thread_pool.cpp:163-184, main.cpp thread_pool_wait:24-26
 //
 // The waiter drains its OWN deque and then sleeps. It does NOT steal -- C++ has no steal
 // pass here, and the port used to (LEDGER #300). That extra pass was masking LEDGER #299:

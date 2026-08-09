@@ -1,0 +1,107 @@
+23  inversions / 31  citations   check_expr.odin check_expr_base_internal -> check_expr.cpp check_expr_base_internal   [TRIAGED]
+      port :8006   cites 12442 after 12495
+      port :8085   cites 12595 after 12599
+      port :8090   cites 12578 after 12599
+      port :8092   cites 12523 after 12599
+      port :8218   cites 12450 after 12599
+      port :8223   cites 12454 after 12599
+      port :8228   cites 12491 after 12599
+      port :8233   cites 12587 after 12599
+      port :8243   cites 12405 after 12599
+      port :8255   cites 12475 after 12599
+      port :8264   cites 12481 after 12599
+      port :8278   cites 12325 after 12599
+      port :8289   cites 12277 after 12599
+      port :8311   cites 12285 after 12599
+      port :8331   cites 12366 after 12599
+      port :8348   cites 12401 after 12599
+      port :8355   cites 12406 after 12599
+      port :8362   cites 12410 after 12599
+      port :8385   cites 12418 after 12599
+      port :8402   cites 12432 after 12599
+      port :8413   cites 12438 after 12599
+      port :8427   cites 12382 after 12599
+      port :8478   cites 12576 after 12609
+22  inversions / 46  citations   check_proc.odin check_proc_body -> check_decl.cpp check_proc_body   [TRIAGED]
+      port :1846   cites 2189 after 2192
+      port :1938   cites 2120 after 2217
+      port :1946   cites 2121 after 2217
+      port :1952   cites 2126 after 2217
+      port :1956   cites 2128 after 2217
+      port :1960   cites 2130 after 2217
+      port :1965   cites 2133 after 2217
+      port :1969   cites 2137 after 2217
+      port :1974   cites 2140 after 2217
+      port :1980   cites 2144 after 2217
+      port :1984   cites 2146 after 2217
+      port :1988   cites 2188 after 2217
+      port :1998   cites 2193 after 2217
+      port :2009   cites 2161 after 2217
+      port :2016   cites 2166 after 2217
+      port :2022   cites 2170 after 2217
+      port :2028   cites 2175 after 2217
+      port :2035   cites 2182 after 2217
+      port :2039   cites 2184 after 2217
+      port :2043   cites 2186 after 2217
+      port :2047   cites 2188 after 2217
+      port :2060   cites 2197 after 2217
+13  inversions / 15  citations   check_expr.odin check_call_expr -> check_expr.cpp check_polymorphic_record_type   [TRIAGED]
+      port :10343  cites 8226 after 8563
+      port :10390  cites 8223 after 8563
+      port :10759  cites 8213 after 8563
+      port :10796  cites 8229 after 8563
+      port :10830  cites 8248 after 8563
+      port :10847  cites 8251 after 8563
+      port :10862  cites 8270 after 8563
+      port :10873  cites 8295 after 8563
+      port :10886  cites 8300 after 8563
+      port :10927  cites 8421 after 8563
+      port :10970  cites 8307 after 8563
+      port :10982  cites 8292 after 8563
+      port :10995  cites 8327 after 8563
+7   inversions / 12  citations   check_expr.odin update_untyped_expr_type -> check_expr.cpp update_untyped_expr_type   [TRIAGED]
+      port :3184   cites 4859 after 4941
+      port :3191   cites 4869 after 4941
+      port :3223   cites 4884 after 4941
+      port :3242   cites 4903 after 4941
+      port :3249   cites 4913 after 4941
+      port :3255   cites 4922 after 4941
+      port :3261   cites 4931 after 4941
+4   inversions / 18  citations   check_proc.odin evaluate_where_clauses -> check_expr.cpp evaluate_where_clauses   [TRIAGED]
+      port :973    cites 7121 after 7150
+      port :1006   cites 7121 after 7150
+      port :1029   cites 7149 after 7164
+      port :1070   cites 7153 after 7170
+3   inversions / 5   citations   check_expr.odin check_call_expr -> check_expr.cpp check_call_expr_as_type_cast   [TRIAGED]
+      port :10636  cites 8629 after 8640
+      port :10705  cites 8634 after 8640
+      port :10714  cites 8627 after 8640
+3   inversions / 4   citations   check_expr.odin check_call_expr -> check_expr.cpp check_call_arguments   [TRIAGED]
+      port :10626  cites 8064 after 8166
+      port :10644  cites 8083 after 8166
+      port :10702  cites 8110 after 8166
+2   inversions / 23  citations   checker_lifecycle.odin populate_builtin_package_scope -> checker.cpp init_universal   [TRIAGED]
+      port :1218   cites 1296 after 1480
+      port :1237   cites 1267 after 1480
+2   inversions / 7   citations   check_decl.odin check_init_fini_common -> checker.cpp generate_minimum_dependency_set_internal   [TRIAGED]
+      port :1927   cites 3036 after 3050
+      port :1936   cites 3041 after 3050
+1   inversions / 44  citations   check_decl.odin check_proc_decl -> check_decl.cpp check_proc_decl   [TRIAGED]
+      port :1321   cites 1435 after 1442
+1   inversions / 28  citations   check_proc.odin check_proc_info -> checker.cpp check_proc_info   [TRIAGED]
+      port :767    cites 6541 after 6607
+1   inversions / 20  citations   check_deferred.odin check_deferred_procedures -> checker.cpp check_deferred_procedures   [TRIAGED]
+      port :132    cites 6893 after 6896
+1   inversions / 13  citations   check_global_init.odin calculate_global_init_order -> checker.cpp calculate_global_init_order   [TRIAGED]
+      port :433    cites 6409 after 6411
+1   inversions / 7   citations   check_proc.odin check_all_scope_usages -> checker.cpp check_all_scope_usages   [TRIAGED]
+      port :2943   cites 7608 after 7612
+1   inversions / 7   citations   types.odin type_size_of -> types.cpp type_size_of_internal   [TRIAGED]
+      port :1716   cites 4773 after 4845
+1   inversions / 4   citations   check_expr.odin check_call_expr -> check_expr.cpp check_objc_call_expr   [TRIAGED]
+      port :11047  cites 8766 after 8767
+1   inversions / 2   citations   check_global_init.odin check_all_global_entities -> checker.cpp check_parsed_files   [TRIAGED]
+      port :620    cites 7706 after 7760
+CITEMONO-DONE scope=triaged procedures only groups_with_inversions=17 total_inversions=87
+  NOT A GATE -- some inversions are legitimate (a hoisted nested helper cites call sites
+  BELOW it). Disposition each AT THE SITE so the next run already has the answer.

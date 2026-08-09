@@ -367,7 +367,7 @@ assign_score_function :: proc(distance: i64, is_variadic := false) -> i64 {
 
 // valid_index_and_score_cmp compares two candidates by score (for sorting)
 // Returns: -1 if a better than b, +1 if b better than a, 0 if equal
-// Reference: check_expr.cpp:62-66
+// Reference: check_expr.cpp valid_index_and_score_cmp:62-66
 valid_index_and_score_cmp :: proc(a, b: Valid_Index_And_Score) -> slice.Ordering {
 	if a.score > b.score {
 		return .Less // a is better (higher score)
@@ -612,7 +612,7 @@ matched_target_features :: proc(pt: ^Type_Proc) -> int {
 
 	matches := 0
 
-	// C++ (types.cpp:3599) scores on VALIDITY FOR THE TARGET ARCH, not on whether the feature is
+	// C++ (types.cpp matched_target_features:3599) scores on VALIDITY FOR THE TARGET ARCH, not on whether the feature is
 	// enabled -- the note that used to stand here claimed this needed target_features_set and was
 	// simply wrong about which predicate C++ uses. Two smaller divergences went with it:
 	//   - C++ does NOT trim whitespace, so " sse2" is not a valid feature to it. Trimming here made
@@ -783,13 +783,13 @@ check_call_arguments_internal :: proc(
 
 	pt := &proc_type.variant.(Type_Proc)
 
-	// THE ARITY CHECK. C++ Reference: check_expr.cpp:6684-6700, and its POSITION is load-bearing:
+	// THE ARITY CHECK. C++ Reference: check_expr.cpp check_call_arguments_internal:6684-6700, and its POSITION is load-bearing:
 	// it runs before the polymorphic instantiation below, exactly as C++ runs it before its own
-	// instantiation at check_expr.cpp:6940.
+	// instantiation at check_expr.cpp check_call_arguments_internal:6940.
 	//
 	// C++ has ONE of these because it scores proc-group candidates through this very function --
 	// the same check_call_arguments_internal a direct call uses -- so the single check both sets
-	// `err = CallArgumentError_TooManyArguments` (which check_expr.cpp:6940's
+	// `err = CallArgumentError_TooManyArguments` (which check_expr.cpp check_call_arguments_internal:6940's
 	// `err == CallArgumentError_None` then consults, suppressing instantiation) and emits the
 	// diagnostic. The port split that function in two, and this copy had NEITHER half. Two
 	// defects followed from the one omission (LEDGER #510):
@@ -830,10 +830,10 @@ check_call_arguments_internal :: proc(
 	}
 
 	// Handle polymorphic procedures by attempting instantiation
-	// C++ Reference: check_expr.cpp:6684-6960 (the polymorphic arm of check_call_arguments_internal)
+	// C++ Reference: check_expr.cpp check_call_arguments_internal:6684-6960 (the polymorphic arm of check_call_arguments_internal)
 	specialized_proc_type := proc_type
 	if pt.is_polymorphic && !pt.is_poly_specialized {
-		// C++ Reference: check_expr.cpp:6666-6700 and 6759-6788.
+		// C++ Reference: check_expr.cpp check_call_arguments_internal:6666-6700 and 6759-6788.
 		//
 		// The operand array handed to polymorphic instantiation is sized to the PARAMETER count,
 		// not the argument count, and a variadic procedure's variadic slot is ALWAYS filled with
@@ -922,8 +922,8 @@ check_call_arguments_internal :: proc(
 
 			operands = ops
 
-			// MISSING-REQUIRED gate. C++ Reference: check_expr.cpp:6835-6857 sets
-			// `err = CallArgumentError_ParameterMissing`, which check_expr.cpp:6940's
+			// MISSING-REQUIRED gate. C++ Reference: check_expr.cpp check_call_arguments_internal:6835-6857 sets
+			// `err = CallArgumentError_ParameterMissing`, which check_expr.cpp check_call_arguments_internal:6940's
 			// `err == CallArgumentError_None` then consults to suppress instantiation.
 			//
 			// LEDGER #524, and this is the THIRD gate found on only one side of a function the
@@ -1084,7 +1084,7 @@ check_call_arguments_internal :: proc(
 		}
 
 		// Fill named arguments using pre-checked named_operands
-		// Reference: check_expr.cpp:7569-7600
+		// Reference: check_expr.cpp check_call_arguments_proc_group:7569-7600
 		for named_arg, i in args_split.named {
 			if fv, ok := named_arg.derived.(^ast.Field_Value); ok {
 				if ident, ok2 := fv.field.derived.(^ast.Ident); ok2 {
@@ -1156,7 +1156,7 @@ check_call_arguments_internal :: proc(
 			dummy_argument_count += 1
 		}
 
-		// C++ Reference: check_expr.cpp:6879. C++'s `err` is a value the scoring loop SETS and
+		// C++ Reference: check_expr.cpp check_call_arguments_internal:6879. C++'s `err` is a value the scoring loop SETS and
 		// keeps going with, not a bail. Mirrored here so a mis-typed argument no longer hides a
 		// separate missing-parameter error reported after the loop.
 		had_wrong_types := false
@@ -1217,7 +1217,7 @@ check_call_arguments_internal :: proc(
 		// variadic index binds to the variadic parameter, so the index saturates there
 		// rather than running off the end.
 		//
-		// C++ Reference: check_expr.cpp:6970-6975 and the variadic_operands loop at
+		// C++ Reference: check_expr.cpp check_call_arguments_internal:6970-6975 and the variadic_operands loop at
 		// :6992-6999 — arguments in the variadic slot are scored one by one against the
 		// slice's ELEMENT type, via eval_param_and_score(..., t = elem, ...).
 		param_index := i
@@ -1233,7 +1233,7 @@ check_call_arguments_internal :: proc(
 			continue
 		}
 
-		// C++ Reference: check_expr.cpp:6954-6958 -- an INVALID operand is skipped, not
+		// C++ Reference: check_expr.cpp check_call_arguments_internal:6954-6958 -- an INVALID operand is skipped, not
 		// scored:
 		//     Operand *o = &ordered_operands[i];
 		//     if (o->mode == Addressing_Invalid) {
@@ -1430,7 +1430,7 @@ report_missing_parameters :: proc(pt: ^Type_Proc, params: ^Type_Tuple, visited: 
 }
 
 // check_call_arguments_single checks a single procedure candidate
-// Reference: check_expr.cpp:6859-6930
+// Reference: check_expr.cpp check_call_arguments_internal:6859-6930
 check_call_arguments_single :: proc(
 	ctx: ^Checker_Context,
 	call_node: ^ast.Node,
@@ -1491,7 +1491,7 @@ check_call_arguments_single :: proc(
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:7281-7308
+	// C++ Reference: check_expr.cpp check_call_arguments_single:7281-7308
 	//
 	// A polymorphic candidate that instantiated successfully is not yet a match:
 	// its `where` clauses are evaluated against the BOUND parameters, and a
@@ -1528,7 +1528,7 @@ check_call_arguments_single :: proc(
 				}
 			} else {
 				decl.where_clauses_evaluated = true
-				// C++ Reference: check_expr.cpp:7304-7307. The generated entity's RESULTS
+				// C++ Reference: check_expr.cpp check_call_arguments_single:7304-7307. The generated entity's RESULTS
 				// become the call's result type; the port never set this, so a polymorphic
 				// call's result came from whatever the generic signature said.
 				if is_type_proc(gen.type) {

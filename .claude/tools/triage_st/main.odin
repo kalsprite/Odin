@@ -36,6 +36,21 @@ main :: proc() {
 		}
 	}
 	checker.ensure_build_context_initialized()
+	// -microarch:<name> must be applied AFTER init_build_context, which does not set it, and it is
+	// read lazily through get_final_microarchitecture, so ordering against the target loop above is
+	// the only constraint. The oracle takes the same spelling:
+	//     ./odin check <pkg> -no-entry-point -target:js_wasm32 -microarch:bleeding-edge
+	// Added for #611: the wasm atomics gate answers differently under `generic` (no atomics) and
+	// `bleeding-edge` (atomics), so without this the harness could only ever exercise one side of it
+	// -- the same blind spot -target: had before #572. An unknown name is NOT rejected here because
+	// the checker itself does not reject one either (microarch_default_features returns "" and
+	// documents why it does not panic where C++ does); rejecting here would make the harness stricter
+	// than the thing it measures.
+	for a in args[1:] {
+		if len(a) > 11 && a[:11] == "-microarch:" {
+			checker.build_context.microarch = a[11:]
+		}
+	}
 	checker.build_context.no_entry_point = true
 	// The sweeps run `odin check`, and C++ keys several exemptions off command_kind -- notably
 	// the "only works on darwin" objc suppression (check_builtin.cpp:283-287). Mirror the command
@@ -94,7 +109,14 @@ main :: proc() {
 	}
 
 	for path in paths {
-		res := checker.check_package_from_path(path)
+		res := checker.check_package_from_path(path, checker.Session_Options{
+			// PASS the harness's decision explicitly. check_package_from_path now APPLIES its
+			// opts to the process-global build_context (#593), so calling it with default
+			// options would silently overwrite the -no-entry-point set above and undo the
+			// whole point of matching the oracle's configuration. Measured the hard way:
+			// leaving this as the default put parity at 272 count mismatches.
+			no_entry_point = checker.build_context.no_entry_point,
+		})
 		defer checker.destroy_package_check_result(&res)
 		fmt.printf(
 			"### %s files=%d errors=%d warnings=%d limit=%v raw_diags=%d\n",

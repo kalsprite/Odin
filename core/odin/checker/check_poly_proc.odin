@@ -67,7 +67,7 @@ check_polymorphic_procedure_assignment :: proc(ctx: ^Checker_Context, operand: ^
 // find_or_generate_polymorphic_procedure_from_parameters infers types from call arguments
 // This is called when calling a polymorphic procedure with concrete arguments
 //
-// C++ Reference: check_expr.cpp:657-659
+// C++ Reference: check_expr.cpp find_or_generate_polymorphic_procedure:657-659
 //
 // Example:
 //   identity :: proc(x: $T) -> T { return x }
@@ -134,7 +134,7 @@ find_or_generate_polymorphic_procedure :: proc(old_ctx: ^Checker_Context, base_e
 	}
 
 	// Check if procedure is polymorphic and unspecialized
-	// C++ Reference: check_expr.cpp:412-423.
+	// C++ Reference: check_expr.cpp find_or_generate_polymorphic_procedure:412-423.
 	src_proc, src_ok := src.variant.(Type_Proc)
 	if !src_ok || !src_proc.is_polymorphic || src_proc.is_poly_specialized {
 		// IDEMPOTENCE GUARD. Upstream PR #7208 added this; C++'s own comment is
@@ -396,7 +396,7 @@ find_or_generate_polymorphic_procedure :: proc(old_ctx: ^Checker_Context, base_e
 	}
 
 	// Clone identifier
-	// C++ Reference: check_expr.cpp:588-589
+	// C++ Reference: check_expr.cpp find_or_generate_polymorphic_procedure:588-589
 	//   Ast *ident = clone_ast(base_entity->identifier);
 	//   Token token = ident->Ident.token;
 	//

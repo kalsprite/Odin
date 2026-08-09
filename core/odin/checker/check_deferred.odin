@@ -77,7 +77,7 @@ tuple_to_pointers :: proc(ot: ^Type, allocator := context.allocator) -> ^Type {
 // C++ Reference: checker.cpp:6515-6704
 check_deferred_procedures :: proc(c: ^Checker) {
 	// Drain queue of procedures with deferred attributes
-	// C++ Reference: checker.cpp:6877 (mpsc_dequeue loop)
+	// C++ Reference: checker.cpp check_deferred_procedures:6877 (mpsc_dequeue loop)
 	for {
 		src, ok := queue.mpsc_dequeue(&c.procs_with_deferred_to_check)
 		if !ok || src == nil {
@@ -103,7 +103,7 @@ check_deferred_procedures :: proc(c: ^Checker) {
 		assert(dst.kind == .Procedure)
 
 		// Get attribute name for error messages
-		// C++ Reference: checker.cpp:6885-6894
+		// C++ Reference: checker.cpp check_deferred_procedures:6885-6894
 		attribute := ""
 		#partial switch dst_kind {
 		case .None:
@@ -123,13 +123,13 @@ check_deferred_procedures :: proc(c: ^Checker) {
 		}
 
 		// Validate self-reference
-		// C++ Reference: checker.cpp:6896-6899
+		// C++ Reference: checker.cpp check_deferred_procedures:6896-6899
 		if src == dst {
 			error(src.token, "'%s' cannot be used as its own %s", src.token.text, attribute)
 			continue
 		}
 
-		// Reject deferred-procedure CHAINING. C++ checker.cpp:6893-6898, between the
+		// Reject deferred-procedure CHAINING. C++ checker.cpp check_deferred_procedures:6893-6898, between the
 		// self-reference check above and the polymorphic check below. The port had no equivalent,
 		// so `@(deferred_none=b)` on a procedure whose target `b` itself carries a deferred
 		// procedure was accepted in silence (probe nc_defchain).
@@ -141,14 +141,14 @@ check_deferred_procedures :: proc(c: ^Checker) {
 		}
 
 		// Check polymorphic procedures
-		// C++ Reference: checker.cpp:6901-6904
+		// C++ Reference: checker.cpp check_deferred_procedures:6901-6904
 		if is_type_polymorphic(src.type) || is_type_polymorphic(dst.type) {
 			error(src.token, "'%s' cannot be used with a polymorphic procedure", attribute)
 			continue
 		}
 
 		// Check if target procedure is disabled
-		// C++ Reference: checker.cpp:6906-6910
+		// C++ Reference: checker.cpp check_deferred_procedures:6906-6910
 		if .Disabled in dst.flags {
 			// Prevent procedures that have been disabled from acting as deferrals
 			src_proc.deferred_procedure = {}
@@ -156,7 +156,7 @@ check_deferred_procedures :: proc(c: ^Checker) {
 			continue
 		}
 
-		// Both must be procedure types. C++ checker.cpp:6911-6913 DIAGNOSES and continues; the
+		// Both must be procedure types. C++ checker.cpp check_deferred_procedures:6911-6913 DIAGNOSES and continues; the
 		// port asserted, which turns a reportable program into an abort. Same family as #21/#283:
 		// an assert on a condition user input can reach. I have not built a repro that gets a
 		// non-proc here -- the attribute checker may reject earlier -- so this is a latent abort
@@ -178,7 +178,7 @@ check_deferred_procedures :: proc(c: ^Checker) {
 		dst_params := dst_proc_type.params
 
 		// Apply pointer transformation for by_ptr variants
-		// C++ Reference: checker.cpp:6918-6933
+		// C++ Reference: checker.cpp check_deferred_procedures:6918-6933
 		by_ptr := false
 		#partial switch dst_kind {
 		case .In_By_Ptr:
@@ -194,11 +194,11 @@ check_deferred_procedures :: proc(c: ^Checker) {
 		}
 
 		// Validate signature compatibility based on deferred kind
-		// C++ Reference: checker.cpp:6935-7062
+		// C++ Reference: checker.cpp check_deferred_procedures:6935-7062
 		#partial switch dst_kind {
 		case .None:
 			// Deferred procedure must have no input parameters
-			// C++ Reference: checker.cpp:6936-6944
+			// C++ Reference: checker.cpp check_deferred_procedures:6936-6944
 			if dst_params == nil {
 				// Okay - no parameters
 				continue
@@ -208,7 +208,7 @@ check_deferred_procedures :: proc(c: ^Checker) {
 
 		case .In, .In_By_Ptr:
 			// Parameters must match inputs
-			// C++ Reference: checker.cpp:6945-6974
+			// C++ Reference: checker.cpp check_deferred_procedures:6945-6974
 			if src_params == nil && dst_params == nil {
 				// Okay - both have no parameters
 				continue
@@ -219,7 +219,7 @@ check_deferred_procedures :: proc(c: ^Checker) {
 			}
 
 			// Both must be tuples
-			// C++ Reference: checker.cpp:6958-6959
+			// C++ Reference: checker.cpp check_deferred_procedures:6958-6959
 			assert(src_params.kind == .Tuple)
 			assert(dst_params.kind == .Tuple)
 
@@ -230,7 +230,7 @@ check_deferred_procedures :: proc(c: ^Checker) {
 
 		case .Out, .Out_By_Ptr:
 			// Parameters must match results
-			// C++ Reference: checker.cpp:6975-7004
+			// C++ Reference: checker.cpp check_deferred_procedures:6975-7004
 			if src_results == nil && dst_params == nil {
 				// Okay - both have no results/parameters
 				continue
@@ -241,7 +241,7 @@ check_deferred_procedures :: proc(c: ^Checker) {
 			}
 
 			// Both must be tuples
-			// C++ Reference: checker.cpp:6988-6989
+			// C++ Reference: checker.cpp check_deferred_procedures:6988-6989
 			assert(src_results.kind == .Tuple)
 			assert(dst_params.kind == .Tuple)
 
@@ -252,7 +252,7 @@ check_deferred_procedures :: proc(c: ^Checker) {
 
 		case .In_Out, .In_Out_By_Ptr:
 			// Parameters must match concatenated inputs and results
-			// C++ Reference: checker.cpp:7005-7061
+			// C++ Reference: checker.cpp check_deferred_procedures:7005-7061
 			if src_params == nil && src_results == nil && dst_params == nil {
 				// Okay - all are empty
 				continue
@@ -264,11 +264,11 @@ check_deferred_procedures :: proc(c: ^Checker) {
 			}
 
 			// dst_params must be a tuple
-			// C++ Reference: checker.cpp:7017
+			// C++ Reference: checker.cpp check_deferred_procedures:7017
 			assert(dst_params.kind == .Tuple)
 
 			// Build concatenated tuple: (src_params..., src_results...)
-			// C++ Reference: checker.cpp:7019-7045
+			// C++ Reference: checker.cpp check_deferred_procedures:7019-7045
 			tsrc := new(Type)
 			tsrc.kind = .Tuple
 
@@ -277,7 +277,7 @@ check_deferred_procedures :: proc(c: ^Checker) {
 
 			// Add parameters
 			if src_params != nil {
-				// C++ Reference: checker.cpp:7026
+				// C++ Reference: checker.cpp check_deferred_procedures:7026
 				assert(src_params.kind == .Tuple)
 				if src_params_tuple, ok2 := src_params.variant.(Type_Tuple); ok2 {
 					for var in src_params_tuple.variables {
@@ -288,7 +288,7 @@ check_deferred_procedures :: proc(c: ^Checker) {
 
 			// Add results
 			if src_results != nil {
-				// C++ Reference: checker.cpp:7030
+				// C++ Reference: checker.cpp check_deferred_procedures:7030
 				assert(src_results.kind == .Tuple)
 				if src_results_tuple, ok3 := src_results.variant.(Type_Tuple); ok3 {
 					for var in src_results_tuple.variables {
@@ -300,7 +300,7 @@ check_deferred_procedures :: proc(c: ^Checker) {
 			tsrc.variant = src_tuple
 
 			// Check if concatenated tuple matches dst_params
-			// C++ Reference: checker.cpp:7048-7060
+			// C++ Reference: checker.cpp check_deferred_procedures:7048-7060
 			if !are_types_identical(tsrc, dst_params) {
 				error(src.token, "Deferred procedure '%s' parameters %s do not match the combined inputs and results of initial procedure '%s' %s", dst.token.text, type_to_string(dst_params), src.token.text, type_to_string(tsrc))
 				continue
@@ -311,12 +311,12 @@ check_deferred_procedures :: proc(c: ^Checker) {
 
 // ======================================================================================
 // OBJECTIVE-C CONTEXT PROVIDERS
-// C++ Reference: checker.cpp:6971-7007
+// C++ Reference: checker.cpp check_deferred_procedures:6971-7007
 // ======================================================================================
 
 // check_objc_context_provider_procedures validates Objective-C context provider procedures
 // Ensures procedures with @(objc_context_provider) have correct signatures
-// C++ Reference: checker.cpp:6971-7007
+// C++ Reference: checker.cpp check_deferred_procedures:6971-7007
 check_objc_context_provider_procedures :: proc(c: ^Checker) {
 	// Drain queue of ObjC context provider type entities
 	// C++ Reference: checker.cpp:6972 (mpsc_dequeue loop)
@@ -422,7 +422,7 @@ check_objc_context_provider_procedures :: proc(c: ^Checker) {
 				self_type := base_named_type(self_param_pointer.elem)
 
 				// Check if self_type is assignable to the entity's type or objc_ivar
-				// C++ Reference: checker.cpp:7358-7362
+				// C++ Reference: checker.cpp check_objc_context_provider_procedures:7358-7362
 				//
 				// base_named_type yields t_invalid when the pointee is not a named type.
 				// That is handed straight to internal_check_is_assignable_to, as C++ does:

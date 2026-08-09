@@ -155,11 +155,19 @@ is_package_init :: proc(info: ^Checker_Info, pkg: ^ast.Package) -> bool {
 }
 
 // NOTE: there is deliberately no `is_package_init_simple`. A kind-only variant
-// (`pkg.kind == .Init`, without the fullpath half of C++ checker.cpp:267) is
-// unconditionally FALSE in this port: nothing ever assigns `pkg.kind = .Init` --
-// the init package is identified solely by `info.init_fullpath`, set in
-// check_files.odin. Such a helper is a trap for a future caller, not a shortcut.
-// Use is_package_init(info, pkg).
+// (`pkg.kind == .Init`, without the fullpath half of C++ checker.cpp:267) is not
+// equivalent: when the requested package IS base/runtime, the runtime seed claims the
+// queue slot and the root entry is skipped, so that package carries kind `.Runtime`
+// and is identified by the fullpath comparison alone. C++'s disjunction exists for
+// precisely that case. Use is_package_init(info, pkg).
+//
+// This note used to claim the kind test was "unconditionally FALSE in this port,
+// nothing ever assigns pkg.kind = .Init -- the init package is identified solely by
+// info.init_fullpath". The first half was true and the second was not: the ONLY writer
+// of info.init_fullpath sat inside `if pkg.kind == .Init`, so both halves of
+// checker.cpp:268 were permanently false and no package was ever the init package.
+// That killed the whole entry-point surface (#589). Both are now written: the kind at
+// the loader's root seed, the fullpath from the path the caller asked for.
 
 // is_package_builtin checks if package is the builtin package
 // C++ Reference: checker.cpp:1035 - pkg->kind = Package_Builtin

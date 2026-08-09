@@ -958,7 +958,7 @@ exact_binary_operator_value :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value)
 			big.int_mul(&c, &a, &b)
 		case .Quo:
 			// Integer `/` never reaches here: check_binary_expr rewrites the token to
-			// `.Quo_Eq` first (C++ check_expr.cpp:4734), which is where integer division
+			// `.Quo_Eq` first (C++ check_expr.cpp check_binary_expr:4734), which is where integer division
 			// happens. C++'s own `.Quo` integer arm is `fmod` and is dead code for it.
 			//
 			// C++'s arm is fmod (exact_value.cpp), and this now matches it.
@@ -984,7 +984,7 @@ exact_binary_operator_value :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value)
 			b_f, _ := big.int_get_float(&b)
 			return exact_value_float(math.mod(a_f, b_f))
 		case .Quo_Eq:
-			// C++ exact_value.cpp:797: integer (truncating) division
+			// C++ exact_value.cpp exact_binary_operator_value:797: integer (truncating) division
 			big.int_div(&c, &a, &b)
 		case .Mod:
 			// C++ line 784: Remainder
@@ -1876,7 +1876,7 @@ big_int_from_string :: proc(s: string) -> (dst: big.Int, success: bool) {
 }
 
 // exact_value_integer_from_string parses a string to create an integer exact value
-// C++ Reference: exact_value.cpp:201-210
+// C++ Reference: exact_value.cpp exact_value_integer_from_string:201-210
 exact_value_integer_from_string :: proc(str: string) -> Exact_Value {
 	result, ok := big_int_from_string(str)
 	if !ok {
@@ -2137,7 +2137,7 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 
 	// C++ line 1075-1087: String
 	case string:
-		// C++ Reference: exact_value.cpp:1102-1112. quote_to_ascii supplies the
+		// C++ Reference: exact_value.cpp write_exact_value_to_string:1102-1112. quote_to_ascii supplies the
 		// surrounding quote characters, so a string constant renders as
 		// `"not an int"`.
 		//
@@ -2183,7 +2183,7 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 			strings.write_string(buf, str)
 		}
 
-	// C++ Reference: exact_value.cpp:1135-1141, rendered by gb__print_f64 (src/gb/gb.h:5942).
+	// C++ Reference: exact_value.cpp write_exact_value_to_string:1135-1141, rendered by gb__print_f64 (src/gb/gb.h:5942).
 	// See gb_write_f64 below for why this cannot be any host formatter.
 	case f64:
 		gb_write_f64(buf, val, 17)
@@ -2213,7 +2213,7 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 		// Return empty for pointer
 		return
 
-	// LEDGER #546. C++ (exact_value.cpp:1145,1147) passes shorthand=FALSE at both arms; the port
+	// LEDGER #546. C++ (exact_value.cpp write_exact_value_to_string:1145,1147) passes shorthand=FALSE at both arms; the port
 	// passed TRUE, and write_expr_to_string's Comp_Lit arm renders `...` instead of the elements
 	// when shorthand is set. So every compound constant printed as `{...}` where C++ prints
 	// `{7, 7, 7, 7}`. Not cosmetic and not dump-only: exact_value_to_string feeds DIAGNOSTICS
@@ -2227,7 +2227,7 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 }
 
 // exact_value_to_string formats an exact value to a string
-// C++ Reference: exact_value.cpp:1126-1128
+// C++ Reference: exact_value.cpp write_exact_value_to_string:1126-1128
 exact_value_to_string :: proc(v: Exact_Value, string_limit: int = 36) -> string {
 	buf: strings.Builder
 	strings.builder_init(&buf)

@@ -70,7 +70,14 @@ main :: proc() {
 
 	for path in paths {
 
-		res := checker.check_package_from_path(path)
+		res := checker.check_package_from_path(path, checker.Session_Options{
+			// PASS the harness's decision explicitly. check_package_from_path now APPLIES its
+			// opts to the process-global build_context (#593), so calling it with default
+			// options would silently overwrite the -no-entry-point set above and undo the
+			// whole point of matching the oracle's configuration. Measured the hard way:
+			// leaving this as the default put parity at 272 count mismatches.
+			no_entry_point = checker.build_context.no_entry_point,
+		})
 		defer checker.destroy_package_check_result(&res)
 		fmt.printf(
 			"### %s files=%d errors=%d warnings=%d limit=%v raw_diags=%d\n",

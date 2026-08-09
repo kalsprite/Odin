@@ -141,7 +141,7 @@ destroy_checker_info :: proc(info: ^Checker_Info) {
 	queue.mpsc_destroy(&info.foreign_decls_to_check)
 	queue.mpsc_destroy(&info.raddbg_type_views_queue)
 	queue.mpsc_destroy(&info.intrinsics_entry_point_usage)
-	// C++ Reference: checker.cpp:1678 -- `// mpsc_destroy(&i->objc_class_implementations);`
+	// C++ Reference: checker.cpp destroy_checker_info:1678 -- `// mpsc_destroy(&i->objc_class_implementations);`
 	// is COMMENTED OUT upstream, deliberately. The queue's consumer lives in the BACKEND
 	// (llvm_backend.cpp:1571 dequeues it), which runs after checking, so the queue is
 	// legitimately non-empty when the checker finishes and must not be torn down here.
@@ -230,7 +230,7 @@ init_checker :: proc(c: ^Checker, allocator := context.allocator) {
 
 	// Initialize the builtin context the same way C++ init_checker_context does, so that
 	// anything reached through it has a valid type path to push onto.
-	// C++ Reference: checker.cpp:1685-1693
+	// C++ Reference: checker.cpp init_checker_context:1685-1693
 	c.builtin_ctx.checker = c
 	c.builtin_ctx.info = &c.info
 	c.builtin_ctx.type_path = new_checker_type_path(allocator)
@@ -258,7 +258,7 @@ init_checker :: proc(c: ^Checker, allocator := context.allocator) {
 // destroy_checker cleans up a Checker instance
 destroy_checker :: proc(c: ^Checker) {
 	// Clean up the builtin context's type path
-	// C++ Reference: checker.cpp:1695-1697 (destroy_checker_context)
+	// C++ Reference: checker.cpp destroy_checker_context:1695-1697 (destroy_checker_context)
 	destroy_checker_type_path(c.builtin_ctx.type_path, c.allocator)
 	c.builtin_ctx.type_path = nil
 
@@ -768,7 +768,7 @@ parse_minimum_os_version :: proc(s: string) -> i64 {
 // populate_builtin_package_scope populates the universe scope: builtin types, the ODIN_*
 // build constants and their enum types, and the builtin/intrinsics procedures.
 //
-// C++ Reference: checker.cpp:1113-1592 (init_universal)
+// C++ Reference: checker.cpp init_universal:1113-1592 (init_universal)
 //
 // Everything here that describes the target is read from `build_context`, never from the
 // host, because the checker supports cross-target checking. C++ guarantees the ordering by
@@ -799,14 +799,14 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 
 	// ------------------------------------------------------------------------------
 	// Types
-	// C++ Reference: checker.cpp:1120-1133
+	// C++ Reference: checker.cpp init_universal:1120-1133
 	//
 	// C++ walks the `basic_types` table and registers every entry whose name has no space
 	// in it (which is how "invalid type", "llvm bool" and every "untyped x" are skipped).
 	// The port keeps that filtering implicit by naming the registered types outright.
 	// ------------------------------------------------------------------------------
 
-	// C++ Reference: checker.cpp:1123-1129 - `-bedrock` drops the 128-bit integers.
+	// C++ Reference: checker.cpp init_universal:1123-1129 - `-bedrock` drops the 128-bit integers.
 	bedrock := bc.bedrock
 
 	// Boolean types
@@ -898,7 +898,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 
 	// ------------------------------------------------------------------------------
 	// Constants
-	// C++ Reference: checker.cpp:1145-1477
+	// C++ Reference: checker.cpp init_universal:1145-1477
 	// ------------------------------------------------------------------------------
 
 	// DEVIATION: C++ registers `nil` with alloc_entity_nil (Entity_Nil). The port has
@@ -916,7 +916,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	add_global_bool_constant(builtin_scope, "ODIN_BEDROCK", bedrock, allocator)
 
 	// Odin_Windows_Subsystem_Type / ODIN_WINDOWS_SUBSYSTEM
-	// C++ Reference: checker.cpp:1160-1180
+	// C++ Reference: checker.cpp init_universal:1160-1180
 	{
 		values := []Global_Enum_Value {
 			{"Unknown", 0},
@@ -949,7 +949,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	}
 
 	// Odin_OS_Type / ODIN_OS
-	// C++ Reference: checker.cpp:1182-1199
+	// C++ Reference: checker.cpp init_universal:1182-1199
 	{
 		values := []Global_Enum_Value {
 			{"Unknown", 0},
@@ -977,7 +977,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	}
 
 	// Odin_Arch_Type / ODIN_ARCH
-	// C++ Reference: checker.cpp:1201-1214
+	// C++ Reference: checker.cpp init_universal:1201-1214
 	{
 		values := []Global_Enum_Value {
 			{"Unknown", 0},
@@ -997,7 +997,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	add_global_string_constant(builtin_scope, "ODIN_MICROARCH_STRING", get_final_microarchitecture(), allocator)
 
 	// Odin_Build_Mode_Type / ODIN_BUILD_MODE
-	// C++ Reference: checker.cpp:1218-1230
+	// C++ Reference: checker.cpp init_universal:1218-1230
 	{
 		values := []Global_Enum_Value {
 			{"Executable", 0},
@@ -1012,7 +1012,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	}
 
 	// Odin_Endian_Type / ODIN_ENDIAN
-	// C++ Reference: checker.cpp:1232-1241
+	// C++ Reference: checker.cpp init_universal:1232-1241
 	//
 	// This is the pair that `#assert(ODIN_ENDIAN == .Little)` needs: the constant must carry
 	// a real enum type, or the implicit selector on the right has nothing to infer from.
@@ -1025,7 +1025,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	}
 
 	// Odin_Platform_Subtarget_Type / ODIN_PLATFORM_SUBTARGET
-	// C++ Reference: checker.cpp:1243-1255
+	// C++ Reference: checker.cpp init_universal:1243-1255
 	{
 		values := []Global_Enum_Value {
 			{"Default", 0},
@@ -1046,7 +1046,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	}
 
 	// Odin_Error_Pos_Style_Type / ODIN_ERROR_POS_STYLE
-	// C++ Reference: checker.cpp:1257-1265
+	// C++ Reference: checker.cpp init_universal:1257-1265
 	{
 		values := []Global_Enum_Value{{"Default", 0}, {"Unix", 1}}
 		fields, _ := add_global_enum_type(builtin_scope, "Odin_Error_Pos_Style_Type", values, nil, allocator)
@@ -1061,7 +1061,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	}
 
 	// Odin_Calling_Convention / ODIN_DEFAULT_CALLING_CONVENTION
-	// C++ Reference: checker.cpp:1310-1336
+	// C++ Reference: checker.cpp init_universal:1310-1336
 	{
 		values := []Global_Enum_Value {
 			{"Invalid", 0},
@@ -1092,7 +1092,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	}
 
 	// ODIN_MINIMUM_OS_VERSION
-	// C++ Reference: checker.cpp:1338-1352
+	// C++ Reference: checker.cpp init_universal:1338-1352
 	add_global_constant(
 		builtin_scope,
 		"ODIN_MINIMUM_OS_VERSION",
@@ -1101,7 +1101,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 		allocator,
 	)
 
-	// C++ Reference: checker.cpp:1354-1368
+	// C++ Reference: checker.cpp init_universal:1354-1368
 	add_global_bool_constant(builtin_scope, "ODIN_DEBUG", bc.ODIN_DEBUG, allocator)
 	add_global_bool_constant(builtin_scope, "ODIN_DISABLE_ASSERT", bc.ODIN_DISABLE_ASSERT, allocator)
 	add_global_bool_constant(
@@ -1132,7 +1132,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	add_global_bool_constant(builtin_scope, "ODIN_VALGRIND_SUPPORT", bc.ODIN_VALGRIND_SUPPORT, allocator)
 
 	// ODIN_COMPILE_TIMESTAMP
-	// C++ Reference: checker.cpp:1370 (odin_compile_timestamp, checker.cpp:1104-1109):
+	// C++ Reference: checker.cpp init_universal:1370 (odin_compile_timestamp, checker.cpp:1104-1109):
 	// nanoseconds since the Unix epoch, captured while the universe is being built.
 	add_global_constant(
 		builtin_scope,
@@ -1143,12 +1143,12 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	)
 
 	// ODIN_VERSION_HASH
-	// C++ Reference: checker.cpp:1372-1382 - the GIT_SHA the compiler was built with, empty
+	// C++ Reference: checker.cpp init_universal:1372-1382 - the GIT_SHA the compiler was built with, empty
 	// when it was not defined. The checker is not built with one, so it is always empty.
 	add_global_string_constant(builtin_scope, "ODIN_VERSION_HASH", "", allocator)
 
 	// __ODIN_LLVM_F16_SUPPORTED
-	// C++ Reference: checker.cpp:1384-1397
+	// C++ Reference: checker.cpp init_universal:1384-1397
 	{
 		f16_supported := true
 		if is_arch_wasm() {
@@ -1161,7 +1161,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	}
 
 	// Odin_Sanitizer_Flag / Odin_Sanitizer_Flags / ODIN_SANITIZER_FLAGS
-	// C++ Reference: checker.cpp:1399-1424
+	// C++ Reference: checker.cpp init_universal:1399-1424
 	{
 		values := []Global_Enum_Value{{"Address", 0}, {"Memory", 1}, {"Thread", 2}}
 		_, enum_type := add_global_enum_type(builtin_scope, "Odin_Sanitizer_Flag", values, nil, allocator)
@@ -1190,7 +1190,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	}
 
 	// Odin_Optimization_Mode / ODIN_OPTIMIZATION_MODE
-	// C++ Reference: checker.cpp:1426-1437
+	// C++ Reference: checker.cpp init_universal:1426-1437
 	{
 		values := []Global_Enum_Value {
 			{"None", -1},
@@ -1211,11 +1211,11 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	}
 
 	// Add builtin procedures (len, cap, size_of, etc.)
-	// C++ Reference: checker.cpp:1480-1508
+	// C++ Reference: checker.cpp init_universal:1480-1508
 	intrinsics_scope := info.intrinsics_package != nil ? info.intrinsics_package.scope : nil
 
 	// intrinsics.Atomic_Memory_Order
-	// C++ Reference: checker.cpp:1296-1308
+	// C++ Reference: checker.cpp init_universal:1296-1308
 	//
 	// This is what gives `intrinsics.atomic_load_explicit(p, .Acquire)` a type to resolve
 	// its implicit selector against; t_atomic_memory_order had no producer before this.
@@ -1234,7 +1234,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	}
 
 	// intrinsics.Fast_Math_Flag / intrinsics.Fast_Math_Flags
-	// C++ Reference: checker.cpp:1267-1294
+	// C++ Reference: checker.cpp init_universal:1267-1294
 	if intrinsics_scope != nil {
 		values := []Global_Enum_Value {
 			{"Allow_Reassoc", 0},
@@ -1290,7 +1290,7 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 
 	// `expand_to_tuple` is the deprecated spelling of `expand_values`, registered as a second
 	// builtin entity with the same id.
-	// C++ Reference: checker.cpp:1510-1516
+	// C++ Reference: checker.cpp init_universal:1510-1516
 	{
 		entity := alloc_entity_builtin("expand_to_tuple", .Expand_Values, allocator)
 		entity.state = .Resolved

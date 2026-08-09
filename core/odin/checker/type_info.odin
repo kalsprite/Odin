@@ -128,7 +128,7 @@ init_core_type_info :: proc(c: ^Checker) {
 	c.t_type_info_bit_field = find_core_type(c, "Type_Info_Bit_Field")
 
 	// LEDGER #577 tail. C++ closes init_core_type_info with exactly this block
-	// (checker.cpp:3539-3566); the port declared all 27 globals, RESET them, and never assigned
+	// (checker.cpp init_core_type_info:3539-3566); the port declared all 27 globals, RESET them, and never assigned
 	// one -- found by resetaudit.py, not by reading.
 	//
 	// They have NO reader in this port, and only one in the reference: llvm_backend_stmt.cpp.
@@ -166,7 +166,7 @@ init_core_type_info :: proc(c: ^Checker) {
 	c.t_type_info_bit_field_ptr = alloc_type_pointer(c.t_type_info_bit_field)
 
 	// NOT ported, and the absence is CONSISTENT rather than half-done: C++ also resolves
-	// Type_Info_Fixed_Capacity_Dynamic_Array here (checker.cpp:3537) and its pointer (:3566). The
+	// Type_Info_Fixed_Capacity_Dynamic_Array here (checker.cpp init_core_type_info:3537) and its pointer (:3566). The
 	// port declares NEITHER the base nor the pointer, so there is no dangling half. The type does
 	// exist in base/runtime (core.odin:230), so this is a genuine gap rather than a stale C++
 	// reference -- it is just an inert one, with no reader on either side of the port. Filed on
@@ -355,7 +355,7 @@ add_type_info_type_internal :: proc(ctx: ^Checker_Context, t: ^Type) {
 
 	// THAT IS THE WHOLE LIVE FUNCTION. C++ Reference: checker.cpp:2297-2533.
 	//
-	// C++ opens `#if 0` on the line AFTER add_type_info_dependency (checker.cpp:2303) and closes
+	// C++ opens `#if 0` on the line AFTER add_type_info_dependency (checker.cpp add_type_info_type:2303) and closes
 	// it at :2532 -- the `#endif` is the last line before the function's closing brace. So the
 	// type_info_set update, the type_info_map lookup, the entire per-kind recursive walk over
 	// Named/Pointer/Slice/.../Generic, and the trailing default GB_PANIC are ALL DEAD.
@@ -975,11 +975,11 @@ type_info_index :: proc(info: ^Checker_Info, t: ^Type, error_on_failure: bool) -
 
 // ====================================================================================
 // TYPE INFO SORTING AND COMPARISON
-// C++ Reference: name_canonicalization.cpp:3-10
+// C++ Reference: name_canonicalization.cpp type_info_pair_cmp:3-10
 // ======================================================================================
 
 // type_info_pair_cmp compares two Type_Info_Pair values by their hash
-// C++ Reference: name_canonicalization.cpp:3-10
+// C++ Reference: name_canonicalization.cpp type_info_pair_cmp:3-10
 //
 // This comparison function is used to sort the type info array by hash value.
 // The sorted array enables efficient lookup and collision detection.

@@ -1,0 +1,288 @@
+# ============================================================================================
+# #610 SWEEP RESULT -- READ THIS BEFORE TRUSTING ANY ENTRY BELOW.
+#
+# .claude/tools/citemono.py was run over every anchored citation in the checker (baseline saved to
+# citemono_baseline.txt, triaged-only view to citemono_triaged.txt). It detects
+# RIGHT-FUNCTION-WRONG-LINES by monotonicity: port code order normally tracks C++ order, so any
+# backwards jump in (port line -> C++ line) is a suspect. On check_proc_decl that heuristic was
+# 15/15 precise with zero false positives (#608/#609).
+#
+# *** CORRECTION (#611 tick). The claim on line 8 -- "15/15 precise with zero false positives" -- was
+# *** measured on ONE LINEAR function and DOES NOT GENERALISE. The premise (port order tracks C++ order)
+# *** FAILS COMPLETELY for SWITCH-DISPATCH procedures: both sides order their arms freely, so a citation
+# *** crossing the reordering registers as an inversion while being exactly right. citemono.py now flags
+# *** those. Partitioning the 265:
+# ***     23 (1 group)   EXPLAINED       check_expr_base_internal, switch-arm reordering (see
+# ***                                    citemono_dispositioned.txt; 41 of 78 common arm pairs discordant,
+# ***                                    six inverted citations spot-checked by content, all correct)
+# ***     66 (18 groups) PREMISE FAILS   switch-dispatch; monotonicity says NOTHING about these
+# ***    176 (41 groups) REAL QUEUE      linear procedures
+# *** So the backlog below is overstated by a third. Worst LINEAR entries: 22/46 check_proc_body,
+# *** 18/20 check_type_decl, 16/21 check_builtin_procedure_directive, 15/21 check_get_params,
+# *** 13/17 check_call_arguments_basic, 13/15 check_call_expr.
+#
+# TREE-WIDE: 265 inversions across 60 (procedure, C++ function) groups.
+# INSIDE THIS FILE'S CLAIMED-READ SET: 87 inversions across 17 groups. Worst first --
+#     23 / 31  check_expr.odin  check_expr_base_internal -> check_expr.cpp check_expr_base_internal
+#     22 / 46  check_proc.odin  check_proc_body          -> check_decl.cpp check_proc_body
+#     13 / 15  check_expr.odin  check_call_expr          -> check_expr.cpp check_polymorphic_record_type
+#      7 / 12  check_expr.odin  update_untyped_expr_type -> check_expr.cpp update_untyped_expr_type
+#      4 / 18  check_proc.odin  evaluate_where_clauses   -> check_expr.cpp evaluate_where_clauses
+#      3 / 5, 3 / 4  check_call_expr -> check_call_expr_as_type_cast, check_call_arguments
+#      2 / 23  populate_builtin_package_scope -> init_universal
+#      2 / 7   check_init_fini_common   -> generate_minimum_dependency_set_internal
+#      1 each: check_proc_decl (LEGITIMATE, documented at the site), check_proc_info,
+#              check_deferred_procedures, calculate_global_init_order, check_all_scope_usages,
+#              type_size_of, check_call_expr -> check_objc_call_expr, check_all_global_entities
+#
+# WHAT THIS FILE MEANS, RESTATED HONESTLY. Every line below is a claim that someone read a
+# procedure's citations. It is NOT a verification, and --apply trusts it completely -- it cements
+# whatever the drifted lines happen to resolve to, after which --check certifies the result forever,
+# because self-consistency is the only property --check can test. An entry with unresolved
+# inversions above should be read as "claimed read, monotonicity NOT clean", not as done.
+#
+# The 1-inversion entries are mostly the hoisted-nested-helper shape (Odin requires declaration
+# before use, so the citation sits above the C++ call sites) and are likely benign -- but only
+# check_proc_decl's has actually been checked and documented. The rest are unexamined.
+# ============================================================================================
+
+# citefn_triaged.txt -- Odin procedures whose C++ citations have been READ, one per line.
+#
+# WHAT A LINE HERE CLAIMS. "Every citation inside this procedure has been checked against src/ by
+# reading the code it annotates, and is either correct or has been corrected." That is the
+# precondition for --apply to anchor them: anchoring records "line N is inside function F" as an
+# assertion, and anchoring a citation that has already drifted launders it into something --check
+# will certify as clean forever. Adding a name here without doing the reading defeats the tool.
+#
+# WHAT IT DOES NOT CLAIM. That the procedure is a faithful port. Four of the entries below were
+# REWRITES rather than ports, and reading their citations is exactly what surfaced the real
+# defects. Citation-clean and behaviour-clean are different properties.
+#
+# Format: <file.odin> <proc_name>   (# comments and blank lines ignored)
+
+# --- #571 / #582 / #584 / #585, the expression surface ------------------------------------------
+# check_slice                 9 citations repaired incl. a right-function-wrong-arm PAIR on one
+#                             line; reading it found an unemitted diagnostic and 2 wrong messages,
+#                             plus the two UPSTREAM-582 aborts.
+# check_index                 11 repaired. The offset survey TIED across +877/878/879 -- all three
+#                             land inside check_index_expr, one of them on its header -- so the
+#                             delta had to come from content (+908, and not uniform).
+# check_expr_base_internal    32 of 34 repaired, 2 confirmed correct. Arm-to-arm by NODE KIND;
+#                             8 were callee citations whose callees had moved.
+# check_call_expr             9 repaired, ~29 confirmed legitimate callee-style, 2 cleared by the
+#                             index fix. Two citations did not support the claim written beside
+#                             them (a quoted message, an asserted phase ordering).
+check_expr.odin  check_slice
+check_expr.odin  check_index
+check_expr.odin  check_expr_base_internal
+check_expr.odin  check_call_expr
+check_expr.odin  update_untyped_expr_type
+# #585: get_constant_field_single ported to C++'s success/finish contract; the old version
+# was DEAD, dispatched on the static type instead of the value kind, indexed strings by RUNE
+# where C++ takes the byte, had no String16 arm, and cited check_representable_as_constant.
+check_expr.odin  get_constant_field_single
+
+# --- #571 parts 1-3 -----------------------------------------------------------------------------
+types.odin       type_size_of
+types.odin       check_is_assignable_to_using_subtype
+check_proc.odin  check_proc_info
+check_proc.odin  evaluate_where_clauses
+check_deferred.odin  check_deferred_procedures
+
+# --- #587 -------------------------------------------------------------------------------------
+# check_proc_body: 24 citations shifted +107, content-verified at SEVEN independent anchors
+# (2010-2012->2117-2119, 2015-2021->2122-2128, 2023-2024->2130-2131, 2026->2133,
+#  2028-2033->2135-2140, 2035-2037->2142-2144, 2039-2045->2146-2152). 22 REFUSED as already
+# correct -- a blanket shift would have corrupted the whole second half of the procedure.
+# One citation deliberately left bare: checker.hpp:468-505 is a struct definition, legitimately
+# outside any function, and citefn refuses to guess those.
+check_proc.odin  check_proc_body
+
+# --- #592 ---------------------------------------------------------------------------------------
+# check_proc_info_worker_proc: 10 citations all pointed at checker.cpp:6412-6436, which is
+# calculate_global_init_order's PRIORITY QUEUE -- a different function entirely. Resolved by NAME:
+# the worker proc is at 6770 (delta +358) and check_init_worker_data at 6799 (delta +361), so the
+# delta is NOT uniform and every citation was re-anchored by CONTENT, not by one offset.
+# Reading it found a REAL DEFECT, not just drift: C++ 6784-6785 gates the nested-procedure re-queue
+# on `!pt->Proc.is_polymorphic || pt->Proc.is_poly_specialized` and the port had no such gate, so
+# the re-queue was unconditional -- self-feeding forever for a parent that is an uninstantiated
+# generic, whose body never gets checked. Ported; livelock reachability stated UNMEASURED.
+check_proc.odin  check_proc_info_worker_proc
+check_proc.odin  check_init_worker_data
+
+# --- #596 -------------------------------------------------------------------------------------
+# check_init_fini_common: ALL 6 citations read and corrected. Every one pointed into
+# generate_minimum_dependency_set_internal (2961-3116) -- which is CORRECT as a callee citation, so
+# --suspect keeps flagging it and always will -- but every LINE was stale by +7/+8, and the port's
+# block order differs from C++'s so a blanket shift was not available:
+#     contextless+Suggestion  3015-3021 -> 3022-3029  (C++ 3022 `u64 feature_flags = ...`)
+#     file scope, clears      3023-3026 -> 3031-3034
+#     @(disabled) warning     3028-3031 -> 3036-3039
+#     is_init=false claim     3037-3039 -> 3036-3039  (same block; start was off by one)
+#     blank ident, no clear   3033-3035 -> 3041-3043
+#     the @(fini) arm         3042-3075 -> 3050-3085
+# Also removed a DUPLICATE citation: 1898 and 1899 both said "checker.cpp:3023-3026", the second
+# carrying the real note. Collapsed to one.
+# The NOTES were all semantically right (which clears "clears is_init", which does not, and that the
+# fini arm has no disabled handling) -- only the line numbers had drifted. Verified against
+# checker.cpp:3009-3085 read in full.
+# ALSO CHECKED, and it is NOT a gap: this helper has no signature check where C++'s arm opens with
+# one. The port does it at the two CALL SITES instead (check_decl.odin:1169 @(init), :1186 @(fini),
+# both immediately before the call), so the diagnostic exists and the split is a refactor.
+check_decl.odin  check_init_fini_common
+
+# --- #597 (completed) ---------------------------------------------------------------------------
+# are_types_identical_internal: ALL 37 citations read. They pointed at types.cpp:2954-3191, which is
+# ~250 lines BEFORE the function they document -- the real one is 3195-3437 (types.cpp:3123 is only a
+# forward declaration; 3125-3152 is the public are_types_identical wrapper). RIGHT FILE, WRONG
+# FUNCTION, invisible to --check because every stale line still resolved to something.
+#
+# delta=+241 landed EXACTLY on the function header and was wrong for all 21 arms -- Type_Generic hit
+# `#endif`, Type_Dynamic_Array hit Matrix, Type_Struct hit Union, Type_Tuple hit MultiPointer. The arms
+# are in a different ORDER, so no offset exists. Re-anchored arm-to-arm on C++'s 21 `case Type_X:`
+# labels (normalising Type_DynamicArray vs Type_Dynamic_Array), spans preserved then CLAMPED to end
+# before the next label -- Type_Proc would otherwise have overlapped Type_Map -- with a no-overlap
+# assertion before writing.
+#
+# STRUCTURAL RESULT: the arm pairing is 1:1 AND TOTAL. 21 port arms, 21 C++ cases, no port-only arm and
+# no unhandled C++ kind. The port covers exactly C++'s kind set.
+#
+# The 16 arm-INTERNAL sub-citations were each content-anchored inside their parent arm, never offset
+# from it (offsetting assumes arm bodies did not grow, which is the assumption this whole exercise
+# disproves). Notable ones: port 129's "(commented out in C++)" is the `#if 0` type-alias unwrap block
+# at 3208-3224; port 431 is the function's final `return false` at 3436.
+#
+# A "VERIFIED <date>" MARKER IS NOT IMMUNITY. port:302 read "types.cpp:3352 (VERIFIED 2026-08-01; the
+# old 3106-3109 citation was stale)". Correct when written, stale AGAIN now: 3352 is the subtype-flag
+# test (port:295's block); the `return true` that skips polymorphic_params is 3358, with C++'s own
+# commented-out check at 3356-3357. Re-anchored to 3356-3358 and the note now records that it rotted
+# twice.
+check_equivalence.odin  are_types_identical_internal
+
+# --- #598 -------------------------------------------------------------------------------------
+# check_range: all 7 citations read. They pointed at check_expr.cpp:8628-8673; the real check_range
+# is 9247-9345, so they sat ~670 lines earlier -- another right-file-wrong-function. Here the shift IS
+# uniform (+669 at all seven anchors) and that was verified by CONTENT at each, not inferred from one:
+#     is_for_loop type validation  8628-8638 -> 9297-9307
+#     both-constant block          8640-8670 -> 9309-9339
+#     op-selection switch          8647-8652 -> 9316-9322
+#     compare_exact_values         8654-8659 -> 9323-9328
+#     inline_for_depth             8661-8666 -> 9330-9335
+#     else-if must-be-constant     8667-8670 -> 9336-9339
+#     add_type_and_value pair      8672-8673 -> 9341-9342
+# Citations from check_expr_helpers.odin:1334 onward are OUTSIDE check_range (which ends at 1330) and
+# belong to later procedures -- untouched here.
+#
+# THE LOGIC IS A FAITHFUL PORT. Two shape divergences were examined and both dispositioned with
+# evidence, then documented AT THE SITE so a future reader does not "fix" either:
+#   1. the `case:` arm of the range-operator switch -- C++ reports and BREAKS (continuing with
+#      op=Token_Lt, possibly emitting a second diagnostic); the port returns. UNREACHABLE IN BOTH:
+#      the entry guard is is_ast_range -> is_token_range, accepting exactly
+#      {Ellipsis, RangeFull, RangeHalf} in C++ (parser.cpp:1694-1702) and the same three in the port
+#      (check_stmt.odin:4649). A divergence in dead code; #266 says leave it.
+#   2. inline_for_depth -- C++ computes unconditionally and stores conditionally; the port hoists the
+#      nil test around the computation. Observationally identical ONLY because exact_value_sub and
+#      exact_value_increment_one are pure (0 diagnostics in either implementation, checked). The
+#      comment records what would break the equivalence.
+check_expr_helpers.odin  check_range
+
+# --- #604 ------------------------------------------------------------------------------------------
+# check_proc.odin's remaining four clusters + check_global_init.odin's check_all_global_entities.
+# EVERY procedure below was read line-for-line against C++. ALL ARE FAITHFUL -- this round found no
+# defects, which is itself worth recording: the ratio matters when judging whether --suspect is still
+# paying for itself.
+#
+# check_unchecked_bodies              cited :6288-6320 -> real :6643-6675, uniform +355 verified at all
+#                                    six anchors by content.
+# check_safety_all_procedures_for_unchecked  cited :6322-6348 -> real :6677-6703. The old SUB-citations
+#                                    ran to :6359, PAST the cited function's own end of :6348 -- they
+#                                    were internally inconsistent, so no shift could have been right
+#                                    and all ten were mapped by content.
+# check_scope_usage_file_worker / _pkg_worker / check_all_scope_usages   uniform +376.
+#                                    C++'s two workers ARE the WORKER_TASK_PROC macro forms
+#                                    (checker.cpp:7590, :7598); the port splits each into a rawptr
+#                                    wrapper (scope_check_*_worker_proc) plus a typed body. That is an
+#                                    Odin-vs-macro shape difference, NOT an invention -- the port's
+#                                    wrapper names simply have no C++ counterpart to cite, so both
+#                                    halves cite the single C++ worker.
+# check_all_global_entities          cited :4938-4995, which resolves to check_collect_value_decl --
+#                                    RIGHT-FILE-WRONG-FUNCTION, the FIFTH instance (#587, #592, #598,
+#                                    #602, here). The cited extent was 57 lines where the real function
+#                                    (:5316-5340) is 25, so the drift was never a shift.
+#
+# PORT-ONLY SHAPES verified benign and now documented AT THE SITE so they are not "fixed" into
+# divergences:
+#   * check_all_scope_usages has a thread-count branch C++ lacks (C++ always adds tasks then waits).
+#     Needed because global_thread_pool may be nil in a hosted session; identical observably.
+#   * that function iterates sorted_files/sorted_packages where C++ iterates maps in hash order. Safe
+#     HERE specifically because these workers only emit diagnostics, which are collected and sorted
+#     before printing, so submission order cannot reach the output (#50/#214 policy).
+#   * check_unchecked_bodies reuses check_procedure_bodies_worker_data[0].untyped where C++ makes a
+#     fresh local map. consume_proc_info clears the map per procedure either way.
+#   * two `queue_count > 0` / nil guards around what are no-ops in C++, and two plain reads where C++
+#     uses relaxed atomic loads on values it then discards (proc_checked_state, min_dep_count).
+#     min_dep_count is never raised above zero at all (#272), so that loop finds nothing today.
+check_proc.odin  check_unchecked_bodies
+check_proc.odin  check_safety_all_procedures_for_unchecked
+check_proc.odin  check_scope_usage_file_worker
+check_proc.odin  check_scope_usage_pkg_worker
+check_proc.odin  scope_check_file_worker_proc
+check_proc.odin  scope_check_pkg_worker_proc
+check_proc.odin  check_all_scope_usages
+check_global_init.odin  check_all_global_entities
+
+# --- #605 ------------------------------------------------------------------------------------------
+# calculate_global_init_order + report_circular_dependency (check_global_init.odin).
+# Its 15 citations resolved to check_create_file_scopes, check_collect_entities_all_worker_proc and
+# check_collect_entities_all -- three DIFFERENT wrong functions. RIGHT-FILE-WRONG-FUNCTION, the SIXTH
+# instance (#587, #592, #598, #602, #604, here). Real function is checker.cpp:6398-6465.
+# The BODY was read line-for-line in #602 and confirmed faithful: kind filter, dedup keyed on
+# decl_info_of_entity, the cyclic-init report, and bill's commented-out decl_info_has_init note. The
+# only shape difference is the priority queue (C++ min-heap + priority_queue_fix vs the port's full
+# re-sort per iteration); same permutation, because the comparator's secondary key order_in_src breaks
+# every tie deterministically. All 15 mapped by CONTENT against that read.
+#
+# populate_builtin_package_scope: the port's counterpart of C++ init_universal (checker.cpp:1113-1592),
+# a RENAME, which is why 24 citations sat at the top of --suspect looking like the worst cluster in the
+# tree. VERIFIED MECHANICALLY: 23 of 24 cited ranges resolve INSIDE init_universal and ZERO resolve to
+# any other function; the remaining 3 are file-scope (types.cpp basic_types entries, and
+# checker.cpp:1104-1109 for the odin_compile_timestamp global) and stay bare.
+# SCOPE OF THAT CLAIM, stated precisely: containment is verified for every citation, and content was
+# verified by SAMPLE at four points spread across the 480-line range -- the bedrock 128-bit drop
+# (:1120-1133), the ODIN_ARCH table (:1201-1214), Odin_Sanitizer_Flag (:1399-1424) and the objc
+# intrinsics types (:1510-1516) -- all four exactly as the port describes them. A full line-for-line
+# audit of init_universal against populate_builtin_package_scope was NOT done and is not claimed. The
+# anchor asserts only "this citation points into init_universal", and THAT is fully verified.
+check_global_init.odin  calculate_global_init_order
+check_global_init.odin  report_circular_dependency
+checker_lifecycle.odin  populate_builtin_package_scope
+
+# --- #609 ------------------------------------------------------------------------------------------
+# check_proc_decl (check_decl.odin). NOW COMPLETE, after being deliberately withheld by #607 and #608.
+#
+# All 44 citations anchored into check_decl.cpp check_proc_decl (1259-1680) were audited by
+# MONOTONICITY: list (port line, C++ line) in PORT order, flag every backwards jump. 15 inversions.
+# EVERY ONE of the 15 was a genuinely wrong line range -- the heuristic was 15/15 precise, which makes
+# it worth reusing on any procedure with many citations into a large C++ function.
+#   3 fixed in #608:  main block 1475-1495 -> 1529-1565; is_foreign&&is_export 1497-1499 -> 1567-1569;
+#                     is_valid_instrumentation_call 1368-1385 -> called at 1442 and 1462
+#   12 fixed in #609: pt assignment 1277-1282 -> 1319; optimization_mode switch 1335-1341 -> 1381-1386;
+#                     `if (file)` 1351-1360 -> 1402-1403; instrumentation MUTEX_GUARD 1405 -> 1451 and
+#                     1424 -> 1470; is_polymorphic 1501-1510 -> 1571-1579; `pl->body != nullptr`
+#                     1512-1532 -> 1582-1602; BlockStmt assert 1524 -> 1592; the else-branch
+#                     1563 -> 1596-1601; `if (is_foreign)` 1560-1605 -> 1630-1645; foreign_mutex
+#                     1582-1603 -> 1652; CustomLinkName 1607-1609 -> 1677-1679
+# Plus #607's seven init/fini cross-references into generate_minimum_dependency_set_internal, also all
+# wrong by content and remapped there.
+#
+# AFTER the remap, monotonicity is 44 citations / 1 inversion, and that ONE is LEGITIMATE and now
+# documented at the site: the port's is_valid_instrumentation_call is a NESTED procedure, which Odin
+# requires to be declared before use, so it sits above the enter/exit dispatch; C++ has no nested
+# definition and the only lines mentioning it are the two calls. Declaration-before-use vs call-order.
+#
+# THE LOGIC WAS NOT RE-AUDITED HERE and that is not claimed. This entry certifies that all 44 citations
+# now point at the C++ code they describe -- verified by content, not by containment (#606/#607 showed
+# containment is necessary but not sufficient). Whether the port's BEHAVIOUR matches C++ at each of
+# those sites is a separate question; #607 read the init/fini arms and found them faithful, the rest
+# were read only closely enough to identify the counterpart construct.
+check_decl.odin  check_proc_decl

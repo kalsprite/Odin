@@ -207,13 +207,13 @@ destroy_error_collector :: proc() {
 }
 
 // any_errors returns true if any errors have been reported
-// C++ Reference: error.cpp:65-67
+// C++ Reference: error.cpp any_errors:65-67
 any_errors :: proc() -> bool {
 	return sync.atomic_load(&global_error_collector.count) != 0
 }
 
 // any_warnings returns true if any warnings have been reported
-// C++ Reference: error.cpp:68-70
+// C++ Reference: error.cpp any_warnings:68-70
 any_warnings :: proc() -> bool {
 	return sync.atomic_load(&global_error_collector.warning_count) != 0
 }
@@ -246,7 +246,7 @@ error_limit_reached :: proc() -> bool {
 // ============================================================================
 
 // push_error_value stages an error value for batched reporting
-// C++ Reference: error.cpp:31-38
+// C++ Reference: error.cpp push_error_value:31-38
 push_error_value :: proc(pos: tokenizer.Pos, kind: Error_Value_Kind = .Error) {
 	assert(!tls_curr_error_value_set, "Nested error push detected - did you forget to pop a previous error?")
 
@@ -263,7 +263,7 @@ push_error_value :: proc(pos: tokenizer.Pos, kind: Error_Value_Kind = .Error) {
 }
 
 // pop_error_value commits the staged error to the error list
-// C++ Reference: error.cpp:40-49
+// C++ Reference: error.cpp pop_error_value:40-49
 pop_error_value :: proc() {
 	if tls_curr_error_value_set {
 		// Lock to safely append to the shared error list
@@ -278,7 +278,7 @@ pop_error_value :: proc() {
 }
 
 // try_pop_error_value conditionally pops the error if not in a block
-// C++ Reference: error.cpp:52-56
+// C++ Reference: error.cpp try_pop_error_value:52-56
 try_pop_error_value :: proc() {
 	if !tls_in_block {
 		pop_error_value()
@@ -286,7 +286,7 @@ try_pop_error_value :: proc() {
 }
 
 // get_error_value returns the current staged error value
-// C++ Reference: error.cpp:58-61
+// C++ Reference: error.cpp get_error_value:58-61
 get_error_value :: proc() -> ^Error_Value {
 	assert(tls_curr_error_value_set, "No current error value to write to - error_out called without push_error_value")
 	return &tls_curr_error_value
@@ -354,13 +354,13 @@ destroy_error_values :: proc(values: ^[dynamic]Error_Value) {
 
 // begin_error_block starts a batched error reporting block
 // Errors reported within the block are accumulated and flushed together
-// C++ Reference: error.cpp:214-217
+// C++ Reference: error.cpp begin_error_block:214-217
 begin_error_block :: proc() {
 	tls_in_block = true
 }
 
 // end_error_block ends a batched error reporting block and flushes accumulated errors
-// C++ Reference: error.cpp:219-223
+// C++ Reference: error.cpp end_error_block:219-223
 end_error_block :: proc() {
 	pop_error_value()
 	tls_in_block = false
@@ -393,7 +393,7 @@ Terminal_Colour :: enum {
 }
 
 // terminal_set_colours sets the terminal text color and style using ANSI codes
-// C++ Reference: error.cpp:254-274
+// C++ Reference: error.cpp terminal_set_colours:254-274
 terminal_set_colours :: proc(style: Terminal_Style, foreground: Terminal_Colour) {
 	if !has_ansi_terminal_colours() {
 		return
@@ -432,7 +432,7 @@ terminal_set_colours :: proc(style: Terminal_Style, foreground: Terminal_Colour)
 }
 
 // terminal_reset_colours resets terminal colors to default
-// C++ Reference: error.cpp:275-279
+// C++ Reference: error.cpp terminal_reset_colours:275-279
 terminal_reset_colours :: proc() {
 	if has_ansi_terminal_colours() {
 		error_out("\x1b[0m")
@@ -445,7 +445,7 @@ terminal_reset_colours :: proc() {
 
 // error_out appends formatted text to the current error message
 // This is the core output function that all error messages go through
-// C++ Reference: error.cpp:229-234 (error_out) and error.cpp:191-210 (default_error_out_va)
+// C++ Reference: error.cpp error_out:229-234 (error_out) and error.cpp default_error_out_va:191-210 (default_error_out_va)
 error_out :: proc(format: string, args: ..any) {
 	// Safety check: if no active error value, print directly to stderr
 	if !tls_curr_error_value_set {
@@ -474,13 +474,13 @@ error_out :: proc(format: string, args: ..any) {
 }
 
 // error_out_empty outputs an empty string (used for structure)
-// C++ Reference: error.cpp:518-520
+// C++ Reference: error.cpp error_out_empty:518-520
 error_out_empty :: proc() {
 	error_out("")
 }
 
 // error_out_pos outputs a formatted position
-// C++ Reference: error.cpp:521-525
+// C++ Reference: error.cpp error_out_pos:521-525
 error_out_pos :: proc(pos: tokenizer.Pos) {
 	terminal_set_colours(.Bold, .White)
 	error_out("%s ", token_pos_to_string(pos))
@@ -488,7 +488,7 @@ error_out_pos :: proc(pos: tokenizer.Pos) {
 }
 
 // error_out_coloured outputs colored text
-// C++ Reference: error.cpp:527-531
+// C++ Reference: error.cpp error_out_coloured:527-531
 error_out_coloured :: proc(str: string, style: Terminal_Style, foreground: Terminal_Colour) {
 	terminal_set_colours(style, foreground)
 	error_out(str)
@@ -723,7 +723,7 @@ get_file_line_as_string :: proc(info: ^Checker_Info, pos: tokenizer.Pos, error_s
 // ============================================================================
 
 // show_error_on_line displays the source line with the error highlighted
-// C++ Reference: error.cpp:282-516
+// C++ Reference: error.cpp show_error_on_line:282-516
 // Implements full Unicode grapheme cluster support using core:unicode/utf8
 show_error_on_line :: proc(pos: tokenizer.Pos, end: tokenizer.Pos) -> int {
 	get_error_value().end = end
@@ -751,11 +751,11 @@ show_error_on_line :: proc(pos: tokenizer.Pos, end: tokenizer.Pos) -> int {
 	}
 
 	// Decode grapheme clusters for proper visual width calculation
-	// C++ Reference: error.cpp:308-332
+	// C++ Reference: error.cpp show_error_on_line:308-332
 	graphemes, line_length_graphemes, _, line_width :=
 		utf8.decode_grapheme_clusters(the_line, true, context.temp_allocator)
 
-	// Line display constants (C++ Reference: error.cpp:335-345)
+	// Line display constants (C++ Reference: error.cpp show_error_on_line:335-345)
 	MAX_LINE_LENGTH :: 80
 	ELLIPSIS_PADDING :: 8   // `...  ...`
 	MIN_LEFT_VIEW :: 8
@@ -763,7 +763,7 @@ show_error_on_line :: proc(pos: tokenizer.Pos, end: tokenizer.Pos) -> int {
 	MAX_LINE_LENGTH_PADDED :: MAX_LINE_LENGTH - MAX_INSERTED_WIDTH
 
 	// Find error start in grapheme indices
-	// C++ Reference: error.cpp:347-361
+	// C++ Reference: error.cpp show_error_on_line:347-361
 	error_start_index_graphemes := 0
 	for i := 0; i < line_length_graphemes; i += 1 {
 		if graphemes[i].byte_index == error_start_index_bytes {
@@ -784,7 +784,7 @@ show_error_on_line :: proc(pos: tokenizer.Pos, end: tokenizer.Pos) -> int {
 	window_open_bytes := 0
 	window_close_bytes := len(the_line)
 
-	// Line truncation with windowing (C++ Reference: error.cpp:370-433)
+	// Line truncation with windowing (C++ Reference: error.cpp show_error_on_line:370-433)
 	if line_width > MAX_LINE_LENGTH_PADDED {
 		// Compose a visual window to display the error
 		window_size_left := 0
@@ -837,7 +837,7 @@ show_error_on_line :: proc(pos: tokenizer.Pos, end: tokenizer.Pos) -> int {
 	}
 
 	// Calculate squiggle padding from grapheme widths
-	// C++ Reference: error.cpp:435-440 --
+	// C++ Reference: error.cpp show_error_on_line:435-440 --
 	//     for (i32 i = error_start_index_graphemes; i > 0; i -= 1) {
 	//         if (graphemes[i].byte_index == window_open_bytes) break;
 	//         squiggle_padding += graphemes[i].width;
@@ -935,10 +935,10 @@ show_error_on_line :: proc(pos: tokenizer.Pos, end: tokenizer.Pos) -> int {
 // ============================================================================
 
 // error_va is the core error reporting function (variadic version)
-// C++ Reference: error.cpp:535-563
+// C++ Reference: error.cpp error_va:535-563
 error_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args: ..any) {
 	// DELIBERATE DIVERGENCE FROM C++ (CPP_DEVIATIONS.md [EMBED-1]).
-	// C++ error.cpp:535-563 does `print_all_errors(); exit(1);` here. That is correct for a
+	// C++ error.cpp error_va:535-563 does `print_all_errors(); exit(1);` here. That is correct for a
 	// compiler that owns the process; it is wrong for a library, where it would kill the host
 	// (e.g. the test binary in core/odin/checker/tests, taking the whole run with it).
 	// Instead: latch the limit, stop recording, and let the caller unwind. Printing is the
@@ -991,7 +991,7 @@ error_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args: .
 // error_no_newline_va reports an error WITHOUT terminating its line, so a following
 // error_line() continues on the same physical line.
 //
-// C++ Reference: error.cpp:605-631. Two things differ from error_va, and both are visible in
+// C++ Reference: error.cpp error_no_newline_va:605-631. Two things differ from error_va, and both are visible in
 // the output:
 //
 //   1. The "Error: " label is emitted ONLY when the terminal supports ANSI colours. Under a
@@ -1047,7 +1047,7 @@ error_no_newline :: proc(node: ^ast.Node, format: string, args: ..any) {
 }
 
 // warning_va is the core warning reporting function (variadic version)
-// C++ Reference: error.cpp:565-598
+// C++ Reference: error.cpp warning_va:565-598
 warning_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args: ..any) {
 	if global_warnings_as_errors() {
 		error_va(pos, end, format, ..args)
@@ -1082,7 +1082,7 @@ warning_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args:
 }
 
 // error_line_va outputs a continuation line for multi-line errors
-// C++ Reference: error.cpp:601-603
+// C++ Reference: error.cpp error_line_va:601-603
 error_line_va :: proc(format: string, args: ..any) {
 	// Safety check: only output if there's an active error value
 	// This prevents crashes if error_line is called standalone
@@ -1098,10 +1098,10 @@ error_line_va :: proc(format: string, args: ..any) {
 }
 
 // syntax_error_va reports a syntax error with "Syntax Error:" prefix
-// C++ Reference: error.cpp:637-667
+// C++ Reference: error.cpp syntax_error_va:637-667
 syntax_error_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args: ..any) {
 	// DELIBERATE DIVERGENCE FROM C++ (CPP_DEVIATIONS.md [EMBED-1]).
-	// C++ error.cpp:637-667 does `print_all_errors(); exit(1);` here. Same reasoning as
+	// C++ error.cpp syntax_error_va:637-667 does `print_all_errors(); exit(1);` here. Same reasoning as
 	// error_va: a library must not terminate its host. Latch and unwind instead.
 	if error_limit_reached() {
 		return
@@ -1137,7 +1137,7 @@ syntax_error_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, 
 }
 
 // syntax_warning_va reports a syntax warning
-// C++ Reference: error.cpp:704-738
+// C++ Reference: error.cpp syntax_warning_va:704-738
 syntax_warning_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args: ..any) {
 	if global_warnings_as_errors() {
 		syntax_error_va(pos, end, format, ..args)
@@ -1176,7 +1176,7 @@ syntax_warning_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string
 // ============================================================================
 
 // warning reports a warning at a token
-// C++ Reference: error.cpp:742-747
+// C++ Reference: error.cpp warning:742-747
 warning :: proc {
 	warning_token,
 	warning_pos,
@@ -1203,7 +1203,7 @@ warning_node :: proc(node: ^ast.Node, format: string, args: ..any) {
 }
 
 // error reports an error at a token/position/node
-// C++ Reference: error.cpp:749-763
+// C++ Reference: error.cpp error:749-763
 error :: proc {
 	error_token,
 	error_pos,
@@ -1220,13 +1220,13 @@ error_pos :: proc(pos: tokenizer.Pos, format: string, args: ..any) {
 
 // ast_token_pos returns the position C++ reports a diagnostic at for a given node.
 //
-// C++ Reference: parser_pos.cpp:1-110 (`ast_token`). Nearly every arm either returns the
+// C++ Reference: parser_pos.cpp ast_token:1-110 (`ast_token`). Nearly every arm either returns the
 // node's own first token or recurses leftward (BinaryExpr -> left, IndexExpr -> expr,
 // OrReturnExpr -> expr, ...), all of which resolve to `node.pos`. Exactly TWO kinds have a
 // representative token that is not the leftmost one, and for those `node.pos` is wrong:
 //
-//   Assign_Stmt  -> the operator      (parser_pos.cpp:64).  `y = f()` reports at the `=`.
-//   Deref_Expr   -> the trailing `^`  (parser_pos.cpp:50).  Odin's deref is postfix.
+//   Assign_Stmt  -> the operator      (parser_pos.cpp ast_token:64).  `y = f()` reports at the `=`.
+//   Deref_Expr   -> the trailing `^`  (parser_pos.cpp ast_token:50).  Odin's deref is postfix.
 //
 // Found because cmp.sh started diffing diagnostic TEXT rather than counting: probe ud2
 // matched on message and line but reported column 2 where the oracle reports column 4.
@@ -1240,12 +1240,12 @@ ast_token_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
 	case ^ast.Deref_Expr:
 		return n.op.pos
 	case ^ast.Implicit_Selector_Expr:
-		// C++ parser_pos.cpp:35-39: reports at the SELECTOR, not the leading '.'.
+		// C++ parser_pos.cpp ast_token:35-39: reports at the SELECTOR, not the leading '.'.
 		if n.field != nil {
 			return n.field.pos
 		}
 	case ^ast.Field_Value:
-		// C++ parser_pos.cpp:44-47. The point is the RECURSION: C++'s ast_token walks
+		// C++ parser_pos.cpp ast_token:44-47. The point is the RECURSION: C++'s ast_token walks
 		// into the field, which for `.A = x` lands on the Implicit_Selector arm above and
 		// yields the `A`. The port had no Field_Value arm, so it fell through to node.pos
 		// -- the Field_Value's own start, which is the '.' -- leaving every diagnostic
@@ -1292,13 +1292,13 @@ node_end_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
 }
 
 // error_line outputs a continuation line for a multi-line error
-// C++ Reference: error.cpp:765-770
+// C++ Reference: error.cpp error_line:765-770
 error_line :: proc(format: string, args: ..any) {
 	error_line_va(format, ..args)
 }
 
 // syntax_error reports a syntax error
-// C++ Reference: error.cpp:773-785
+// C++ Reference: error.cpp syntax_error:773-785
 syntax_error :: proc {
 	syntax_error_token,
 	syntax_error_pos,
@@ -1313,7 +1313,7 @@ syntax_error_pos :: proc(pos: tokenizer.Pos, format: string, args: ..any) {
 }
 
 // syntax_warning reports a syntax warning
-// C++ Reference: error.cpp:787-792
+// C++ Reference: error.cpp syntax_warning:787-792
 syntax_warning :: proc {
 	syntax_warning_token,
 	syntax_warning_pos,
@@ -1328,7 +1328,7 @@ syntax_warning_pos :: proc(pos: tokenizer.Pos, format: string, args: ..any) {
 }
 
 // compiler_error reports a fatal internal compiler error and exits
-// C++ Reference: error.cpp:803-816
+// C++ Reference: error.cpp compiler_error:803-816
 //
 // HOST-DRIVER ONLY. Unlike error_va/syntax_error_va (see CPP_DEVIATIONS.md [EMBED-1]), this
 // deliberately keeps the C++ exit(1) behaviour:
@@ -1351,7 +1351,7 @@ compiler_error :: proc(format: string, args: ..any) {
 }
 
 // exit_with_errors prints all errors and exits if there are any
-// C++ Reference: error.cpp:819-824
+// C++ Reference: error.cpp exit_with_errors:819-824
 //
 // HOST-DRIVER ONLY. This keeps the C++ exit(1) because terminating *is* its entire contract:
 // it exists so a command-line front end can end its own process after a failed check. It has
@@ -1369,7 +1369,7 @@ exit_with_errors :: proc() {
 // ============================================================================
 
 // error_value_cmp compares two error values by position for sorting
-// C++ Reference: error.cpp:828-832
+// C++ Reference: error.cpp error_value_cmp:828-832
 // C++'s error_value_cmp is a one-liner: `return token_pos_cmp(x->pos, y->pos)`. That
 // comparator (src/tokenizer.cpp:210) orders by OFFSET, then line, then column, and only then
 // by file path. This port had the file FIRST -- while citing the same C++ lines -- which
@@ -1427,7 +1427,7 @@ error_article_table := [?]Error_Article_Entry {
 }
 
 // error_article returns the appropriate article ("a ", "an ", or "") for a context name
-// C++ Reference: error.cpp:854-861
+// C++ Reference: error.cpp error_article:854-861
 error_article :: proc(context_name: string) -> string {
 	for entry in error_article_table {
 		if context_name == entry.context_name {
@@ -1469,7 +1469,7 @@ escape_char :: proc(sb: ^strings.Builder, c: u8) {
 }
 
 // print_all_errors outputs all accumulated errors and warnings
-// C++ Reference: error.cpp:865-1033
+// C++ Reference: error.cpp print_all_errors:865-1033
 print_all_errors :: proc() {
 	if errors_already_printed {
 		// If all errors are warnings, clear them and reset
@@ -1483,7 +1483,7 @@ print_all_errors :: proc() {
 		return
 	}
 
-	// C++ Reference: error.cpp:897 - GB_ASSERT(any_errors() || any_warnings())
+	// C++ Reference: error.cpp print_all_errors:897 - GB_ASSERT(any_errors() || any_warnings())
 	//
 	// KEPT, deliberately. This is a precondition, not a formality: every C++ call site guards
 	// with `if (any_errors() || any_warnings())` (error.cpp:804, error.cpp:820) or has just
@@ -1928,7 +1928,7 @@ did_you_mean_results :: proc(suggestions: ^[dynamic]Distance_And_Target) -> []Di
 }
 
 // check_did_you_mean_print renders the suggestion block.
-// C++ Reference: check_expr.cpp:155-171.
+// C++ Reference: check_expr.cpp check_did_you_mean_print:155-171.
 //
 // The port emitted every line WITHOUT a trailing newline, so the whole block rendered as one
 // run-together line ("\tSuggestion: Did you mean?\t\t.Alpha"), and it had no limit, so a wide
@@ -1981,7 +1981,7 @@ check_did_you_mean_scope :: proc(name: string, scope: ^Scope, prefix := "") {
 		return
 	}
 
-	// C++ (check_expr.cpp:264) walks scope->elements in raw hash order, then sorts by
+	// C++ (check_expr.cpp check_did_you_mean_scope:264) walks scope->elements in raw hash order, then sorts by
 	// distance ALONE with an unstable quicksort, so its tie order is a property of its own
 	// hash table and is not reproducible here. What the port must not do is be
 	// nondeterministic: iterating an Odin map directly made the suggestion order flip

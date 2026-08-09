@@ -753,7 +753,7 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 
 	case ^ast.Matrix_Index_Expr:
 		// `m[i, j]`
-		// C++ Reference: parser.cpp:251-255 - clones expr, row_index, column_index.
+		// C++ Reference: parser.cpp clone_ast:251-255 - clones expr, row_index, column_index.
 		//
 		// Reachable as soon as polymorphic matrix procedures can be declared: instantiating
 		// `proc(m: $T/matrix[$R, $C]$E)` clones the body, and any m[i, j] in it lands here.
@@ -768,7 +768,7 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 		return n
 
 	case ^ast.Relative_Type:
-		// C++ Reference: parser.cpp:441-444 - clones tag and type.
+		// C++ Reference: parser.cpp clone_ast:441-444 - clones tag and type.
 		n := new(ast.Relative_Type)
 		n^ = variant^
 		n.node.expr_base.tav = {}
@@ -780,7 +780,7 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 
 	case ^ast.Fixed_Capacity_Dynamic_Array_Type:
 		// `[dynamic; N]T`
-		// C++ Reference: parser.cpp:461-464 - clones elem, capacity AND tag.
+		// C++ Reference: parser.cpp clone_ast:461-464 - clones elem, capacity AND tag.
 		//
 		// Without this case clone_ast_node hit its "unhandled AST variant" panic, so ANY attempt to
 		// instantiate a polymorphic procedure whose signature mentions [dynamic; $N]$E aborted the

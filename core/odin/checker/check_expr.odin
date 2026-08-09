@@ -375,7 +375,7 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 		// Nested procedure capture checking
 		if entity.parent_proc_decl != nil && ctx.curr_proc_decl != nil && entity.parent_proc_decl != ctx.curr_proc_decl {
 			if entity.kind == .Variable {
-				// LEDGER #545. C++ (check_expr.cpp:1909) tests the FLAG: `e->flags &
+				// LEDGER #545. C++ (check_expr.cpp check_ident:1909) tests the FLAG: `e->flags &
 				// EntityFlag_Static`. The port tested Entity_Variable.is_static, a field with
 				// ZERO writers anywhere in the checker (C++ has no such field at all), so this
 				// condition was always true and every `@(static)` variable captured by a nested
@@ -445,7 +445,7 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 
 	// Resolve BEFORE dispatching on entity.kind.
 	//
-	// C++ Reference: check_expr.cpp:1956-1960 — add_entity_use, then
+	// C++ Reference: check_expr.cpp check_ident:1956-1960 — add_entity_use, then
 	// `if (e->state == EntityState_Unresolved) check_entity_decl(...)`, and only
 	// THEN `switch (e->kind)`.
 	//
@@ -493,7 +493,7 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 	}
 
 
-	// C++ Reference: check_expr.cpp:1957-1968
+	// C++ Reference: check_expr.cpp check_ident:1957-1968
 	// Report an illegal declaration cycle before the `type == nil` bail-out below: an
 	// entity caught mid-cycle has no type yet, so leaving this until the .Type_Name case
 	// further down means the cycle is never reported and resolution keeps recursing.
@@ -505,7 +505,7 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:2047-2056. Import and library names carry no type, and C++
+	// C++ Reference: check_expr.cpp check_ident:2047-2056. Import and library names carry no type, and C++
 	// handles them in its kind switch by reporting the not-in-selector-form error (when not allowed)
 	// and RETURNING THE ENTITY.
 	//
@@ -565,7 +565,7 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 		o.mode = .Constant
 
 	case .Variable:
-		// C++ check_expr.cpp:2004-2007, the FIRST thing the Entity_Variable arm does. A
+		// C++ check_expr.cpp check_ident:2004-2007, the FIRST thing the Entity_Variable arm does. A
 		// `#c_vararg` parameter may only be named as c_va_start's second argument, which sets
 		// ctx.allow_c_vararg_param; anywhere else it is an error with a Suggestion pointing at
 		// c_va_start. Note this precedes the t_invalid bail below, matching C++'s order.
@@ -608,13 +608,13 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 	case .Type_Name:
 		o.mode = .Type
 
-		// C++ Reference: check_expr.cpp:1881-1883
+		// C++ Reference: check_expr.cpp check_ident:1881-1883
 		// Check for type cycles during type resolution
 		if check_cycle(ctx, entity, true) {
 			o.type = t_invalid
 		}
 
-		// NO ALIAS UNWRAPPING HERE. C++ Reference: check_expr.cpp:1963-1968 — the
+		// NO ALIAS UNWRAPPING HERE. C++ Reference: check_expr.cpp check_ident:1963-1968 — the
 		// Entity_TypeName arm only runs the cycle check; o->type stays e->type.
 		//
 		// This previously did `if type_name.is_type_alias { o.type = base_type(o.type) }`,
@@ -1055,7 +1055,7 @@ parse_escape_rune :: proc(s: string) -> rune {
 }
 
 // check_literal handles basic literal expressions
-// Reference: check_expr.cpp:11422-11444
+// Reference: check_expr.cpp check_compound_literal:11422-11444
 //
 // This function checks basic literal nodes and sets the operand to the
 // appropriate untyped constant type with the literal's exact value.
@@ -1181,7 +1181,7 @@ check_binary_op :: proc(ctx: ^Checker_Context, o: ^Operand, op: tokenizer.Token)
 	// The core_array_type step is what lets array programming through: `[4]int % n`
 	// must be judged on the ELEMENT type, not on the array.
 	type := base_type(core_array_type(o.type))
-	// C++ Reference: check_expr.cpp:2150, `Type *ct = core_type(type)`. The bitwise
+	// C++ Reference: check_expr.cpp check_binary_op:2150, `Type *ct = core_type(type)`. The bitwise
 	// arms below test `ct`, not `type`: core_type strips an enum down to its backing
 	// integer, which is what makes the standard idiom of defining an enum member from
 	// earlier members legal —
@@ -1222,7 +1222,7 @@ check_binary_op :: proc(ctx: ^Checker_Context, o: ^Operand, op: tokenizer.Token)
 			error(op.pos, "Operator '%s' is not allowed with #simd types with integer elements", op.text)
 			return false
 		}
-		// C++ Reference: check_expr.cpp:2172-2178. Token_Quo has NO break -- it falls through
+		// C++ Reference: check_expr.cpp check_binary_op:2172-2178. Token_Quo has NO break -- it falls through
 		// into the Token_Mul arm, so `/` on a bit set reports the BIT-SET message, not the
 		// numeric one. The port had its own numeric-only text here (probe n7_bitset).
 		if is_type_bit_set(type) {
@@ -1235,7 +1235,7 @@ check_binary_op :: proc(ctx: ^Checker_Context, o: ^Operand, op: tokenizer.Token)
 		}
 
 	case .Mul:
-		// C++ Reference: check_expr.cpp:2174-2178.
+		// C++ Reference: check_expr.cpp check_binary_op:2174-2178.
 		//
 		// `*` on a bit set is REJECTED. It used to mean intersection and the port still returned
 		// true for it -- an UNDER-rejection: `a * b` on two bit sets compiled here and is an
@@ -1282,14 +1282,14 @@ check_binary_op :: proc(ctx: ^Checker_Context, o: ^Operand, op: tokenizer.Token)
 		}
 
 	case .And, .Or, .Xor:
-		// C++ Reference: check_expr.cpp:2203-2212
+		// C++ Reference: check_expr.cpp check_binary_op:2203-2212
 		if !is_type_integer(ct) && !is_type_boolean(ct) && !is_type_bit_set(ct) {
 			error(op.pos, "Operator '%s' is only allowed with integers, booleans, or bit sets", op.text)
 			return false
 		}
 
 	case .And_Not:
-		// C++ Reference: check_expr.cpp:2231-2237. `&~` is its own arm: unlike the
+		// C++ Reference: check_expr.cpp check_binary_op:2231-2237. `&~` is its own arm: unlike the
 		// other bitwise operators it does NOT accept booleans. The port had merged it
 		// into the arm above, so `bool &~ bool` was wrongly accepted.
 		if !is_type_integer(ct) && !is_type_bit_set(ct) {
@@ -1398,7 +1398,7 @@ check_binary_matrix :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand,
 		x.mode = .Value
 
 	case .Mul:
-		// C++ Reference: check_expr.cpp:4205-4290 (check_binary_matrix, Token_Mul).
+		// C++ Reference: check_expr.cpp check_binary_matrix:4205-4290 (check_binary_matrix, Token_Mul).
 		//
 		// C++ recognises exactly FOUR shapes under `*`, and the set is ASYMMETRIC:
 		//     matrix * matrix   (RxN)*(NxP)
@@ -1433,7 +1433,7 @@ check_binary_matrix :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand,
 			if x_cols != y_rows {
 				return matrix_error(x, y, op)
 			}
-			// C++ compares is_row_major BEFORE computing the result (check_expr.cpp:4217).
+			// C++ compares is_row_major BEFORE computing the result (check_expr.cpp check_binary_matrix:4217).
 			if x_mat.is_row_major != y_mat.is_row_major {
 				return matrix_error(x, y, op)
 			}
@@ -1811,7 +1811,7 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 		// nil == nil is always allowed
 		defined = true
 	} else if x_is_nil || y_is_nil {
-		// One side is nil. C++ (check_expr.cpp:3233-3235) asks `type_has_nil` about
+		// One side is nil. C++ (check_expr.cpp check_comparison:3233-3235) asks `type_has_nil` about
 		// the other side rather than enumerating nillable kinds, and only for the
 		// equality operators. The hand-written list here was missing enum, bit_set,
 		// rawptr, typeid, #soa pointers and #soa slice/dynamic structs, so idioms
@@ -1830,7 +1830,7 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 			defined = is_type_comparable(x.type) && is_type_comparable(y.type)
 
 		case .Lt, .Gt, .Lt_Eq, .Gt_Eq:
-			// C++ Reference: check_expr.cpp:3196-3201. Ordered comparison of two IDENTICAL
+			// C++ Reference: check_expr.cpp check_comparison:3196-3201. Ordered comparison of two IDENTICAL
 			// bit_set types is always defined — in Odin these are the subset/superset
 			// operators, not an ordering on the underlying integer. The port tested only
 			// is_type_ordered, which is false for a bit_set, so `x >= y` on two bit_sets
@@ -1844,7 +1844,7 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 			}
 		}
 
-		// C++ Reference: check_expr.cpp:3221 -- mutual assignability is the OUTER gate that
+		// C++ Reference: check_expr.cpp check_comparison:3221 -- mutual assignability is the OUTER gate that
 		// selects which FAMILY of message to emit, not an extra condition folded into
 		// `defined`:
 		//
@@ -1864,7 +1864,7 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 	}
 
 	if !mutually_assignable || !defined {
-		// C++ Reference: check_expr.cpp:3255-3267, 3277-3288 and 3292. FOUR messages, all
+		// C++ Reference: check_expr.cpp check_comparison:3255-3267, 3277-3288 and 3292. FOUR messages, all
 		// wrapped as "Cannot compare expression. %s." -- three for types that ARE mutually
 		// assignable but whose comparison is undefined, and one for types that are not
 		// mutually assignable at all. The port collapsed everything into one invented
@@ -1873,7 +1873,7 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 		err_str: string
 		if !mutually_assignable {
 			// C++ names a procedure-group operand as "procedure group" rather than printing
-			// its type. C++ Reference: check_expr.cpp:3277-3286.
+			// its type. C++ Reference: check_expr.cpp check_comparison:3277-3286.
 			xt := x.mode == .Proc_Group ? "procedure group" : type_to_string(x.type)
 			yt := y.mode == .Proc_Group ? "procedure group" : type_to_string(y.type)
 			err_str = fmt.tprintf("Mismatched types '%s' and '%s'", xt, yt)
@@ -1894,7 +1894,7 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 		return
 	}
 
-	// C++ Reference: check_expr.cpp:3272-3278. The `defined` ELSE branch — the point at which
+	// C++ Reference: check_expr.cpp check_comparison:3272-3278. The `defined` ELSE branch — the point at which
 	// the comparison has been accepted — registers the runtime comparison procedures the
 	// generated code will call.
 	//
@@ -1965,12 +1965,12 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 	} else {
 		x.mode = .Value
 
-		// C++ Reference: check_expr.cpp:3341-3421, ported faithfully. THE WHOLE BLOCK WAS DEAD.
+		// C++ Reference: check_expr.cpp check_comparison:3341-3421, ported faithfully. THE WHOLE BLOCK WAS DEAD.
 		//
 		// The port assigned `x.type = t_untyped_bool` FIRST and then read `base_type(x.type)` to
 		// decide which runtime helper to register, so the switch subject was always `untyped bool`
 		// and matched no arm -- not one dependency was ever registered from this site. C++ sets
-		// only `x->mode` here and assigns the bool AFTER the block (check_expr.cpp:3421), so it
+		// only `x->mode` here and assigns the bool AFTER the block (check_expr.cpp check_comparison:3421), so it
 		// still has the OPERAND types to dispatch on. The assignment is moved below accordingly.
 		//
 		// Three further divergences in the same block, all fixed here:
@@ -2057,7 +2057,7 @@ check_comparison :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand, y:
 			}
 		}
 
-		// C++ check_expr.cpp:3421 -- AFTER the dependency block, not before it.
+		// C++ check_expr.cpp check_comparison:3421 -- AFTER the dependency block, not before it.
 		x.type = t_untyped_bool
 	}
 }
@@ -2101,7 +2101,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 	#partial switch op.kind {
 	case .Cmp_Eq, .Not_Eq:
 		// NOTE(bill) in C++: allow comparisons between types.
-		// C++ Reference: check_expr.cpp:4382-4410
+		// C++ Reference: check_expr.cpp check_binary_expr:4382-4410
 		//
 		// Each side is checked with the *other* side's type as its hint, which is the only
 		// thing that gives an implicit selector something to resolve against:
@@ -2117,7 +2117,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 		}
 
 		// If exactly one side is a type, that is an error unless the other is a typeid.
-		// C++ Reference: check_expr.cpp:4394-4409
+		// C++ Reference: check_expr.cpp check_binary_expr:4394-4409
 		{
 			x_is_type := x.mode == .Type
 			y_is_type := y.mode == .Type
@@ -2217,7 +2217,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 		return
 
 	case:
-		// C++ Reference: check_expr.cpp:4510-4528. The enclosing type_hint must
+		// C++ Reference: check_expr.cpp check_binary_expr:4510-4528. The enclosing type_hint must
 		// reach the operands: an untyped compound literal like
 		// `open(name, {.Read} + extra, perm)` has no other way to learn its type.
 		is_cmp := token_is_comparison(op.kind)
@@ -2269,7 +2269,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 		return
 	}
 
-	// C++ check_expr.cpp:4577-4581. Called on BOTH operand base types, before the shift
+	// C++ check_expr.cpp check_binary_expr:4577-4581. Called on BOTH operand base types, before the shift
 	// dispatch below. This was entirely absent from the port -- see the note on
 	// check_binary_expr_dependency itself. LEDGER #547.
 	{
@@ -2279,7 +2279,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 	}
 
 	// Shifts are dispatched BEFORE EITHER operand-unification block below, and ALWAYS
-	// return. C++ Reference: check_expr.cpp:4574-4577
+	// return. C++ Reference: check_expr.cpp check_binary_expr:4574-4577
 	//     if (token_is_shift(op.kind)) { check_shift(c, x, y, node, type_hint); return; }
 	//
 	// A shift's operands are independent: the amount is NOT unified with the shifted
@@ -2301,7 +2301,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 		return
 	}
 
-	// C++ Reference: check_expr.cpp:4580-4601. This block MUST run BEFORE the convert_to_typed
+	// C++ Reference: check_expr.cpp check_binary_expr:4580-4601. This block MUST run BEFORE the convert_to_typed
 	// pair below -- that ordering is the whole defect (LEDGER #281).
 	//
 	// The port had it AFTER, at the old division-by-zero site. By then convert_to_typed had
@@ -2323,11 +2323,11 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 	case .Quo, .Mod, .Mod_Mod, .Quo_Eq, .Mod_Eq, .Mod_Mod_Eq:
 		if is_type_integer(y.type) && !is_type_untyped(y.type) &&
 		   is_type_float(x.type) && is_type_untyped(x.type) {
-			// C++ Reference: check_expr.cpp:4588. A literal tab, then "Suggestion:".
+			// C++ Reference: check_expr.cpp check_binary_expr:4588. A literal tab, then "Suggestion:".
 			suggestion := "\tSuggestion: Try explicitly casting the constant value for clarity"
 			// type_to_string result is NOT deleted -- see LEDGER #142.
 			t_str := type_to_string(y.type)
-			// C++ Reference: check_expr.cpp:4590-4597 -- two variants, chosen by whether the
+			// C++ Reference: check_expr.cpp check_binary_expr:4590-4597 -- two variants, chosen by whether the
 			// left operand carries an exact value. The port had a single message whose wording
 			// matched neither, and no Suggestion line at all.
 			// C++ tests `x->value.kind != ExactValue_Invalid`. The port's Exact_Value union
@@ -2355,7 +2355,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 	}
 
 	// Comparisons dispatch AFTER both operands are unified, as C++ does
-	// (check_expr.cpp:4616, following the convert_to_typed pair at :4602-4610).
+	// (check_expr.cpp check_binary_expr:4616, following the convert_to_typed pair at :4602-4610).
 	if is_comparison_operator(op.kind) {
 		check_comparison(ctx, node, x, &y, op.kind)
 		return
@@ -2388,7 +2388,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 	}
 
 	// Array programming, in BOTH operand orders.
-	// C++ Reference: check_expr.cpp:4620-4629
+	// C++ Reference: check_expr.cpp check_binary_expr:4620-4629
 	if check_binary_array_expr(ctx, x, &y, op) {
 		x.mode = .Value
 		x.expr = node
@@ -2403,13 +2403,13 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 
 
 	// Types must match
-	// C++ Reference: check_expr.cpp:4284-4290
+	// C++ Reference: check_expr.cpp check_binary_matrix:4284-4290
 	// Exception: && and || allow any boolean types to be mixed
 	if (op.kind == .Cmp_And || op.kind == .Cmp_Or) && is_type_boolean(x.type) && is_type_boolean(y.type) {
 		// NOTE(bill): Allow any boolean types within `&&` and `||`
 	} else if !are_types_identical(x.type, y.type) {
 		if x.type != t_invalid && y.type != t_invalid {
-			// C++ Reference: check_expr.cpp:4649 -- the EXPRESSION text comes first:
+			// C++ Reference: check_expr.cpp check_binary_expr:4649 -- the EXPRESSION text comes first:
 			//   "Mismatched types in binary expression '%s' : '%s' vs '%s'"
 			expr_str := expr_to_string(node)
 			defer delete(expr_str)
@@ -2440,7 +2440,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 			}
 
 			if is_zero {
-				// C++ Reference: check_expr.cpp:4396-4441
+				// C++ Reference: check_expr.cpp check_binary_expr:4396-4441
 				// Handle target-specific division by zero behavior
 				div_by_zero_kind := check_for_integer_division_by_zero(ctx, node)
 				#partial switch div_by_zero_kind {
@@ -2462,7 +2462,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 	case .Cmp_And, .Cmp_Or:
 		// '&&' and '||' short-circuit, so a deferred procedure attached to a call in
 		// either operand may or may not run. C++ rejects it outright.
-		// C++ Reference: check_expr.cpp:4711-4720
+		// C++ Reference: check_expr.cpp check_binary_expr:4711-4720
 		if .Contains_Deferred_Procedure in be.left.viral_state_flags {
 			error(be.left, "Procedure calls that have an associated deferred procedure are not allowed within logical binary expressions")
 		}
@@ -2478,7 +2478,7 @@ check_binary_expr :: proc(ctx: ^Checker_Context, x: ^Operand, node: ^ast.Node, t
 			return
 		}
 
-		// Two operator rewrites C++ performs before folding (check_expr.cpp:4734-4743).
+		// Two operator rewrites C++ performs before folding (check_expr.cpp check_binary_expr:4734-4743).
 		//
 		// `/` on integers is INTEGER division, but exact_binary_operator_value's `.Quo`
 		// arm is float division; C++ gets truncating division by rewriting the token to
@@ -2561,7 +2561,7 @@ check_unary_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, ty
 	}
 
 	// '**x' is the expand_values operator: **x == expand_values(x)
-	// C++ Reference: check_expr.cpp:2995-3035 (case Token_MulMul), handled before check_unary_op.
+	// C++ Reference: check_expr.cpp check_unary_expr:2995-3035 (case Token_MulMul), handled before check_unary_op.
 	if op.kind == .Mul_Mul {
 		if o.type == nil {
 			return
@@ -2616,7 +2616,7 @@ check_unary_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, ty
 				case .Swizzle_Value, .Swizzle_Variable:
 					error(op.pos, "Cannot take the pointer address of '%s' which is a swizzle intermediate array value", str)
 				case:
-					// C++ Reference: check_expr.cpp:2930-2957 -- the ONLY arm with continuations.
+					// C++ Reference: check_expr.cpp check_unary_expr:2930-2957 -- the ONLY arm with continuations.
 					begin_error_block()
 					defer end_error_block()
 					error(op.pos, "Cannot take the pointer address of '%s'", str)
@@ -2752,7 +2752,7 @@ check_unary_op :: proc(ctx: ^Checker_Context, o: ^Operand, op: tokenizer.Token) 
 
 	#partial switch op.kind {
 	case .Sub, .Add:
-		// C++ Reference: check_expr.cpp:2092-2098 -- names the EXPRESSION, not the category:
+		// C++ Reference: check_expr.cpp check_unary_op:2092-2098 -- names the EXPRESSION, not the category:
 		//   "Operator '-' is not allowed with 'p'"
 		if !is_type_numeric(type) {
 			str := expr_to_string(o.expr)
@@ -3134,7 +3134,7 @@ tav_lookup :: proc(info: ^Checker_Info, node: ^ast.Node) -> (tv: Type_And_Value,
 }
 
 // update_untyped_expr_type updates the type for an untyped expression
-// C++ Reference: check_expr.cpp:4479-4601
+// C++ Reference: check_expr.cpp check_binary_expr:4479-4601
 // This function is used during type inference to propagate concrete types
 // to untyped expressions (literals, untyped operations, etc.).
 //
@@ -3145,14 +3145,14 @@ update_untyped_expr_type :: proc(ctx: ^Checker_Context, expr: ^ast.Node, type: ^
 	}
 
 	// Get expr info from TEMPORARY storage (not permanent tav map)
-	// C++ Reference: check_expr.cpp:4844-4856
+	// C++ Reference: check_expr.cpp update_untyped_expr_type:4844-4856
 	// NOTE: check_get_expr_info requires ^ast.Expr, but we have ^ast.Node.
 	// Since Expr embeds Node, we can cast if this is an expression node.
 	expr_node := cast(^ast.Expr)expr
 	old := check_get_expr_info(ctx, expr_node)
 	if old == nil {
 		// No expr info found - try updating tav directly as fallback
-		// C++ Reference: check_expr.cpp:4846-4855
+		// C++ Reference: check_expr.cpp update_untyped_expr_type:4846-4855
 		if type != nil && type != t_invalid {
 			if tv, found := tav_lookup(ctx.info, expr); found {
 				if tv.type == nil || tv.type == t_invalid {
@@ -3171,24 +3171,24 @@ update_untyped_expr_type :: proc(ctx: ^Checker_Context, expr: ^ast.Node, type: ^
 	}
 
 	// Handle recursive propagation for different expression types
-	// C++ Reference: check_expr.cpp:4858-4944
+	// C++ Reference: check_expr.cpp update_untyped_expr_type:4858-4944
 	// NOTE: We skip constant expressions (old.value != Invalid) as they'll be
 	// updated later during the general checking stage
 
 	#partial switch e in expr.derived {
 	case ^ast.Paren_Expr:
-		// C++ Reference: check_expr.cpp:4941-4943
+		// C++ Reference: check_expr.cpp update_untyped_expr_type:4941-4943
 		update_untyped_expr_type(ctx, e.expr, type, final)
 
 	case ^ast.Unary_Expr:
-		// C++ Reference: check_expr.cpp:4859-4867
+		// C++ Reference: check_expr.cpp update_untyped_expr_type:4859-4867
 		if old.value == nil {
 			// Non-constant unary - propagate to operand
 			update_untyped_expr_type(ctx, e.expr, type, final)
 		}
 
 	case ^ast.Binary_Expr:
-		// C++ Reference: check_expr.cpp:4869-4882
+		// C++ Reference: check_expr.cpp update_untyped_expr_type:4869-4882
 		if old.value == nil {
 			// Non-constant binary - propagate to operands
 
@@ -3220,7 +3220,7 @@ update_untyped_expr_type :: proc(ctx: ^Checker_Context, expr: ^ast.Node, type: ^
 		}
 
 	case ^ast.Ternary_If_Expr:
-		// C++ Reference: check_expr.cpp:4884-4900
+		// C++ Reference: check_expr.cpp update_untyped_expr_type:4884-4900
 		if old.value == nil {
 			// Check expressibility of branches before updating
 			// If a branch has a constant value, verify it can be represented in the target type
@@ -3239,26 +3239,26 @@ update_untyped_expr_type :: proc(ctx: ^Checker_Context, expr: ^ast.Node, type: ^
 		}
 
 	case ^ast.Ternary_When_Expr:
-		// C++ Reference: check_expr.cpp:4903-4911
+		// C++ Reference: check_expr.cpp update_untyped_expr_type:4903-4911
 		if old.value == nil {
 			update_untyped_expr_type(ctx, e.x, type, final)
 			update_untyped_expr_type(ctx, e.y, type, final)
 		}
 
 	case ^ast.Or_Return_Expr:
-		// C++ Reference: check_expr.cpp:4913-4920
+		// C++ Reference: check_expr.cpp update_untyped_expr_type:4913-4920
 		if old.value == nil {
 			update_untyped_expr_type(ctx, e.expr, type, final)
 		}
 
 	case ^ast.Or_Branch_Expr:
-		// C++ Reference: check_expr.cpp:4922-4929
+		// C++ Reference: check_expr.cpp update_untyped_expr_type:4922-4929
 		if old.value == nil {
 			update_untyped_expr_type(ctx, e.expr, type, final)
 		}
 
 	case ^ast.Or_Else_Expr:
-		// C++ Reference: check_expr.cpp:4931-4939
+		// C++ Reference: check_expr.cpp update_untyped_expr_type:4931-4939
 		if old.value == nil {
 			update_untyped_expr_type(ctx, e.x, type, final)
 			update_untyped_expr_type(ctx, e.y, type, final)
@@ -3266,7 +3266,7 @@ update_untyped_expr_type :: proc(ctx: ^Checker_Context, expr: ^ast.Node, type: ^
 	}
 
 	// Final processing
-	// C++ Reference: check_expr.cpp:4946-4964
+	// C++ Reference: check_expr.cpp update_untyped_expr_type:4946-4964
 	if !final && is_type_untyped(type) {
 		old.type = base_type(type)
 		return
@@ -3286,7 +3286,7 @@ update_untyped_expr_type :: proc(ctx: ^Checker_Context, expr: ^ast.Node, type: ^
 }
 
 // update_untyped_expr_value updates the value for an untyped expression
-// C++ Reference: check_expr.cpp:4603-4609
+// C++ Reference: check_expr.cpp check_binary_expr:4603-4609
 // This function is used to propagate constant values through untyped expressions.
 //
 // CRITICAL: Uses ExprInfo map (temporary storage), NOT type_and_value_map (permanent)
@@ -3395,7 +3395,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		return true
 	}
 
-	// C++ Reference: check_expr.cpp:2295 - `type = core_type(type);`
+	// C++ Reference: check_expr.cpp check_representable_as_constant:2295 - `type = core_type(type);`
 	// Unwraps Named, Enum (to its backing integer) and Bit_Field (to its backing type)
 	// so the rules below dispatch on the underlying basic kind.
 	ct := core_type(type)
@@ -3412,7 +3412,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 
 	} else if is_type_string(ct) {
 		// String values
-		// C++ Reference: check_expr.cpp:2301-2306
+		// C++ Reference: check_expr.cpp check_representable_as_constant:2301-2306
 		// A UTF-16 string value is only representable in the UTF-16 string types.
 		if _, is_string16 := in_value.(Exact_Value_String16); is_string16 {
 			return is_type_string16(ct) || is_type_cstring16(ct)
@@ -3606,13 +3606,13 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				}
 				return true
 			}
-			// C++ Reference: check_expr.cpp:2445 - GB_PANIC("Compiler error: Unknown integer type!")
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2445 - GB_PANIC("Compiler error: Unknown integer type!")
 			// No integer basic kind is wider than 8 bytes except the i128/u128 families above.
 			panic(fmt.tprintf("check_representable_as_constant: Compiler error: Unknown integer type: %v", basic.kind))
 		}
 
 		// Check range based on signedness
-		// C++ Reference: check_expr.cpp:2375-2446
+		// C++ Reference: check_expr.cpp check_representable_as_constant:2375-2446
 		#partial switch basic.kind {
 		case .I8, .I16, .I32, .I64, .Int, .Rune,
 		     .I16le, .I32le, .I64le,
@@ -3620,12 +3620,12 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 			// Signed integer types
 			// Note: Rune is treated as i32 for representability
 			// Note: Untyped_Rune handled by is_type_untyped check above
-			// C++ Reference: check_expr.cpp:2376-2388 (Basic_rune, Basic_i*, Basic_i*le, Basic_i*be)
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2376-2388 (Basic_rune, Basic_i*, Basic_i*le, Basic_i*be)
 			if byte_size < 9 && byte_size > 0 {
 				min_val := SIGNED_INTEGER_MINS[byte_size]
 				max_val := SIGNED_INTEGER_MAXS[byte_size]
 
-				// C++ Reference: check_expr.cpp:2389-2397:
+				// C++ Reference: check_expr.cpp check_representable_as_constant:2389-2397:
 				//     if (!big_int_can_be_represented_in_64_bits(&i)) return false;
 				//     i64 val64 = big_int_to_i64(&i);
 				//     return imin_64 <= val64 && val64 <= imax_64;
@@ -3654,7 +3654,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				}
 				if out_value != nil {
 					// C++ assigns *out_value from the ORIGINAL exact value near the top of
-					// the function (check_expr.cpp:2312), before any range test, so the
+					// the function (check_expr.cpp check_representable_as_constant:2312), before any range test, so the
 					// stored constant is the value as written, not the wrapped one.
 					if use_bigint {
 						out_value^ = bigint_value
@@ -3672,7 +3672,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		     .U16le, .U32le, .U64le,
 		     .U16be, .U32be, .U64be:
 			// Unsigned integer types
-			// C++ Reference: check_expr.cpp:2408-2421 (Basic_u*, Basic_uint, Basic_uintptr, Basic_u*le, Basic_u*be)
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2408-2421 (Basic_u*, Basic_uint, Basic_uintptr, Basic_u*le, Basic_u*be)
 			if byte_size < 9 && byte_size > 0 {
 				max_val := UNSIGNED_INTEGER_MAXS[byte_size]
 
@@ -3702,7 +3702,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 
 		case .Untyped_Integer:
 			// Untyped integers accept any integer value
-			// C++ Reference: check_expr.cpp:2443-2444
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2443-2444
 			if out_value != nil {
 				// Convert to big.Int since Exact_Value uses big.Int for integers
 				result: big.Int
@@ -3716,7 +3716,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 			return true
 
 		case:
-			// C++ Reference: check_expr.cpp:2446 - GB_PANIC("Compiler error: Unknown integer type!")
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2446 - GB_PANIC("Compiler error: Unknown integer type!")
 			// Every Basic_Kind carrying Basic_Flag.Integer is covered above; the untyped
 			// integer kinds (Untyped_Integer, Untyped_Rune) return early via is_type_untyped.
 			panic(fmt.tprintf("check_representable_as_constant: Compiler error: Unknown integer type: %v", basic.kind))
@@ -3771,7 +3771,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 			return true
 		}
 
-		// C++ Reference: check_expr.cpp:2450-2477.
+		// C++ Reference: check_expr.cpp check_representable_as_constant:2450-2477.
 		//
 		//     } else if (is_type_float(type)) {
 		//         ExactValue v = exact_value_to_float(in_value);
@@ -3813,7 +3813,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 			return true
 
 		case:
-			// C++ Reference: check_expr.cpp:2476 - GB_PANIC("Compiler error: Unknown float type!")
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2476 - GB_PANIC("Compiler error: Unknown float type!")
 			// Every Basic_Kind carrying Basic_Flag.Float is covered above.
 			panic(fmt.tprintf("check_representable_as_constant: Compiler error: Unknown float type: %v", basic.kind))
 		}
@@ -3887,7 +3887,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				}
 				return true
 			}
-			// C++ Reference: check_expr.cpp:2489 - `break` out of the switch, then `return false`
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2489 - `break` out of the switch, then `return false`
 			return false
 
 		case .Untyped_Complex:
@@ -3897,7 +3897,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 			return true
 
 		case:
-			// C++ Reference: check_expr.cpp:2495 - GB_PANIC("Compiler error: Unknown complex type!")
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2495 - GB_PANIC("Compiler error: Unknown complex type!")
 			// Every Basic_Kind carrying Basic_Flag.Complex is covered above.
 			panic(fmt.tprintf("check_representable_as_constant: Compiler error: Unknown complex type: %v", basic.kind))
 		}
@@ -3941,7 +3941,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 				}
 				return true
 			}
-			// C++ Reference: check_expr.cpp:2523 - `break` out of the switch, then `return false`
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2523 - `break` out of the switch, then `return false`
 			return false
 
 		case .Untyped_Quaternion:
@@ -3951,7 +3951,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 			return true
 
 		case:
-			// C++ Reference: check_expr.cpp:2531 - GB_PANIC (quaternion switch default)
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2531 - GB_PANIC (quaternion switch default)
 			// Every Basic_Kind carrying Basic_Flag.Quaternion is covered above.
 			panic(fmt.tprintf("check_representable_as_constant: Compiler error: Unknown quaternion type: %v", basic.kind))
 		}
@@ -3959,25 +3959,25 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 	} else if is_type_pointer(ct) {
 		// Pointer constants (nil, pointer literals). Covers both Type_Pointer and
 		// the `rawptr` basic type, which carries Basic_Flag.Pointer.
-		// C++ Reference: check_expr.cpp:2535-2549
+		// C++ Reference: check_expr.cpp check_representable_as_constant:2535-2549
 		#partial switch v in in_value {
 		case Exact_Value_Pointer:
-			// C++ Reference: check_expr.cpp:2536-2538
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2536-2538
 			return true
 		case big.Int:
 			// Integer to pointer rejected at constant level
 			// (May be allowed at runtime via cast/transmute)
-			// C++ Reference: check_expr.cpp:2539-2542
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2539-2542
 			return false
 		case string:
 			// String to pointer rejected
-			// C++ Reference: check_expr.cpp:2543-2545
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2543-2545
 			return false
 		case Exact_Value_String16:
-			// C++ Reference: check_expr.cpp:2546-2548
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2546-2548
 			return false
 		case:
-			// C++ Reference: check_expr.cpp:2549 - writes the value through but does NOT
+			// C++ Reference: check_expr.cpp check_representable_as_constant:2549 - writes the value through but does NOT
 			// return true; control falls out to the trailing `return false`.
 			if out_value != nil {
 				out_value^ = in_value
@@ -3986,7 +3986,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 
 	} else if is_type_bit_set(ct) {
 		// Bit set constants can be initialized from integers
-		// C++ Reference: check_expr.cpp:2340-2343
+		// C++ Reference: check_expr.cpp check_representable_as_constant:2340-2343
 		#partial switch v in in_value {
 		case big.Int:
 			// Accept integer values for bit set initialization
@@ -4000,7 +4000,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 
 	} else if is_type_typeid(ct) {
 		// Typeid constants
-		// C++ Reference: check_expr.cpp:2336-2349
+		// C++ Reference: check_expr.cpp check_representable_as_constant:2336-2349
 		// Handle typeid{} compound literals
 		result_value := in_value
 		if compound, is_compound := in_value.(Exact_Value_Compound); is_compound {
@@ -4021,7 +4021,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		}
 	} else if is_type_proc(ct) {
 		// Procedure constants
-		// C++ Reference: check_expr.cpp:2363-2365
+		// C++ Reference: check_expr.cpp check_representable_as_constant:2363-2365
 		#partial switch v in in_value {
 		case Exact_Value_Procedure:
 			if out_value != nil {
@@ -4032,7 +4032,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 	}
 
 	// Compound literal constants (struct{}, array{})
-	// C++ Reference: check_expr.cpp:2350-2362
+	// C++ Reference: check_expr.cpp check_representable_as_constant:2350-2362
 	if _, is_compound := in_value.(Exact_Value_Compound); is_compound {
 		if is_type_struct(ct) || is_type_array(ct) || is_type_enumerated_array(ct) {
 			// Compound literals can be assigned to struct/array types
@@ -4044,7 +4044,7 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:2569 - the function simply returns false for anything
+	// C++ Reference: check_expr.cpp check_representable_as_constant:2569 - the function simply returns false for anything
 	// that matched none of the categories above. There is NO panic here in C++; the four
 	// GB_PANICs live inside the integer/float/complex/quaternion switches, which is where
 	// they now live here too. Basic kinds that legitimately reach this point and are not
@@ -4067,7 +4067,7 @@ check_is_expressible :: proc(ctx: ^Checker_Context, operand: ^Operand, target_ty
 
 		// Error reporting for expressibility failures
 		// C++ Reference: check_expr.cpp:2545-2578
-		// C++ Reference: check_expr.cpp:2754-2757 binds FOUR strings, and every message in
+		// C++ Reference: check_expr.cpp check_is_expressible:2754-2757 binds FOUR strings, and every message in
 		// this family uses the EXPRESSION text, not the source type:
 		//     a = expr_to_string(o->expr)        the expression
 		//     b = type_to_string(type)           the TARGET type
@@ -4083,7 +4083,7 @@ check_is_expressible :: proc(ctx: ^Checker_Context, operand: ^Operand, target_ty
 		value_str := exact_value_to_string(operand.value)
 		defer delete(value_str)
 
-		// C++ Reference: check_expr.cpp:2766 -- the whole reporting tail is one error block,
+		// C++ Reference: check_expr.cpp check_is_expressible:2766 -- the whole reporting tail is one error block,
 		// and every arm except the truncation one follows its message with
 		// check_assignment_error_suggestion. The port emitted the messages and none of the
 		// suggestions, so an out-of-range constant never said what the bound actually was.
@@ -4092,10 +4092,10 @@ check_is_expressible :: proc(ctx: ^Checker_Context, operand: ^Operand, target_ty
 
 		if is_type_numeric(operand.type) && is_type_numeric(target_type) {
 			if !is_type_integer(operand.type) && is_type_integer(target_type) {
-				// C++ check_expr.cpp:2771. NOTE: no suggestion on this arm.
+				// C++ check_expr.cpp check_is_expressible:2771. NOTE: no suggestion on this arm.
 				error(operand.expr, "'%s' truncated to '%s', got %s", expr_str, dst_type_str, value_str)
 			} else {
-				// C++ check_expr.cpp:2773-2776: the bit_field width in scope, when there is
+				// C++ check_expr.cpp check_is_expressible:2773-2776: the bit_field width in scope, when there is
 				// one, narrows the bound the suggestion reports.
 				max_bit_size: i64 = 0
 				if ctx.bit_field_bit_size != 0 {
@@ -4103,17 +4103,17 @@ check_is_expressible :: proc(ctx: ^Checker_Context, operand: ^Operand, target_ty
 				}
 
 				if are_types_identical(operand.type, target_type) {
-					// C++ check_expr.cpp:2779
+					// C++ check_expr.cpp check_is_expressible:2779
 					error(operand.expr, "Numeric value '%s' from '%s' cannot be represented by '%s'", value_str, expr_str, dst_type_str)
 				} else {
-					// C++ check_expr.cpp:2781
+					// C++ check_expr.cpp check_is_expressible:2781
 					error(operand.expr, "Cannot convert numeric value '%s' from '%s' to '%s' from '%s'", value_str, expr_str, dst_type_str, src_type_str)
 				}
 
 				check_assignment_error_suggestion(ctx, operand, target_type, operand.expr, max_bit_size)
 			}
 		} else {
-			// C++ check_expr.cpp:2787
+			// C++ check_expr.cpp check_is_expressible:2787
 			error(operand.expr, "Cannot convert '%s' to '%s' from '%s', got %s", expr_str, dst_type_str, src_type_str, value_str)
 			check_assignment_error_suggestion(ctx, operand, target_type, operand.expr)
 		}
@@ -4272,7 +4272,7 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 		// `---` (explicit uninitialized) converts to ANY type. C++ Reference:
 		// check_expr.cpp:711-713, where check_distance_between_types returns distance 1 for
 		// an untyped-uninit source before any other test, and the default arm of
-		// convert_to_typed (check_expr.cpp:5306) accepts it too.
+		// convert_to_typed (check_expr.cpp convert_to_typed:5306) accepts it too.
 		//
 		// The port had the distance guard (check_equivalence.odin:550) and the default arm,
 		// but NOT this one — so a target whose base type is Basic never reached either. `---`
@@ -4297,7 +4297,7 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 				return
 			}
 		} else if operand.mode == .Constant {
-			// C++ Reference: check_expr.cpp:5051. C++ passes TARGET_TYPE here, not `t`.
+			// C++ Reference: check_expr.cpp convert_to_typed:5051. C++ passes TARGET_TYPE here, not `t`.
 			// `t` exists only to switch on the type's KIND (base_type, or core_type inside
 			// an enum declaration); the representability check itself, and the message it
 			// prints, use the type as WRITTEN. Passing `t` named the underlying integer, so
@@ -4348,7 +4348,7 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 		} else if operand.mode == .Constant && operand.value != nil {
 			// Handle string to array conversion
 			// C++ Reference: check_expr.cpp:4858-4878
-			// C++ Reference: check_expr.cpp:5110-5133. The COUNT must match, and which
+			// C++ Reference: check_expr.cpp convert_to_typed:5110-5133. The COUNT must match, and which
 			// count depends on the element type: bytes for [N]u8, rune count for
 			// [N]rune, and UTF-16 code units for [N]u16. The port previously accepted
 			// any [N]u8 or [N]rune regardless of length -- it discarded the string value
@@ -4496,7 +4496,7 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 			} else if valid_count > 1 {
 				// Ambiguous - multiple variants match equally well
 				// C++ Reference: check_expr.cpp:4882-4905
-				// C++ Reference: check_expr.cpp:5249-5271. The variant list is written with
+				// C++ Reference: check_expr.cpp convert_to_typed:5249-5271. The variant list is written with
 				// error_line INSIDE the block opened for convert_untyped_error -- it is a
 				// continuation of that diagnostic, not a diagnostic of its own. The port built the
 				// same text but emitted it through error(), producing a second POSITIONED
@@ -4531,7 +4531,7 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 			} else if !is_type_untyped_nil(operand.type) || !type_has_nil(target_type) {
 				// No matching variant found
 				// C++ Reference: check_expr.cpp:4908-4933
-				// C++ Reference: check_expr.cpp:5273-5297. Same correction as the ambiguous arm
+				// C++ Reference: check_expr.cpp convert_to_typed:5273-5297. Same correction as the ambiguous arm
 				// above: error_line continuations inside the headline's block, not a second
 				// error() at the same position. Probe: .claude/probes/union_bad.
 				begin_error_block()
@@ -4734,7 +4734,7 @@ error_operand_no_value :: proc(o: ^Operand) {
 		// Report appropriate error message
 		if x != nil {
 			if _, is_call := x.derived.(^ast.Call_Expr); is_call {
-				// C++ Reference: check_expr.cpp:312 -- names the call expression.
+				// C++ Reference: check_expr.cpp error_operand_no_value:312 -- names the call expression.
 				nv_call := expr_to_string(o.expr)
 				defer delete(nv_call)
 				error(o.expr, "'%s' call does not return a value and cannot be used as a value", nv_call)
@@ -4836,89 +4836,176 @@ get_constant_field_value :: proc(ctx: ^Checker_Context, comp_lit: ^ast.Comp_Lit,
 	return {}, false
 }
 
-// get_constant_array_element_value extracts an element value from a constant array compound literal
-// C++ Reference: check_expr.cpp:5473-5637 (get_constant_field_single, the ExactValue_Compound arm
-// from 5494). DRIFT REPAIR (#584): was 11110-11128, which is now check_compound_literal; a blanket
-// shift would have moved it to check_index_expr's CALL SITE, describing the caller rather than the
-// counterpart this helper actually implements.
-// Returns the value and true if one was found and is constant. See get_constant_field_value for
-// why this returns by value rather than by pointer.
-get_constant_array_element_value :: proc(ctx: ^Checker_Context, comp_lit: ^ast.Comp_Lit, elem_idx: i64) -> (value: Exact_Value, ok: bool) {
-	if comp_lit == nil || elem_idx < 0 {
-		return {}, false
-	}
+// get_constant_array_element_value was DELETED in #585. It reimplemented the CompoundLit half of
+// C++'s get_constant_field_single (check_expr.cpp get_constant_field_single:5473-5637) for arrays only, and became dead the
+// moment check_index was routed through the faithful port of that function. Keeping a second,
+// narrower extractor alive would guarantee the two drift apart -- LEDGER #266 is the precedent for
+// deleting rather than preserving a partial duplicate.
 
-	elems := comp_lit.elems
-	if len(elems) == 0 || elem_idx >= i64(len(elems)) {
-		return {}, false
-	}
-
-	// Array elements are always positional (unlike struct fields which can be named)
-	target_elem := elems[elem_idx]
-	if target_elem == nil {
-		return {}, false
-	}
-
-	// Get the type_and_value of the target element
-	if tv, found := tav_lookup(ctx.info, target_elem); found {
-		if tv.mode == .Constant {
-			return tv.value, true
+// get_constant_field_single extracts ONE element from a constant value by index.
+// C++ Reference: check_expr.cpp get_constant_field_single:5473-5637.
+//
+// #585. The previous version of this procedure was a REIMPLEMENTATION and was DEAD -- zero callers,
+// so not one of its divergences was observable. It:
+//   * dispatched on the static TYPE (is_type_string / is_type_array), where C++ dispatches on the
+//     VALUE KIND -- hence a `type` parameter C++ does not have and does not need;
+//   * indexed strings by RUNE and returned the rune, where C++ takes the BYTE at that index and
+//     returns exact_value_u64 (5476). For any non-ASCII constant those disagree;
+//   * had no String16 arm at all (C++ 5480-5485);
+//   * carried no success/finish, which is the entire reason check_index could not emit
+//     "Cannot index a constant '%s' with index %lld" -- see the caller;
+//   * cited check_expr.cpp lines 2319-2325 (written without a colon on purpose: citefn's
+//     CITE_RE cannot tell a note QUOTING a superseded citation from a live one, and --apply
+//     would happily rewrite this sentence). That range is check_representable_as_constant.
+//
+// THE CONTRACT, and it is subtle. C++ uses two out-params and DOES NOT SET `success` on several
+// paths -- the struct arm (5508-5527) and the array arm that finds no covering element both fall
+// through to the tail at 5635. The caller initialises `bool success = false`, so "unset" MEANS
+// false and those paths are reported as failures. Returning the flags is the same contract as long
+// as the tail returns success=false, which it does below. Getting that backwards would silently
+// turn every unreachable index into a successful extraction.
+get_constant_field_single :: proc(
+	ctx: ^Checker_Context, value: Exact_Value, index: i64,
+) -> (result: Exact_Value, success: bool, finish: bool) {
+	// C++ 5474-5486. C++ ASSERTS the bound; the port returns success=false instead. LEDGER #582 is
+	// the standing reason: an upstream GB_ASSERT on an index is reachable from source, and the port
+	// must report rather than abort.
+	if str, is_str := value.(string); is_str {
+		if index < 0 || index >= i64(len(str)) {
+			return nil, false, true
 		}
+		return exact_value_u64(u64(str[index])), true, true
+	}
+	if s16, is_s16 := value.(Exact_Value_String16); is_s16 {
+		if index < 0 || index >= i64(s16.len) {
+			return nil, false, true
+		}
+		return exact_value_u64(u64(s16.text[index])), true, true
 	}
 
-	return {}, false
-}
-
-// get_constant_field_single extracts a single element from a constant value by index
-// C++ Reference: check_expr.cpp:2319-2325
-// Works with constant strings (returns rune) and arrays (returns element value)
-// Returns the extracted value, or nil if not extractable
-get_constant_field_single :: proc(ctx: ^Checker_Context, value: Exact_Value, type: ^Type, index: i64) -> Exact_Value {
-	if value == nil {
-		return nil
+	// C++ 5487-5491. A non-compound constant is its own answer.
+	compound, is_compound := value.(Exact_Value_Compound)
+	if !is_compound {
+		return value, true, true
+	}
+	node := compound.expr
+	if node == nil {
+		return nil, true, true
+	}
+	comp_lit, is_cl := node.derived.(^ast.Comp_Lit)
+	if !is_cl {
+		// C++ 5629-5632: the switch default arm.
+		return nil, true, true
+	}
+	// C++ 5497-5501.
+	if len(comp_lit.elems) == 0 {
+		return nil, true, true
 	}
 
-	bt := base_type(type)
-	if bt == nil {
-		return nil
-	}
+	cl_type := node.tav.type
+	out := value
 
-	// Handle string constants - return the rune at index
-	if is_type_string(bt) {
-		if str, is_str := value.(string); is_str {
-			// Get rune at index (rune-based indexing)
-			rune_idx: i64 = 0
-			for r in str {
-				if rune_idx == index {
-					// Return the rune value as an integer
-					result: big.Int
-					big.internal_int_set_from_integer(&result, i64(r), false)
-					return result
+	if _, first_is_fv := comp_lit.elems[0].derived.(^ast.Field_Value); first_is_fv {
+		if is_type_raw_union(cl_type) {
+			// C++ 5504-5507.
+			return nil, false, true
+		} else if is_type_struct(cl_type) {
+			// C++ 5508-5527. Note this arm does NOT set success -- see the contract note above.
+			found := false
+			for elem in comp_lit.elems {
+				fv, ok := elem.derived.(^ast.Field_Value)
+				if !ok {
+					continue
 				}
-				rune_idx += 1
+				ident, is_ident := fv.field.derived.(^ast.Ident)
+				if !is_ident {
+					continue
+				}
+				sel := lookup_field(ctx.checker, cl_type, ident.name, false)
+				if len(sel.index) > 0 && i64(sel.index[0]) == index {
+					out = fv.value.tav.value
+					found = true
+					break
+				}
 			}
-		}
-		return nil
-	}
-
-	// Handle array constants from compound literals
-	if is_type_array(bt) || is_type_enumerated_array(bt) {
-		// For compound literal values, we need the expression context
-		// This case is handled by get_constant_array_element_value
-		// Here we handle the case where we have a direct Exact_Value_Compound
-		if compound, is_compound := value.(Exact_Value_Compound); is_compound {
-			if compound.expr != nil {
-				if comp_lit, ok := compound.expr.derived.(^ast.Comp_Lit); ok {
-					if elem, has_elem := get_constant_array_element_value(ctx, comp_lit, index); has_elem {
-						return elem
+			if !found {
+				// C++ 5524-5527: "Use the zero value if it is not found".
+				out = nil
+			}
+		} else if is_type_array(cl_type) || is_type_enumerated_array(cl_type) {
+			// C++ 5528-5592.
+			for elem in comp_lit.elems {
+				fv, ok := elem.derived.(^ast.Field_Value)
+				if !ok {
+					continue
+				}
+				if is_ast_range(fv.field) {
+					be, is_be := fv.field.derived.(^ast.Binary_Expr)
+					if !is_be {
+						continue
+					}
+					lo := exact_value_to_i64(be.left.tav.value)
+					hi := exact_value_to_i64(be.right.tav.value)
+					corrected := index
+					if is_type_enumerated_array(cl_type) {
+						bt := base_type(cl_type)
+						earr := bt.variant.(Type_Enumerated_Array)
+						if earr.min_value != nil {
+							corrected = index + exact_value_to_i64(earr.min_value^)
+						}
+					}
+					// C++ 5552-5566: Token_RangeHalf (`..<`) excludes the upper bound.
+					if be.op.kind != .Range_Half {
+						if lo <= corrected && corrected <= hi {
+							return fv.value.tav.value, true, false
+						}
+					} else {
+						if lo <= corrected && corrected < hi {
+							return fv.value.tav.value, true, false
+						}
+					}
+				} else {
+					// C++ 5567-5589.
+					if fv.field.tav.mode != .Constant {
+						return nil, false, true
+					}
+					index_value := fv.field.tav.value
+					if is_type_enumerated_array(cl_type) {
+						bt := base_type(cl_type)
+						earr := bt.variant.(Type_Enumerated_Array)
+						if earr.min_value != nil {
+							index_value = exact_value_sub(index_value, earr.min_value^)
+						}
+					}
+					if index == exact_value_to_i64(index_value) {
+						return fv.value.tav.value, true, false
 					}
 				}
 			}
+			// No covering element: fall through to the tail with success=false, as C++ does.
 		}
-		return nil
+	} else {
+		// C++ 5593-5625, the positional arm.
+		count := i64(len(comp_lit.elems))
+		if count < index {
+			return nil, false, true
+		}
+		if count <= index {
+			return value, false, false
+		}
+		tav := comp_lit.elems[index].tav
+		if tav.mode == .Constant {
+			return tav.value, true, false
+		} else if tav.mode == .Type {
+			return exact_value_typeid(tav.type), true, false
+		}
+		// C++ 5615-5624: procedures and typeids carry their value; anything else C++ asserts is
+		// untyped nil and returns the value regardless, so both branches do the same thing here.
+		return tav.value, true, false
 	}
 
-	return nil
+	// C++ 5635-5636. success is FALSE here on purpose -- see the contract note above.
+	return out, false, false
 }
 
 // parse_swizzle_name parses a swizzle selector name (e.g., "xyz", "rgb")
@@ -5081,7 +5168,7 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 					entity = nil
 				}
 
-				// C++ Reference: check_expr.cpp:5937-5945.
+				// C++ Reference: check_expr.cpp check_selector:5937-5945.
 				//
 				// C++ reports this and DELIBERATELY CONTINUES. The three lines that would bail
 				// are present in the source but commented out, with bill's note:
@@ -5103,7 +5190,7 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 				}
 
 				if entity == nil {
-					// C++ check_expr.cpp:5927-5935. check_did_you_mean_scope was ported
+					// C++ check_expr.cpp check_selector:5927-5935. check_did_you_mean_scope was ported
 					// (error.odin:1801) but never called from anywhere; C++ has exactly one
 					// call site and it is this one, so the suggestion block never appeared
 					// for a misspelled package member.
@@ -5174,7 +5261,7 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 	}
 
 	// #simd selectors are rejected OUTRIGHT, before any field lookup.
-	// C++ Reference: check_expr.cpp:5994-6002. Note this is NOT gated on the lookup having
+	// C++ Reference: check_expr.cpp check_selector:5994-6002. Note this is NOT gated on the lookup having
 	// failed -- C++ errors and returns for any `.field` on a #simd vector, and picks the message
 	// by name length.
 	//
@@ -5236,7 +5323,7 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 			is_array := base != nil && base.kind == .Array
 			is_simd := base != nil && base.kind == .Simd_Vector
 
-			// `1 < len` -- C++ check_expr.cpp:6007. A ONE-character name is never a swizzle: it is
+			// `1 < len` -- C++ check_expr.cpp check_selector:6007. A ONE-character name is never a swizzle: it is
 			// an ordinary component, resolved in lookup_field's array arm (types.cpp:4160, ported
 			// in #364) which is itself capped at count <= 4. Without this gate a single component
 			// on a LARGER array fell through to the swizzle path and was read as a 1-element
@@ -5329,7 +5416,7 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 		}
 
 		if operand.mode == .Type {
-			// C++ Reference: check_expr.cpp:6112-6118. When the operand IS a type rather than
+			// C++ Reference: check_expr.cpp check_selector:6112-6118. When the operand IS a type rather than
 			// a value, C++ uses two dedicated forms that name the type directly and do NOT
 			// repeat "of type":
 			//     "Type '%s' has no field nor polymorphic parameter '%s'"   (polymorphic)
@@ -5367,7 +5454,7 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 	}
 
 	// Constant field access from constant structs
-	// C++ Reference: check_expr.cpp:5810-5830
+	// C++ Reference: check_expr.cpp check_entity_from_ident_or_selector:5810-5830
 	// If the operand is a constant struct/array, extract the field value
 	if operand.mode == .Constant && entity != nil && len(sel.index) > 0 {
 		if compound, is_compound := operand.value.(Exact_Value_Compound); is_compound {
@@ -5398,7 +5485,7 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 	// REMOVED: an invented bit-field runtime dependency.
 	//
 	// The block registered `__write_bits` / `__read_bits` under a citation of
-	// check_expr.cpp:5833-5836. That range is check_entity_decl and a GB_ASSERT_MSG -- nothing
+	// check_expr.cpp check_entity_from_ident_or_selector:5833-5836. That range is check_entity_decl and a GB_ASSERT_MSG -- nothing
 	// to do with bit fields -- and C++ registers NO bit-field dependency anywhere in src/. Both
 	// names are also absent from base:runtime, so the calls resolved to nothing and took
 	// add_package_dependency's silent `entity == nil` return: the block was already inert, which
@@ -5411,7 +5498,7 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 		constant := entity.variant.(Entity_Constant)
 		operand.value = constant.value
 
-		// C++ Reference: check_expr.cpp:5840-5845
+		// C++ Reference: check_expr.cpp check_entity_from_ident_or_selector:5840-5845
 		// Check for procedure constant - unwrap to get actual procedure entity
 		if proc_value, is_proc := operand.value.(Exact_Value_Procedure); is_proc {
 			proc_entity := strip_entity_wrapping(ctx, proc_value.expr)
@@ -5442,7 +5529,7 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 		}
 
 	// SOA pointer field handling
-	// Reference: check_expr.cpp:5800-5803
+	// Reference: check_expr.cpp check_entity_from_ident_or_selector:5800-5803
 	if .Soa_Ptr_Field in entity.flags {
 		operand.mode = .Soa_Variable
 	}
@@ -5602,7 +5689,7 @@ check_set_index_data :: proc(operand: ^Operand, t: ^Type, indirection: bool, max
 		return true
 
 	case .Fixed_Capacity_Dynamic_Array:
-		// C++ Reference: check_expr.cpp:9132-9133 — indexes exactly like [dynamic]T.
+		// C++ Reference: check_expr.cpp check_set_index_data:9132-9133 — indexes exactly like [dynamic]T.
 		fc := t.variant.(Type_Fixed_Capacity_Dynamic_Array)
 		operand.type = fc.elem
 		if operand.mode != .Constant {
@@ -5746,11 +5833,11 @@ check_index_value :: proc(ctx: ^Checker_Context, main_type: ^Type, open_range: b
 		}
 
 		// Check for negative indices (not allowed except for multi-pointers and enums)
-		// C++ Reference: check_expr.cpp:5383-5387.
+		// C++ Reference: check_expr.cpp check_index_value:5383-5387.
 		//
 		// Two divergences fixed here (#555):
 		//   1. The predicate tested `operand.type`; C++ tests `index_type`, which is t_int or the
-		//      type_hint (check_expr.cpp:5350-5352, mirrored at :5670-5672 above). They coincide
+		//      type_hint (check_expr.cpp check_index_value:5350-5352, mirrored at :5670-5672 above). They coincide
 		//      only when the convert_to_typed at :5674 succeeded.
 		//   2. The message dropped BOTH the source expression and the offending value. C++:
 		//          "Index '%s' cannot be a negative value, got %.*s"
@@ -5833,7 +5920,7 @@ check_index_value :: proc(ctx: ^Checker_Context, main_type: ^Type, open_range: b
 			if out_of_bounds {
 				expr_str := expr_to_string(operand.expr)
 				defer delete(expr_str)
-				// C++ Reference: check_expr.cpp:5439-5442. Two divergences here. The bracket is
+				// C++ Reference: check_expr.cpp check_index_value:5439-5442. Two divergences here. The bracket is
 				// chosen by open_range -- '=' for a closed range, '<' for a half-open one -- and
 				// the port hardcoded "..<", so every CLOSED-range index printed the wrong
 				// bracket. And C++ appends ", got %s" with the index's ORIGINAL big integer,
@@ -5860,7 +5947,7 @@ check_index_value :: proc(ctx: ^Checker_Context, main_type: ^Type, open_range: b
 
 // check_index checks index expressions (x[i])
 // Handles: arrays, slices, dynamic arrays, maps, strings, multi-pointers, SOA structs
-// Ported from check_expr.cpp:11009-11136
+// Ported from check_expr.cpp check_compound_literal:11009-11136
 //
 // Implemented: Arrays, slices, dynamic arrays, maps, strings, multi-pointers, SOA, matrices, constant indexing
 // Map runtime dependencies handled in entity_helpers.odin:add_map_dependencies
@@ -5909,7 +5996,7 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 		operand.expr = node
 
 		// Add runtime dependencies for map access
-		// C++ Reference: check_expr.cpp:11948-11949 (check_index_expr, the map arm).
+		// C++ Reference: check_expr.cpp check_index_expr:11948-11949 (check_index_expr, the map arm).
 		// DRIFT REPAIR (#584): was 11040-11041 (now check_compound_literal) and, from a later
 		// partial fix, 11905-11906 -- which is check_selector_call_expr, the function BEFORE this
 		// one. A map INDEX registers BOTH -- reading through
@@ -5931,14 +6018,14 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 			// These types can be indexed when constant
 		} else if is_type_matrix(t) {
 			// Matrix constants can be indexed
-			// Reference: check_expr.cpp:11967-11968
+			// Reference: check_expr.cpp check_index_expr:11967-11968
 		} else {
 			valid = false
 		}
 	}
 
 	if !valid {
-		// C++ Reference: check_expr.cpp:11974-11993
+		// C++ Reference: check_expr.cpp check_index_expr:11974-11993
 		begin_error_block()
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
@@ -5961,7 +6048,7 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 	// Check for missing index
 	if ie.index == nil {
-		// C++ Reference: check_expr.cpp:11995-12002
+		// C++ Reference: check_expr.cpp check_index_expr:11995-12002
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
 		error(operand.expr, "Missing index for '%s'", expr_str)
@@ -5982,7 +6069,7 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	index: i64 = 0
 	index_ok := check_index_value(ctx, t, false, ie.index, max_count, &index, index_type_hint)
 
-	// NO BAIL HERE. C++ (check_expr.cpp:12012) keeps `ok` as a local and consults it only inside
+	// NO BAIL HERE. C++ (check_expr.cpp check_index_expr:12012) keeps `ok` as a local and consults it only inside
 	// the is_const arm below -- a failed check_index_value does NOT invalidate the operand, which
 	// still carries the element type check_set_index_data gave it. The port had an invented
 	// `if !index_ok { mode = .Invalid; return }`, which suppressed every downstream diagnostic
@@ -5993,7 +6080,7 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	// Handle constant array/string indexing
 	if is_const {
 		if index < 0 {
-			// C++ Reference: check_expr.cpp:12013-12024. `index < 0` is how check_index_value
+			// C++ Reference: check_expr.cpp check_index_expr:12013-12024. `index < 0` is how check_index_value
 			// reports a NON-CONSTANT index, so this is the "variable index into a constant" case.
 			// The message was reworded and the Suggestion was dropped entirely; both restored.
 			begin_error_block()
@@ -6008,42 +6095,45 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 			operand.expr = node
 			return kind
 		} else if index_ok && !is_type_matrix(t) {
-			// Extract constant value from indexed constant
-			// Reference: check_expr.cpp:12025-12044
-			if operand.value != nil {
-				str_val, is_string := operand.value.(string)
-				if is_string && index >= 0 && index < i64(len(str_val)) {
-					// Constant string indexing - extract byte value
-					byte_val := str_val[index]
-					result: big.Int
-					big.int_set_from_integer(&result, i64(byte_val))
-					operand.mode = .Constant
-					operand.value = result
-					operand.type = t_u8
+			// C++ Reference: check_expr.cpp check_index_expr:12025-12044.
+			//
+			// #585. This arm was a REIMPLEMENTATION of C++'s and diverged three ways:
+			//   1. It never emitted "Cannot index a constant '%s' with index %lld" (C++ 12035) or its
+			//      Suggestion, because the port's get_constant_field_single had no `success` out-param
+			//      to test. Silent under-rejection, the same shape as the one #582 closed in check_slice.
+			//   2. It hand-rolled a string-byte path and an array-compound path, so string16 and every
+			//      other compound shape C++ handles -- struct field-values, raw unions, `a..=b = v`
+			//      ranges, sparse enumerated arrays, the `finish` short-circuit -- were simply absent.
+			//   3. It never set operand.type, and set mode only inside its success branches, so a
+			//      partial extraction could leave a stale mode. C++ sets mode BEFORE the call (12028)
+			//      and demotes only on failure.
+			tav_type, tav_value, _ := type_and_value_of_expr(ctx, ie.expr)
+			_ = tav_type
+			operand.mode = .Constant
+			value, success, _ := get_constant_field_single(ctx, tav_value, index)
+			operand.value = value
+			if !success {
+				// C++ 12032-12043.
+				begin_error_block()
+				defer end_error_block()
+				expr_str := expr_to_string(operand.expr)
+				defer delete(expr_str)
+				error(operand.expr, "Cannot index a constant '%s' with index %d", expr_str, index)
+				if !build_context.terse_errors {
+					error_line("\tSuggestion: store the constant into a variable in order to index it with a variable index\n")
 				}
-
-				// Handle constant array indexing from compound literals
-				// C++ Reference: check_expr.cpp:12025-12044
-				if compound, is_compound := operand.value.(Exact_Value_Compound); is_compound {
-					if compound.expr != nil {
-						if comp_lit, is_comp := compound.expr.derived.(^ast.Comp_Lit); is_comp {
-							elem_value, has_elem := get_constant_array_element_value(ctx, comp_lit, index)
-							if has_elem {
-								operand.value = elem_value
-								operand.mode = .Constant
-							}
-						}
-					}
-				}
+				operand.mode = .Invalid
+				operand.expr = node
+				return kind
 			}
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:12047-12050. The condition is real but the BODY IS EMPTY --
+	// C++ Reference: check_expr.cpp check_index_expr:12047-12050. The condition is real but the BODY IS EMPTY --
 	// it holds only bill's TODO, "allow matrix columns to be assignable to other types which are
 	// the same internally if a type hint exists". The port filled it in with a
 	// `check_matrix_type_hint` call, retyping the operand where the reference does nothing.
-	// That helper does exist in C++ (check_expr.cpp:4177) and is called from six other sites, so
+	// That helper does exist in C++ (check_expr.cpp check_matrix_type_hint:4177) and is called from six other sites, so
 	// this is not an invented FUNCTION -- it is an invented CALL, which is harder to spot and has
 	// the same effect: the port silently implements a feature C++ has deliberately not written.
 	// Restored to C++'s no-op; the condition is kept, commented, so the site stays findable if
@@ -6059,7 +6149,7 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 }
 
 // check_matrix_index_expr checks matrix indexing (mat[row, col])
-// Reference: check_expr.cpp:9519-9584
+// Reference: check_expr.cpp check_matrix_index_expr:9519-9584
 //
 // Matrix indexing extracts a single element from a matrix using row and column indices.
 // Both indices must be integers within the bounds of the matrix dimensions.
@@ -6150,7 +6240,7 @@ check_matrix_index_expr :: proc(ctx: ^Checker_Context, operand: ^Operand, node: 
 	_ = check_index_value(ctx, t, false, me.row_index, mat.row_count, &row_index, nil)
 	_ = check_index_value(ctx, t, false, me.column_index, mat.column_count, &column_index, nil)
 
-	// C++ Reference: check_expr.cpp:9522-9524. Absent from the port entirely -- indexing a
+	// C++ Reference: check_expr.cpp check_matrix_index_expr:9522-9524. Absent from the port entirely -- indexing a
 	// CONSTANT matrix with non-constant indices was silently accepted.
 	if is_const && (me.row_index.tav.mode != .Constant || me.column_index.tav.mode != .Constant) {
 		node_str := expr_to_string(node)
@@ -6169,7 +6259,7 @@ check_matrix_index_expr :: proc(ctx: ^Checker_Context, operand: ^Operand, node: 
 }
 
 // check_slice checks slice expressions (x[low:high])
-// Reference: check_expr.cpp:11138-11340
+// Reference: check_expr.cpp check_compound_literal:11138-11340
 //
 // Slice expressions create sub-slices from sliceable types:
 // - Arrays: [N]T -> []T (requires addressability)
@@ -6212,7 +6302,7 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	#partial switch t.kind {
 	case .Basic:
 		// String slicing
-		// Reference: check_expr.cpp:12070-12085 (check_slice_expr, case Type_Basic)
+		// Reference: check_expr.cpp check_slice_expr:12070-12085 (check_slice_expr, case Type_Basic)
 		// DRIFT REPAIR (#571): this whole procedure cited the 11154-11217 block, which upstream
 		// motion moved into check_compound_literal. The real slice code is check_slice_expr from
 		// 12054. Note the shift is NOT uniform -- +916 for the cases up to Dynamic_Array, but the
@@ -6230,7 +6320,7 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 			}
 			operand.type = type_deref(operand.type)
 		} else if basic.kind == .String16 {
-			// String16 slicing support (check_expr.cpp:12078-12084)
+			// String16 slicing support (check_expr.cpp check_slice_expr:12078-12084)
 			valid = true
 			// Extract length from constant String16 values
 			if operand.mode == .Constant && operand.value != nil {
@@ -6243,14 +6333,14 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 	case .Array:
 		// Array slicing: [N]T -> []T
-		// Reference: check_expr.cpp:12088-12100
+		// Reference: check_expr.cpp check_slice_expr:12088-12100
 		valid = true
 		array_type := t.variant.(Type_Array)
 		max_count = array_type.count
 
 		// Arrays require addressability to be sliced
 		if operand.mode != .Variable && !is_type_pointer(operand.type) {
-			// C++ Reference: check_expr.cpp:12091-12098
+			// C++ Reference: check_expr.cpp check_slice_expr:12091-12098
 			expr_str := expr_to_string(operand.expr)
 			defer delete(expr_str)
 			error(node, "Cannot slice array '%s', value is not addressable", expr_str)
@@ -6264,26 +6354,26 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 	case .Multi_Pointer:
 		// Multi-pointer slicing
-		// Reference: check_expr.cpp:12102-12105
+		// Reference: check_expr.cpp check_slice_expr:12102-12105
 		valid = true
 		operand.type = type_deref(operand.type)
 
 	case .Slice:
 		// Slice sub-slicing: []T -> []T
-		// Reference: check_expr.cpp:12107-12110
+		// Reference: check_expr.cpp check_slice_expr:12107-12110
 		valid = true
 		operand.type = type_deref(operand.type)
 
 	case .Dynamic_Array:
 		// Dynamic array slicing: [dynamic]T -> []T
-		// Reference: check_expr.cpp:12112-12115
+		// Reference: check_expr.cpp check_slice_expr:12112-12115
 		valid = true
 		da_type := t.variant.(Type_Dynamic_Array)
 		operand.type = alloc_type_slice(da_type.elem)
 
 	case .Fixed_Capacity_Dynamic_Array:
 		// `[dynamic; N]T` slices to []T, as [dynamic]T does.
-		// C++ Reference: check_expr.cpp:12117-12128 (check_slice_expr, case Type_FixedCapacityDynamicArray).
+		// C++ Reference: check_expr.cpp check_slice_expr:12117-12128 (check_slice_expr, case Type_FixedCapacityDynamicArray).
 		// Was 12060-12070, which is check_slice_expr's PROLOGUE, not this case. citefn --check would
 		// not have caught it: the function was right, only the region was wrong.
 		valid = true
@@ -6304,14 +6394,14 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 	case .Struct:
 		// SOA struct slicing
-		// Reference: check_expr.cpp:12130-12146
+		// Reference: check_expr.cpp check_slice_expr:12130-12146
 		strct := &t.variant.(Type_Struct)
 		if strct.soa_kind != .None {
 			// SOA struct slicing - result is a SOA slice
 			// C++ lines 12133-12145
 			if strct.soa_kind == .Fixed {
 				// Fixed SOA: needs addressability check
-				// C++ check_expr.cpp:12135-12142 (was 12077-12084, the string16 branch -- wrong region).
+				// C++ check_expr.cpp check_slice_expr:12135-12142 (was 12077-12084, the string16 branch -- wrong region).
 				//
 				// TWO divergences fixed here. The condition tested `.Soa_Variable` where C++
 				// tests `!is_type_pointer(o->type)` -- a different question, so a pointer to a
@@ -6340,7 +6430,7 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 	case .Enumerated_Array:
 		// Enumerated arrays explicitly cannot be sliced
-		// C++ Reference: check_expr.cpp:12148-12164 (check_slice_expr, case Type_EnumeratedArray).
+		// C++ Reference: check_expr.cpp check_slice_expr:12148-12164 (check_slice_expr, case Type_EnumeratedArray).
 		// DRIFT REPAIR (#571): this arm carried TWO wrong citations. 11219-11230 now lands in
 		// check_compound_literal; 12090-12106 is check_slice_expr's Type_Array case -- the right
 		// function, the wrong arm, which is exactly the class --check cannot catch. The three
@@ -6361,7 +6451,7 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 	// Validate that type is sliceable
 	if !valid {
-		// C++ Reference: check_expr.cpp:12167-12176
+		// C++ Reference: check_expr.cpp check_slice_expr:12167-12176
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
 		type_str := type_to_string(operand.type)
@@ -6372,10 +6462,10 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	}
 
 	// Validate slice indices
-	// Reference: check_expr.cpp:12178-12211
+	// Reference: check_expr.cpp check_slice_expr:12178-12211
 
 	// Handle nil low index (defaults to 0)
-	// Reference: check_expr.cpp:12178-12180
+	// Reference: check_expr.cpp check_slice_expr:12178-12180
 
 	indices: [2]i64
 	nodes := [2]^ast.Expr{se.low, se.high}
@@ -6408,7 +6498,7 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	}
 
 	// Validate that low <= high
-	// Reference: check_expr.cpp:12203-12211
+	// Reference: check_expr.cpp check_slice_expr:12203-12211
 	for i in 0 ..< len(indices) {
 		a := indices[i]
 		for j in i + 1 ..< len(indices) {
@@ -6420,7 +6510,7 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	}
 
 	// Check for slicing constants without known bounds
-	// C++ Reference: check_expr.cpp:12213-12219
+	// C++ Reference: check_expr.cpp check_slice_expr:12213-12219
 	if max_count < 0 {
 		if operand.mode == .Constant {
 			expr_str := expr_to_string(se.expr)
@@ -6430,7 +6520,7 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	}
 
 	// Multi-pointer special semantics
-	// Reference: check_expr.cpp:12221-12229
+	// Reference: check_expr.cpp check_slice_expr:12221-12229
 	// x[:]   -> [^]T (multi-pointer)
 	// x[i:]  -> [^]T (multi-pointer)
 	// x[:n]  -> []T  (slice)
@@ -6444,7 +6534,7 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	operand.mode = .Value
 
 	// Constant string slicing.
-	// C++ Reference: check_expr.cpp:12234-12272 (check_slice_expr, tail).
+	// C++ Reference: check_expr.cpp check_slice_expr:12234-12272 (check_slice_expr, tail).
 	//
 	// This block was a REIMPLEMENTATION of C++'s, not a port, and carried four divergences:
 	//   1. It never emitted "Cannot slice '%s' with non-constant indices" (C++ 12248) at all --
@@ -6777,7 +6867,7 @@ check_type_assertion :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 					o.type = type_hint
 					o.mode = .Optional_Ok
 					o.expr = node
-					// C++ `goto end` (check_expr.cpp:11641) -- NOT a plain return.
+					// C++ `goto end` (check_expr.cpp check_type_assertion:11641) -- NOT a plain return.
 					add_type_assertion_dependencies(ctx)
 					return kind
 				}
@@ -6826,7 +6916,7 @@ check_type_assertion :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 		}
 
 		if !ok {
-			// C++ check_expr.cpp:11657-11665. Two divergences here, not one: the port
+			// C++ check_expr.cpp check_type_assertion:11657-11665. Two divergences here, not one: the port
 			// dropped the EXPRESSION from the message entirely ("Cannot type assert to"
 			// rather than "Cannot type assert '%s' to"), and passed the ^Type to a "%v",
 			// dumping the Type struct where a name belongs. LEDGER 287.
@@ -6861,7 +6951,7 @@ check_type_assertion :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 
 	} else {
 		// Invalid source type for type assertion
-		// C++ Reference: check_expr.cpp:11684 -- reports the actual type.
+		// C++ Reference: check_expr.cpp check_type_assertion:11684 -- reports the actual type.
 		ta_got := type_to_string(o.type)
 		error(o.expr, "Type assertions can only operate on unions and 'any', got %s", ta_got)
 		o.mode = .Invalid
@@ -6869,7 +6959,7 @@ check_type_assertion :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 		return kind
 	}
 
-	// C++ check_expr.cpp:11708-11723, ported verbatim. TWO defects here, both silent:
+	// C++ check_expr.cpp check_type_assertion:11708-11723, ported verbatim. TWO defects here, both silent:
 	//
 	//   1. STALE NAMES. `type_assertion_check` and `type_assertion_check2` do not exist in
 	//      base:runtime at all -- the real symbols are the four _with_context/_contextless
@@ -6890,7 +6980,7 @@ check_type_assertion :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 
 // add_type_assertion_dependencies registers the runtime helpers a type assertion needs.
 //
-// C++ Reference: check_expr.cpp:11706-11722, the block immediately after the `end:` label.
+// C++ Reference: check_expr.cpp check_type_assertion:11706-11722, the block immediately after the `end:` label.
 //
 // WHY IT IS A SEPARATE PROC. C++ reaches that block from THREE places: the two `.?` success
 // paths (one via `goto end` at :11641, one by falling out of the optional-ok branch) and the
@@ -7023,7 +7113,7 @@ check_implicit_selector_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^
 	if !ok {
 		name := ise.field.name
 
-		// C++ (check_expr.cpp:9395) reads `th->BitSet.elem` off `th` directly, which is only
+		// C++ (check_expr.cpp attempt_implicit_selector_expr:9395) reads `th->BitSet.elem` off `th` directly, which is only
 		// sound when `th` IS the bit_set rather than a named type wrapping one. Go through
 		// base_type here and return nil when it is not a bit_set at all, so the guard below
 		// is a test rather than an unchecked variant access.
@@ -7039,7 +7129,7 @@ check_implicit_selector_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^
 		}
 
 		if is_type_enum(th) {
-			// C++ Reference: check_expr.cpp:9384-9394.
+			// C++ Reference: check_expr.cpp attempt_implicit_selector_expr:9384-9394.
 			//
 			// The ERROR_BLOCK is not decoration. check_did_you_mean_type emits its lines with
 			// error_line, which appends to the CURRENT error value; with no block open there
@@ -7062,7 +7152,7 @@ check_implicit_selector_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^
 			}
 
 		} else if is_type_bit_set(th) && is_type_enum(bit_set_elem_of(th)) {
-			// C++ Reference: check_expr.cpp:9395-9403. Two lines, not one: the message names
+			// C++ Reference: check_expr.cpp attempt_implicit_selector_expr:9395-9403. Two lines, not one: the message names
 			// the TYPE, and the suggestion is a separate continuation naming the EXPRESSION.
 			// The port had a single invented message that named neither
 			// ("Cannot convert enum value to bit_set; did you mean '{ .%s }'?").
@@ -7073,11 +7163,11 @@ check_implicit_selector_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^
 			bs_str := expr_to_string(node)
 			defer delete(bs_str)
 			error(node, "Cannot convert enum value to '%s'", bs_typ)
-			// LEDGER 346: braces escaped for Odin's fmt. C++ Reference: src/check_expr.cpp:9402
+			// LEDGER 346: braces escaped for Odin's fmt. C++ Reference: src/check_expr.cpp attempt_implicit_selector_expr:9402
 			error_line("\tSuggestion: Did you mean '{{ %s }}'?\n", bs_str)
 
 		} else {
-			// C++ Reference: check_expr.cpp:9404-9409 -- names the TYPE and the expression.
+			// C++ Reference: check_expr.cpp attempt_implicit_selector_expr:9404-9409 -- names the TYPE and the expression.
 			// The port's fallback named neither ("Invalid type for implicit selector
 			// expression"), and was only reachable for non-bit_set types because the
 			// bit_set-with-non-enum-element case was handled by a nested else above.
@@ -7211,7 +7301,7 @@ check_or_return_split_types :: proc(ctx: ^Checker_Context, x: ^Operand, name: st
 // check_or_else_expr_no_value_error reports error when expression doesn't return optional value
 // Reference: check_builtin.cpp:103-129
 check_or_else_expr_no_value_error :: proc(ctx: ^Checker_Context, name: string, x: Operand, type_hint: ^Type) {
-	// C++ Reference: check_builtin.cpp:109-131. The port was missing the ERROR_BLOCK (so the
+	// C++ Reference: check_builtin.cpp check_or_else_expr_no_value_error:109-131. The port was missing the ERROR_BLOCK (so the
 	// suggestion escaped the collector), the leading tab, the trailing newline, and the
 	// type-hint variant below.
 	begin_error_block()
@@ -7344,7 +7434,7 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 		o.expr = node
 		return .Expr
 
-	// C++ Reference: check_expr.cpp:9761-9769. C++ groups ALL EIGHT of these in a single
+	// C++ Reference: check_expr.cpp check_basic_directive_expr:9761-9769. C++ groups ALL EIGHT of these in a single
 	// branch and emits the same message for each. The port had five separate but identical
 	// arms (defined, config, load, load_directory, assert) and NO arm at all for exists,
 	// load_hash or load_or -- so those three fell through to "Unknown directive: #X" where
@@ -7371,7 +7461,7 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 		return .Expr
 
 	case "caller_location":
-		// C++ Reference: check_expr.cpp:9734-9738.
+		// C++ Reference: check_expr.cpp check_basic_directive_expr:9734-9738.
 		//
 		// Reaching THIS function already means the directive is misused. A legitimate
 		// `#caller_location` is a default argument value, and that is substituted at the call
@@ -7391,7 +7481,7 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 		return .Expr
 
 	case "caller_expression":
-		// C++ Reference: check_expr.cpp:9739-9742. Same reasoning as caller_location; this arm
+		// C++ Reference: check_expr.cpp check_basic_directive_expr:9739-9742. Same reasoning as caller_location; this arm
 		// did not exist at all, so the directive fell through to "Unknown directive".
 		error(node, "#caller_expression may only be used as a default argument parameter")
 		o.type = t_string
@@ -7400,18 +7490,18 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 		return .Expr
 
 	case "branch_location":
-		// C++ Reference: check_expr.cpp:9743-9755. Also absent, so it too reported
+		// C++ Reference: check_expr.cpp check_basic_directive_expr:9743-9755. Also absent, so it too reported
 		// "Unknown directive". Unlike the two above this one is legal -- inside a 'defer'.
 		//
 		// The write below was previously marked "NOT PORTED" on two claims, BOTH FALSE (#550):
 		//   "no such field"        -- Entity_Procedure.uses_branch_location exists
 		//                             (semantic_types.odin) and dump_model.odin emits it as
 		//                             `branchloc`, so the port was dumping a field it never set.
-		//   "read only by backend" -- C++ WRITES it in the CHECKER, at check_expr.cpp:9764.
+		//   "read only by backend" -- C++ WRITES it in the CHECKER, at check_expr.cpp check_basic_directive_expr:9764.
 		//                             The backend reads it (llvm_backend_proc.cpp:140), but the
 		//                             decision is the checker's.
 		// My first grep missed the write because it was truncated by `head -6` -- the same trap
-		// as #530. C++ Reference: check_expr.cpp:9757-9766, structure mirrored exactly.
+		// as #530. C++ Reference: check_expr.cpp check_basic_directive_expr:9757-9766, structure mirrored exactly.
 		if !ctx.in_defer {
 			error(node, "#branch_location may only be used within a 'defer' statement")
 		} else if ctx.curr_proc_decl != nil {
@@ -7809,7 +7899,7 @@ check_or_branch_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 // - Unary expressions (via check_unary_expr)
 // check_expr_base checks an expression and RECORDS its type-and-value on the node.
 //
-// C++ Reference: check_expr.cpp:12670-12690. C++ splits this in two: check_expr_base_internal
+// C++ Reference: check_expr.cpp check_expr_base_internal:12670-12690. C++ splits this in two: check_expr_base_internal
 // does the dispatch, and check_expr_base wraps it and calls add_type_and_value(c, node, ...)
 // UNCONDITIONALLY for every expression it checks. That single call is what guarantees any
 // checked node has a type-and-value.
@@ -7873,7 +7963,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 	case ^ast.Ident:
 		// Identifier expression
 		check_ident(ctx, o, node, nil, type_hint, false)
-		// LEDGER #316. C++ check_expr.cpp:12297-12305. A label is an entity in scope, so
+		// LEDGER #316. C++ check_expr.cpp check_expr_base_internal:12297-12305. A label is an entity in scope, so
 		// check_ident resolves `loop` happily and the port then used it as a value with no
 		// diagnostic at all -- a silent under-rejection. The name comes from the ENTITY's
 		// token, not the ident node, which is what C++ reads. Probe n7_label.
@@ -7896,7 +7986,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 	case ^ast.Unary_Expr:
 		// Unary operator expression
 		check_unary_expr(ctx, o, node, type_hint)
-		// C++ Reference: check_expr.cpp:12492 -- viral flags propagate from the operand.
+		// C++ Reference: check_expr.cpp check_expr_base_internal:12492 -- viral flags propagate from the operand.
 		// C++ does this right after check_expr_base on ue->expr; the port delegates the whole
 		// arm to check_unary_expr, so the operand is already checked by this point and the
 		// propagation is equivalent here (#297).
@@ -7907,13 +7997,13 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Type_Cast:
 		// Type cast expression: cast(T)expr or transmute(T)expr
-		// Reference: check_expr.cpp:12495-12525
+		// Reference: check_expr.cpp check_expr_base_internal:12495-12525
 		tc := node.derived.(^ast.Type_Cast)
 
 		// First, check the type expression
 		check_expr_or_type(ctx, o, tc.type)
 		if o.mode != .Type {
-			// C++ Reference: check_expr.cpp:12442 prints expr_to_string(tc->type) -- the
+			// C++ Reference: check_expr.cpp check_expr_base_internal:12442 prints expr_to_string(tc->type) -- the
 			// EXPRESSION the user wrote. The port printed o.mode, an internal Addressing_Mode
 			// enum, so `cast(y)2` reported "got Variable" where C++ reports "got y". An
 			// implementation detail leaking into a user-facing diagnostic.
@@ -7951,7 +8041,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Auto_Cast:
 		// Auto cast expression: auto_cast expr
-		// Reference: check_expr.cpp:12528-12540
+		// Reference: check_expr.cpp check_expr_base_internal:12528-12540
 		ac := node.derived.(^ast.Auto_Cast)
 
 		check_expr_base(ctx, o, ac.expr, type_hint)
@@ -7974,9 +8064,9 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Index_Expr:
 		// Index expression: x[i]
-		// Reference: check_expr.cpp:12591-12592
+		// Reference: check_expr.cpp check_expr_base_internal:12591-12592
 		ie_kind := check_index(ctx, o, node, type_hint)
-		// C++ Reference: check_expr.cpp:11864 (inside check_index_expr) -- viral flags propagate
+		// C++ Reference: check_expr.cpp check_index_expr:11921 (inside check_index_expr) -- viral flags propagate
 		// from the indexed operand. The port had no counterpart, so `arr[x or_break]` set the flag
 		// on the child and never on the enclosing statement (#297).
 		if ie_v, ok := node.derived.(^ast.Index_Expr); ok && ie_v.expr != nil {
@@ -7986,20 +8076,20 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Matrix_Index_Expr:
 		// Matrix index expression: mat[row, col]
-		// C++ Reference: check_expr.cpp:12599-12602 (check_expr_base_internal, the MatrixIndexExpr arm).
+		// C++ Reference: check_expr.cpp check_expr_base_internal:12599-12602 (check_expr_base_internal, the MatrixIndexExpr arm).
 		// The callee itself is check_matrix_index_expr at 9519-9584.
 		return check_matrix_index_expr(ctx, o, node, type_hint)
 
 	case ^ast.Slice_Expr:
 		// Slice expression: x[low:high]
-		// Reference: check_expr.cpp:12595-12596
+		// Reference: check_expr.cpp check_expr_base_internal:12595-12596
 		return check_slice(ctx, o, node, type_hint)
 
 	case ^ast.Selector_Expr:
 		// Selector expression: x.y
-		// Reference: check_expr.cpp:12578-12580
+		// Reference: check_expr.cpp check_expr_base_internal:12578-12580
 		check_selector(ctx, o, node, type_hint)
-		// C++ Reference: check_expr.cpp:12523 -- viral flags propagate from the operand.
+		// C++ Reference: check_expr.cpp check_expr_base_internal:12523 -- viral flags propagate from the operand.
 		// Missing here meant an or_break/or_return/deferred call inside `x` never reached the
 		// enclosing statement (#297).
 		if se_v, ok := node.derived.(^ast.Selector_Expr); ok && se_v.expr != nil {
@@ -8010,7 +8100,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 	case ^ast.Selector_Call_Expr:
 		// Arrow call: `x->y(123)` desugars to `x.y(x, 123)`.
 		//
-		// C++ Reference: check_expr.cpp:11770-11914. C++ REWRITES THE AST - it prepends the
+		// C++ Reference: check_expr.cpp check_selector_call_expr:11770-11914. C++ REWRITES THE AST - it prepends the
 		// receiver to the call's argument list and latches se->modified_call so the rewrite
 		// happens exactly once. The port did neither: it checked sc.call verbatim, so the
 		// receiver was never passed and every arrow call was short one argument. `o->bare()`
@@ -8039,7 +8129,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 				check_expr_base(ctx, &callee, sc.expr, nil)
 				ctx.allow_arrow_right_selector_expr = prev_allow_arrow
 
-				// C++ Reference: check_expr.cpp:11751-11759. The callee of an arrow call must
+				// C++ Reference: check_expr.cpp check_selector_call_expr:11808-11811. The callee of an arrow call must
 				// be a PROCEDURE (or a proc group). The port had no such guard: it fell through
 				// to check_call_expr, which reported the GENERIC "Cannot call a non-procedure:
 				// 't->field' of type 'int'" where the oracle reports the selector-call-specific
@@ -8058,7 +8148,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 				if callee.mode != .Proc_Group {
 					if pt := base_type(callee.type); pt != nil && pt.kind == .Proc {
 						proc_info := pt.variant.(Type_Proc)
-						// C++ Reference: check_expr.cpp:11788-11793. A zero-parameter procedure
+						// C++ Reference: check_expr.cpp check_selector_call_expr:11845-11850. A zero-parameter procedure
 						// cannot be the callee of an arrow call -- there is no first parameter
 						// for the receiver to bind to. C++ errors; the port SILENTLY SKIPPED the
 						// adjustment via `len(vars) > 0` and let the call proceed one argument
@@ -8115,54 +8205,54 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Call_Expr:
 		// Call expression: f(x, y, z)
-		// Reference: check_expr.cpp:8780-9070
+		// Reference: check_expr.cpp check_call_expr:8780-9070
 		return check_call_expr(ctx, o, node, type_hint)
 
 	case ^ast.Comp_Lit:
 		// Compound literal: T{...}
-		// Reference: check_expr.cpp:10609-11627
+		// Reference: check_expr.cpp check_compound_literal:10609-11627
 		return check_compound_literal(ctx, o, node, type_hint)
 
 	case ^ast.Ternary_If_Expr:
 		// Ternary if expression: x if cond else y
-		// Reference: check_expr.cpp:12450-12451
+		// Reference: check_expr.cpp check_expr_base_internal:12450-12451
 		return check_ternary_if_expr(ctx, o, node, type_hint)
 
 	case ^ast.Ternary_When_Expr:
 		// Ternary when expression: x when cond else y
-		// Reference: check_expr.cpp:12454-12455
+		// Reference: check_expr.cpp check_expr_base_internal:12454-12455
 		return check_ternary_when_expr(ctx, o, node, type_hint)
 
 	case ^ast.Type_Assertion:
 		// Type assertion expression: value.(Type)
-		// Reference: check_expr.cpp:12491-12492
+		// Reference: check_expr.cpp check_expr_base_internal:12491-12492
 		return check_type_assertion(ctx, o, node, type_hint)
 
 	case ^ast.Implicit_Selector_Expr:
 		// Implicit selector expression: .field
-		// Reference: check_expr.cpp:12587-12588
+		// Reference: check_expr.cpp check_expr_base_internal:12587-12588
 		return check_implicit_selector_expr(ctx, o, node, type_hint)
 
 	case ^ast.Or_Else_Expr:
 		// Or else expression: value or_else default_value
-		// Reference: check_expr.cpp:10016-10142
+		// Reference: check_expr.cpp check_or_else_expr:10016-10142
 		return check_or_else_expr(ctx, o, node, type_hint)
 
 	case ^ast.Or_Return_Expr:
 		// Or return expression: value or_return
-		// Reference: check_expr.cpp:12405-12407
+		// Reference: check_expr.cpp check_expr_base_internal:12405-12407
 		// NOTE: C++ sets this flag here but never reads it anywhere; kept for parity.
 		node.viral_state_flags |= {.Contains_Or_Return}
 		return check_or_return_expr(ctx, o, node, type_hint)
 
 	case ^ast.Or_Branch_Expr:
 		// Or branch expression: value or_break label, value or_continue label
-		// Reference: check_expr.cpp:10227-10332
+		// Reference: check_expr.cpp check_or_branch_expr:10227-10332
 		return check_or_branch_expr(ctx, o, node, type_hint)
 
 	case ^ast.Paren_Expr:
 		// Parenthesized expression: (expr)
-		// Reference: check_expr.cpp:12475-12478
+		// Reference: check_expr.cpp check_expr_base_internal:12475-12478
 		pe := node.derived.(^ast.Paren_Expr)
 		kind := check_expr_base(ctx, o, pe.expr, type_hint)
 		node.viral_state_flags |= pe.expr.viral_state_flags
@@ -8171,7 +8261,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Tag_Expr:
 		// Tag expression: #tag expr
-		// Reference: check_expr.cpp:12481-12488
+		// Reference: check_expr.cpp check_expr_base_internal:12481-12488
 		te := node.derived.(^ast.Tag_Expr)
 		name := te.name
 		error(node, "Unknown tag expression, #%s", name)
@@ -8185,7 +8275,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Implicit:
 		// Implicit values like 'context'
-		// Reference: check_expr.cpp:12325-12351
+		// Reference: check_expr.cpp check_expr_base_internal:12325-12351
 		impl := node.derived.(^ast.Implicit)
 
 		// Check if this is the context implicit value
@@ -8196,7 +8286,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 				return .Stmt
 			}
 
-			// C++ Reference: check_expr.cpp:12277-12279. Assigning TO `context` is what
+			// C++ Reference: check_expr.cpp check_expr_base_internal:12277-12279. Assigning TO `context` is what
 			// defines it for the rest of the scope — this is how a "c" or "contextless"
 			// procedure bootstraps one:
 			//
@@ -8218,12 +8308,12 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 				error(node, "'context' has not been defined within this scope")
 			}
 
-			// C++ Reference: check_expr.cpp:12285 - init_core_context(c->checker) is called HERE,
+			// C++ Reference: check_expr.cpp check_expr_base_internal:12285 - init_core_context(c->checker) is called HERE,
 			// immediately before assigning t_context, not only from init_preload.
 			//
 			// The previous comment here claimed "core context initialization is handled during
 			// global entity checking". That is exactly backwards: init_preload runs AFTER
-			// check_all_global_entities (check_files.odin, matching checker.cpp:7695-7698), and
+			// check_all_global_entities (check_files.odin, matching checker.cpp check_parsed_files:7703-7706), and
 			// procedure signatures with `allocator := context.allocator` are checked inside that
 			// earlier window - so t_context was still nil for them and every such default
 			// parameter reported "Cannot use a selector expression on nil-value expression".
@@ -8238,11 +8328,11 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Undef:
 		// Uninitialized literal (---)
-		// Reference: check_expr.cpp:12366-12369
+		// Reference: check_expr.cpp check_expr_base_internal:12366-12369
 		// Note: ast.Uninit doesn't exist, it's ast.Undef
 		o.mode = .Value
 		o.type = t_untyped_uninit
-		// C++ Reference: check_type.cpp:1769. A DEFAULT PARAMETER `---` gets its own message;
+		// C++ Reference: check_type.cpp handle_parameter_value:1769. A DEFAULT PARAMETER `---` gets its own message;
 		// the port was still emitting the global-variable wording here for both (probe
 		// n7_dashdash).
 		error(node, "Default parameter cannot be ---")
@@ -8250,26 +8340,29 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Basic_Directive:
 		// Directive expression: #file, #line, #procedure, #column, #load, etc.
-		// Reference: check_expr.cpp:9711-9839, 11446-11448
+		// Reference: check_expr.cpp check_basic_directive_expr:9711-9839, 11446-11448
 		return check_basic_directive_expr(ctx, o, node, type_hint)
 
 	case ^ast.Proc_Group:
 		// Procedure group - illegal in expression context
-		// Reference: check_expr.cpp:12401-12403
+		// Reference: check_expr.cpp check_expr_base_internal:12401-12403
 		error(node, "Illegal use of a procedure group")
 		o.mode = .Invalid
 		return .Stmt
 
 	case ^ast.Proc_Lit:
 		// Procedure literal (inline procedure)
-		// C++ Reference: check_expr.cpp:12406-12447
+		// C++ Reference: check_expr.cpp check_expr_base_internal:12406-12447
 		pl := node.derived.(^ast.Proc_Lit)
 
 		// Create a new context for the procedure literal
 		proc_ctx := ctx^
 
 		// Allocate the procedure type
-		// C++ Reference: check_decl.cpp:1225-1230
+		// C++ Reference: check_expr.cpp check_expr_base_internal:12410 (check_expr_base_internal, the ProcLit arm:
+		// `Type *type = alloc_type(Type_Proc);`). DRIFT REPAIR (#584): the old citation named the
+		// wrong FILE -- check_decl.cpp check_foreign_procedure:1225-1230 is check_foreign_procedure's link-name bookkeeping
+		// and has nothing to do with allocating a procedure-literal type.
 		proc_type := alloc_type_proc(
 			scope = proc_ctx.scope,
 			params = nil,
@@ -8289,7 +8382,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 		proc_ctx.decl = decl
 
 		// Procedure literals cannot have tags
-		// C++ Reference: check_expr.cpp:11642-11645
+		// C++ Reference: check_expr.cpp check_expr_base_internal:12418-12420
 		if pl.tags != {} {
 			error(node, "A procedure literal cannot have tags")
 			pl.tags = {}
@@ -8306,7 +8399,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 		}
 
 		// Procedure literals must have a body
-		// C++ Reference: check_expr.cpp:11656-11659
+		// C++ Reference: check_expr.cpp check_expr_base_internal:12432-12435
 		if pl.body == nil {
 			error(node, "A procedure literal must have a body")
 			check_close_scope(&proc_ctx)
@@ -8317,7 +8410,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 		pl.decl = decl
 
 		// Queue the procedure body for later checking
-		// C++ Reference: check_expr.cpp:11662
+		// C++ Reference: check_expr.cpp check_expr_base_internal:12438
 		empty_token: tokenizer.Token
 		check_procedure_later_from_params(
 			proc_ctx.checker,
@@ -8331,7 +8424,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 		// Track nested procedure literals
 		//
-		// C++ Reference: check_expr.cpp:12382-12384 --
+		// C++ Reference: check_expr.cpp check_expr_base_internal:12382-12384 --
 		//     mutex_lock(&ctx.checker->nested_proc_lits_mutex);
 		//     array_add(&ctx.checker->nested_proc_lits, decl);
 		//     mutex_unlock(&ctx.checker->nested_proc_lits_mutex);
@@ -8358,7 +8451,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Deref_Expr:
 		// Explicit dereference: ^ptr
-		// Reference: check_expr.cpp:12609-12650
+		// Reference: check_expr.cpp check_expr_base_internal:12609-12650
 		de := node.derived.(^ast.Deref_Expr)
 
 		check_expr_or_type(ctx, o, de.expr)
@@ -8382,7 +8475,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 			o.mode = .Soa_Variable
 			o.type = type_deref(t)
 		} else {
-			// C++ Reference: check_expr.cpp:12576-12586. Names the expression, and the
+			// C++ Reference: check_expr.cpp check_expr_base_internal:12576-12586. Names the expression, and the
 			// multi-pointer hint is C++'s wording inside an ERROR_BLOCK. The port's
 			// "Suggestion: Multi-pointer types cannot be dereferenced..." was invented, and
 			// being unblocked it printed BEFORE the error.
@@ -8410,7 +8503,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 		//
 		// That one divergence made is_type_asm_proc (types.odin:3449) permanently false, which
 		// made check_decl.odin:118's "Invalid use of inline asm in %s" DEAD -- present, faithful
-		// to check_decl.cpp:86-89, and unreachable. Same family as #20/#135/#212. Probe n7_asmok.
+		// to check_decl.cpp check_init_variable:86-89, and unreachable. Same family as #20/#135/#212. Probe n7_asmok.
 		//
 		// Four more divergences fixed in the same pass:
 		//   * the PARAMETER types were never checked at all -- `asm(Undefined_Type) ...` said
@@ -8474,7 +8567,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	// Type expression nodes - these are all types, not expressions
 	case ^ast.Distinct_Type, ^ast.Typeid_Type, ^ast.Poly_Type, ^ast.Proc_Type, ^ast.Pointer_Type, ^ast.Multi_Pointer_Type, ^ast.Array_Type, ^ast.Dynamic_Array_Type, ^ast.Fixed_Capacity_Dynamic_Array_Type, ^ast.Struct_Type, ^ast.Union_Type, ^ast.Enum_Type, ^ast.Map_Type, ^ast.Bit_Set_Type, ^ast.Matrix_Type:
-		// Reference: check_expr.cpp:12700-12718
+		// Reference: check_expr.cpp check_expr_base_internal:12700-12718
 		o.mode = .Type
 		o.type = check_type(ctx, node)
 		return .Expr
@@ -8489,6 +8582,14 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 		// (DistinctType/TypeidType/PolyType/ProcType/Pointer/MultiPointer/Array/DynamicArray/
 		// FixedCapacityDynamicArray/Struct/Union/Enum/Map/BitSet/Matrix/RelativeType) and
 		// anything else simply falls out to `kind = Expr_Expr; o->expr = node; return kind;`
+		//
+		// NOTE (#584): C++'s grouped case is at 12700-12718 and includes Ast_RelativeType, which
+		// the port's list above deliberately OMITS. `#relative` was removed upstream and the
+		// PARSER now rejects it (parser.cpp parse_operand:2534), so no Relative_Type node survives to reach an
+		// expression position. Verified rather than assumed: probe p584rel
+		// (`size_of(#relative(u16)^int)`) gets the identical Syntax Error from both compilers and
+		// no semantic diagnostic from either. Adding the case would be modelling a branch neither
+		// implementation can reach -- LEDGER #266.
 		// -- silently, with the operand left as the caller initialised it.
 		//
 		// The port had an INVENTED diagnostic here, "Expression type not yet supported: %v".
@@ -8507,7 +8608,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 // check_assignment validates that an operand can be assigned to a target type
 // This is the main entry point for type checking assignments, parameters, returns, etc.
-// Ported from check_expr.cpp:1137-1391
+// Ported from check_expr.cpp check_assignment:1137-1391
 //
 // Key responsibilities:
 // 1. Reject tuple expressions (must be single values)
@@ -8672,7 +8773,7 @@ check_assignment :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 	op_type_str := type_to_string(operand.type)
 	target_type_str := type_to_string(target_type)
 
-	// C++ Reference: check_expr.cpp:1300-1308. Two divergences fixed here:
+	// C++ Reference: check_expr.cpp check_assignment:1300-1308. Two divergences fixed here:
 	//   - C++ names the EXPRESSION: "Cannot assign value 'arr' of type '[3]int' to '[]int'".
 	//     The port omitted it, the same shape as the Cannot-convert family (LEDGER task 232).
 	//   - C++ then calls check_assignment_error_suggestion, which the port implemented and
@@ -8687,7 +8788,7 @@ check_assignment :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 	// block the buffered error and the immediate continuation come out in the wrong order.
 	//
 	// STILL NOT reproduced: C++'s "(package X)" disambiguation when both type names render
-	// identically (check_expr.cpp:1286-1297), and the variadic/calling-convention hints below
+	// identically (check_expr.cpp check_assignment:1286-1297), and the variadic/calling-convention hints below
 	// it. Recorded rather than silently skipped.
 	begin_error_block()
 	expr_str := expr_to_string(operand.expr)
@@ -8695,14 +8796,14 @@ check_assignment :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 	error(operand.expr, "Cannot assign value '%s' of type '%s' to '%s' in %s%s", expr_str, op_type_str, target_type_str, article, context_name)
 	check_assignment_error_suggestion(ctx, operand, target_type, operand.expr)
 
-	// C++ Reference: check_expr.cpp:1309-1378. Everything below was missing; the port stopped
+	// C++ Reference: check_expr.cpp check_assignment:1309-1378. Everything below was missing; the port stopped
 	// at the bare "Cannot assign" line. The NOTE that used to sit above this block recorded
 	// the gap ("the variadic/calling-convention hints below it") rather than pretending it
 	// was done -- this is that gap closed.
 	src := base_type(operand.type)
 	dst := base_type(target_type)
 
-	// C++ Reference: check_expr.cpp:1311-1317.
+	// C++ Reference: check_expr.cpp check_assignment:1311-1317.
 	if context_name == "procedure argument" {
 		if src != nil && dst != nil {
 			if sl, is_sl := src.variant.(Type_Slice); is_sl && are_types_identical(sl.elem, dst) {
@@ -8713,7 +8814,7 @@ check_assignment :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:1318-1378. Five mutually exclusive branches, selected by
+	// C++ Reference: check_expr.cpp check_assignment:1318-1378. Five mutually exclusive branches, selected by
 	// which HALF of the signature matches. C++ compares with are_types_identical_internal and
 	// check_tuple_names = false, so parameter NAMES are deliberately ignored.
 	if src != nil && dst != nil {
@@ -8759,7 +8860,7 @@ check_assignment :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 
 			case:
 				// NOTE(parity): C++ writes "The signature type do not match whatsoever"
-				// (check_expr.cpp:1372) -- singular "type" with plural "do". Reproduced
+				// (check_expr.cpp check_assignment:1372) -- singular "type" with plural "do". Reproduced
 				// verbatim; reported upstream rather than corrected here.
 				error_line("\tNote: The signature type do not match whatsoever\n")
 				error_line("\t      Expected: %s\n", type_to_string(dst))
@@ -8971,7 +9072,7 @@ write_type_to_string :: proc(b: ^strings.Builder, t: ^Type, shorthand := true) {
 	case .Proc:
 		pr := t.variant.(Type_Proc)
 		strings.write_string(b, "proc")
-		// C++ Reference: src/types.cpp:5615-5622.
+		// C++ Reference: src/types.cpp write_type_to_string:5615-5622.
 		//
 		//     if (type->Proc.calling_convention != default_calling_convention()) {
 		//         str = gb_string_appendc(str, " \"");
@@ -9418,7 +9519,7 @@ check_is_castable_to :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^
 	}
 
 	// []u16 <-> string16 (not cstring16)
-	// C++ Reference: check_expr.cpp:3713-3716 - the exact UTF-16 counterpart of the rule
+	// C++ Reference: check_expr.cpp check_is_castable_to:3713-3716 - the exact UTF-16 counterpart of the rule
 	// above, which the port had but its u16 twin was absent.
 	if is_type_u16_slice(src) && (is_type_string16(dst) && !is_type_cstring16(dst)) {
 		return true
@@ -9447,7 +9548,7 @@ check_is_castable_to :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^
 		return true
 	}
 	// cstring16 casting rules — the UTF-16 counterparts of the block above.
-	// C++ Reference: check_expr.cpp:3759-3785. These six were simply absent, so every
+	// C++ Reference: check_expr.cpp check_is_castable_to:3759-3785. These six were simply absent, so every
 	// `([^]u16)(s)` / `(^u16)(s)` on a cstring16 was rejected. base:runtime's UTF-16
 	// string handling is built on exactly these casts (internal.odin:581/603/651,
 	// core_builtin.odin:483), and it is imported by everything.
@@ -9474,7 +9575,7 @@ check_is_castable_to :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^
 	}
 
 	// cstring -> string (view conversion)
-	// C++ Reference: check_expr.cpp:3722-3728. The conversion is not free — it calls
+	// C++ Reference: check_expr.cpp check_is_castable_to:3722-3728. The conversion is not free — it calls
 	// runtime.cstring_to_string to walk for the NUL — so C++ registers that dependency here,
 	// but only for a non-constant operand (a constant cstring is folded, no call emitted).
 	// The port had the ACCEPTANCE rule and not the registration.
@@ -9486,11 +9587,11 @@ check_is_castable_to :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^
 	}
 
 	// cstring16 -> string16
-	// C++ Reference: check_expr.cpp:3725-3731. Task 114 ported the six cstring16 POINTER
+	// C++ Reference: check_expr.cpp check_is_castable_to:3725-3731. Task 114 ported the six cstring16 POINTER
 	// rules but not this one or the []u16 rule above, so `string16(v)` on a cstring16 was
 	// still rejected - which is what core/reflect's UTF-16 `any` handling and core/fmt do.
 	if are_types_identical(src, t_cstring16) && are_types_identical(dst, t_string16) {
-		// C++ Reference: check_expr.cpp:3729-3735 — same registration as the cstring case above.
+		// C++ Reference: check_expr.cpp check_is_castable_to:3729-3735 — same registration as the cstring case above.
 		if operand.mode != .Constant {
 			add_package_dependency(ctx, "runtime", "cstring16_to_string16")
 		}
@@ -9499,7 +9600,7 @@ check_is_castable_to :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^
 
 	// #simd[N]T -> #simd[N]U, when the element types are themselves castable.
 	//
-	// C++ Reference: check_expr.cpp:3815-3836. BOTH of these arms were absent from the port,
+	// C++ Reference: check_expr.cpp check_is_castable_to:3815-3836. BOTH of these arms were absent from the port,
 	// so no cast involving a #simd destination was ever allowed. core/simd/x86 is built on
 	// them - `x86.__m128i(K_1)` where K_1 is a #simd[2]u64 and __m128i is #simd[2]i64 is the
 	// shape that failed, and core/crypto/sha2's Intel SHA path does it in every round.
@@ -9517,7 +9618,7 @@ check_is_castable_to :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^
 	}
 
 	// A scalar may be cast to a #simd vector when it is castable to the element type
-	// (C++ check_expr.cpp:3827-3832 - the splat form).
+	// (C++ check_expr.cpp check_is_castable_to:3827-3832 - the splat form).
 	if is_type_simd_vector(dst) {
 		if check_is_castable_to(ctx, operand, base_array_type(dst)) {
 			return true
@@ -9665,7 +9766,7 @@ check_cast_internal :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^T
 }
 
 // check_cast performs type casting validation and updates the operand
-// Reference: check_expr.cpp:3564-3658
+// Reference: check_expr.cpp check_is_castable_to:3564-3658
 check_cast :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^Type, forbid_identical := false) {
 	if !is_operand_value(operand^) {
 		error(operand.expr, "Only values can be casted")
@@ -9677,14 +9778,14 @@ check_cast :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^Type, forb
 	can_convert := check_cast_internal(ctx, operand, target)
 
 	if !can_convert {
-		// C++ Reference: check_expr.cpp:3568-3598
+		// C++ Reference: check_expr.cpp check_is_castable_to:3568-3598
 		operand.mode = .Invalid
 
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
 		from_str := type_to_string(operand.type)
 		to_str := type_to_string(target)
-		// C++ Reference: check_expr.cpp:3901-3923. ERROR_BLOCK keeps the continuation lines
+		// C++ Reference: check_expr.cpp check_cast:3901-3923. ERROR_BLOCK keeps the continuation lines
 		// attached to this error; without it they printed BEFORE it.
 		//
 		// The "types have the same size, try 'transmute'" line the port used to emit here does
@@ -9714,7 +9815,7 @@ check_cast :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^Type, forb
 	}
 
 	// Handle untyped expressions
-	// C++ Reference: check_expr.cpp:3602-3610
+	// C++ Reference: check_expr.cpp check_is_castable_to:3602-3610
 	if is_type_untyped(operand.type) {
 		final_type := target
 		if is_const_expr && !is_type_constant_type(target) {
@@ -9728,7 +9829,7 @@ check_cast :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^Type, forb
 		src := core_type(operand.type)
 		dst := core_type(target)
 		if src != dst {
-			// C++ check_expr.cpp:3939-3955, ported verbatim. The port's version diverged in
+			// C++ check_expr.cpp check_cast:3939-3955, ported verbatim. The port's version diverged in
 			// FOUR ways, all of which showed up in the dump-model `flags` column (#547):
 			//   1. it passed no `required` argument, so REQUIRE was never set on any of them;
 			//   2. it dropped floattidf_unsigned, fixunsdfdi and gnu_f2h_ieee entirely;
@@ -9759,11 +9860,11 @@ check_cast :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^Type, forb
 		}
 
 		// Vet check for unnecessary identical casts
-		// Reference: C++ check_expr.cpp:3615-3625
+		// Reference: C++ check_expr.cpp check_is_castable_to:3615-3625
 		if forbid_identical && .Cast in check_vet_flags(ctx) &&
 		   (ctx.curr_proc_sig == nil || !is_type_polymorphic(ctx.curr_proc_sig)) {
 			if are_types_identical(operand.type, target) {
-				// C++ check_expr.cpp:3968-3970 names the OPERAND as well as the target.
+				// C++ check_expr.cpp check_cast:3968-3970 names the OPERAND as well as the target.
 				cast_oper_str := expr_to_string(operand.expr)
 				defer delete(cast_oper_str)
 				error(operand.expr, "Unneeded cast of '%s' to identical type '%s'", cast_oper_str, type_to_string(target))
@@ -9772,7 +9873,7 @@ check_cast :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^Type, forb
 		_, _ = src, dst
 	}
 
-	// C++ check_expr.cpp:3986-3990, the tail of check_cast. Never ported.
+	// C++ check_expr.cpp check_cast:3986-3990, the tail of check_cast. Never ported.
 	//
 	// A scalar-to-AGGREGATE cast is array programming, so the result is a computed value
 	// rather than a constant. is_type_array_like is array-or-enumerated-array ONLY -- it
@@ -9799,7 +9900,7 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 		return false
 	}
 
-	// C++ Reference: check_expr.cpp:4014 -- `Operand src = *o;`, a COPY BY VALUE taken before
+	// C++ Reference: check_expr.cpp check_transmute:4014 -- `Operand src = *o;`, a COPY BY VALUE taken before
 	// anything mutates the operand.
 	//
 	// `src := operand` was a pointer ALIAS, not a copy: `operand` is an ^Operand, so `src`
@@ -9824,7 +9925,7 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 
 	// Cannot transmute untyped expressions
 	if is_type_untyped(src_t) {
-		// C++ Reference: check_expr.cpp:4019
+		// C++ Reference: check_expr.cpp check_transmute:4019
 		tm_str := expr_to_string(operand.expr)
 		defer delete(tm_str)
 		error(operand.expr, "Cannot transmute untyped expression: '%s'", tm_str)
@@ -9853,7 +9954,7 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 	srcz := type_size_of(src_t)
 	dstz := type_size_of(dst_t)
 	if srcz != dstz {
-		// C++ check_expr.cpp:4047-4049 names the OPERAND as well as the target.
+		// C++ check_expr.cpp check_transmute:4047-4049 names the OPERAND as well as the target.
 		tm_expr_str := expr_to_string(operand.expr)
 		defer delete(tm_expr_str)
 		error(operand.expr, "Cannot transmute '%s' to '%s', %d vs %d bytes", tm_expr_str, type_to_string(dst_t), srcz, dstz)
@@ -9871,7 +9972,7 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 			return true
 		}
 
-		// C++ check_expr.cpp:4066-4098. A transmute preserves the BIT PATTERN, but an
+		// C++ check_expr.cpp check_transmute:4066-4098. A transmute preserves the BIT PATTERN, but an
 		// Exact_Value holds a SIGNED big integer, so when source and destination disagree
 		// about signedness the stored number must be RE-EXPRESSED or it reads back as a
 		// different number: transmute(Map_Flags)u32(0x88000000) is -2013265920, not
@@ -9905,7 +10006,7 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 					big.int_shl(&umax, &one, bits)
 
 					if is_type_unsigned(src_t) && !is_type_unsigned(dst_t) {
-						// C++ Reference: check_expr.cpp:4085 -- `big_int_cmp(&v, &smax) > 0`.
+						// C++ Reference: check_expr.cpp check_transmute:4085 -- `big_int_cmp(&v, &smax) > 0`.
 						//
 						// FIXED UPSTREAM (PR #7244, merged). The bound used to be `>= smax`,
 						// which wrapped one value too many: transmute(i32)u32(0x7FFFFFFF)
@@ -9936,14 +10037,14 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 		   check_is_castable_to(ctx, src, dst_t) {
 
 			if are_types_identical(src_t, dst_t) {
-				// C++ check_expr.cpp:4103-4105 names the OPERAND as well as the target.
+				// C++ check_expr.cpp check_transmute:4103-4105 names the OPERAND as well as the target.
 				tm_id_str := expr_to_string(operand.expr)
 				defer delete(tm_id_str)
 				error(operand.expr, "Unneeded transmute of '%s' to identical type '%s'", tm_id_str, type_to_string(dst_t))
 			} else if is_type_internally_pointer_like(src_t) && is_type_internally_pointer_like(dst_t) {
 				error(operand.expr, "Use of 'transmute' where 'cast' would be preferred since the types are pointer-like")
 			} else if are_types_identical(src_bt, dst_bt) {
-				// C++ check_expr.cpp:4112-4114 emits the SAME message as the identical-type
+				// C++ check_expr.cpp check_transmute:4112-4114 emits the SAME message as the identical-type
 				// branch above -- "identical type", not "identical base type". The port had
 				// invented the word "base" for this arm, so the two branches diverged in
 				// wording where C++ deliberately does not. LEDGER 288.
@@ -9953,7 +10054,7 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 			} else if is_type_integer(src_t) && is_type_integer(dst_t) &&
 			   types_have_same_internal_endian(src_t, dst_t) &&
 			   type_endian_kind_of(src_t) == type_endian_kind_of(dst_t) {
-				// C++ Reference: check_expr.cpp:4121-4128. The FOURTH arm of this chain was
+				// C++ Reference: check_expr.cpp check_transmute:4121-4128. The FOURTH arm of this chain was
 				// never ported -- the port's if/else stopped after the identical-base-type
 				// arm, so a same-endianness integer transmute (u64 -> i64) produced nothing
 				// where C++ names both types. Found by extending parity to the previously
@@ -9972,7 +10073,7 @@ check_transmute :: proc(ctx: ^Checker_Context, node: ^ast.Node, operand: ^Operan
 }
 
 // Helper function to check if an operand is a value
-// C++ Reference: checker.cpp:16-31
+// C++ Reference: checker.cpp is_operand_value:16-31
 //
 // NOTE: `.Context` and `.Optional_Ok_Ptr` ARE values. The port previously
 // omitted both and listed `.Context` in the false arm, so `&x.(T)` - which
@@ -10066,9 +10167,9 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	call := node.derived.(^ast.Call_Expr)
 
 	// Step 0: Handle directive calls like #location(), #defined(), #config(), etc.
-	// C++ Reference: check_builtin.cpp:2089-2175
+	// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2415-2776
 	if bd0, is_directive := call.expr.derived.(^ast.Basic_Directive); is_directive {
-		// LEDGER #316. C++ (check_expr.cpp:8729-8758) recognises the directive NAME, emits
+		// LEDGER #316. C++ (check_expr.cpp check_objc_call_expr:8729-8758) recognises the directive NAME, emits
 		// these two diagnostics, and only then dispatches to the handler -- so they precede
 		// any handler output. The unknown-name branch RETURNS before reaching them.
 		//
@@ -10076,7 +10177,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		//   recognised name whose handler fails   -> the inlining error fires   (n7_inldir2)
 		//   unrecognised name with #force_inline  -> only "Unknown directive"   (n7_inldir3)
 		//
-		// This is a DIFFERENT diagnostic from check_builtin.cpp:2780 "Inlining OPERATORS are
+		// This is a DIFFERENT diagnostic from check_builtin.cpp check_builtin_procedure:2780 "Inlining OPERATORS are
 		// not allowed on built-in procedures", which the port already has at
 		// check_builtin.odin:31. Both exist; they are not duplicates of each other.
 		if directive_call_name_is_known(bd0.name) {
@@ -10093,7 +10194,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			return .Expr
 		}
 		// C++ reaches check_builtin_procedure_directive through check_builtin_procedure's
-		// `case BuiltinProc_DIRECTIVE:` (src/check_builtin.cpp:2917) -- that is, only once the
+		// `case BuiltinProc_DIRECTIVE:` (src/check_builtin.cpp check_builtin_procedure:2917) -- that is, only once the
 		// callee has ALREADY been resolved to a builtin. A false return there means "this
 		// builtin call failed", and the caller never re-examines the callee.
 		//
@@ -10112,13 +10213,13 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		// One thing the fallthrough WAS providing: a diagnostic for a directive name nothing
 		// recognises. `#unknown_thing(1)` draws "Unknown directive: #unknown_thing" from the
 		// oracle, so that report is reproduced here rather than lost. The name set is C++'s
-		// directive-CALL set (check_builtin_procedure_directive, src/check_builtin.cpp:2415
+		// directive-CALL set (check_builtin_procedure_directive, src/check_builtin.cpp check_builtin_procedure_directive:2415
 		// onward); a name inside it that still returned false is a handler that reported, or
 		// a known gap in the port -- see #229 for load_directory/load_hash/load_or, which the
 		// port's handler does not implement as calls at all.
 		if bd, bd_ok := call.expr.derived.(^ast.Basic_Directive); bd_ok {
 			if !directive_call_name_is_known(bd.name) {
-				// LEDGER #317: C++ check_expr.cpp:8747 anchors at `proc` -- the DIRECTIVE
+				// LEDGER #317: C++ check_expr.cpp check_objc_call_expr:8747 anchors at `proc` -- the DIRECTIVE
 				// node -- not the whole call. My #316 edit used `node`, which spanned
 				// `#unknown_thing(1)` where C++ marks just the `#`.
 				error_node(call.expr, "Unknown directive: #%s", bd.name)
@@ -10133,7 +10234,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	}
 
 	// Step 1: Check the callee expression (the thing being called)
-	// Reference: check_expr.cpp:8189-8194
+	// Reference: check_expr.cpp lookup_polymorphic_record_parameter:8189-8194
 	// Allow arrow operator (->) inside call expressions
 	prev_allow_arrow := ctx.allow_arrow_right_selector_expr
 	ctx.allow_arrow_right_selector_expr = true
@@ -10141,7 +10242,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	ctx.allow_arrow_right_selector_expr = prev_allow_arrow
 
 	// Step 2: Handle invalid operands early
-	// C++ Reference: check_expr.cpp:8767-8778
+	// C++ Reference: check_expr.cpp check_objc_call_expr:8767-8778
 	if o.mode == .Invalid {
 		if !check_call_parameter_mixture(call.args, "procedure call") {
 			o.mode = .Invalid
@@ -10169,13 +10270,13 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	}
 
 	// Step 3: Handle type constructor calls (type conversion)
-	// Reference: check_expr.cpp:8054-8154
+	// Reference: check_expr.cpp check_call_expr_as_type_cast:8616-8714
 	// Example: int(x), f32(y), complex64(1, 2)
 	if o.mode == .Type {
 		target_type := o.type
 
 		// Track entity use for the type
-		// C++ Reference: check_expr.cpp:8058-8062
+		// C++ Reference: check_expr.cpp check_call_expr_as_type_cast:8640-8641
 		type_entity := entity_of_node(ctx.info, call.expr)
 		if type_entity != nil {
 			add_entity_use(ctx, call.expr, type_entity)
@@ -10185,9 +10286,14 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		// When target_type is a polymorphic struct/union, this is type instantiation
 		// like Container(int) or Fixed_Array(10, f32), not a type conversion
 		// Arguments can be types ($T: typeid) or constants ($N: int)
-		// C++ Reference: check_expr.cpp handles this differently - see check_type.cpp:3412
+		// C++ Reference: check_polymorphic_record_type (check_expr.cpp check_polymorphic_record_type:8199-8572) -- the port
+		// INLINES that function here rather than calling it.
+		// DRIFT REPAIR (#585): the old pointer read "see check_type.cpp make_soa_struct_internal:3412", which is
+		// add_entity_use(ctx, nullptr, len_field) inside make_soa_struct_internal -- SOA field
+		// bookkeeping, unrelated to polymorphic instantiation. The line below already cites the
+		// right function, so the pointer was both wrong and redundant.
 		if is_type_polymorphic_record_unspecialized(target_type) {
-			// C++ Reference: check_expr.cpp:8563
+			// C++ Reference: check_expr.cpp check_polymorphic_record_type:8563
 			if !check_call_parameter_mixture(call.args, "polymorphic type construction") {
 				o.mode = .Invalid
 				o.expr = node
@@ -10197,7 +10303,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			// Check all arguments - they can be types or constant values
 			named_fields := len(call.args) > 0 && is_call_expr_field_value(call.args[0])
 
-			// C++ Reference: check_expr.cpp:8166-8173, inside check_polymorphic_record_type:
+			// C++ Reference: check_expr.cpp check_call_arguments:8166-8173, inside check_polymorphic_record_type:
 			//
 			//	// NOTE(bill, 2019-10-26): Allow a cycle in the parameters but not in the
 			//	// fields themselves
@@ -10234,7 +10340,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 
 			operand_list := make([dynamic]Operand, 0, 2 * len(call.args), context.temp_allocator)
 			if named_fields {
-				// C++ Reference: check_expr.cpp:8171-8194. Each named argument is checked on
+				// C++ Reference: check_expr.cpp check_polymorphic_record_type:8226-8239. Each named argument is checked on
 				// its own; there is nothing positional to unpack. The port used to hand
 				// check_expr_or_type the whole Field_Value node rather than its VALUE, so the
 				// operand never described `int` in `R(T = int)` - it described the assignment.
@@ -10281,7 +10387,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			}
 			operands := operand_list[:]
 
-			// C++ Reference: check_expr.cpp:8223-8425 - the validation prologue that runs
+			// C++ Reference: check_expr.cpp check_polymorphic_record_type:8223-8425 - the validation prologue that runs
 			// BEFORE the record is instantiated. The port went straight from unpacking the
 			// arguments to instantiating, so neither a wrong argument count nor a non-type
 			// argument was ever rejected. `R(5)` against `R :: struct($T: typeid)` therefore
@@ -10483,7 +10589,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 
 			// C++ lines 8573-8587: on error the operand simply becomes invalid. C++ emits no
 			// closing message here - the caller's context supplies it (a type-expression
-			// position reports "'R(5)' is not a type", check_type.cpp:3696/4019). The port
+			// position reports "'R(5)' is not a type", check_type.cpp check_type_internal:3700/4023). The port
 			// used to print "Failed to instantiate polymorphic type '%s'", which appears
 			// nowhere in src/.
 			if poly_err {
@@ -10509,7 +10615,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			}
 		}
 
-		// C++ Reference: check_expr.cpp:8590
+		// C++ Reference: check_expr.cpp check_call_parameter_mixture:8590
 		if !check_call_parameter_mixture(call.args, "type conversion") {
 			o.mode = .Invalid
 			o.expr = node
@@ -10517,17 +10623,17 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		}
 
 		// Validate argument count
-		// C++ Reference: check_expr.cpp:8064-8072
+		// C++ Reference: check_expr.cpp check_call_arguments:8064-8072
 		if len(call.args) == 0 {
 			// No arguments - error
 			type_str := type_to_string(target_type)
-			error(node, "Missing argument in conversion to '%s'", type_str)   // C++ check_expr.cpp:8598
+			error(node, "Missing argument in conversion to '%s'", type_str)   // C++ check_expr.cpp check_call_parameter_mixture:8598
 			o.mode = .Invalid
 			o.expr = node
 			return .Stmt
 		}
 
-		// C++ Reference: check_expr.cpp:8629-8633 handles `field = value` INSIDE the
+		// C++ Reference: check_expr.cpp check_call_expr_as_type_cast:8629-8633 handles `field = value` INSIDE the
 		// single-argument case: it reports, unwraps the argument to its value, and carries on
 		// with the conversion ("NOTE(bill): Carry on the cast regardless"). The port had it as
 		// a pre-guard that bailed out, under an invented message and an invented Suggestion
@@ -10535,7 +10641,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 
 
 		// Handle complex/quaternion constructors with multiple arguments
-		// C++ Reference: check_expr.cpp:8083-8108
+		// C++ Reference: check_expr.cpp check_call_arguments:8083-8108
 		if len(call.args) > 1 {
 			// Check if it's complex or quaternion type
 			bt := base_type(target_type)
@@ -10593,10 +10699,10 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		}
 
 		// Single argument type conversion
-		// C++ Reference: check_expr.cpp:8110-8151
+		// C++ Reference: check_expr.cpp check_call_arguments:8110-8151
 		arg := call.args[0]
 		arg_op: Operand
-		// C++ Reference: check_expr.cpp:8634 - check_expr_with_type_hint(c, operand, arg, t).
+		// C++ Reference: check_expr.cpp check_call_expr_as_type_cast:8634 - check_expr_with_type_hint(c, operand, arg, t).
 		// The target type must be pushed down, otherwise an implicit-selector argument
 		// (`Futex_Trylock_Pi_Type(.TRYLOCK_PI)`) reaches check_implicit_selector_expr with a
 		// nil hint and fails.
@@ -10605,7 +10711,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		// every expression: the hint made `m[k] = v` code reachable, and that construct aborted
 		// on check_stmt.odin's `has_tav` assertion. The crash was never caused by this line —
 		// any map assignment crashed the checker on its own. Fixed at check_expr_base.
-		// C++ Reference: check_expr.cpp:8627-8652.
+		// C++ Reference: check_expr.cpp check_call_expr_as_type_cast:8627-8652.
 		//
 		// C++ hands the whole decision to check_cast, which owns both the verdict and the
 		// diagnostic. The port instead re-decided inline with
@@ -10650,9 +10756,9 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	}
 
 	// Step 4: Handle built-in procedures
-	// Reference: check_expr.cpp:8213-8227
+	// Reference: check_expr.cpp check_polymorphic_record_type:8213-8227
 	if o.mode == .Builtin {
-		// C++ Reference: check_expr.cpp:8785
+		// C++ Reference: check_expr.cpp check_call_expr:8785
 		if !check_call_parameter_mixture(call.args, "builtin call") {
 			o.mode = .Invalid
 			o.expr = node
@@ -10674,7 +10780,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		return info.kind == .Expr ? .Expr : .Stmt
 	}
 
-	// C++ Reference: check_expr.cpp:8800. This is the ONLY site that passes allow_mixed,
+	// C++ Reference: check_expr.cpp check_call_expr:8800. This is the ONLY site that passes allow_mixed,
 	// and it covers both proc-group and ordinary procedure calls - so `f(1, b = 2)` is
 	// legal (positional then named) while `f(a = 1, 2)` is not. The port enforced the same
 	// rule from inside check_call_arguments_basic under an invented message
@@ -10687,10 +10793,10 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	}
 
 	// Step 5: Handle procedure groups
-	// Reference: check_expr.cpp:8229-8268
+	// Reference: check_expr.cpp check_polymorphic_record_type:8229-8268
 	if o.mode == .Proc_Group {
 		// Dispatch to procedure group call resolution
-		// Reference: check_expr.cpp:6933-7504
+		// Reference: check_expr.cpp check_call_arguments_proc_group:7339-8061
 		arg_data := check_procedure_group_call(ctx, o, node)
 
 		if arg_data.error {
@@ -10703,7 +10809,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		// Set result type from the resolved procedure.
 		//
 		// A SINGLE result must be unwrapped from its tuple. C++ maintains this as an
-		// invariant and asserts it: check_not_tuple (check_expr.cpp:12739-12749) ends with
+		// invariant and asserts it: check_not_tuple (check_expr.cpp check_not_tuple:12796-12807) ends with
 		// GB_ASSERT(count != 1), i.e. a 1-tuple must never reach a single-value context.
 		// The other result path in this file (the `case 1:` arm below, ~line 9112) already
 		// unwraps; this proc-group path did not, so every call to an overloaded procedure
@@ -10721,7 +10827,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		o.expr = node
 
 		// Record entity use if we resolved to a specific procedure
-		// C++ Reference: check_expr.cpp:8248-8250
+		// C++ Reference: check_expr.cpp check_polymorphic_record_type:8248-8250
 		if arg_data.gen_entity != nil {
 			add_entity_use(ctx, call.expr, arg_data.gen_entity)
 		}
@@ -10738,12 +10844,12 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	}
 
 	// Step 6: Validate it's actually a procedure type
-	// Reference: check_expr.cpp:8251-8268
+	// Reference: check_expr.cpp check_polymorphic_record_type:8251-8268
 	proc_type := base_type(o.type)
 	if proc_type == nil || proc_type.kind != .Proc {
 		// Error: trying to call something that's not a procedure
 		type_str := type_to_string(o.type)
-		// C++ Reference: check_expr.cpp:8830 -- "Cannot call a non-procedure: '<expr>' of type '<T>'"
+		// C++ Reference: check_expr.cpp check_call_expr:8830 -- "Cannot call a non-procedure: '<expr>' of type '<T>'"
 		callee_str := expr_to_string(call.expr)
 		defer delete(callee_str)
 		error_node(call.expr, "Cannot call a non-procedure: '%s' of type '%s'", callee_str, type_str)
@@ -10753,7 +10859,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	}
 
 	// Step 7: Check the call arguments
-	// Reference: check_expr.cpp:8270-8279
+	// Reference: check_expr.cpp check_polymorphic_record_type:8270-8279
 	arg_data := check_call_arguments_basic(ctx, o, call)
 
 	if arg_data.error {
@@ -10764,12 +10870,12 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	}
 
 	// Step 8: Check calling convention requirements
-	// Reference: check_expr.cpp:8295-8305
+	// Reference: check_expr.cpp check_polymorphic_record_type:8295-8305
 	pt := &proc_type.variant.(Type_Proc)
 	if pt.calling_convention == .Odin {
 		// Odin calling convention requires context to be defined
 		if .Context_Defined not_in ctx.scope.flags {
-			error_node(node, "Procedures requiring a 'context' cannot be called at the global scope")   // C++ check_expr.cpp:8870
+			error_node(node, "Procedures requiring a 'context' cannot be called at the global scope")   // C++ check_expr.cpp check_call_expr:8870
 			o.mode = .Invalid
 			o.expr = node
 			return .Stmt
@@ -10777,7 +10883,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	}
 
 	// Step 9: Validate @(entry_point_only) attribute
-	// C++ Reference: check_expr.cpp:8300-8306
+	// C++ Reference: check_expr.cpp check_polymorphic_record_type:8300-8306
 	// Procedures marked with @(entry_point_only) can only be called from the entry point
 	callee_entity := entity_of_node(ctx.info, call.expr)
 	if callee_entity != nil {
@@ -10799,7 +10905,46 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		}
 	}
 
-	// LEDGER #321 part 2. C++ check_expr.cpp:8934-8947. `#must_tail` requires the callee's type
+	// C++ Reference: check_expr.cpp check_call_expr:8955-8989
+	//
+	// #613: ORDER IS LOAD-BEARING and the port had it wrong. C++ resolves inlining FIRST, then #must_tail,
+	// then the target-feature checks -- because the target-feature block READS is_call_inlined. The port
+	// had the inlining validation sitting AFTER the target-feature block, so (a) any diagnostic ordering
+	// between them was reversed, and (b) is_call_inlined did not exist when it was needed, which is why
+	// the whole `#force_inline` half of the target-feature rules could not be written.
+	//
+	// The `.None` arm matters as much as the explicit one: a call with NO directive is still an inlined
+	// call when the CALLEE is declared `#force_inline`. The port only ever looked at `call.inlining`, so
+	// it could not see that case at all.
+	is_call_inlined := false
+	{
+		callee_e := entity_of_node(ctx.info, call.expr)
+		callee_inlining := ast.Proc_Inlining.None
+		if callee_e != nil && callee_e.kind == .Procedure &&
+		   callee_e.decl_info != nil && callee_e.decl_info.proc_lit != nil {
+			callee_inlining = callee_e.decl_info.proc_lit.inlining
+		}
+
+		switch call.inlining {
+		case .None:
+			// C++ Reference: check_expr.cpp check_call_expr:8976-8988
+			if callee_inlining == .Inline {
+				is_call_inlined = true
+			}
+		case .Inline:
+			// C++ Reference: check_expr.cpp check_call_expr:8959-8973
+			is_call_inlined = true
+			if callee_inlining == .No_Inline {
+				error_node(node, "'#force_inline' cannot be applied to a procedure that has been marked as '#force_no_inline'")
+			}
+		case .No_Inline:
+			// C++ Reference: check_expr.cpp check_call_expr:8974-8975 -- C++ does nothing here. The port
+			// used to carry an empty `else if` with a note musing about warning; that was port-only
+			// speculation and is deleted.
+		}
+	}
+
+	// LEDGER #321 part 2. C++ check_expr.cpp check_call_expr:8991-9006. `#must_tail` requires the callee's type
 	// to be IDENTICAL to the enclosing procedure's, because a tail call reuses its frame.
 	//
 	// This was unreachable until part 1 of #321 taught the parser to accept `#must_tail` in
@@ -10817,51 +10962,69 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		}
 	}
 
-	// Step 10: Validate @(require_target_feature) attribute
-	// C++ Reference: check_expr.cpp:8421-8453
-	// If callee requires target features, caller must enable them
-	if len(pt.require_target_feature) > 0 {
-		// Get the caller's enabled features
-		caller_features := ""
-		if ctx.curr_proc_decl != nil && ctx.curr_proc_decl.entity != nil {
-			if caller_type := entity_type(ctx.curr_proc_decl.entity); caller_type != nil {
-				if caller_pt, is_proc := base_type(caller_type).variant.(Type_Proc); is_proc {
-					caller_features = caller_pt.enable_target_feature
+	// C++ Reference: check_expr.cpp check_call_expr:9008-9041
+	//
+	// #613: what stood here was a REDUCTION of one of C++'s two branches, with four separate defects:
+	//   1. WRONG DATA SOURCE. It read the CALLER's @(enable_target_feature) through ctx.curr_proc_decl.
+	//      C++ asks check_target_feature_is_enabled, which consults the GLOBAL enabled set. Until #612
+	//      that set was wrong per-architecture anyway; now it is right, so the correct question is
+	//      finally askable.
+	//   2. It never called check_target_feature_is_valid_for_target_arch, though the port HAS that helper.
+	//   3. Its message was invented, and it emitted a Suggestion line the reference does not emit here.
+	//   4. The ENTIRE @(enable_target_feature) branch was absent, including both #force_inline rules.
+	{
+		enabled := enabled_target_features()
+
+		// C++ Reference: check_expr.cpp check_call_expr:9010-9016
+		if len(pt.require_target_feature) > 0 {
+			if valid, invalid := check_target_feature_is_valid_for_target_arch(pt.require_target_feature); !valid {
+				error_node(node, "Called procedure requires target feature '%s' which is invalid for the build target", invalid)
+			} else if !target_feature_is_enabled(pt.require_target_feature, enabled) {
+				// C++ hands check_target_feature_is_enabled an out-param for the offending feature; the
+				// port's predicate is a plain bool, so name the first requirement that is not enabled.
+				missing := pt.require_target_feature
+				if _, first_missing := check_target_feature_is_superset_of(enabled, pt.require_target_feature); len(first_missing) > 0 {
+					missing = first_missing
 				}
+				error_node(node, "Calling this procedure requires target feature '%s' to be enabled", missing)
 			}
 		}
 
-		// Check if all required features are available
-		required := strings.split(pt.require_target_feature, ",", context.temp_allocator)
-		enabled := strings.split(caller_features, ",", context.temp_allocator) if len(caller_features) > 0 else nil
-
-		for req in required {
-			req_trimmed := strings.trim_space(req)
-			if len(req_trimmed) == 0 {
-				continue
+		// C++ Reference: check_expr.cpp check_call_expr:9018-9040
+		if len(pt.enable_target_feature) > 0 {
+			if valid, invalid := check_target_feature_is_valid_for_target_arch(pt.enable_target_feature); !valid {
+				error_node(node, "Called procedure enables target feature '%s' which is invalid for the build target", invalid)
 			}
-			// Check if feature is enabled globally or by caller
-			feature_available := false
-			// TODO: Check global target features from build context
-			// For now, check if caller enables this feature
-			if enabled != nil {
-				for en in enabled {
-					if strings.trim_space(en) == req_trimmed {
-						feature_available = true
-						break
+
+			// C++'s own note: due to restrictions in LLVM you can not inline calls with a superset of
+			// features. Hence both rules below apply only to an INLINED call.
+			if is_call_inlined {
+				if ctx.curr_proc_decl == nil {
+					// C++ Reference: check_expr.cpp check_call_expr:9025-9026
+					error_node(node, "Calling a '#force_inline' procedure that enables target features is not allowed at file scope")
+				} else {
+					// C++ Reference: check_expr.cpp check_call_expr:9028-9037
+					scope_features := ""
+					if caller_e := ctx.curr_proc_decl.entity; caller_e != nil {
+						if caller_t := entity_type(caller_e); caller_t != nil {
+							if caller_pt, is_proc := base_type(caller_t).variant.(Type_Proc); is_proc {
+								scope_features = caller_pt.enable_target_feature
+							}
+						}
+					}
+					if ok, missing := check_target_feature_is_superset_of(scope_features, pt.enable_target_feature); !ok {
+						begin_error_block()
+						error_node(node, "Inlined procedure enables target feature '%s', this requires the calling procedure to at least enable the same feature", missing)
+						error_line("\tSuggested Example: @(enable_target_feature=\"%s\")\n", missing)
+						end_error_block()
 					}
 				}
-			}
-			if !feature_available {
-				error_node(node, "Procedure requires target feature '%s' which is not enabled", req_trimmed)
-				error_line("\tSuggestion: Add @(enable_target_feature=\"%s\") to the calling procedure", req_trimmed)
-				// Note: We don't return invalid here, just warn, to match C++ behavior
 			}
 		}
 	}
 
 	// Step 11: Set result type based on procedure return type
-	// Reference: check_expr.cpp:8307-8325
+	// Reference: check_expr.cpp check_polymorphic_record_type:8307-8325
 	set_call_result_type(o, arg_data.result_type, node)
 
 	{
@@ -10873,7 +11036,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	}
 
 	// Step 12: Track deferred procedure calls
-	// C++ Reference: check_expr.cpp:8292-8298
+	// C++ Reference: check_expr.cpp check_polymorphic_record_type:8292-8298
 	// If the called procedure has a deferred attribute, mark this expression
 	// as containing a deferred procedure for control flow analysis
 	if callee_entity != nil {
@@ -10885,28 +11048,9 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		}
 	}
 
-	// Inlining directive validation
-	// Reference: check_expr.cpp:8327-8374
-	if call.inlining != .None {
-		// Get the entity of the procedure being called
-		proc_entity := entity_of_node(ctx.info, call.expr)
-		if proc_entity != nil && proc_entity.decl_info != nil && proc_entity.decl_info.proc_lit != nil {
-			proc_lit := proc_entity.decl_info.proc_lit
-			proc_inlining := proc_lit.inlining
-
-			// Check for conflicts
-			if call.inlining == .Inline && proc_inlining == .No_Inline {
-				error_node(node, "Cannot force inline a procedure marked as '#force_no_inline'")
-			} else if call.inlining == .No_Inline && proc_inlining == .Inline {
-				// This is usually allowed - caller can suppress inlining
-				// But we might want to warn in some cases
-			}
-		}
-	}
-
 	// Objective-C call: rewrite an `instancetype` return to the concrete class.
 	//
-	// C++ Reference: check_expr.cpp:9006-9010 (the gate) and 8662-8687 (check_objc_call_expr).
+	// C++ Reference: check_expr.cpp check_call_expr:9006-9010 (the gate) and 8662-8687 (check_objc_call_expr).
 	//     Entity *proc_entity = entity_from_expr(call->CallExpr.proc);
 	//     bool is_objc_call = proc_entity && proc_entity->kind == Entity_Procedure &&
 	//                         proc_entity->Procedure.is_objc_impl_or_import;
@@ -10928,17 +11072,17 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	//
 	// What is deliberately NOT ported, and why it costs no parity: C++ also builds `self_type`
 	// and `param_types` and hands them to add_objc_proc_type, which only populates
-	// info.objc_msgSend_types for the BACKEND to consume (check_builtin.cpp:219). The port has
+	// info.objc_msgSend_types for the BACKEND to consume (check_builtin.cpp add_objc_proc_type:219). The port has
 	// no backend, and nothing in checking reads that map. t_objc_super_ptr and
 	// is_type_objc_ptr_to_object feed ONLY that backend path --
 	// an earlier note on #296 claimed the instance-method branch needed them, which was
 	// imprecise: they are needed for param_types, not for the return type.
 	//
 	// CORRECTION (#568): tav.objc_super_target is NOT backend-only and was wrongly listed above.
-	// It has a second, checker-side reader -- check_builtin.cpp:259 gates the
+	// It has a second, checker-side reader -- check_builtin.cpp add_objc_proc_type:259 gates the
 	// objc_msgSendSuper2 / _stret dependency registrations on it, which is an effect on the
 	// min-dep set. It is now modelled and written at the objc_super() intrinsic. Only the
-	// self_type read at check_expr.cpp:8708 is genuinely backend-only.
+	// self_type read at check_expr.cpp check_objc_call_expr:8766 is genuinely backend-only.
 	if proc_entity := entity_of_node(ctx.info, call.expr); proc_entity != nil {
 		if pv, is_proc := &proc_entity.variant.(ast.Entity_Procedure); is_proc && pv.is_objc_impl_or_import {
 			if o.type != nil && o.type == ctx.checker.t_objc_instancetype {
@@ -10971,7 +11115,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 }
 
 // check_call_arguments_basic validates arguments for a basic procedure call
-// Reference: check_expr.cpp:7505-7615
+// Reference: check_expr.cpp check_call_arguments_proc_group:7505-7615
 //
 // Implemented features:
 // - Positional arguments
@@ -11040,7 +11184,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			append(&named_args, fv)
 		} else {
 			// C++ has no ordering check here. The rule lives in
-			// check_call_parameter_mixture at the call dispatcher (check_expr.cpp:8800),
+			// check_call_parameter_mixture at the call dispatcher (check_expr.cpp check_call_expr:8800),
 			// which is reached before this procedure runs, so re-testing it here only
 			// risked a second, differently-worded diagnostic for the same mistake.
 			append(&positional_args, arg)
@@ -11214,10 +11358,10 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 
 		// Do NOT instantiate when a required argument was never supplied.
 		//
-		// C++ Reference: check_expr.cpp:6931 --
+		// C++ Reference: check_expr.cpp check_call_arguments_internal:6931 --
 		//     if (pt->is_polymorphic && !pt->is_poly_specialized && err == CallArgumentError_None)
 		// `err` was set to CallArgumentError_ParameterMissing by the missing-parameter loop at
-		// check_expr.cpp:6835-6844, which runs BEFORE the instantiation. So on a call with a
+		// check_expr.cpp check_call_arguments_internal:6835-6844, which runs BEFORE the instantiation. So on a call with a
 		// missing argument C++ never instantiates at all; it reports
 		// "Parameter '%s' of type '%s' is missing in procedure call" and stops.
 		//
@@ -11266,8 +11410,8 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 		}
 
 		// ...nor when TOO MANY arguments were supplied. C++'s gate is on `err`, not on any one
-		// error kind: check_expr.cpp:6940 instantiates only when `err == CallArgumentError_None`,
-		// and check_expr.cpp:6680-6689 has already set `err = CallArgumentError_TooManyArguments`
+		// error kind: check_expr.cpp check_call_arguments_internal:6940 instantiates only when `err == CallArgumentError_None`,
+		// and check_expr.cpp check_call_arguments_internal:6680-6689 has already set `err = CallArgumentError_TooManyArguments`
 		// by then. So a call with a surplus argument never reaches instantiation in C++ either.
 		//
 		// This mirrors the port's own too-many diagnostic below (the `positional_count >
@@ -11314,7 +11458,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			add_entity_use(ctx, call.expr, poly_data.gen_entity)
 
 			// C++ Reference: check_expr.cpp:7281-7305, reached from the SINGLE-procedure
-			// call at check_expr.cpp:8107.
+			// call at check_expr.cpp check_call_arguments:8107.
 			//
 			// LEDGER task 278/279. C++ runs one `check_call_arguments_single` for both
 			// proc-group and single calls, so this committed pass happens either way. The
@@ -11395,7 +11539,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 		}
 	} else {
 		if positional_count > param_count {
-			// C++ Reference: check_expr.cpp:6680-6689. C++ NAMES the procedure and, when
+			// C++ Reference: check_expr.cpp check_call_arguments_internal:6680-6689. C++ NAMES the procedure and, when
 			// some parameters have defaults, reports the accepted RANGE rather than a single
 			// count. The port's wording was invented and named neither.
 			proc_str := expr_to_string(call.expr)
@@ -11434,7 +11578,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 				if arg_op.mode != .Invalid {
 					// Verify it's assignable to the variadic slice type
 					if !check_is_assignable_to(ctx, &arg_op, expected_slice_type) {
-						// C++ Reference: check_expr.cpp:7009. The variadic path calls the SAME
+						// C++ Reference: check_expr.cpp check_call_arguments_internal:7009. The variadic path calls the SAME
 						// eval_param_and_score lambda as every other argument, so it reports
 						// through check_assignment with the context name "procedure argument".
 						// "Cannot expand argument of type '%s' as variadic '%s'" was invented.
@@ -11457,7 +11601,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 					} else {
 						// Check assignability to variadic element type
 						if !check_is_assignable_to(ctx, &arg_op, variadic_elem_type) {
-							// C++ Reference: check_expr.cpp:7009, same lambda, same context
+							// C++ Reference: check_expr.cpp check_call_arguments_internal:7009, same lambda, same context
 							// name. "Cannot pass argument of type '%s' to variadic parameter
 							// of type '..%s'" was invented.
 							check_assignment(ctx, &arg_op, variadic_elem_type, "procedure argument")
@@ -11511,7 +11655,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 		}
 	}
 
-	// C++ Reference: check_expr.cpp:6835-6857. The missing-parameter loop sets
+	// C++ Reference: check_expr.cpp check_call_arguments_internal:6835-6857. The missing-parameter loop sets
 	// `err = CallArgumentError_ParameterMissing` and FALLS THROUGH -- C++ has no bail between it
 	// and the argument type-checking that follows, so a call that both omits one parameter and
 	// mis-types another reports BOTH. Tracked separately from data.error here so that the early
@@ -11538,7 +11682,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 							// `#+vet explicit-allocators`: an omitted parameter whose
 							// default is literally `context.allocator` or
 							// `context.temp_allocator` must be passed explicitly.
-							// C++ Reference: check_expr.cpp:6798-6812 -- it matches the
+							// C++ Reference: check_expr.cpp check_call_arguments_internal:6798-6812 -- it matches the
 							// default's ORIGINAL expression syntactically, an implicit
 							// `context` selected with `allocator`/`temp_allocator`, and
 							// gates on the per-file vet flag.
@@ -11563,7 +11707,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 									}
 								}
 							}
-							// C++ check_expr.cpp:6816-6821 synthesises an operand
+							// C++ check_expr.cpp check_call_arguments_internal:6816-6821 synthesises an operand
 							// for the omitted argument from the parameter's default.
 							// Without this the slot stays zeroed, the type-check loop
 							// below reads it as Addressing_Invalid and sets data.error,
@@ -11580,7 +11724,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			}
 
 			if !has_default {
-				// C++ Reference: check_expr.cpp:6835-6844. C++ names the parameter's TYPE as
+				// C++ Reference: check_expr.cpp check_call_arguments_internal:6835-6844. C++ names the parameter's TYPE as
 				// well, and gives type parameters their own message; "Missing argument for
 				// parameter '%s'" was invented, and the positional fallback has no C++
 				// counterpart at all.
@@ -11655,7 +11799,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 
 		// Validate type compatibility
 		// Reference: check_call_arguments_internal lines 6480+
-		// C++ Reference: check_expr.cpp:6852 (eval_param_and_score).
+		// C++ Reference: check_expr.cpp check_call_arguments_internal:6852 (eval_param_and_score).
 		// `#no_broadcast` on a parameter disables array programming for THAT parameter, so
 		// the assignability test itself has to be told. The port always passed the default
 		// (true), which is why the flag -- parsed, validated and stored on the entity at
@@ -11677,7 +11821,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			if i < len(pt.params.variant.(Type_Tuple).variables) {
 				param_entity := pt.params.variant.(Type_Tuple).variables[i]
 				if .Any_Int in param_entity.flags {
-					// C++ Reference: check_expr.cpp:6856-6858. C++ guards with THREE
+					// C++ Reference: check_expr.cpp check_call_arguments_internal:6856-6858. C++ guards with THREE
 					// conditions; the port had only the middle one, so `#any_int x: int`
 					// accepted anything merely CASTABLE to an integer -- a f32, a bool, even
 					// a type operand -- all of which C++ rejects. Probes ai1/ai2/ai4.
@@ -11689,7 +11833,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 				}
 			}
 
-			// C++ Reference: check_expr.cpp:6861-6865. When broadcasting is disallowed but
+			// C++ Reference: check_expr.cpp check_call_arguments_internal:6861-6865. When broadcasting is disallowed but
 			// the argument WOULD have been assignable with it allowed, C++ names the reason
 			// rather than emitting a bare type mismatch.
 			if !allow_array_programming && check_is_assignable_to(ctx, arg_op, param_type, true) {
@@ -11697,7 +11841,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			}
 
 			if !ok {
-				// C++ Reference: check_expr.cpp:6870 (eval_param_and_score) routes the
+				// C++ Reference: check_expr.cpp check_call_arguments_internal:6870 (eval_param_and_score) routes the
 				// failure through check_assignment with the context name "procedure
 				// argument", producing "Cannot assign value 'b' of type 'X' to 'Y' in a
 				// procedure argument" plus the source line and caret.
@@ -11710,7 +11854,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 				data.error = true
 			}
 		} else {
-			// C++ Reference: check_expr.cpp:6873-6875.
+			// C++ Reference: check_expr.cpp check_call_arguments_internal:6873-6875.
 			//
 			//     } else if (show_error) {
 			//         check_assignment(c, o, param_type, str_lit("procedure argument"));
@@ -11735,7 +11879,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			check_assignment(ctx, arg_op, param_type, "procedure argument")
 		}
 
-		// C++ Reference: check_expr.cpp:6887-6909. Two checks that run REGARDLESS of whether
+		// C++ Reference: check_expr.cpp check_call_arguments_internal:6887-6909. Two checks that run REGARDLESS of whether
 		// assignability succeeded, and that this copy of eval_param_and_score was missing --
 		// so `fci :: proc(#const n: int)` called with a runtime value was ACCEPTED here.
 		// LEDGER #534. (The proc-group copies were missing them too and now share one helper;
@@ -11803,7 +11947,7 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 // error, failed as an assignment count mismatch, and `c := ok2(n)` as an extra initial
 // expression, while both two-value forms worked.
 //
-// C++ Reference: check_expr.cpp:8987-9003. It prefers the type recorded for the callee
+// C++ Reference: check_expr.cpp check_call_expr:8987-9003. It prefers the type recorded for the callee
 // expression and falls back to the procedure type in hand; `fallback` supplies the
 // latter. C++ additionally sets `CallExpr.optional_ok_one`, which is backend-only for
 // codegen and has no counterpart in core/odin/ast, so it is deliberately not mirrored.

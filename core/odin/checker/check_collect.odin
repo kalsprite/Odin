@@ -208,7 +208,7 @@ collect_file_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) -> bool {
 		mark_been_handled(ctx, decl)
 
 		// Queue for delayed processing (C++ line 5653)
-		// C++ Reference: checker.cpp:5939-5942 (processing phase)
+		// C++ Reference: checker.cpp collect_file_decls_from_when_stmt:5939-5942 (processing phase)
 		if ctx.collect_delayed_decls && ctx.file != nil {
 			// Queue the foreign block declaration directly on file
 			append(&ctx.file.delayed_decls_foreign_block, decl)
@@ -254,7 +254,7 @@ collect_file_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) -> bool {
 			case ^ast.Basic_Directive:
 				// Queue directive expressions for delayed processing
 				// C++ line 5684: array_add(&curr_file->delayed_decls_queues[AstDelayQueue_Expr], es->expr)
-				// C++ Reference: checker.cpp:5949-5953 (processing phase)
+				// C++ Reference: checker.cpp collect_file_decls_from_when_stmt:5949-5953 (processing phase)
 				if ctx.collect_delayed_decls && ctx.file != nil {
 					// Queue the directive expression directly on file
 					append(&ctx.file.delayed_decls_expr, es.expr)
@@ -359,7 +359,7 @@ check_create_file_scopes :: proc(c: ^Checker) {
 		}
 
 		// C++ line 5729: Initialize export queue
-		// C++ Reference: checker.cpp:6063 - mpmc_init(&pkg->exported_entity_queue, total_pkg_decl_count);
+		// C++ Reference: checker.cpp check_create_file_scopes:6063 - mpmc_init(&pkg->exported_entity_queue, total_pkg_decl_count);
 		// The exported_entity_queue is a multi-producer multi-consumer queue used in C++ for
 		// thread-safe entity collection (see checker.cpp:2044 enqueue, 5780 dequeue).
 		// In multi-threaded mode, entities are enqueued during parallel file collection,
@@ -429,7 +429,7 @@ check_collect_entities_all :: proc(c: ^Checker) {
 		task_idx := 0
 		// C++ Reference: checker.cpp:6052 sorts sort_file_by_name over pkg->files -- the
 		// PER-PACKAGE array, inside check_create_file_scopes. Its collection pass
-		// (checker.cpp:6104) then iterates the GLOBAL c->info.files map unsorted.
+		// (checker.cpp check_collect_entities_all:6104) then iterates the GLOBAL c->info.files map unsorted.
 		//
 		// The port applied that basename sort to the global set instead, which is a sort C++
 		// does not have on a collection C++ does not sort. It matters because the key is
@@ -542,7 +542,7 @@ is_ast_type :: proc(node: ^ast.Node) -> bool {
 	// In the Odin AST, type nodes are directly in the Any_Node union
 	#partial switch _ in node.derived {
 	// Type expressions
-	// C++ Reference: parser.hpp:926-928 — is_ast_type is a RANGE check over every kind
+	// C++ Reference: parser.hpp is_ast_type:926-928 — is_ast_type is a RANGE check over every kind
 	// between Ast__TypeBegin and Ast__TypeEnd, so C++ picks up new type nodes for free.
 	// This port enumerates them, and three were missing: Bit_Field_Type,
 	// Relative_Type and Fixed_Capacity_Dynamic_Array_Type. A declaration whose
@@ -681,7 +681,7 @@ check_arity_match :: proc(ctx: ^Checker_Context, vd: ^ast.Value_Decl, is_global:
 check_builtin_attributes :: proc(ctx: ^Checker_Context, e: ^Entity, attributes: []^ast.Attribute) {
 	// C++ Reference: checker.cpp - processes various builtin attributes
 	// Process attributes and store in Attribute_Context
-	// C++ Reference: checker.cpp:4790-4800. An @(builtin) declaration is added to the BUILTIN
+	// C++ Reference: checker.cpp check_builtin_attributes:4790-4800. An @(builtin) declaration is added to the BUILTIN
 	// PACKAGE SCOPE so it resolves everywhere without an import. Nothing in this port did that, so
 	// every @(builtin) proc group in base:runtime - append, resize, reserve, delete, make, clear and
 	// the rest - was undeclared in every consuming package.
@@ -701,7 +701,7 @@ check_builtin_attributes :: proc(ctx: ^Checker_Context, e: ^Entity, attributes: 
 			if attr_name != "builtin" {
 				continue
 			}
-			// C++ Reference: checker.cpp:4796-4798
+			// C++ Reference: checker.cpp check_builtin_attributes:4796-4798
 			if has_value {
 				error(elem, "'builtin' cannot have a field value")
 			}
@@ -1029,7 +1029,7 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 		// For non-file-scope variables, we still need to add them to the scope
 		// so that later declarations (like `T :: type_of(x)`) can reference them.
 		// However, their actual checking happens in check_stmt.
-		// C++ Reference: checker.cpp:4918-4922 -
+		// C++ Reference: checker.cpp check_collect_value_decl:4918-4922 -
 		//	if (vd->is_mutable) {
 		//		if (!(c->scope->flags&ScopeFlag_File)) {
 		//			// NOTE(bill): local scope -> handle later and in order
@@ -1063,7 +1063,7 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 			// C++ line 4593-4596: Validate name is identifier
 			ident, name_ok := name.derived.(^ast.Ident)
 			if !name_ok {
-				// C++ checker.cpp:4931 and 4977 both name the offending node kind via
+				// C++ checker.cpp check_collect_value_decl:4931 and 4977 both name the offending node kind via
 				// ast_strings[name->kind]. Confirmed against the oracle: `c.d: int` at file
 				// scope reports ", got selector expression".
 				error(name, "A declaration's name must be an identifier, got %s", ast_kind_string(name))
@@ -1138,7 +1138,7 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 			// C++ line 4639-4642: Validate name is identifier
 			ident, name_ok := name.derived.(^ast.Ident)
 			if !name_ok {
-				// C++ checker.cpp:4931 and 4977 both name the offending node kind via
+				// C++ checker.cpp check_collect_value_decl:4931 and 4977 both name the offending node kind via
 				// ast_strings[name->kind]. Confirmed against the oracle: `c.d: int` at file
 				// scope reports ", got selector expression".
 				error(name, "A declaration's name must be an identifier, got %s", ast_kind_string(name))
@@ -1193,7 +1193,7 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 					if proc_ent, ok6 := &e.variant.(Entity_Procedure); ok6 {
 						proc_ent.is_foreign = true
 						proc_ent.foreign_library_ident = fl
-						// C++ Reference: checker.cpp:5016-5034. The foreign block's calling
+						// C++ Reference: checker.cpp check_collect_value_decl:5016-5034. The foreign block's calling
 						// convention is resolved HERE, while foreign_context is still live,
 						// and written back into the AST node. By the time check_procedure_type
 						// runs the node no longer says .Foreign_Block_Default, so that
@@ -1278,7 +1278,7 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 			// C++ line 4736-4746: Validate foreign block constraints
 			if e.kind != .Procedure {
 				if fl != nil {
-					// C++ checker.cpp:5073-5083. C++ does not choose between two messages:
+					// C++ checker.cpp check_collect_value_decl:5073-5083. C++ does not choose between two messages:
 					// it always names the offending node kind, and ADDITIONALLY appends the
 					// hint when that kind is a procedure type. The port had split this into
 					// two mutually exclusive arms, so every non-proc-type kind -- basic
@@ -1330,7 +1330,7 @@ check_add_foreign_import_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 	library_name := fl.name != nil ? fl.name.name : ""
 	if library_name == "" && len(fl.fullpaths) != 0 {
 		// Use first source path as basis for library name
-		// C++ Reference: checker.cpp:5836 - path_to_entity_name(fl->library_name.string, fullpath)
+		// C++ Reference: checker.cpp check_add_foreign_import_decl:5836 - path_to_entity_name(fl->library_name.string, fullpath)
 		// Extract library name from first fullpath
 		if basic_lit, fullpath_ok := fl.fullpaths[0].derived_expr.(^ast.Basic_Lit); fullpath_ok {
 			library_name = path_to_entity_name(library_name, basic_lit.tok.text)
@@ -1493,10 +1493,10 @@ check_add_foreign_block_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) -> 
 		}
 	}
 
-	// C++ Reference: checker.cpp:5109
+	// C++ Reference: checker.cpp check_add_foreign_block_decl:5109
 	check_foreign_block_attributes(&c, fb.attributes)
 
-	// C++ Reference: checker.cpp:5111-5116
+	// C++ Reference: checker.cpp check_add_foreign_block_decl:5111-5116
 	block, block_ok := fb.body.derived.(^ast.Block_Stmt)
 	if !block_ok {
 		return false

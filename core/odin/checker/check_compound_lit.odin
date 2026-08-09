@@ -743,7 +743,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		// Reference: C++ lines 9949-10187
 		//
 		// LEDGER #309: Type_Fixed_Capacity_Dynamic_Array was the ONE kind C++'s chain
-		// (check_expr.cpp:10781-10810) covers that this switch did not, so `x: [dynamic; 2]int
+		// (check_expr.cpp check_compound_literal:10781-10810) covers that this switch did not, so `x: [dynamic; 2]int
 		// = {1, 2}` -- entirely legal -- fell through to the catch-all and was rejected with
 		// "Invalid compound literal type". An OVER-rejection: valid code refused. #53 ported the
 		// TYPE and #127 audited its sites, but the literal form was not among them.
@@ -766,7 +766,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			elem_type = slice.elem
 			context_name = "slice literal"
 		} else if fc, is_fc := variant.(Type_Fixed_Capacity_Dynamic_Array); is_fc {
-			// C++ Reference: check_expr.cpp:10799-10802. context_name is what the shared
+			// C++ Reference: check_expr.cpp check_compound_literal:10799-10802. context_name is what the shared
 			// index-bounds diagnostics interpolate, so this spelling is what produces
 			// "Index 2 is out of bounds (>= 2) for fixed capacity dynamic array literal".
 			elem_type = fc.elem
@@ -977,7 +977,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			}
 		}
 
-		// C++ Reference: check_expr.cpp:10992-10997. Note the asymmetry with the array case just
+		// C++ Reference: check_expr.cpp check_compound_literal:10992-10997. Note the asymmetry with the array case just
 		// above, which is C++'s and not a slip: an array literal is faulted for having TOO FEW
 		// values, a fixed-capacity one only for having too many. The capacity is an upper bound,
 		// not a required length.
@@ -998,11 +998,11 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		//
 		// Dynamic literals are opt-in: C++ gates them on a per-file
 		// `#+feature dynamic-literals` or the project-wide build setting
-		// (check_expr.cpp:11009 for [dynamic]T, :11409 for map). Only reported for a
+		// (check_expr.cpp check_compound_literal:11009 for [dynamic]T, :11409 for map). Only reported for a
 		// NON-EMPTY literal. `check_for_dynamic_literals` already existed with zero call
 		// sites; the feature flags it reads are populated in check_files.odin.
 		//
-		// C++ Reference: check_expr.cpp:11423-11426. The RESULT is the gate:
+		// C++ Reference: check_expr.cpp check_compound_literal:11423-11426. The RESULT is the gate:
 		//     if (check_for_dynamic_literals(c, node, cl)) {
 		//         add_map_reserve_dependencies(c);
 		//         add_map_set_dependencies(c);
@@ -1019,7 +1019,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		key_type := mp.key
 		value_type := mp.value
 
-		// C++ Reference: check_expr.cpp:11374-11407. This arm was a REIMPLEMENTATION, not a
+		// C++ Reference: check_expr.cpp check_compound_literal:11374-11407. This arm was a REIMPLEMENTATION, not a
 		// port, and diverged in five ways -- two of which rejected valid code:
 		//   1. Elements were checked with a bare check_expr, no type hint, so an
 		//      implicit-selector key (`map[E]int{.A = 1}`) had nothing to resolve against
@@ -1070,7 +1070,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		bs := variant
 
 		// Get the element type for validation
-		// C++ Reference: check_expr.cpp:11420-11460.
+		// C++ Reference: check_expr.cpp check_compound_literal:11420-11460.
 		//
 		// Two DIFFERENT types are in play and using one for both is what produced ~2,888
 		// spurious "Cannot use 'X' as an element in bit_set[...]" errors:
@@ -1085,7 +1085,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		for elem in cl.elems {
 			// Bit_set literals cannot use named fields
 			// Reference: C++ lines 10579-10583
-			// C++ Reference: check_expr.cpp:11431-11435. C++ also clears is_constant here;
+			// C++ Reference: check_expr.cpp check_compound_literal:11431-11435. C++ also clears is_constant here;
 			// the port errored and continued, leaving the literal constant.
 			if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
 				error(elem, "'field = value' in a bit_set literal is not allowed")
@@ -1122,12 +1122,12 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				// Single value element
 				// Reference: C++ lines 10607-10630
 				elem_operand := Operand{}
-				// C++ Reference: check_expr.cpp:11439 - check_expr_with_type_hint(c, o, elem, et).
+				// C++ Reference: check_expr.cpp check_compound_literal:11439 - check_expr_with_type_hint(c, o, elem, et).
 				// Without the hint every implicit-selector element (`Permission{.Read}`) reaches
 				// check_implicit_selector_expr with a nil hint and fails.
 				check_expr_with_type_hint(ctx, &elem_operand, elem, elem_hint)
 
-				// C++ Reference: check_expr.cpp:11439-11441. There is NO early bail on an
+				// C++ Reference: check_expr.cpp check_compound_literal:11439-11441. There is NO early bail on an
 				// invalid element here. An invented `if elem_operand.mode == .Invalid { continue }`
 				// used to sit above this, which skipped the update below -- so a literal whose
 				// element failed to resolve stayed CONSTANT. Callers that inspect the operand
@@ -1138,7 +1138,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 					is_constant = false
 				}
 
-				// C++ Reference: check_expr.cpp:11460 — check_assignment against the
+				// C++ Reference: check_expr.cpp check_compound_literal:11460 — check_assignment against the
 				// DECLARED element type, not a bespoke check_is_assignable_to. The custom
 				// version this replaces compared the operand against elem_type after
 				// hinting with elem_type, which rejected perfectly legal elements whenever
@@ -1148,7 +1148,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 					continue
 				}
 
-				// C++ Reference: check_expr.cpp:11461-11472 — range bounds check.
+				// C++ Reference: check_expr.cpp check_compound_literal:11461-11472 — range bounds check.
 				if elem_operand.mode == .Constant {
 					v := exact_value_to_i64(elem_operand.value)
 					if v < bs.lower || v > bs.upper {
@@ -1215,7 +1215,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				index_operand := Operand{}
 				check_expr_with_type_hint(ctx, &index_operand, fv.field, index_type)
 
-				// C++ Reference: check_expr.cpp:11160-11163. C++ demands the index be
+				// C++ Reference: check_expr.cpp check_compound_literal:11160-11163. C++ demands the index be
 				// CONSTANT and its type IDENTICAL to the index type. The port asked only
 				// for assignability, which accepted a non-constant index outright --
 				// `[E]int{ ev = 1 }` for a variable `ev: E` passed silently. The message
@@ -1230,7 +1230,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 					continue
 				}
 
-				// C++ Reference: check_expr.cpp:11174-11179 -- names the index and the
+				// C++ Reference: check_expr.cpp check_compound_literal:11174-11179 -- names the index and the
 				// context, and anchors at `elem`. The port's message named neither.
 				idx_val := exact_value_to_i64(index_operand.value)
 				if indices_visited[idx_val] {
@@ -1243,7 +1243,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 
 				// Check value expression WITH the element type as the hint.
 				//
-				// C++ Reference: check_expr.cpp:11145 -
+				// C++ Reference: check_expr.cpp check_compound_literal:11145 -
 				// `check_expr_with_type_hint(c, &operand, fv->value, elem_type)`.
 				// The port hinted the INDEX (fv.field, just above) but not the value, so a
 				// nested braced literal had no type to resolve against and reported
@@ -1254,7 +1254,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				value_operand := Operand{}
 				check_expr_with_type_hint(ctx, &value_operand, fv.value, elem_type)
 
-				// C++ Reference: check_expr.cpp:11187-11192. check_assignment, not a bespoke
+				// C++ Reference: check_expr.cpp check_compound_literal:11187-11192. check_assignment, not a bespoke
 				// check_is_assignable_to plus the invented "Cannot assign '%s' to enumerated
 				// array element of type '%s'"; and the constant test is
 				// check_is_operand_compound_lit_constant, not a bare mode comparison -- the
@@ -1269,9 +1269,9 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			// Report enum cases the literal does not cover -- unless it is written
 			// `#partial [E]T{...}`, which explicitly opts out of completeness.
 			//
-			// C++ Reference: check_expr.cpp:11244, which guards this on `!is_partial`,
+			// C++ Reference: check_expr.cpp check_compound_literal:11244, which guards this on `!is_partial`,
 			// where `is_partial = cl->tag && cl->tag->BasicDirective.name.string ==
-			// "partial"` (check_expr.cpp:11073). The port never consulted the tag, so
+			// "partial"` (check_expr.cpp check_compound_literal:11073). The port never consulted the tag, so
 			// `#partial` literals -- core/crypto/rsa's
 			// `PKCS1_HASH_OIDS := #partial [hash.Algorithm][]byte{...}` -- were rejected
 			// for exactly the cases they deliberately omit.
@@ -1290,7 +1290,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			}
 
 			if !ea.is_sparse && !is_partial {
-				// C++ Reference: check_expr.cpp:11248-11283. C++ walks the index enum's
+				// C++ Reference: check_expr.cpp check_compound_literal:11248-11283. C++ walks the index enum's
 				// fields and collects the ones the literal never mentioned, then names them.
 				et := base_type(index_type)
 				unhandled: [dynamic]^Entity
@@ -1323,7 +1323,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 					begin_error_block()
 					defer end_error_block()
 					if len(unhandled) == 1 {
-						// C++ Reference: check_expr.cpp:11270 -- error_no_newline. See the
+						// C++ Reference: check_expr.cpp check_compound_literal:11270 -- error_no_newline. See the
 						// switch-statement twin in check_stmt.odin.
 						error_no_newline(node, "Unhandled enumerated array case: %s", unhandled[0].token.text)
 					} else {
@@ -1359,7 +1359,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				check_expr_with_type_hint(ctx, &elem_operand, elem, elem_type)
 				check_assignment(ctx, &elem_operand, elem_type, "enumerated array literal")
 
-				// C++ Reference: check_expr.cpp:11223-11225 -- guarded, and via
+				// C++ Reference: check_expr.cpp check_compound_literal:11223-11225 -- guarded, and via
 				// check_is_operand_compound_lit_constant, not a bare mode comparison.
 				if is_constant {
 					is_constant = check_is_operand_compound_lit_constant(ctx, &elem_operand, elem_type)
@@ -1378,11 +1378,11 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		//
 		// Dynamic literals are opt-in: C++ gates them on a per-file
 		// `#+feature dynamic-literals` or the project-wide build setting
-		// (check_expr.cpp:11009 for [dynamic]T, :11409 for map). Only reported for a
+		// (check_expr.cpp check_compound_literal:11009 for [dynamic]T, :11409 for map). Only reported for a
 		// NON-EMPTY literal. `check_for_dynamic_literals` already existed with zero call
 		// sites; the feature flags it reads are populated in check_files.odin.
 		//
-		// C++ Reference: check_expr.cpp:11022-11027, same shape as the map case above:
+		// C++ Reference: check_expr.cpp check_compound_literal:11022-11027, same shape as the map case above:
 		//     if (check_for_dynamic_literals(c, node, cl)) {
 		//         add_package_dependency(c, "runtime", "__dynamic_array_reserve");
 		//         add_package_dependency(c, "runtime", "__dynamic_array_append");
@@ -1432,7 +1432,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			check_expr_with_type_hint(ctx, &elem_operand, elem, elem_type)
 			check_assignment(ctx, &elem_operand, elem_type, "simd vector literal")
 
-			// C++ Reference: check_expr.cpp:11223-11225 -- guarded, and via
+			// C++ Reference: check_expr.cpp check_compound_literal:11223-11225 -- guarded, and via
 			// check_is_operand_compound_lit_constant, not a bare mode comparison.
 			if is_constant {
 				is_constant = check_is_operand_compound_lit_constant(ctx, &elem_operand, elem_type)
@@ -1464,7 +1464,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			check_expr_with_type_hint(ctx, &elem_operand, elem, elem_type)
 			check_assignment(ctx, &elem_operand, elem_type, "matrix literal")
 
-			// C++ Reference: check_expr.cpp:11223-11225 -- guarded, and via
+			// C++ Reference: check_expr.cpp check_compound_literal:11223-11225 -- guarded, and via
 			// check_is_operand_compound_lit_constant, not a bare mode comparison.
 			if is_constant {
 				is_constant = check_is_operand_compound_lit_constant(ctx, &elem_operand, elem_type)
@@ -1477,7 +1477,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		}
 
 	case Type_Bit_Field:
-		// C++ Reference: check_expr.cpp:11477-11488. C++ has NO bit_field element loop --
+		// C++ Reference: check_expr.cpp check_compound_literal:11477-11488. C++ has NO bit_field element loop --
 		// it delegates to check_compound_literal_field_values, the SAME helper it uses for
 		// struct literals, which is why that helper takes assignment_str at all. The port
 		// HAD the helper (with a live Type_Bit_Field branch) and ALSO a hand-rolled loop
@@ -1619,7 +1619,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		// Special handling for bit sets (C++ lines 10843-10870)
 		if is_type_bit_set(type) {
 			// NOTE: Bit sets are encoded as integers
-			// C++ Reference: check_expr.cpp:10843-10870
+			// C++ Reference: check_expr.cpp check_compound_literal:10843-10870
 			bt := base_type(type)
 			bs := bt.variant.(Type_Bit_Set)
 

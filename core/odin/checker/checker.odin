@@ -577,14 +577,14 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	// Data access
 	.Raw_Data = {name = "raw_data", arg_count = 1, variadic = false, kind = .Expr, pkg = .Builtin},
 	// Math operations
-	// C++ Reference: check_builtin.cpp:3744-4258
+	// C++ Reference: check_builtin.cpp check_builtin_procedure:4161-4676
 	.Min = {name = "min", arg_count = 1, variadic = true, kind = .Expr, pkg = .Builtin},
 	.Max = {name = "max", arg_count = 1, variadic = true, kind = .Expr, pkg = .Builtin},
 	.Abs = {name = "abs", arg_count = 1, variadic = false, kind = .Expr, pkg = .Builtin},
 	.Clamp = {name = "clamp", arg_count = 3, variadic = false, kind = .Expr, pkg = .Builtin},
 
 	// Bit manipulation intrinsics
-	// C++ Reference: check_builtin.cpp:5193-5336
+	// C++ Reference: check_builtin.cpp check_builtin_procedure:5610-5784
 	.Count_Ones = {name = "count_ones", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Count_Zeros = {name = "count_zeros", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Count_Trailing_Zeros = {name = "count_trailing_zeros", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -595,23 +595,23 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Byte_Swap = {name = "byte_swap", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Overflow-checking arithmetic
-	// C++ Reference: check_builtin.cpp:5338-5380
+	// C++ Reference: check_builtin.cpp check_builtin_procedure:5785-5836
 	.Overflow_Add = {name = "overflow_add", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Overflow_Sub = {name = "overflow_sub", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Overflow_Mul = {name = "overflow_mul", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Saturating arithmetic
-	// C++ Reference: check_builtin.cpp:5382-5423
+	// C++ Reference: check_builtin.cpp check_builtin_procedure:5837-5887
 	.Saturating_Add = {name = "saturating_add", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Saturating_Sub = {name = "saturating_sub", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Floating-point intrinsics
-	// C++ Reference: check_builtin.cpp:5425-5500
+	// C++ Reference: check_builtin.cpp check_builtin_procedure:5888-5976
 	.Sqrt = {name = "sqrt", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Fused_Mul_Add = {name = "fused_mul_add", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Fixed-point arithmetic
-	// C++ Reference: check_builtin.cpp:6078-6150
+	// C++ Reference: check_builtin.cpp check_builtin_procedure:6541-6615
 	.Fixed_Point_Mul = {name = "fixed_point_mul", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Fixed_Point_Div = {name = "fixed_point_div", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Fixed_Point_Mul_Sat = {name = "fixed_point_mul_sat", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},

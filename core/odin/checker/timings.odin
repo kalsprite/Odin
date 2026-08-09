@@ -46,7 +46,7 @@ Timings :: struct {
 //
 // Odin's time.tick_now() provides equivalent functionality across all platforms.
 
-// C++: timings.cpp:84
+// C++: timings.cpp time_stamp_time_now:84
 // Platform-agnostic wrapper for high-resolution time stamp
 time_stamp_time_now :: proc() -> time.Tick {
 	// C++ uses different implementations based on platform:
@@ -57,7 +57,7 @@ time_stamp_time_now :: proc() -> time.Tick {
 	return time.tick_now()
 }
 
-// C++: timings.cpp:96
+// C++: timings.cpp time_stamp__freq:96
 // Returns the timer frequency for converting ticks to time units
 time_stamp__freq :: proc() -> u64 {
 	// C++ uses different implementations based on platform:
@@ -73,7 +73,7 @@ time_stamp__freq :: proc() -> u64 {
 // C++ Reference: timings.cpp:108-134
 // ======================================================================================
 
-// C++: timings.cpp:108
+// C++: timings.cpp make_time_stamp:108
 // Creates a new time stamp with the given label and starts timing
 make_time_stamp :: proc(label: string) -> Time_Stamp {
 	// C++ line 109-112
@@ -83,7 +83,7 @@ make_time_stamp :: proc(label: string) -> Time_Stamp {
 	return ts
 }
 
-// C++: timings.cpp:115
+// C++: timings.cpp timings_init:115
 // Initializes a Timings structure with the given label and buffer size
 timings_init :: proc(t: ^Timings, label: string, buffer_size: int, allocator := context.allocator) {
 	// C++ line 116-118
@@ -92,14 +92,14 @@ timings_init :: proc(t: ^Timings, label: string, buffer_size: int, allocator := 
 	t.freq = time_stamp__freq()
 }
 
-// C++: timings.cpp:121
+// C++: timings.cpp timings_destroy:121
 // Destroys a Timings structure and frees its memory
 timings_destroy :: proc(t: ^Timings) {
 	// C++ line 122
 	delete(t.sections)
 }
 
-// C++: timings.cpp:125
+// C++: timings.cpp timings__stop_current_section:125
 // Stops the current timing section if one is active
 timings__stop_current_section :: proc(t: ^Timings) {
 	// C++ line 126-128
@@ -108,7 +108,7 @@ timings__stop_current_section :: proc(t: ^Timings) {
 	}
 }
 
-// C++: timings.cpp:131
+// C++: timings.cpp timings_start_section:131
 // Starts a new timing section with the given label
 timings_start_section :: proc(t: ^Timings, label: string) {
 	// C++ line 132-133
@@ -121,7 +121,7 @@ timings_start_section :: proc(t: ^Timings, label: string) {
 // C++ Reference: timings.cpp:136-172
 // ======================================================================================
 
-// C++: timings.cpp:136
+// C++: timings.cpp time_stamp_as_s:136
 // Converts a TimeStamp to seconds
 time_stamp_as_s :: proc(ts: Time_Stamp, freq: u64) -> f64 {
 	// C++ line 137-138
@@ -130,14 +130,14 @@ time_stamp_as_s :: proc(ts: Time_Stamp, freq: u64) -> f64 {
 	return time.duration_seconds(duration)
 }
 
-// C++: timings.cpp:141
+// C++: timings.cpp time_stamp_as_ms:141
 // Converts a TimeStamp to milliseconds
 time_stamp_as_ms :: proc(ts: Time_Stamp, freq: u64) -> f64 {
 	// C++ line 142
 	return 1000.0 * time_stamp_as_s(ts, freq)
 }
 
-// C++: timings.cpp:145
+// C++: timings.cpp time_stamp_as_us:145
 // Converts a TimeStamp to microseconds
 time_stamp_as_us :: proc(ts: Time_Stamp, freq: u64) -> f64 {
 	// C++ line 146
@@ -159,7 +159,7 @@ TIMING_UNIT_STRINGS := [Timing_Unit]string {
 	.Microsecond = "us", // C++ line 163
 }
 
-// C++: timings.cpp:165
+// C++: timings.cpp time_stamp:165
 // Converts a TimeStamp to the specified unit
 time_stamp :: proc(ts: Time_Stamp, freq: u64, unit: Timing_Unit) -> f64 {
 	// C++ line 166-171
@@ -176,10 +176,10 @@ time_stamp :: proc(ts: Time_Stamp, freq: u64, unit: Timing_Unit) -> f64 {
 
 // ======================================================================================
 // TIMING REPORT OUTPUT
-// C++ Reference: timings.cpp:174-217
+// C++ Reference: timings.cpp timings_print_all:174-217
 // ======================================================================================
 
-// C++: timings.cpp:174
+// C++: timings.cpp timings_print_all:174
 // Prints all timing sections with formatted output
 timings_print_all :: proc(t: ^Timings, unit := Timing_Unit.Millisecond, timings_are_finalized := false) {
 	// C++ line 175-177

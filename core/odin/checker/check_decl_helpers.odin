@@ -869,7 +869,7 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				continue
 			}
 
-			// Objective-C attributes - C++ check_decl.cpp:517-610
+			// Objective-C attributes - C++ check_decl.cpp check_type_decl:517-610
 			// @(objc_class="ClassName") - ObjC class binding
 			if name == "objc_class" {
 				ev := check_decl_attribute_value(ctx, value)
@@ -1207,7 +1207,7 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				continue
 			}
 
-			// C++ Reference: checker.cpp:4627-4633. Anything still unmatched is an error,
+			// C++ Reference: checker.cpp check_decl_attributes:4627-4633. Anything still unmatched is an error,
 			// unless the build asked for unknown attributes to be tolerated.
 			//
 			// The accept-list above was derived EMPIRICALLY: a probe build with this
@@ -1226,7 +1226,7 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 		}
 	}
 
-	// C++ Reference: checker.cpp:4638-4650. An INHERITED link_prefix/link_suffix is silently
+	// C++ Reference: checker.cpp check_decl_attributes:4638-4650. An INHERITED link_prefix/link_suffix is silently
 	// dropped when this declaration supplies its own link_name; only a prefix set on the SAME
 	// declaration as the link_name is the conflict that handle_link_name reports. Without this,
 	// the common idiom of @(link_prefix="CF") on a foreign block plus @(link_name=...) on one
@@ -1260,7 +1260,7 @@ handle_link_name :: proc(ctx: ^Checker_Context, token: tokenizer.Token, link_nam
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1032-1048
+	// C++ Reference: check_decl.cpp handle_link_name:1032-1048
 	// Handle link_suffix
 	if len(link_suffix) > 0 {
 		if len(original_link_name) > 0 {
@@ -1385,7 +1385,7 @@ init_entity_foreign_library :: proc(ctx: ^Checker_Context, e: ^Entity) -> ^Entit
 		return nil
 	}
 
-	// C++ Reference: check_decl.cpp:989-1013
+	// C++ Reference: check_decl.cpp init_entity_foreign_library:989-1013
 	if ident == nil {
 		error(e.token, "foreign entities must declare which library they are from")
 	} else if ident_node, ok := ident.derived.(^ast.Ident); !ok {
@@ -1433,7 +1433,7 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 		y = bit_set_to_int(y)
 	}
 
-	// C++ Reference: check_decl.cpp:794-832
+	// C++ Reference: check_decl.cpp signature_parameter_similar_enough:794-832
 	// Helper for signature comparison
 	sig_compare :: proc(a: proc(_: ^Type) -> bool, x, y: ^Type) -> bool {
 		x_ct := core_type(x)
@@ -1447,7 +1447,7 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 		return (a(x_ct) && b(y_ct)) || (b(x_ct) && a(y_ct))
 	}
 
-	// C++ Reference: check_decl.cpp:794-802
+	// C++ Reference: check_decl.cpp signature_parameter_similar_enough:794-802
 	// Check various pointer type combinations
 	if sig_compare(is_type_pointer, x, y) {
 		return true
@@ -1459,7 +1459,7 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 		return true
 	}
 
-	// C++ Reference: check_decl.cpp:804-810
+	// C++ Reference: check_decl.cpp signature_parameter_similar_enough:804-810
 	// Allow integer types of same size
 	if sig_compare(is_type_integer, x, y) {
 		sx := type_size_of(x)
@@ -1469,7 +1469,7 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:812-818
+	// C++ Reference: check_decl.cpp signature_parameter_similar_enough:812-818
 	// Allow integer-to-boolean conversion if sizes match
 	if sig_compare_pair(is_type_integer, is_type_boolean, x, y) {
 		sx := type_size_of(x)
@@ -1479,7 +1479,7 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:819-830
+	// C++ Reference: check_decl.cpp signature_parameter_similar_enough:819-830
 	// cstring equivalences
 	if sig_compare_pair(is_type_cstring, is_type_u8_ptr, x, y) {
 		return true
@@ -1494,13 +1494,13 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 		return true
 	}
 
-	// C++ Reference: check_decl.cpp:832-834
+	// C++ Reference: check_decl.cpp signature_parameter_similar_enough:832-834
 	// uintptr/rawptr equivalence
 	if sig_compare_pair(is_type_uintptr, is_type_rawptr, x, y) {
 		return true
 	}
 
-	// C++ Reference: check_decl.cpp:836-844
+	// C++ Reference: check_decl.cpp signature_parameter_similar_enough:836-844
 	// Additional pointer type pair checks
 	if sig_compare_pair(is_type_proc, is_type_pointer, x, y) {
 		return true
@@ -1512,7 +1512,7 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 		return true
 	}
 
-	// C++ Reference: check_decl.cpp:846-852
+	// C++ Reference: check_decl.cpp signature_parameter_similar_enough:846-852
 	// Slice recursion: allow slices with similar element types
 	if sig_compare(is_type_slice, x, y) {
 		s1 := core_type(x)
@@ -1524,7 +1524,7 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:854-895
+	// C++ Reference: check_decl.cpp signature_parameter_similar_enough:854-895
 	// Struct ABI compatibility: allow structs with same size/alignment
 	x_base := base_type(x)
 	y_base := base_type(y)
@@ -1543,20 +1543,20 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 		y_struct := y_base.variant.(Type_Struct)
 
 		if x_struct.is_raw_union == y_struct.is_raw_union && xs == ys && xa == ya {
-			// C++ Reference: check_decl.cpp:872-877
+			// C++ Reference: check_decl.cpp signature_parameter_similar_enough:872-877
 			// ABI NOTE: Structs over 16 bytes are passed by pointer on all current ABIs
 			// This must be changed when ABI changes
 			if xs > 16 {
 				return true
 			}
 
-			// C++ Reference: check_decl.cpp:878-880
+			// C++ Reference: check_decl.cpp signature_parameter_similar_enough:878-880
 			// Raw unions with same size/alignment are compatible
 			if x_struct.is_raw_union {
 				return true
 			}
 
-			// C++ Reference: check_decl.cpp:881-893
+			// C++ Reference: check_decl.cpp signature_parameter_similar_enough:881-893
 			// Check field-by-field compatibility
 			if len(x_struct.fields) == len(y_struct.fields) {
 				all_similar := true
@@ -1568,14 +1568,14 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 						break
 					}
 				}
-				// C++ Reference: check_decl.cpp:894-897
+				// C++ Reference: check_decl.cpp signature_parameter_similar_enough:894-897
 				// HACK NOTE(bill): Allow this for the time being until it becomes a practical problem
 				// If all fields are similar, the structs are ABI-compatible
 				if all_similar {
 					return true
 				}
 			}
-			// C++ Reference: check_decl.cpp:894-897
+			// C++ Reference: check_decl.cpp signature_parameter_similar_enough:894-897
 			// HACK NOTE(bill): Allow structs with same size/alignment to be ABI-compatible
 			// even if field types differ. This is intentional for foreign function interface
 			// compatibility and will remain until it becomes a practical problem.
@@ -1583,7 +1583,7 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:898
+	// C++ Reference: check_decl.cpp signature_parameter_similar_enough:898
 	// Default: require identical types
 	return are_types_identical(x, y)
 }
@@ -1600,43 +1600,43 @@ are_signatures_similar_enough :: proc(a_, b_: ^Type) -> bool {
 	pa := &a_.variant.(Type_Proc)
 	pb := &b_.variant.(Type_Proc)
 
-	// C++ Reference: check_decl.cpp:908-910
+	// C++ Reference: check_decl.cpp are_signatures_similar_enough:908-910
 	// Parameter count must match
 	if pa.param_count != pb.param_count {
 		return false
 	}
 
-	// C++ Reference: check_decl.cpp:911-913
+	// C++ Reference: check_decl.cpp are_signatures_similar_enough:911-913
 	// Result count must match
 	if pa.result_count != pb.result_count {
 		return false
 	}
 
-	// C++ Reference: check_decl.cpp:915-917
+	// C++ Reference: check_decl.cpp are_signatures_similar_enough:915-917
 	// C vararg must match
 	if pa.c_vararg != pb.c_vararg {
 		return false
 	}
 
-	// C++ Reference: check_decl.cpp:919-921
+	// C++ Reference: check_decl.cpp are_signatures_similar_enough:919-921
 	// Variadic must match
 	if pa.variadic != pb.variadic {
 		return false
 	}
 
-	// C++ Reference: check_decl.cpp:923-925
+	// C++ Reference: check_decl.cpp are_signatures_similar_enough:923-925
 	// Variadic index must match if variadic
 	if pa.variadic && pa.variadic_index != pb.variadic_index {
 		return false
 	}
 
-	// C++ Reference: check_decl.cpp:927-952
+	// C++ Reference: check_decl.cpp are_signatures_similar_enough:927-952
 	// Check parameter types are similar enough
 	for i in 0 ..< pa.param_count {
 		x := core_type(pa.params.variant.(Type_Tuple).variables[i].type)
 		y := core_type(pb.params.variant.(Type_Tuple).variables[i].type)
 
-		// C++ Reference: check_decl.cpp:931-936
+		// C++ Reference: check_decl.cpp are_signatures_similar_enough:931-936
 		// Convert BitSet to underlying type for comparison
 		if x.kind == .Bit_Set {
 			if bs := x.variant.(Type_Bit_Set); bs.underlying != nil {
@@ -1649,7 +1649,7 @@ are_signatures_similar_enough :: proc(a_, b_: ^Type) -> bool {
 			}
 		}
 
-		// C++ Reference: check_decl.cpp:938-947
+		// C++ Reference: check_decl.cpp are_signatures_similar_enough:938-947
 		// Allow a `#c_vararg args: ..any` to match `#c_vararg args: ..foo`
 		if pa.variadic && i == pa.variadic_index {
 			assert(x.kind == .Slice)
@@ -1661,19 +1661,19 @@ are_signatures_similar_enough :: proc(a_, b_: ^Type) -> bool {
 			}
 		}
 
-		// C++ Reference: check_decl.cpp:949-951
+		// C++ Reference: check_decl.cpp are_signatures_similar_enough:949-951
 		if !signature_parameter_similar_enough(x, y) {
 			return false
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:953-967
+	// C++ Reference: check_decl.cpp are_signatures_similar_enough:953-967
 	// Check result types are similar enough
 	for i in 0 ..< pa.result_count {
 		x := core_type(pa.results.variant.(Type_Tuple).variables[i].type)
 		y := core_type(pb.results.variant.(Type_Tuple).variables[i].type)
 
-		// C++ Reference: check_decl.cpp:957-962
+		// C++ Reference: check_decl.cpp are_signatures_similar_enough:957-962
 		// Convert BitSet to underlying type for comparison
 		if x.kind == .Bit_Set {
 			if bs := x.variant.(Type_Bit_Set); bs.underlying != nil {
@@ -1686,13 +1686,13 @@ are_signatures_similar_enough :: proc(a_, b_: ^Type) -> bool {
 			}
 		}
 
-		// C++ Reference: check_decl.cpp:964-966
+		// C++ Reference: check_decl.cpp are_signatures_similar_enough:964-966
 		if !signature_parameter_similar_enough(x, y) {
 			return false
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:969
+	// C++ Reference: check_decl.cpp are_signatures_similar_enough:969
 	return true
 }
 
@@ -1796,12 +1796,12 @@ clone_enum_type :: proc(ctx: ^Checker_Context, original_enum_type: ^Type, named_
 	assert(original_enum_type.kind == .Enum)
 	assert(named_type.kind == .Named)
 
-	// C++ Reference: check_decl.cpp:416-417
+	// C++ Reference: check_decl.cpp clone_enum_type:416-417
 	original_enum := &original_enum_type.variant.(Type_Enum)
 	parent := original_enum.scope.parent
 	scope := create_scope(parent, ctx.checker.allocator)
 
-	// C++ Reference: check_decl.cpp:420-426
+	// C++ Reference: check_decl.cpp clone_enum_type:420-426
 	et := alloc_type_enum(ctx.checker)
 	enum_variant := &et.variant.(Type_Enum)
 	enum_variant.base_type = original_enum.base_type
@@ -1811,7 +1811,7 @@ clone_enum_type :: proc(ctx: ^Checker_Context, original_enum_type: ^Type, named_
 	enum_variant.max_value_index = original_enum.max_value_index
 	enum_variant.scope = scope
 
-	// C++ Reference: check_decl.cpp:428-445
+	// C++ Reference: check_decl.cpp clone_enum_type:428-445
 	fields := make([dynamic]^Entity, 0, len(original_enum.fields), ctx.checker.allocator)
 	for old in original_enum.fields {
 		e := alloc_entity_constant(scope, old.token, named_type, old.variant.(Entity_Constant).value)
@@ -1848,7 +1848,7 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 	// C++ Reference: check_decl.cpp:449-517
 	assert(entity_type(e) == nil)
 
-	// C++ Reference: check_decl.cpp:592-609
+	// C++ Reference: check_decl.cpp check_type_decl:592-609
 	// Process type declaration attributes (raddbg_type_view, etc.)
 	// If ac is not provided, process attributes from the entity's decl_info
 	local_ac := Attribute_Context{}
@@ -1861,7 +1861,7 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:506-515
+	// C++ Reference: check_decl.cpp check_type_decl:506-515
 	// Process explicit type annotation if provided
 	if type_expr != nil {
 		type_type := check_type(ctx, type_expr)
@@ -1895,7 +1895,7 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 
 	base := base_type(bt)
 
-	// C++ Reference: check_decl.cpp:473-475
+	// C++ Reference: check_decl.cpp check_type_decl:473-475
 	// For distinct enum types, clone the enum to have separate field entities
 	if is_distinct && is_type_enum(base) {
 		base = clone_enum_type(ctx, base, named)
@@ -1929,25 +1929,25 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 
 	if !is_distinct {
 		set_entity_type(e, bt)
-		// C++ Reference: check_decl.cpp:499-502
+		// C++ Reference: check_decl.cpp check_type_decl:499-502
 		// For non-distinct types, update named->Named.base = bt
 		if named_variant, ok := &named.variant.(Type_Named); ok {
 			named_variant.base = bt
 		}
-		// C++ Reference: check_decl.cpp:504
+		// C++ Reference: check_decl.cpp check_type_decl:504
 		// Set is_type_alias again after type is finalized
 		if type_name, ok := &e.variant.(Entity_Type_Name); ok {
 			type_name.is_type_alias = true
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:614-616
+	// C++ Reference: check_decl.cpp check_type_decl:614-616
 	// 'using' an enum declaration is not allowed
 	if ctx.decl != nil && ctx.decl.is_using && is_type_enum(base) {
 		error(init_expr, "'using' an enum declaration is not allowed, prefer using implicit selector expressions e.g. '.A'")
 	}
 
-	// C++ Reference: check_decl.cpp:604-609
+	// C++ Reference: check_decl.cpp check_type_decl:604-609
 	// Handle raddbg_type_view attribute for RAD Debugger type visualizers
 	if effective_ac != nil && effective_ac.raddbg_type_view {
 		view := Raddbg_Type_View{
@@ -1957,13 +1957,13 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 		queue.mpsc_enqueue(&ctx.checker.info.raddbg_type_views_queue, view)
 	}
 
-	// C++ Reference: check_decl.cpp:517-610
+	// C++ Reference: check_decl.cpp check_type_decl:517-610
 	// Handle Objective-C class attributes for type declarations
 	if effective_ac != nil && len(effective_ac.objc_class) > 0 {
 		if type_name, ok := &e.variant.(Entity_Type_Name); ok {
-			// C++ Reference: check_decl.cpp:521-528
+			// C++ Reference: check_decl.cpp check_type_decl:521-528
 			// Verify the type is zero-size (ObjC class bindings must be opaque)
-			// e.token, NOT init_expr. C++ anchors this on the ENTITY (check_decl.cpp:603,
+			// e.token, NOT init_expr. C++ anchors this on the ENTITY (check_decl.cpp check_type_decl:603,
 			// `error(e->token, ...)`), i.e. the declared name, so `Foo :: struct {}` reports at
 			// column 1. Anchoring on the initialising expression put us at column 8 -- the `struct`
 			// keyword -- for every @(objc_class) type. Same class as #179 and #197: the message was
@@ -1972,17 +1972,17 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 				error_token(e.token, "@(objc_class) marked type must be of zero size")
 			}
 
-			// C++ Reference: check_decl.cpp:530-540
+			// C++ Reference: check_decl.cpp check_type_decl:530-540
 			type_name.objc_class_name = effective_ac.objc_class
 
-			// C++ Reference: check_decl.cpp:542-555
+			// C++ Reference: check_decl.cpp check_type_decl:542-555
 			// Handle objc_is_implement attribute
 			if effective_ac.objc_is_implementation {
 				type_name.objc_is_implementation = true
 				type_name.objc_ivar = effective_ac.objc_ivar
 				type_name.objc_context_provider = effective_ac.objc_context_provider
 
-				// C++ Reference: check_decl.cpp:536-541 --
+				// C++ Reference: check_decl.cpp check_type_decl:536-541 --
 				//     mutex_lock(&ctx->info->objc_class_name_mutex);
 				//     bool class_exists = string_set_update(&ctx->info->obcj_class_name_set, ac.objc_class);
 				//     mutex_unlock(&ctx->info->objc_class_name_mutex);
@@ -2028,7 +2028,7 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 					)
 				}
 
-				// C++ Reference: check_decl.cpp:532 and 557-592. Both the objc_superclass STORE
+				// C++ Reference: check_decl.cpp check_type_decl:532 and 557-592. Both the objc_superclass STORE
 				// and the validation walk live INSIDE the objc_is_implementation gate. The port
 				// had the validation as a SIBLING, so every @(objc_class) type carrying a
 				// superclass but no @(objc_implement) was checked -- and rejected -- where C++
@@ -2045,12 +2045,12 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 
 				super := effective_ac.objc_superclass
 				for super != nil {
-					// C++ Reference: check_decl.cpp:566-569
+					// C++ Reference: check_decl.cpp check_type_decl:566-569
 					if super.kind != .Named {
 						error(e.token, "@(objc_superclass) Referenced type must be a named struct")
 						break
 					}
-					// C++ Reference: check_decl.cpp:571-574. C++'s type_set_update returns true
+					// C++ Reference: check_decl.cpp check_type_decl:571-574. C++'s type_set_update returns true
 					// when the type was ALREADY present -- that is the cycle.
 					if super in super_set {
 						error(e.token, "@(objc_superclass) Superclass hierarchy cycle encountered")
@@ -2058,7 +2058,7 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 					}
 					super_set[super] = true
 
-					// C++ Reference: check_decl.cpp:576 calls check_single_global_entity here to
+					// C++ Reference: check_decl.cpp check_type_decl:576 calls check_single_global_entity here to
 					// force the superclass to resolve. OMITTED: C++ runs this block from
 					// generate_minimum_dependency_set, a LATER pass, while the port runs it at
 					// DECLARATION time, so re-entering global entity checking here is not safe.
@@ -2068,12 +2068,12 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 					}
 					nt := named_type.variant.(Type_Named)
 
-					// C++ Reference: check_decl.cpp:581-584
+					// C++ Reference: check_decl.cpp check_type_decl:581-584
 					if !is_type_objc_object(ctx.checker, named_type) {
 						error(e.token, "@(objc_superclass) Superclass '%s' must be an Objective-C class", nt.name)
 						break
 					}
-					// C++ Reference: check_decl.cpp:586-589
+					// C++ Reference: check_decl.cpp check_type_decl:586-589
 					if !has_type_got_objc_class_attribute(named_type) {
 						error(e.token, "@(objc_superclass) Superclass '%s' must have a valid @(objc_class) attribute", nt.name)
 						break
@@ -2096,7 +2096,7 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 
 		}
 	} else if effective_ac != nil && effective_ac.objc_is_implementation {
-		// C++ Reference: check_decl.cpp:593-596
+		// C++ Reference: check_decl.cpp check_type_decl:593-596
 		// objc_is_implement requires objc_class
 		error(init_expr, "@(objc_implement) may only be applied when the @(objc_class) attribute is also applied")
 	}
@@ -2109,7 +2109,7 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 // NOTE: add_dependency and add_declaration_dependency are defined in scope.odin
 
 // make_decl_info creates and initializes a new Decl_Info
-// C++ Reference: checker.cpp:183-187 (make_decl_info)
+// C++ Reference: checker.cpp make_decl_info:183-187 (make_decl_info)
 //                checker.cpp:165-181 (init_decl_info)
 make_decl_info :: proc(scope: ^Scope, parent: ^Decl_Info = nil, allocator := context.allocator) -> ^Decl_Info {
 	// This helper creates a new Decl_Info with proper initialization.
@@ -2160,11 +2160,11 @@ check_objc_methods :: proc(ctx: ^Checker_Context, e: ^Entity, ac: ^Attribute_Con
 		return
 	}
 
-	// C++ Reference: check_decl.cpp:1056-1057
+	// C++ Reference: check_decl.cpp check_objc_methods:1056-1057
 	t := ac.objc_type
 	assert(t.kind == .Named) // Already checked at attribute resolution stage
 
-	// C++ Reference: check_decl.cpp:1059-1074
+	// C++ Reference: check_decl.cpp check_objc_methods:1059-1074
 	// Attempt to infer objc_name automatically if proc name contains
 	// the type name as prefix followed by underscore
 	if len(ac.objc_name) == 0 {
@@ -2182,15 +2182,15 @@ check_objc_methods :: proc(ctx: ^Checker_Context, e: ^Entity, ac: ^Attribute_Con
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1076-1077
+	// C++ Reference: check_decl.cpp check_objc_methods:1076-1077
 	tn := t.variant.(Type_Named).type_name
 	assert(tn.kind == .Type_Name)
 
-	// C++ Reference: check_decl.cpp:1079-1081
+	// C++ Reference: check_decl.cpp check_objc_methods:1079-1081
 	if tn.scope != e.scope {
 		error(e.token, "@(objc_name) attribute may only be applied to procedures and types within the same scope")
 	} else {
-		// C++ Reference: check_decl.cpp:1082-1091
+		// C++ Reference: check_decl.cpp check_objc_methods:1082-1091
 		// Enable implementation by default if class is implementer and not explicitly disabled
 		tn_type_name := &tn.variant.(Entity_Type_Name)
 		implement := tn_type_name.objc_is_implementation
@@ -2203,10 +2203,10 @@ check_objc_methods :: proc(ctx: ^Checker_Context, e: ^Entity, ac: ^Attribute_Con
 			implement = false
 		}
 
-		// C++ Reference: check_decl.cpp:1093
+		// C++ Reference: check_decl.cpp check_objc_methods:1093
 		objc_selector := ac.objc_selector if len(ac.objc_selector) > 0 else ac.objc_name
 
-		// C++ Reference: check_decl.cpp:1095-1101
+		// C++ Reference: check_decl.cpp check_objc_methods:1095-1101
 		if e.kind == .Procedure {
 			proc_ent := &e.variant.(Entity_Procedure)
 			has_body := e.decl_info.proc_lit != nil && e.decl_info.proc_lit.derived.(^ast.Proc_Lit).body != nil
@@ -2216,14 +2216,14 @@ check_objc_methods :: proc(ctx: ^Checker_Context, e: ^Entity, ac: ^Attribute_Con
 			proc_ent.objc_selector_name = objc_selector
 			proc_ent.objc_class = tn
 
-			// C++ Reference: check_decl.cpp:1102-1103
+			// C++ Reference: check_decl.cpp check_objc_methods:1102-1103
 			proc_type := &e.type.variant.(Type_Proc)
 			first_param := t_untyped_nil
 			if proc_type.param_count > 0 {
 				first_param = proc_type.params.variant.(Type_Tuple).variables[0].type
 			}
 
-			// C++ Reference: check_decl.cpp:1105-1148
+			// C++ Reference: check_decl.cpp check_objc_methods:1105-1148
 			if implement {
 				// C++ lines 1106-1108
 				if !has_body {
@@ -2306,7 +2306,7 @@ check_objc_methods :: proc(ctx: ^Checker_Context, e: ^Entity, ac: ^Attribute_Con
 			}
 		}
 
-		// C++ Reference: check_decl.cpp:1179-1213
+		// C++ Reference: check_decl.cpp check_objc_methods:1179-1213
 		// Register objc metadata
 		sync.mutex_lock(&global_type_name_objc_metadata_mutex)
 		defer sync.mutex_unlock(&global_type_name_objc_metadata_mutex)
@@ -2365,15 +2365,15 @@ check_foreign_procedure :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info
 	proc_ent := &e.variant.(Entity_Procedure)
 	name := proc_ent.link_name
 
-	// C++ Reference: check_decl.cpp:1222
+	// C++ Reference: check_decl.cpp check_foreign_procedure:1222
 	sync.mutex_lock(&ctx.info.foreign_mutex)
 	defer sync.mutex_unlock(&ctx.info.foreign_mutex)
 
-	// C++ Reference: check_decl.cpp:1224-1226
+	// C++ Reference: check_decl.cpp check_foreign_procedure:1224-1226
 	fp := &ctx.info.foreigns
 	found, has_found := fp[name]
 
-	// C++ Reference: check_decl.cpp:1227-1244
+	// C++ Reference: check_decl.cpp check_foreign_procedure:1227-1244
 	if has_found && e != found {
 		// C++ lines 1228-1244: Check for signature compatibility
 		f := found

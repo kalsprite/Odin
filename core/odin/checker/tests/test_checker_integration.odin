@@ -171,6 +171,18 @@ pkg_path :: proc(dir: string, rel: string) -> string {
 }
 
 // core_pkg returns the absolute path of a package under <odin_root>/core.
+// LIBRARY says what these tests are checking: core packages, none of which declare `main`.
+//
+// Before #589 the entry-point surface was dead, so this was true by accident and needed no saying.
+// Making it live turned every one of these into "Undefined entry point procedure 'main'" -- 5 test
+// failures, 86/86 core packages (#593). The fix is to state the fact, not to filter the diagnostic:
+// whether a `main` is required is a property of what is being built, and the caller is the only
+// party that knows. Identical to the reasoning in Session_Options (#590).
+//
+// A test that genuinely checks a PROGRAM must pass its own options and assert on `main` -- it must
+// not inherit this.
+LIBRARY :: checker.Session_Options{no_entry_point = true}
+
 core_pkg :: proc(rel: string) -> string {
 	return pkg_path(ODIN_CORE_DIR, rel)
 }
@@ -1398,7 +1410,7 @@ test_check_real_package :: proc(t: ^testing.T) {
 
 	// Test with a simpler package - core/odin/tokenizer (fewer dependencies)
 	path := core_pkg("odin/tokenizer")
-	res := checker.check_package_from_path(path)
+	res := checker.check_package_from_path(path, LIBRARY)
 	defer checker.destroy_package_check_result(&res)
 
 	if res.parse_errors > 0 {
@@ -1436,7 +1448,7 @@ test_check_parser_package :: proc(t: ^testing.T) {
 
 	// Test with the parser package (depends on tokenizer and ast)
 	path := core_pkg("odin/parser")
-	res := checker.check_package_from_path(path)
+	res := checker.check_package_from_path(path, LIBRARY)
 	// The result owns its diagnostics; the global collector check_package_from_path used is
 	// already gone by the time it returns.
 	defer checker.destroy_package_check_result(&res)
@@ -1475,7 +1487,7 @@ test_check_ast_package :: proc(t: ^testing.T) {
 
 	// Test with the ast package
 	path := core_pkg("odin/ast")
-	res := checker.check_package_from_path(path)
+	res := checker.check_package_from_path(path, LIBRARY)
 	defer checker.destroy_package_check_result(&res)
 
 	if res.parse_errors > 0 {
@@ -1509,7 +1521,7 @@ test_check_checker_package :: proc(t: ^testing.T) {
 
 	// Test with the checker package itself (self-hosting)
 	path := core_pkg("odin/checker")
-	res := checker.check_package_from_path(path)
+	res := checker.check_package_from_path(path, LIBRARY)
 	defer checker.destroy_package_check_result(&res)
 
 	if res.parse_errors > 0 {
@@ -1654,7 +1666,7 @@ test_check_core_fmt :: proc(t: ^testing.T) {
 	// check_package_from_path initializes ODIN_ROOT internally
 	// Path is anchored to this source file, not to the process CWD
 	path := core_pkg("fmt")
-	res := checker.check_package_from_path(path)
+	res := checker.check_package_from_path(path, LIBRARY)
 	defer checker.destroy_package_check_result(&res)
 
 	testing.expectf(t, res.load_ok, "Should load %s (loaded %d files)", path, res.total_files)
@@ -1679,7 +1691,7 @@ test_check_core_strings :: proc(t: ^testing.T) {
 
 	// Path is anchored to this source file, not to the process CWD
 	path := core_pkg("strings")
-	res := checker.check_package_from_path(path)
+	res := checker.check_package_from_path(path, LIBRARY)
 	defer checker.destroy_package_check_result(&res)
 
 	testing.expectf(t, res.load_ok, "Should load %s (loaded %d files)", path, res.total_files)
@@ -1874,7 +1886,7 @@ test_check_all_core_packages :: proc(t: ^testing.T) {
 	as_expected := 0
 
 	for path in paths {
-		res := checker.check_package_from_path(path)
+		res := checker.check_package_from_path(path, LIBRARY)
 		// Each result owns its own diagnostics, so 40 results do not fight over one shared
 		// buffer - but that also means each one has to be released. Odin's `defer` is
 		// scope-based, so this fires at the end of every iteration, not at the end of the loop.

@@ -46,10 +46,32 @@ CORPUS=(
   # it dies on src/string.cpp(77) `lo <= hi && hi <= max`. A probe whose reference side aborts
   # cannot be a corpus member; the port's guarded behaviour there is a documented divergence.
   p571sl
+  # #613. The call-site target-feature checks, which were a REDUCTION of one of C++'s two branches.
+  # These are HOST-TARGET probes -- they fire on amd64 with no -target/-microarch, so they belong here
+  # and NOT in crosstarget.sh. (#613 was expected to need cross-target probes like #611's; it does not.)
+  #   p613a  require-not-enabled     -> "Calling this procedure requires target feature '%s' to be enabled"
+  #   p613b  require-invalid-for-arch-> "Called procedure requires target feature '%s' which is invalid ..."
+  #   p613c  enable-invalid-for-arch -> "Called procedure enables target feature '%s' which is invalid ..."
+  #   p613d  #force_inline at FILE SCOPE. Must use `proc "contextless"`: an ordinary proc hits
+  #          "Procedures requiring a 'context' cannot be called at the global scope" FIRST on BOTH sides,
+  #          so the probe matched while proving nothing about the rule under test.
+  #   p613e  #force_inline non-superset, including the "\tSuggested Example:" continuation line.
+  p613a p613b p613c p613d p613e
   # #584. check_index: three divergences in one probe -- the 'Cannot index a constant' message
   # and its Suggestion, and an INVENTED `if !index_ok { .Invalid; return }` bail that suppressed
   # the assignment diagnostic on the following line (oracle 3 diagnostics, port 2).
   p584a
+  # #585. get_constant_field_single ported to C++'s contract (success/finish out-params) and
+  # check_index routed through it.
+  #   p585a  four constant EXTRACTION shapes that must all succeed and produce the right value:
+  #          string byte, positional array element, keyed enumerated-array element, and a
+  #          range-keyed (`0..=1 = 7`) element. Forced into constant declarations so the value
+  #          itself is load-bearing -- an earlier draft used `a := S[1]`, which makes `a` a
+  #          VARIABLE, so the #assert could not be constant and the probe proved nothing.
+  #   p585b  the FAILING path: indexing a sparse enumerated-array constant outside its keyed
+  #          range. This is the diagnostic the port could not emit at all before -- there was
+  #          no `success` flag to test.
+  p585a p585b
   # #305 file-tag parsing. One probe per distinct path through parse_file_tag /
   # parse_vet_tag / parse_feature_tag, not one per syntactic variation:
   #   vettag  bare `#+vet` turns every vet check on

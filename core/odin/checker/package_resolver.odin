@@ -118,6 +118,21 @@ Package_Load_Result :: struct {
 	packages:     [dynamic]^ast.Package,
 	parse_errors: int,
 	total_files:  int,
+
+	// root is the package the caller ASKED for -- see the note on Session.root (#588).
+	//
+	// NOT packages[0]: base:runtime is queued ahead of the root (see the seeding comment in
+	// load_package_with_dependencies), so index 0 is the runtime whenever a runtime directory can
+	// be resolved -- which is the normal case, NOT only when ODIN_ROOT is set in the environment.
+	//
+	// Resolved by looking root_fullpath up in `loaded`, which is the one place the normalised
+	// absolute path and the ^ast.Package are both in hand. That also gets the awkward case right:
+	// when the requested path IS base/runtime, the seed wins and the root queue entry is skipped,
+	// so "the package built from the root entry" would be nil while the lookup correctly yields the
+	// runtime package.
+	//
+	// nil if the root path could not be resolved or its package failed to load.
+	root:         ^ast.Package,
 }
 
 // Reserved packages that are synthesized by the compiler rather than parsed from source.
@@ -614,6 +629,24 @@ load_package_with_dependencies :: proc(
 		return result, false
 	}
 
+	// C++ Reference: parser.cpp:7099 - `p->init_fullpath = init_fullpath;`
+	//
+	// This is the ONLY thing that identifies the init package, and it is set here rather than
+	// during checking for a reason C++ shares: it must hold the path the caller ASKED for, not
+	// a path derived from whatever got loaded. create_scope_from_package tests
+	// `pkg.fullpath == info.init_fullpath || pkg.kind == .Init` (scope.odin, C++ checker.cpp:268)
+	// and needs the answer before any scope exists.
+	//
+	// Set UNCONDITIONALLY and BEFORE loading, as C++ does. Both matter:
+	//   * the `.Init` kind stamped below cannot cover the case where the requested package IS
+	//     base/runtime -- the runtime seed is dequeued first and the root entry is then skipped
+	//     by the already-loaded guard, so the package keeps kind `.Runtime`. C++ has the same
+	//     hole and plugs it with exactly this fullpath comparison; that is why checker.cpp:268
+	//     is a disjunction rather than a kind test.
+	//   * a root that fails to load leaves `result.root` nil, but the requested path is still
+	//     the init path. Deriving this from a loaded package instead would lose that.
+	info.init_fullpath = root_fullpath
+
 	// base:runtime is queued BEFORE the root, and therefore loaded first.
 	//
 	// C++ Reference: src/parser.cpp:7062-7071. The comment there is "Add these packages
@@ -646,7 +679,14 @@ load_package_with_dependencies :: proc(
 	}
 
 	// Root package has empty import path (it's the target, not an import)
-	append(&to_load, Package_To_Load{import_path = "", fullpath = root_fullpath, kind = .Normal})
+	//
+	// The kind is `.Init`, matching C++ parser.cpp:7098:
+	//     try_add_import_path(p, init_fullpath, init_fullpath, init_pos, Package_Init);
+	// It used to be `.Normal`, which made `pkg.kind == .Init` unsatisfiable port-wide and left
+	// the whole entry-point surface dead (#589) -- check_entry_point returns early on
+	// `init_scope == nil`, so info.entry_point was never written and C++'s "no main" diagnostic
+	// had no counterpart. The runtime seed above is dequeued first and is unaffected.
+	append(&to_load, Package_To_Load{import_path = "", fullpath = root_fullpath, kind = .Init})
 
 	// Process queue
 	for len(to_load) > 0 {
@@ -785,6 +825,12 @@ load_package_with_dependencies :: proc(
 			}
 		}
 	}
+
+	// #588. Look the requested package up by its normalised absolute path. Done here rather than
+	// in each consumer: `loaded` is keyed by exactly the path filepath.abs produced above, so
+	// no caller has to redo that normalisation (and get symlinks or trailing separators subtly
+	// wrong in its own way).
+	result.root = loaded[root_fullpath]
 
 	ok = result.parse_errors == 0
 	return result, ok
@@ -982,10 +1028,24 @@ print_package_diagnostics :: proc(result: ^Package_Check_Result) {
 // Callers that need the model to outlive the call (a backend, a language server) want
 // session_check_package instead -- see the Session block at the end of this file. This proc is
 // now a thin wrapper over it, so the two can never drift.
-check_package_from_path :: proc(path: string, allocator := context.allocator) -> (result: Package_Check_Result) {
+// `opts` mirrors session_check_package (#590). This is the OTHER public entry point and it had the
+// same gap: it reads the process-global build_context directly, so a consumer checking a LIBRARY had
+// no way to say so. #589 made that fatal -- every no-main package started reporting an undefined
+// entry point, including this repo's own test suite (#593).
+//
+// Same save/restore, and for the same measured reason: the global is shared with anything else in
+// the process, so applying an option to it and walking away alters behaviour behind the caller's
+// back (#321/#368).
+check_package_from_path :: proc(path: string, opts := Session_Options{}, allocator := context.allocator) -> (result: Package_Check_Result) {
 	c: ^Checker
 	cf: []^ast.File
-	result, c, cf = _check_package(path, allocator)
+
+	ensure_build_context_initialized()
+	saved_no_entry_point := build_context.no_entry_point
+	build_context.no_entry_point = opts.no_entry_point
+	defer build_context.no_entry_point = saved_no_entry_point
+
+	result, c, cf, _ = _check_package(path, allocator)
 	// Ownership stays here, exactly as before: the model dies with the call.
 	destroy_checker(c)
 	free(c, allocator)
@@ -1002,7 +1062,7 @@ check_package_from_path :: proc(path: string, allocator := context.allocator) ->
 // destroy_error_collector frees the collector, so a surviving checker does not need a surviving
 // collector.
 @(private = "file")
-_check_package :: proc(path: string, allocator := context.allocator) -> (result: Package_Check_Result, checker: ^Checker, checked_files: []^ast.File) {
+_check_package :: proc(path: string, allocator := context.allocator) -> (result: Package_Check_Result, checker: ^Checker, checked_files: []^ast.File, root: ^ast.Package) {
 	// Initialize ODIN_ROOT from environment if needed
 	init_odin_root_from_env()
 
@@ -1075,6 +1135,7 @@ _check_package :: proc(path: string, allocator := context.allocator) -> (result:
 	// (which also shows up in `parse_errors`) and when the root path could not be resolved
 	// at all - and that second case leaves `parse_errors` at 0 with an empty package list.
 	load_result, loader_ok := load_package_with_dependencies(path, &c.info, allocator)
+	root = load_result.root   // #588: the requested package, resolved by the loader
 	result.parse_errors = load_result.parse_errors
 	result.total_files = load_result.total_files
 
@@ -1232,6 +1293,27 @@ Session :: struct {
 	packages: []^ast.Package,
 	files:    []^ast.File,
 
+	// root is the package `session_check_package` was ASKED for.
+	//
+	// NOT `packages[0]`. Packages are in LOAD order, and base:runtime is seeded ahead of the root,
+	// so index 0 is the runtime whenever a runtime directory can be resolved. That is the normal
+	// case -- it does NOT require ODIN_ROOT to be set in the environment, because the build context
+	// derives a root of its own. Measured on this tree: `packages[0].name == "runtime"` both with
+	// ODIN_ROOT set and with it unset.
+	//
+	// Consumers that must act on exactly the requested package should use this: a backend emitting
+	// one object per package and not walking dependencies; a language server scoping diagnostics to
+	// the open package and not surfacing core:'s.
+	//
+	// Why a field and not a note telling callers to be careful: `packages[0]` is a perfectly valid
+	// ^ast.Package pointing at the WRONG package, so no type, assertion or verifier can reject it.
+	// The error surfaces later, as unrelated failures inside code the consumer never meant to touch.
+	// Requested by the mir agent after exactly that: mirc restricted lowering to packages[0], which
+	// was green across a whole test suite and still false.
+	//
+	// nil if loading failed (`result.load_ok == false`) or the root path could not be resolved.
+	root: ^ast.Package,
+
 	allocator: runtime.Allocator,
 }
 
@@ -1243,13 +1325,48 @@ live_sessions: int
 @(private = "file")
 live_sessions_mutex: sync.Mutex
 
+// Session_Options carries facts about the BUILD that the checker cannot infer from the source.
+//
+// A struct rather than loose parameters so that the next such flag costs no signature change, and
+// so callers name what they are asserting at the call site.
+Session_Options :: struct {
+	// no_entry_point: do not require an entry point procedure. The equivalent of the reference
+	// compiler's `-no-entry-point`.
+	//
+	// THIS IS THE NORMAL CASE FOR A LIBRARY CONSUMER, and the reason this struct exists.
+	// Whether a `main` is required is a property of what is being BUILT, not of the source: a
+	// backend emitting one object per package, a language server opening a library, and a
+	// documentation tool all check packages that are not programs. The caller is the only party
+	// that knows which it has, so the checker cannot infer it and must be told.
+	//
+	// Requested by the mirc agent (#590) as a direct consequence of #589. Before #589 the whole
+	// entry-point surface was dead, so a library checked clean by accident; making it live turned
+	// every `package lib` with no `main` into an error, and there was no way to say "library".
+	//
+	// The alternative -- have the consumer notice the only diagnostic is the missing entry point
+	// and ignore it -- was rejected for two reasons worth recording, because they will come up
+	// again for the next flag. It would match on a MESSAGE (diagnostics carry no stable code, so
+	// the filter is a string comparison against English prose that is free to change), and it
+	// inverts responsibility: the caller would be suppressing a diagnostic it provoked by failing
+	// to state a fact it already knew.
+	no_entry_point: bool,
+}
+
 // session_check_package checks a package and hands back the model, alive.
 //
 // Returns ok=false and a nil session if a session is already live (see precondition 1) -- it
 // does NOT panic, because a library must not kill its host (CPP_DEVIATIONS.md [EMBED-1]).
 // A false return here means "refused", not "the package is bad": a package that fails to load or
 // fails to check still returns a live session, and `result` says which.
-session_check_package :: proc(path: string, allocator := context.allocator) -> (s: ^Session, ok: bool) {
+//
+// `opts` defaults to the zero value, which is the PROGRAM configuration (an entry point IS
+// required) -- matching the reference compiler, whose default is to require `main` and whose flag
+// is the opt-OUT. Existing callers are unaffected by the parameter's addition.
+session_check_package :: proc(
+	path: string,
+	opts := Session_Options{},
+	allocator := context.allocator,
+) -> (s: ^Session, ok: bool) {
 	sync.lock(&live_sessions_mutex)
 	if live_sessions > 0 {
 		sync.unlock(&live_sessions_mutex)
@@ -1258,12 +1375,40 @@ session_check_package :: proc(path: string, allocator := context.allocator) -> (
 	live_sessions += 1
 	sync.unlock(&live_sessions_mutex)
 
-	result, c, cf := _check_package(path, allocator)
+	// build_context is a process GLOBAL (build_settings.odin), not per-checker.
+	//
+	// WHAT THE RESTORE PROTECTS, measured rather than assumed. It is NOT the next session: the
+	// assignment below runs on ENTRY, so a later session_check_package overwrites whatever was
+	// left behind and gets its own options either way (verified -- a library session followed by a
+	// program session still reports the missing entry point with the restore removed).
+	//
+	// It protects readers that are NOT sessions, and there are two:
+	//   * check_package_from_path, which does not go through session_check_package and reads the
+	//     global directly;
+	//   * the host itself, which may have set the global for its own purposes.
+	// With the restore removed, a host that sets no_entry_point = true and then runs ONE session
+	// with different options finds its own global silently flipped to false (measured:
+	// before=true after=false). That is the defect class of #321/#368 -- a session leaving process
+	// globals altered behind the caller's back.
+	//
+	// Safe to touch the global at all only because live_sessions serialises explicit sessions: the
+	// refusal above guarantees no other session is running concurrently.
+	//
+	// ensure_build_context_initialized runs FIRST. It is a no-op once a target is set, but if the
+	// caller never initialised one it populates the whole struct -- so reading the previous value
+	// before that call would save a zero that is not the real default.
+	ensure_build_context_initialized()
+	saved_no_entry_point := build_context.no_entry_point
+	build_context.no_entry_point = opts.no_entry_point
+	defer build_context.no_entry_point = saved_no_entry_point
+
+	result, c, cf, root := _check_package(path, allocator)
 
 	s = new(Session, allocator)
 	s.checker = c
 	s.result = result
 	s.files = cf
+	s.root = root
 	s.allocator = allocator
 	if c != nil {
 		s.packages = c.info.packages_ordered[:]

@@ -60,7 +60,7 @@ print_entity_names := [Entity_Kind]string {
 	.Package_Name = "", // Added for completeness
 }
 
-// C++ Reference: docs.cpp:31-56
+// C++ Reference: docs.cpp cmp_entities_for_printing:31-56
 cmp_entities_for_printing :: proc(a: ^Entity, b: ^Entity) -> slice.Ordering {
 	assert(a != nil) // C++ line 32
 	assert(b != nil) // C++ line 33
@@ -110,7 +110,7 @@ cmp_ast_package_by_name :: proc(a: ^ast.Package, b: ^ast.Package) -> slice.Order
 // C++ Reference: docs.cpp:69-179, docs_writer.cpp:281-395
 // ======================================================================================
 
-// C++ Reference: docs.cpp:100-106, 77-86
+// C++ Reference: docs.cpp print_doc_line:100-106, 77-86
 // NOTE: Architectural divergence from C++:
 // - C++ writes to stdout via gb_printf (global state)
 // - Odin accepts writer parameter for flexibility and testability
@@ -132,7 +132,7 @@ print_doc_line_string :: proc(indent: i32, data: string, writer: ^strings.Builde
 	strings.write_byte(writer, '\n')
 }
 
-// C++ Reference: docs.cpp:108-117
+// C++ Reference: docs.cpp print_doc_line:108-117
 print_doc_line_formatted :: proc(indent: i32, fmt_str: string, writer: ^strings.Builder, args: ..any) {
 	// C++ line 109-111: Print indent tabs
 	for _ in 0 ..< indent {
@@ -144,7 +144,7 @@ print_doc_line_formatted :: proc(indent: i32, fmt_str: string, writer: ^strings.
 	strings.write_byte(writer, '\n')
 }
 
-// C++ Reference: docs.cpp:118-123
+// C++ Reference: docs.cpp print_doc_line_no_newline:118-123
 print_doc_line_no_newline :: proc(indent: i32, data: string, writer: ^strings.Builder) {
 	// C++ line 119-121: Print indent tabs
 	for _ in 0 ..< indent {
@@ -277,12 +277,12 @@ append_comment_group_string :: proc(indent: i32, buf: ^strings.Builder, g: ^ast.
 
 // ======================================================================================
 // EXPRESSION TO STRING CONVERSION
-// C++ Reference: docs.cpp:184-193
+// C++ Reference: docs.cpp print_doc_comment_group_string:184-193
 // ======================================================================================
 
-// C++ Reference: docs.cpp:184-193
+// C++ Reference: docs.cpp print_doc_comment_group_string:184-193
 print_doc_expr :: proc(expr: ^ast.Node, writer: ^strings.Builder, short_form := false) {
-	// C++ Reference: docs.cpp:186-192
+	// C++ Reference: docs.cpp print_doc_comment_group_string:186-192
 	s := short_form ? expr_to_string_shorthand(expr) : expr_to_string(expr)
 	defer delete(s)
 	strings.write_string(writer, s)

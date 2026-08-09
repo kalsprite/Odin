@@ -209,7 +209,7 @@ check_add_import_decl :: proc(ctx: ^Checker_Context, import_decl: ^ast.Import_De
 			// Intrinsics package not available - allow import without error
 			return
 		}
-		// C++ checker.cpp:5606-5608 sets force_use for "intrinsics" exactly as it does for
+		// C++ checker.cpp check_add_import_decl:5606-5608 sets force_use for "intrinsics" exactly as it does for
 		// "builtin" two lines above. The port had it on the builtin branch only, so an
 		// `import "base:intrinsics"` that is never referenced by name was reported as an
 		// unused import -- which the real compiler never does, for either package. Found
@@ -245,7 +245,7 @@ check_add_import_decl :: proc(ctx: ^Checker_Context, import_decl: ^ast.Import_De
 
 	// Get import name (C++ line 5298-5301)
 	// In Odin, import names are derived from the package name or can be aliased
-	// C++ Reference: checker.cpp:5631 - path_to_entity_name(id->import_name.string, id->fullpath, false)
+	// C++ Reference: checker.cpp check_add_import_decl:5631 - path_to_entity_name(id->import_name.string, id->fullpath, false)
 	import_name := path_to_entity_name(import_decl.name.text, import_path, false)
 
 	// Check if this is a blank import (underscore) (C++ line 5299-5301)
@@ -269,12 +269,12 @@ check_add_import_decl :: proc(ctx: ^Checker_Context, import_decl: ^ast.Import_De
 		invalid_name := import_path
 		invalid_name = get_invalid_import_name(invalid_name)
 
-		// C++ Reference: checker.cpp:5647 opens an ERROR_BLOCK here; the port had none, so the
+		// C++ Reference: checker.cpp check_add_import_decl:5647 opens an ERROR_BLOCK here; the port had none, so the
 		// suggestion below escaped the collector and printed ahead of its own diagnostic.
 		begin_error_block()
 		defer end_error_block()
 
-		// C++ (checker.cpp:5650) used to read "cannot be use as an import name as it is not a
+		// C++ (checker.cpp check_add_import_decl:5650) used to read "cannot be use as an import name as it is not a
 		// valid identifier" -- a grammatical slip the port reproduced verbatim, because this text
 		// is compared byte-for-byte. It was filed as #187, fixed upstream and merged, and the
 		// reference now uses the SAME message in both branches:
@@ -314,7 +314,7 @@ check_add_import_decl :: proc(ctx: ^Checker_Context, import_decl: ^ast.Import_De
 			//	}
 			//
 			// At the `default` arm the parser has consumed `import` and not yet consumed the
-			// path, so curr_token IS the path string. checker.cpp:5658 then hands that token to
+			// path, so curr_token IS the path string. checker.cpp check_add_import_decl:5658 then hands that token to
 			// alloc_entity_import_name, and checker.cpp:842 reports "declared but not used" at
 			// e->token -- so the oracle points at `"core:sync"`, column 8, while this port
 			// pointed at `import`, column 1.
@@ -373,7 +373,7 @@ check_import_entities :: proc(c: ^Checker) {
 	ctx := make_checker_context(c)
 	defer destroy_checker_context(&ctx)
 
-	// C++ Reference: checker.cpp:6214-6243. This is a FIXPOINT loop, not a simple walk.
+	// C++ Reference: checker.cpp check_import_entities:6214-6243. This is a FIXPOINT loop, not a simple walk.
 	//
 	// collect_file_decls returns true to mean "new declarations became visible". C++ responds by
 	// re-exporting that package and RESTARTING the package walk from min_pkg_index, so declarations
@@ -409,7 +409,7 @@ check_import_entities :: proc(c: ^Checker) {
 				}
 			}
 
-			// C++ Reference: checker.cpp:6232-6236. The second collection phase, and the only path
+			// C++ Reference: checker.cpp check_import_entities:6232-6236. The second collection phase, and the only path
 			// that descends into a file-scope `when` block (collect_file_decl ->
 			// collect_when_stmt_from_file). Run after this file's imports so the condition can refer
 			// to imported names.
@@ -745,7 +745,7 @@ check_export_entities_in_pkg :: proc(c: ^Checker, pkg: ^ast.Package) {
 
 	for exported in drained {
 
-		// C++ Reference: checker.cpp:6119 — `add_entity(ctx, pkg->scope, ee.identifier, ee.entity)`.
+		// C++ Reference: checker.cpp check_export_entities_in_pkg:6119 — `add_entity(ctx, pkg->scope, ee.identifier, ee.entity)`.
 		//
 		// This goes through add_entity, not scope_insert. add_entity skips BLANK
 		// identifiers (entity_helpers.odin, mirroring checker.cpp:2089), reports
@@ -814,7 +814,7 @@ get_invalid_import_name :: proc(input: string) -> string {
 // is_string_an_identifier is defined in entity_helpers.odin
 
 // is_letter checks if a rune is a letter (including underscore)
-// C++ Reference: unicode.cpp:15-31 (rune_is_letter)
+// C++ Reference: unicode.cpp rune_is_letter:15-31 (rune_is_letter)
 //
 // CRITICAL: Underscore '_' is treated as a letter in Odin identifiers!
 // This matches the C++ implementation which explicitly checks (r == '_')
@@ -841,7 +841,7 @@ is_letter :: proc(r: rune) -> bool {
 }
 
 // is_digit checks if a rune is a digit (including Unicode digits)
-// C++ Reference: unicode.cpp:33-38 (rune_is_digit)
+// C++ Reference: unicode.cpp rune_is_digit:33-38 (rune_is_digit)
 is_digit :: proc(r: rune) -> bool {
 	// C++ line 34-35: Fast path for ASCII digits
 	// Clever trick: (r - '0') < 10 works because unsigned arithmetic
@@ -886,7 +886,7 @@ set_ast_flag :: proc(ctx: ^Checker_Context, node: ^ast.Node, flag: State_Flag) {
 }
 
 // reset_checker_context resets the context for a new file
-// C++ Reference: checker.cpp:1709-1733 (reset_checker_context)
+// C++ Reference: checker.cpp reset_checker_context:1709-1733 (reset_checker_context)
 //
 // LEDGER #463 (task #344). This was a 12-line reimplementation and diverged from C++ in five ways.
 // The one that mattered: it returned early when `file == nil`, where C++ bails only on a null
@@ -916,7 +916,7 @@ reset_checker_context :: proc(ctx: ^Checker_Context, file: ^ast.File, untyped: ^
 	sync.lock(&ctx.mutex)
 	defer sync.unlock(&ctx.mutex)
 
-	// C++ Reference: checker.cpp:1716-1717, 1726-1727
+	// C++ Reference: checker.cpp reset_checker_context:1716-1717, 1726-1727
 	// The type path object is retained across the reset, but emptied, so that a context
 	// reused for the next file does not inherit a stale (or leaked) cycle-detection path.
 	type_path := ctx.type_path

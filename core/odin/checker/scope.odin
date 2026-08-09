@@ -42,7 +42,7 @@ set_single_threaded_checker_stage :: proc(value: bool) {
 }
 
 // create_scope creates a new scope with given parent
-// C++ Reference: checker.cpp:216-232
+// C++ Reference: checker.cpp create_scope:216-232
 create_scope :: proc(parent: ^Scope, allocator := context.allocator) -> ^Scope {
 	s := new(Scope, allocator)
 	s.parent = parent
@@ -50,7 +50,7 @@ create_scope :: proc(parent: ^Scope, allocator := context.allocator) -> ^Scope {
 	s.imported = make(map[^Scope]struct{}, allocator)
 
 	// Link as child of parent (with thread-safety and builtin_pkg check)
-	// C++ Reference: checker.cpp:220-225
+	// C++ Reference: checker.cpp create_scope:220-225
 	// NOTE: The C++ version uses atomic operations to prevent race conditions when
 	// multiple threads create child scopes simultaneously. It also excludes builtin_pkg
 	// scope from the child chain (global scope that doesn't need parent tracking).
@@ -62,7 +62,7 @@ create_scope :: proc(parent: ^Scope, allocator := context.allocator) -> ^Scope {
 
 		if !is_builtin {
 			// THREAD-SAFETY: The C++ version uses atomic exchange operations here:
-			// C++ Reference: checker.cpp:221-224
+			// C++ Reference: checker.cpp create_scope:221-224
 			//   Scope *prev_head_child = parent->head_child.exchange(s, std::memory_order_acq_rel);
 			//   if (prev_head_child) {
 			//       s->next.store(prev_head_child, std::memory_order_release);
@@ -79,7 +79,7 @@ create_scope :: proc(parent: ^Scope, allocator := context.allocator) -> ^Scope {
 	}
 
 	// Propagate ContextDefined flag from parent to child
-	// C++ Reference: checker.cpp:227-229
+	// C++ Reference: checker.cpp create_scope:227-229
 	if parent != nil && .Context_Defined in parent.flags {
 		s.flags += {.Context_Defined}
 	}
@@ -306,7 +306,7 @@ scope_lookup_parent :: proc(s: ^Scope, name: string) -> (scope: ^Scope, entity: 
 }
 
 // scope_insert_with_name_with_mutex adds an entity with explicit name (mutex-protected)
-// Ported from checker.cpp:479-517 (multi-threaded version)
+// Ported from checker.cpp scope_insert_with_name:479-517 (multi-threaded version)
 // Handles result parameter shadowing in procedure scopes
 scope_insert_with_name_with_mutex :: proc(s: ^Scope, name: string, entity: ^Entity) -> ^Entity {
 	if name == "" {
@@ -391,7 +391,7 @@ scope_insert_with_name_no_mutex :: proc(s: ^Scope, name: string, entity: ^Entity
 }
 
 // scope_insert_with_name adds an entity with explicit name
-// Ported from checker.cpp:479-517
+// Ported from checker.cpp scope_insert_with_name:479-517
 // Dispatcher: chooses mutex or no-mutex version based on threading mode
 scope_insert_with_name :: proc(s: ^Scope, name: string, entity: ^Entity) -> ^Entity {
 	if in_single_threaded_checker_stage() {
@@ -536,7 +536,7 @@ create_scope_from_file :: proc(parent: ^Scope, file: ^ast.File, allocator := con
 }
 
 // create_scope_from_package creates a package-level scope
-// C++ Reference: checker.cpp:251-281
+// C++ Reference: checker.cpp create_scope_from_package:251-281
 // Creates a scope for a package with Init, Runtime, and Global flags as appropriate
 // NOTE: This requires builtin_pkg to be available in the Checker_Info or Checker
 // Structural Differences to cpp:
@@ -581,7 +581,7 @@ create_scope_from_package :: proc(ctx: ^Checker_Context, pkg: ^ast.Package, allo
 	s.flags += {.Pkg}
 	s.pkg = pkg
 
-	// C++ Reference: checker.cpp:266 - `pkg->scope = s;`
+	// C++ Reference: checker.cpp create_scope_from_package:266 - `pkg->scope = s;`
 	pkg.scope = s
 
 	// The assignment above was omitted for a long time, and the omission was load-bearing in the

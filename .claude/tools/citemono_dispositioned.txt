@@ -1,0 +1,7 @@
+# Inversion groups that have been EXAMINED and EXPLAINED. Format:
+#     <odin_proc> | <cpp_function> | <reason>
+# citemono.py reports these separately so they stop consuming a reader's attention, exactly as a
+# cleared --suspect cluster must be ANCHORED rather than left bare (#605). Adding a line here is a
+# claim that the inversions were investigated and are NOT defects -- state the evidence in the reason.
+
+check_expr_base_internal | check_expr_base_internal | SWITCH-ARM REORDERING, verified #611. Both implementations dispatch over AST node kinds and the ARM ORDERS DIFFER SUBSTANTIALLY -- 41 of 78 common-arm pairs are discordant. C++ (case_ast_node macros) runs BadExpr, HelperType, Implicit, Ident, Uninit, BasicLit, ...; the port runs Basic_Lit first and Bad_Expr LAST, with Implicit 22nd against C++'s 3rd. Spot-checked six of the 23 inverted citations by CONTENT and every one is exactly right: Implicit->12325, Undef->12366 (Uninit), Proc_Group->12401, Ternary_If->12450, Paren->12475, Tag->12481. The monotonicity premise (port order tracks C++ order) simply does not hold for switch dispatch.

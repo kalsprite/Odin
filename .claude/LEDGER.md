@@ -18223,3 +18223,1329 @@ change and a caller audit, so it is not landed here.
 Gates: vet 0 · corpus **204**/204 FULL-MATCH (p584a added) · corpus_vet 4/4 · parity 323/323
 count=1 text=0 attrib=2 · parity_vet 323/323 count=1 text=0 attrib=2 · splitcheck 0/0 ·
 citefn --check drifted=0 · root suite 146/146.
+
+## #584 part 2 — check_expr_base_internal: 24 of 34 citations repaired, and my triage filter was wrong
+
+The dispatcher's citations split into two kinds, and treating them as one kind is what made this
+cluster look "MIXED" in the first place.
+
+**Arm-to-arm (16 repaired).** The port's switch arms mirror C++'s `case_ast_node` arms, so the
+anchor is the NODE KIND, not an offset -- Type_Cast -> 12495-12525, Implicit -> 12325-12351, and so
+on, computed by walking C++'s switch rather than by shifting. Applied BY LINE NUMBER, which is
+#584's own lesson: a string replace can hit sites you never located.
+
+**Callee-body (8 repaired).** Arms that dispatch cite the CALLEE, and those callees moved:
+check_call_expr 8155-8418 -> 8780-9070, check_compound_literal 9763-10728 -> 10609-11627,
+check_or_else_expr -> 10016-10142, check_or_branch_expr -> 10227-10332, check_basic_directive_expr
+-> 9711-9839, check_selector_call_expr -> 11770-11914, the type-node group -> 12700-12718, and
+check_assignment 1081-1267 -> 1137-1391. Each new range was looked up BY FUNCTION NAME.
+
+**MY FILTER WAS WRONG, and it over-reported the moment the fixes landed.** "A citation inside
+procedure P must resolve to P" is a fine rule for a leaf function and a bad one for a dispatcher:
+after correctly repointing eight citations at their callees, the filter reported all eight as still
+drifted. This is #509 again -- suspect the instrument before the code. The residual worklist is 9,
+not 18: 7979, 8042, 8061, 8226, 8245, 8272, 8292, 8309, 8320, 8413 (8061 may already be right; 8495
+is a new and deliberate parser.cpp citation).
+
+**Relative_Type: a gap that is NOT a gap.** C++'s grouped type-node case (12700-12718) includes
+Ast_RelativeType; the port's list omits it. Probed rather than assumed -- `#relative` was removed
+upstream and the PARSER rejects it (parser.cpp:2534), so probe p584rel gets the identical Syntax
+Error from both compilers and no semantic diagnostic from either. No case added (LEDGER #266); the
+comment now states the finding and its evidence, because a comment that lists RelativeType among
+"what C++ groups" while the code omits it invites exactly the wrong conclusion.
+
+Gates: vet 0 · corpus 204/204 FULL-MATCH · citefn --check drifted=0. Parity not re-run: every edit
+in this part is comment-only, and the last semantic change (#584 part 1) was swept clean at
+323/323 count=1 text=0 attrib=2.
+
+## #584 part 3 — check_expr_base_internal CLOSED: 32 repaired, 2 verified LEGITIMATE
+
+The residual nine (plus one my filter had wrongly grouped with them) each read individually.
+
+REPAIRED (8), every target content-matched in src/ before writing:
+  7979  11864       -> 11921        viral flag propagation, `node->viral_state_flags |= ie->expr->...`
+                                    (11864 was in check_selector_call_expr, the wrong function)
+  8042  11751-11759 -> 11808-11811  arrow-call callee must be a proc (was check_type_assertion)
+  8061  11788-11793 -> 11845-11850  arrow-call needs >= 1 parameter -- RIGHT function, WRONG region,
+                                    which is the class --check cannot catch. Third one this week.
+  8226  checker.cpp:7695-7698 -> 7703-7706   the comment asserts "init_preload runs AFTER
+                                    check_all_global_entities". 7695-7698 is check_import_entities /
+                                    check_export_entities and shows no such thing; 7703/7706 are the
+                                    two calls in order. A citation that did not support its own claim.
+  8272  check_decl.cpp:1225-1230 -> check_expr.cpp:12410   WRONG FILE. The port line allocates the
+                                    proc-literal's type; the cited range is check_foreign_procedure's
+                                    link-name bookkeeping. Nothing in common.
+  8292  11642-11645 -> 12418-12420  "A procedure literal cannot have tags"
+  8309  11656-11659 -> 12432-12435  "A procedure literal must have a body"
+  8320  11662       -> 12438        check_procedure_later
+
+LEGITIMATE, no change (2). Both were flagged only by my broken filter, which asked "does this
+resolve to the enclosing procedure?" -- a question with no meaning for a cross-file helper citation:
+  8245  check_type.cpp:1769   is EXACTLY `error(expr, "Default parameter cannot be ---");`
+  8413  check_decl.cpp:86-89  is EXACTLY the is_type_asm_proc guard + "Invalid use of inline asm"
+
+Running total for check_expr_base_internal: 34 citations triaged, 32 repaired, 2 confirmed correct.
+citefn --suspect is 1026 -> 1005 citations across the tick.
+
+Gates: vet 0 · corpus 204/204 FULL-MATCH · citefn --check drifted=0 · splitcheck 0/0. Parity not
+re-run: comment-only delta since #584 part 1's clean 323/323 sweep.
+
+## #585 — check_call_expr part 1, and citefn had a 61-function blind spot
+
+check_call_expr is 917 port lines against C++'s 291, because the port INLINED
+check_call_expr_as_type_cast (8616-8714) and much of check_polymorphic_record_type (8199-8572) into
+a 480-line `o.mode == .Type` branch. That explains the cluster: ~20 of its 41 flagged citations
+resolve to those C++ functions and are CORRECT -- callee-style citations, not drift. My
+"resolves-to-the-enclosing-procedure" filter over-reported again, exactly as in #584 part 3.
+
+**THE INSTRUMENT FINDING, and it is the important one.** citefn's index only matched
+`^(gb_internal|gb_global|gb_inline)`. Its own comment claimed "exactly one other top-level
+definition shape exists" -- measured on check_expr.cpp alone and then generalised to all of src/,
+where it is FALSE. The real count is **61** plain column-0 definitions: big_int.cpp's MP_MALLOC /
+MP_REALLOC / MP_CALLOC / MP_FREE, build_settings.cpp's get_vet_flag_from_name and
+get_feature_flag_from_name, bundle_command.cpp's bundle*, and -- the one that mattered --
+check_builtin.cpp:219 `void add_objc_proc_type(...)`.
+
+Two citations pointed exactly at add_objc_proc_type. The index could not see it, so they resolved
+to None, which is indistinguishable from drift; --check could not validate them and --suspect
+listed them as suspects. **They were correct the whole time.** A gate that cannot see a target
+cannot vouch for it (#483). PLAIN_DEF_RE added, excluding control keywords and ALL-CAPS macro
+invocations. Verified after: exactly 1 new entry in check_builtin.cpp (add_objc_proc_type 219-263,
+span correct), 0 bogus entries, and every function relied on this session still resolves
+(check_expr_base_internal, check_index_expr, check_call_expr, check_parsed_files).
+
+I also mis-measured this twice before getting it right: my first count of "non-gb_internal
+definitions" was 205 in checker.cpp, which was garbage -- the regex matched the gb_internal lines
+themselves, so "other" OVERLAPPED "gb_*" instead of complementing it. Same family as "never count
+lines from a stream not filtered to your own marker": a loose pattern's count is not a measurement.
+
+REPAIRED (3), each verified against the target function before writing:
+  10080  check_builtin.cpp:2089-2175 -> 2415-2776   check_builtin_procedure_directive. 2089-2175
+                                       straddles cache_load_file_directive's end (1995-2113).
+  10704  6933-7504   -> 7339-8061    check_call_arguments_proc_group
+  10717  12739-12749 -> 12796-12807  check_not_tuple
+
+STILL TO READ (6): 10183 (8054-8154), 10189 (8058-8062), 10248 (8171-8194) -- all three straddle
+the check_call_arguments_proc_group / check_call_arguments / lookup_polymorphic_record_parameter
+boundaries; plus 10199 (check_type.cpp:3412), 10497 (check_type.cpp:3696), 10952 (8708).
+
+Gates: vet 0 · corpus 204/204 FULL-MATCH · citefn --check drifted=0 · splitcheck 0/0. Parity not
+re-run: comment-and-tooling-only delta since #584 part 1's clean 323/323 sweep.
+
+## #585 part 2 — check_call_expr CLOSED, and --suspect is a RANKING not a verdict
+
+All six remaining citations read and repaired. Every new range was content-matched in src/ first.
+
+  10183  8054-8154   -> 8616-8714  check_call_expr_as_type_cast (the port INLINES it)
+  10189  8058-8062   -> 8640-8641  add_entity_use + add_type_and_value, read off the C++ body
+  10248  8171-8194   -> 8226-8239  check_polymorphic_record_type's named-arg loop
+                                   (`named_fields = true` .. lookup_polymorphic_record_parameter)
+  10952  8708        -> 8766       `param_types[0] = self_type;` in check_objc_call_expr. 8708 was
+                                   in check_call_expr_as_type_cast -- the comment names self_type,
+                                   which does not exist there.
+  10199  check_type.cpp:3412 -> check_expr.cpp:8199-8572. The pointer read "see check_type.cpp:3412",
+                                   which is `add_entity_use(ctx, nullptr, len_field)` inside
+                                   make_soa_struct_internal -- SOA field bookkeeping, nothing to do
+                                   with polymorphic instantiation. The NEXT line already cited the
+                                   right function, so it was wrong AND redundant.
+  10497  check_type.cpp:3696/4019 -> 3700/4023. The comment quotes "'R(5)' is not a type" but 3696
+                                   is `error(e, "'%s' used as a type")`. The quoted message is at
+                                   3700 and 4023. A citation must support the claim made next to it.
+
+check_call_expr: 0 citations now resolve to no function. Of its 41 flagged, ~29 were legitimate
+callee-style, 9 repaired here and last tick, 2 cleared by the index fix.
+
+**WHY THE SUSPECT COUNT WENT UP (1005 -> 1027) AND WHY THAT IS NOT A REGRESSION.** The #585 index
+fix made 61 more C++ functions visible, so citations that previously resolved to None now resolve to
+a function -- and suspects() flags any citation whose resolved function is `not related(cur, nm)`.
+More visibility means more flags. The heuristic cannot distinguish drift from a legitimate callee
+citation, and after four clusters where the MAJORITY of flags were legitimate, that is the headline:
+--suspect is a RANKING to triage, not a list of defects. The tool's own header says exactly this
+("rank citations whose resolved C++ function looks unrelated"); I was reading it as a worklist of
+faults. Four functions in, the ranking has still been worth following -- every cluster contained
+real defects -- but the count is not a defect count and must never be reported as one.
+
+**--apply IS STILL NOT SAFE TO RUN, and this is deliberate.** It is global and unscoped. Anchoring
+asserts "line N is inside function F"; anchoring an UNTRIAGED citation that has already drifted
+launders it into something --check certifies forever. The tool documents this as its sharpest edge
+and cites the types.cpp:4436-4474 near-miss. Five clusters are now fully triaged
+(type_size_of, check_slice, check_index, check_expr_base_internal, check_call_expr) and could be
+anchored safely; the rest cannot. The next tooling step is therefore a SCOPE argument for --apply
+(--apply=<odin-proc> or --apply-file=<file>), so the triaged half can be anchored and drop out of
+--suspect while the untriaged half stays visible. Filed as its own task.
+
+Gates: vet 0 · corpus 204/204 FULL-MATCH · citefn --check drifted=0 · splitcheck 0/0. Parity not
+re-run: comment-only delta since #584 part 1's clean 323/323 sweep.
+
+## #586 DONE — citefn --apply is scoped, 224 citations anchored, and the gate is proven to fail
+
+--apply was global and therefore unrunnable: anchoring asserts "line N is inside function F", and
+anchoring an untriaged already-drifted citation makes that false assertion permanent, after which
+--check certifies it clean forever. It now REFUSES to run without a scope.
+
+THE SCOPE IS A CHECKED-IN FILE, not a command-line list: .claude/tools/citefn_triaged.txt, one
+`file.odin proc_name` per line. Each line is a CLAIM that someone read those citations. That is the
+point -- the set only grows, and a reviewer can see what was claimed. `--only=a,b,c` NARROWS the
+file's set and refuses to widen it; `--only-file=x.odin` intersects. Negative controls both fire:
+  --apply --only=check_binary_expr  -> REFUSING (absent from citefn_triaged.txt)
+  --apply --bogus                   -> unknown argument
+
+MEASURED, NOT ASSUMED, in this order:
+  predicted first  229 bare citations inside the 11 triaged procs, 224 of them resolvable
+  --apply          rewrote exactly 224 (check_expr 136, check_proc 48, check_deferred 22, types 18)
+                   and left 2335 resolvable-but-out-of-scope BARE, reported as such
+  idempotent       second --apply rewrote 0
+  --check          already anchored 224, DRIFTED 0
+  POSITIVE CONTROL corrupted one anchor to types.cpp type_size_of_internal:99999 -> DRIFTED 1,
+                   exit code 1. A gate that cannot fail proves nothing (#483); this one fails.
+  inertness        224 lines changed of 81,529; code portion of every changed line byte-identical;
+                   0 changed lines without a citation; no file changed line count.
+
+**--suspect dropped 1027 -> 980 citations, NOT by 224, and the difference is the point.** suspects()
+only ever counted citations whose resolved function is `not related()` to the enclosing proc; most
+of the 224 were already considered related and were never flagged. So anchoring removes 47 from the
+ranking. Reporting "224 fewer suspects" would have been wrong by a factor of five.
+
+TWO MEASUREMENT ERRORS I MADE AND CORRECTED HERE, both the same shape:
+  1. Counted "non-gb_internal definitions" with a regex that also matched the gb_internal lines, so
+     "other=205" in checker.cpp OVERLAPPED gb_* instead of complementing it. Real answer: 61.
+  2. Checked "did --apply touch code?" with `git diff` against HEAD -- which contains every edit
+     from this whole session, not --apply's. 221 removed vs 237 added lines made the pairwise
+     comparison meaningless. Redone against the pre-apply backup: 224/224, code portion untouched.
+Both are "the number came from the wrong population", which is the same family as the earlier
+"never count lines from a stream not filtered to your own marker".
+
+--check now guards 224 citations and is in the per-tick gate battery. It cannot yet guard the other
+~2,335 resolvable citations: those need reading first, one cluster at a time, which is exactly what
+citefn_triaged.txt exists to record.
+
+Gates: vet 0 · corpus 204/204 FULL-MATCH · citefn --check drifted=0 (+ positive control red) ·
+splitcheck 0/0. Parity not re-run: comment-only delta, code portion of every changed line proven
+byte-identical.
+
+## #585 PART 3 / #412 DONE — get_constant_field_single ported to C++'s contract
+
+The premise needed correcting before any code changed: the port's get_constant_field_single had
+**ZERO CALLERS**. It was a ported function nothing invoked, so none of its divergences was
+observable, and the "missing diagnostic" was really "the caller never called it".
+
+Four divergences in the dead helper, all now gone:
+  * it dispatched on the static TYPE (is_type_string / is_type_array) where C++ dispatches on the
+    VALUE KIND -- hence a `type` parameter C++ neither has nor needs;
+  * it indexed strings by RUNE and returned the rune; C++ takes the BYTE and returns
+    exact_value_u64 (check_expr.cpp:5476). Those disagree for any non-ASCII constant;
+  * no String16 arm (C++ 5480-5485);
+  * cited lines 2319-2325, which is check_representable_as_constant.
+
+THE SUBTLE PART OF THE CONTRACT, and getting it backwards would have been silent: C++ uses two
+out-params and DOES NOT SET `success` on several paths -- the struct arm (5508-5527) and the array
+arm that finds no covering element both fall through to the tail at 5635. The caller initialises
+`bool success = false`, so "unset" MEANS false and those paths are reported as failures. The Odin
+port returns the flags instead, so the tail must return success=false explicitly. Had it returned
+true, every unreachable index would have become a successful extraction.
+
+check_index's constant arm now routes through it, sets mode BEFORE the call as C++ does (12028),
+and emits "Cannot index a constant '%s' with index %d" + the Suggestion on failure -- the
+diagnostic the port could not emit at all. get_constant_array_element_value became dead and was
+DELETED rather than kept as a narrower duplicate (#266).
+
+PROBES, both added to the corpus:
+  p585a  four EXTRACTION shapes that must all succeed with the right value: string byte, positional
+         array element, keyed enumerated-array element, range-keyed (`0..=1 = 7`) element. Forced
+         into constant declarations -- my first draft wrote `a := S[1]`, which makes `a` a VARIABLE,
+         so the #assert could not be constant either way and the probe proved nothing. Both sides
+         agreed on that draft, which is exactly how a vacuous probe passes.
+  p585b  the FAILING path: indexing a sparse enumerated-array constant outside its keyed range.
+         Byte-identical to the oracle, message and Suggestion.
+Positive control: flipping an expected value red-flags both sides.
+
+TWO FINDINGS ABOUT #586's OWN SCOPING, found because --apply reported rewritten=0:
+  1. proc_by_line attributed a LEADING DOC COMMENT to the PRECEDING procedure, so the two citations
+     in get_constant_field_single's own doc comment were out of scope. Fixed with a second pass that
+     hands each unbroken comment run above a proc header to that proc. This retroactively anchored
+     8 more in already-triaged procedures: **the first --apply's 224 was an UNDERCOUNT; it is 232.**
+  2. A comment that QUOTES a superseded citation for the record is indistinguishable from a live
+     one, and --apply would rewrite the historical note. The note now spells it "check_expr.cpp
+     lines 2319-2325" without the colon, and says why.
+
+Gates: vet 0 · corpus **206**/206 FULL-MATCH · corpus_vet 4/4 · parity 323/323 count=1 text=0
+attrib=2 · parity_vet 323/323 count=1 text=0 attrib=2 · splitcheck 0/0 · citefn --check 232 anchored
+drifted=0 with the corrupted-anchor positive control still exiting 1 · root suite 146/146.
+
+## #587 — check_proc_body: the FIRST cleanly-uniform shift, and the conditional rule earned its keep
+
+C++'s check_proc_body is at check_decl.cpp:2116-2305. Every drifted citation pointed into 2010-2117,
+i.e. into check_entity_decl and add_deps_from_child_to_parent. δ = **+107**, and unlike check_index
+it is genuinely UNIFORM -- content-verified at seven independent anchors before any edit:
+    2010-2012 -> 2117-2119   `if body == nil { return false }`
+    2015-2021 -> 2122-2128   proc_name / "(anonymous-procedure)"
+    2023-2024 -> 2130-2131   new_ctx := ctx_^ ; ctx := &new_ctx
+    2026      -> 2133        assert(type.kind == .Proc)
+    2028-2033 -> 2135-2140   the six ctx.* assignments
+    2035-2037 -> 2142-2144   decl.entity.parent_proc_decl = decl.parent
+    2039-2045 -> 2146-2152   the calling-convention check
+
+**24 shifted, 22 REFUSED as already right.** This is the clearest vindication of the conditional
+rewrite rule so far: the procedure's second half was already correctly cited, so the blanket +107 a
+survey would have suggested would have corrupted 22 citations while fixing 24. The MIXED pattern is
+not an exception, it is the norm.
+
+One citation left bare on purpose: `checker.hpp:468-505` is a struct definition, legitimately
+outside any function. citefn reports and never guesses those, which is right.
+
+TWO THINGS FOUND BY READING, neither a citation problem:
+  1. DEAD CODE. An `if ctx.pkg == nil { } else { }` -- both branches empty, condition pure -- sat at
+     the calling-convention check doing nothing. Left-over scaffolding from someone investigating
+     whether pkg can be nil. Deleted.
+  2. A PORT-ONLY NIL GUARD, now recorded honestly. C++ writes `if (ctx->pkg->name != "runtime")` and
+     dereferences UNGUARDED; the port tests `ctx.pkg != nil &&` first. Whether the nil branch is
+     reachable is UNMEASURED, and the comment now says so rather than inventing a justification --
+     the guard is kept because removing it can only turn a working check into a crash. If it needs
+     settling, instrument the branch and look for a hit, the way #122 and #508 were settled.
+
+Parity WAS re-run rather than argued about. An empty conditional on a side-effect-free comparison is
+provably inert, but "provably inert" is exactly the claim #340 got wrong once, so it was measured:
+323/323 count=1 text=0 attrib=2, unchanged.
+
+Gates: vet 0 · corpus 206/206 FULL-MATCH · parity 323/323 count=1 text=0 attrib=2 · splitcheck 0/0 ·
+citefn --check drifted=0.
+
+## #588 — Session.root, requested by the mir agent. Request granted; its stated CAUSE was too narrow
+
+mir asked for a field naming the package `session_check_package` was asked for, because `packages[0]`
+is in LOAD order and mirc had restricted lowering to it -- correct-looking, green across a whole test
+suite, and false. Granted as asked.
+
+**BUT THE STATED CAUSE WAS INCOMPLETE, and the correction makes the case stronger.** mir attributed
+it to ODIN_ROOT ("every test ran with ODIN_ROOT unset, where the runtime is never loaded"). Measured
+here with a purpose-built harness: `packages[0].name == "runtime"` **both with ODIN_ROOT set and with
+it unset**. The build context derives a root of its own, so an unset environment variable does not
+prevent the runtime being seeded. `packages[0]` is therefore wrong in the NORMAL case, not an
+ODIN_ROOT edge case -- so mirc's suite was not passing because of a lucky configuration, it was
+passing because nothing in it looked.
+
+IMPLEMENTATION. `Package_Load_Result.root`, set from `loaded[root_fullpath]` at the loader's tail,
+then threaded through `_check_package` (a fourth return) onto `Session.root`. Done in the loader
+because that is the one place the normalised absolute path and the ^ast.Package are both in hand --
+which is exactly the duplicated normalisation mir wanted to stop redoing (symlinks, trailing
+separators, relative inputs).
+
+The lookup ALSO gets the awkward case right, and this is why it beats "remember the package built
+from the root queue entry": when the requested path IS base/runtime, the loader's seed wins and the
+root entry is skipped by the already-loaded guard (the behaviour its own comment at :630-633
+documents). "Package from the root entry" would be nil there; the lookup yields the runtime package.
+VERIFIED all three ways: ordinary package with ODIN_ROOT unset, with it set, and `base/runtime`
+itself -> `root -> name=runtime`.
+
+Gates: vet 0 · corpus 206/206 · parity 323/323 count=1 text=0 attrib=2 · splitcheck 0/0 ·
+citefn --check drifted=0 · root suite 146/146 (these are the tests that drive Session).
+
+## #589 FILED off the back of Jon's follow-up: the ENTRY POINT is unreachable
+
+Jon asked whether a backend has a clear path to the entry point. No -- and it is a defect, not a
+documentation gap. `info.entry_point: ^Entity` exists (checker.odin:975, mirroring
+checker.hpp:713), `check_entry_point` is called, and it is DEAD for two independent reasons:
+  1. `c.info.init_scope` has ZERO writes in the entire port. C++ sets it at checker.cpp:7673 beside
+     init_package, gated on `scope->flags & ScopeFlag_Init`. check_entry_point guards on
+     `init_scope == nil` and returns every time.
+  2. Nothing ever stamps a package `.Init` -- the loader appends the root as `.Normal`
+     (package_resolver.odin:649) -- so the `init_package` write at check_files.odin:441 is dead too.
+MEASURED: a package declaring `main :: proc()`, build_mode .Executable, entry-point checking on ->
+`entry_point == nil`. C++'s "no main" diagnostic consequently has no working counterpart.
+
+WHY NO GATE SAW IT, which is the part worth keeping: every sweep passes -no-entry-point, because
+triage_st sets it deliberately (LEDGER #329) so both sides are measured under one configuration. That
+flag returns BEFORE the init_scope guard, so the whole entry-point surface has never been exercised
+by parity, corpus or the spec suite. Same family as #176 and #20. Closing #589 will need a NEW gate
+that runs without the flag, with a firing positive control -- a surface that has been silently dead
+cannot be declared fixed by a green run.
+
+## #589 DONE: the entry point was unreachable -- TWO independent causes, both proven load-bearing
+
+Jon asked whether a backend has a clear path to the entry point. It did not, and it was a defect.
+`info.entry_point` existed (checker.odin:975 ~ checker.hpp:713) and check_entry_point wrote it, but:
+  1. `c.info.init_scope` had ZERO writes in the whole port. C++ sets it at checker.cpp:7673 beside
+     init_package, from `scope->flags & ScopeFlag_Init`. check_entry_point guards on nil and returned.
+  2. Nothing stamped a package `.Init` -- the loader appended the root as `.Normal`
+     (package_resolver.odin) -- so the init_package write at check_files.odin was dead too.
+And the two were CIRCULAR: the only writer of `info.init_fullpath` sat inside `if pkg.kind == .Init`,
+so BOTH halves of C++'s disjunction at checker.cpp:268 were permanently false. A NOTE in
+build_infrastructure.odin documented half of this ("nothing ever assigns pkg.kind = .Init") while
+asserting the init package was "identified solely by info.init_fullpath" -- which was the other dead
+half. The note described the circularity without noticing it; corrected.
+
+FIX, mirroring C++ exactly: root seed kind `.Normal` -> `.Init` (parser.cpp:7098), `init_fullpath`
+set UNCONDITIONALLY from the requested path before loading (parser.cpp:7099), and init_package +
+init_scope written TOGETHER from the SCOPE FLAG in the scope-creation loop (checker.cpp:7671-7673),
+not from the kind one phase earlier.
+
+BOTH HALVES ARE LOAD-BEARING, predicted then measured, which is *why* checker.cpp:268 is a
+disjunction rather than a kind test:
+  * revert the `.Init` kind  -> ep_const/ep_var go SILENT (the "'main' is reserved" check at
+    type_info.odin reads pkg.kind DIRECTLY). ep_nomain still fires -- init_fullpath still satisfies
+    the scope flag.
+  * remove the init_fullpath write -> ordinary packages unaffected, but `base/runtime` AS THE
+    REQUESTED PACKAGE loses its entry point entirely: the runtime seed claims the queue slot, that
+    package keeps kind `.Runtime`, and only the fullpath comparison can identify it.
+Neither control alone turns everything red. Running only one would have "proved" the other redundant.
+
+check_entry_point was also restructured to C++'s single if / else-if: the else-if arm
+(DynamicLibrary && no_entry_point -> entry_point = nil) is REACHABLE and an early return on
+no_entry_point would skip it. Not redundant with the zero value -- check_decl.odin writes
+info.entry_point for any `main` in the init package regardless of build mode, so a dynamic library
+would otherwise keep an entry symbol. Citations were stale too (7441-7463 -> 7789-7811).
+
+WHY 323 PACKAGES, 206 PROBES AND 146 TESTS WERE ALL GREEN THROUGHOUT, which is the transferable
+part: every sweep passes -no-entry-point, because triage_st sets it so both sides are measured under
+one configuration (#329). C++ puts the ENTIRE entry-point surface behind !no_entry_point --
+checker.cpp:7790 and check_decl.cpp:1528 (every rule about `main`) -- so no existing gate could see
+any of it. Same family as #176 and #20.
+
+NEW GATE: .claude/tools/entrypoint.sh + .claude/tools/entryprobe/. 10 diagnostic probes, one per C++
+rule (missing main, non-procedure main as constant AND as variable, params, results, custom cc,
+bedrock cc accept + reject, main in an imported package, clean case) -- all byte-identical to the
+oracle. The flag asymmetry is why it cannot be corpus membership: the oracle checks `main` BY
+DEFAULT and takes no flag, the port needs -entry-point, and cmpfull.py has no per-side flag
+argument. Unlike corpus.sh it writes its own probes, so it works from a clean checkout.
+Plus a STATE section, labelled expectation-based rather than oracle-based because C++ has no
+entry-point dump: it catches the base/runtime case, where BOTH compilers emit zero diagnostics and a
+diagnostic probe would score MATCH while entry_point silently went nil.
+
+## #590 DONE: Session_Options -- mirc was BLOCKED by #589 within the hour
+
+#589 made a missing `main` an error, which is right for a program and wrong for a library. mirc
+compiles one package per object; libraries are the normal case, and all 775 of its differential
+cases are `package lib`. Every one failed at the checker step.
+
+`bc.no_entry_point` existed but was reachable only for Freestanding, and neither entry point took
+settings -- the capability was present and the API surface did not reach it. Added
+`Session_Options{no_entry_point}` to session_check_package, defaulted to the PROGRAM configuration
+so the reference compiler's default (require `main`; the flag is the opt-out) is preserved and
+existing callers are unaffected.
+
+Rejected the alternative of having the consumer filter the diagnostic, and the reasons generalise to
+the next flag: it would match on a MESSAGE (no stable code, so a string comparison against English
+prose free to change), and it inverts responsibility -- the caller suppressing a diagnostic it
+provoked by not stating a fact it already knew.
+
+MY OWN RATIONALE WAS HALF WRONG AND THE CONTROL CAUGHT IT. I wrote that the save/restore of the
+global stops the option leaking into "every later call". It does not: the assignment runs on ENTRY,
+so a later session overwrites it regardless -- a library session followed by a program session still
+reports the missing entry point with the restore REMOVED. What the restore actually protects is
+non-session readers: check_package_from_path reads the global directly, and a host may have set it
+itself. Measured with the restore removed: host sets true, runs one session with different options,
+global comes back false (GLOBAL-CLOBBERED). Comment corrected to say that. Both claims now rest on a
+control that fires, not on plausibility.
+
+Gate: 2 new STATE rows read as a PAIR -- the same no-main package is 1 error as a program and 0 as a
+library. Either alone proves nothing, since entry_point is nil in both and only the error count
+distinguishes correct suppression from the surface going dead again.
+
+Gates for #589+#590: vet 0 · corpus 206/206 · corpus_vet 4/4 · entrypoint 10/10 + state 5/5 ·
+parity 323/323 count=1 text=0 attrib=2 · parity_vet 323/323 count=1 text=0 attrib=2 ·
+doccmp 29/29 STATE-MATCH · docflag pass · splitcheck 0/0 · citefn --check drifted=0.
+ROOT SUITE NOT RE-RUN for these two -- it timed out in a combined command and is deferred to the
+next batch (see the batching note below). Stated rather than implied.
+
+## PROCESS CHANGE (Jon): batch changes per root-suite run
+
+The root suite is ~7 min and was being run per change, putting >75% of wall-clock in waiting.
+Adopted: cheap gates (vet, corpus, corpus_vet, entrypoint, citefn, splitcheck -- ~90 s total) run on
+EVERY change because they localise a fault; parity and the root suite run once per BATCH at a
+checkpoint. Debugging several changes at once is cheaper than the per-change run tax. The cost is
+that a root-suite failure no longer names its change -- acceptable, and it must be SAID when a
+result is deferred rather than left to look like a pass.
+
+## #592 DONE: a citation cluster pointing at the WRONG FUNCTION hid a missing polymorphic gate
+
+check_proc_info_worker_proc's 10 citations all pointed at checker.cpp:6412-6436. That range is
+calculate_global_init_order's priority queue -- not merely a drifted offset but a different function.
+Resolved by NAME, as the method requires: the worker proc is at 6770 (δ=+358), check_init_worker_data
+at 6799 (δ=+361). δ is NOT uniform, so every citation was re-anchored by CONTENT and each edit
+asserted its expected match count before writing.
+
+THE DEFECT READING FOUND, which --check could never have (right-file-wrong-function still resolves):
+C++ 6783-6788 is
+    if (parent->kind == Entity_Procedure && (parent->flags & EntityFlag_ProcBodyChecked) == 0) {
+        Type *pt = base_type(parent->type);
+        if (!pt->Proc.is_polymorphic || pt->Proc.is_poly_specialized) {
+            thread_pool_add_task(check_proc_info_worker_proc, pi);
+            return 1;
+        }
+    }
+The port had the outer test and NOT the inner one, so the re-queue was unconditional whenever the
+parent's body was unchecked. For a parent that is polymorphic and not poly-specialised that condition
+NEVER CLEARS -- an uninstantiated generic's body is never checked -- so the task re-queues itself
+forever. C++ deliberately falls through and checks the nested body immediately. Same family as #299
+(a worker loop that fed itself) and #34 (.Proc_Body_Checked assertion under the parallel checker),
+and it is squarely inside the "including multi-threaded operation" objective.
+
+Ported using the existing accessor idiom (`base_type(t).variant.(Type_Proc)`, as at
+check_equivalence.odin:783). A missing variant is treated as NOT polymorphic -- the conservative
+reading, since it preserves C++'s re-queue rather than silently skipping the wait.
+
+REACHABILITY OF THE LIVELOCK IS UNMEASURED and the comment says so: it needs a nested procedure whose
+enclosing procedure is an uninstantiated polymorphic one, hit on the threaded path. Ported because
+C++ has the gate and its absence was not a documented divergence -- NOT because a hang was observed.
+Inventing a repro claim here would be the #313 mistake (a timeout count is not evidence about a
+build).
+
+citefn_triaged.txt 13 -> 15 procedures; 16 more citations anchored (278 -> 294); --check drifted=0.
+Cheap gates green: vet 0 · corpus 206/206 · corpus_vet 4/4 · entrypoint 10/10 + state 5/5 ·
+splitcheck 0/0 · citefn --check drifted=0.
+PARITY AND PARITY_VET NOT YET RUN -- this is a SEMANTIC change and they are required. Deferred only
+because the root suite is running and loadavg is 32; starting parity under that load reproduces
+#301's environmental timeout, which was previously misdiagnosed as a hang. Stated, not implied.
+
+## #593: #589 BROKE THE ROOT SUITE, and fixing it broke parity -- both mine, both caught by gates
+
+FIRST FAILURE. The batched root suite came back 146 tests / 5 FAILED, having been 146/146 since #321.
+Signature: "86/86 packages have check errors" plus exactly ONE error on each of
+test_check_{ast,parser,checker,real}_package. Confirmed rather than assumed --
+`Undefined entry point procedure 'main'` at core/odin/ast/ast.odin(2:1).
+
+CAUSE: mine, from #589. These tests check LIBRARY packages; making the entry-point surface live turned
+every one of them into a missing-main error. Identical to what mirc hit (#590), inside our own suite.
+Worth stating plainly: #589 was a real fix and this was its blast radius, which the batched suite run
+is precisely what surfaced. Had I kept deferring the suite, this would have sat there.
+
+FIX: the same reachability argument as #590, applied to the OTHER public entry point.
+check_package_from_path now takes `opts := Session_Options{}` -- it reads the process-global
+build_context directly, so a consumer checking a library had no way to say so. The 7 test call sites
+pass a `LIBRARY :: checker.Session_Options{no_entry_point = true}` constant, declared once with a
+comment saying WHY (they check core packages; none declare `main`). Not a diagnostic filter: whether
+a `main` is required is a property of what is being built, and the caller is the only party that
+knows.
+
+SECOND FAILURE, INTRODUCED BY THAT FIX AND CAUGHT IMMEDIATELY: parity went to
+count_mismatches=272 (baseline 1). Cause: check_package_from_path now APPLIES opts to the global, and
+both triage harnesses called it with DEFAULT options -- silently overwriting the
+`build_context.no_entry_point = true` they set at startup (#329) and undoing the whole point of
+measuring both sides under one configuration. 272 packages then reported an entry point the oracle
+never checks for.
+
+This is the exact hazard the #590 save/restore comment discusses, arriving from the other direction:
+not the option leaking OUT to other readers, but a default option overwriting what the caller had
+already decided. Fixed by having both harnesses pass their decision explicitly:
+    no_entry_point = checker.build_context.no_entry_point
+so the harness owns the choice and the API cannot silently contradict it. Parity back to 1/0/2.
+
+TRANSFERABLE: adding an options parameter that writes to a process global is not additive for
+existing callers that were setting that global themselves. Every such caller must be found and made
+explicit in the SAME change. I found them because parity is reference-anchored and went red by 271;
+a gate that only compared the port against itself would have shown nothing.
+
+Gates after both fixes: vet 0 (checker AND tests) · corpus 206/206 · corpus_vet 4/4 ·
+entrypoint 10/10 + state 5/5 · parity 323/323 count=1 text=0 attrib=2 ·
+parity_vet 323/323 count=1 text=0 attrib=2 · splitcheck 0/0 · citefn --check drifted=0.
+The 4 package tests verified green directly (4/4). FULL root suite re-running -- not yet reported.
+
+## #595 (partial, and deliberately NOT triaged): check_proc_decl's 44 citations re-anchored
+
+--suspect flagged check_proc_decl twice: "cites generate_minimum_dependency_set_internal" and "cites
+check_foreign_procedure". Both flags were misleading in opposite directions.
+
+THE checker.cpp CLUSTER IS CORRECT. 7 citations point at checker.cpp:3001-3080 for the @(init)/@(fini)
+roster work. generate_minimum_dependency_set_internal spans 2961-3116, so those land INSIDE it, and
+the content at 3037-3052 is the @(init)-disabled warning and blank-identifier check the port's
+comments claim. Legitimate callee-style citations -- ranked, not defective. This is the "--suspect is
+a RANKING not a defect count" lesson yet again.
+
+THE check_decl.cpp CLUSTER WAS ALL STALE, and NOT by one offset. C++ check_proc_decl is at 1259-1681;
+the port cited 1218-1609. δ is NOT uniform and GROWS across the function:
+    ac.test               1284 -> 1326   (+42)
+    ac.set_cold           1295 -> 1341   (+46)
+    entry_point_only      1343 -> 1392   (+49)
+    ac.has_disabled_proc  1443 -> 1497   (+54)
+    ac.linkage            1454 -> 1509   (+55)
+    ac.require_results    1534 -> 1604   (+70)
+C++ has grown at several interior points, so any single-delta shift would have corrupted most of it.
+Exactly what the method warns about, now with a worked example spanning 29 lines of drift within one
+function.
+
+MY FIRST GROUPING WAS A BAD HEURISTIC and I caught it before writing: I split the 44 at "cited > 1460
+is probably already correct" because those fall inside the CURRENT span. Testing one killed it --
+port:1403 cites 1469-1472 for `ac.require_declaration`, but C++ 1469-1472 is instrumentation-mutex
+code and require_declaration is at 1523. "Falls inside the right function" is NOT evidence a citation
+is right; that is the RIGHT-FUNCTION-WRONG-REGION failure, which --check cannot see either.
+
+METHOD USED: index every `ac.<name>` in C++ check_proc_decl, take the first such token AFTER each port
+citation, and anchor the citation start on that C++ line with the span preserved. 17 citations had a
+clean token anchor; 4 needed the specific occurrence chosen by reading (require_target_feature has 4
+hits, linkage 4, link_name 4 incl. two outside the function); 2 needed the BLOCK start rather than the
+token line (check_objc_methods at 1346; is_foreign/is_export at 1509-1510). Every rewrite asserted its
+match count and that the result lands within 1259-1681 BEFORE writing.
+
+RESULT: 44/44 check_decl.cpp citations now land inside C++ check_proc_decl (was 35, then 13 stale,
+now 0). vet 0, citefn --check drifted=0. CODE IS BYTE-IDENTICAL -- verified by diffing with comment
+lines stripped -- so this is comment-only and parity/corpus are NOT required for it.
+
+NOT ADDED TO citefn_triaged.txt, and that is the point worth recording. That file's contract is that
+EVERY citation in the named procedure has been read. 26 of the 44 were individually content-verified
+here; the remaining ~18 were only shown to land in the right function, which is necessary and not
+sufficient. Adding the name now would launder unread citations into something --check certifies
+forever -- the precise failure the file's own header warns against. check_proc_decl stays untriaged
+until the rest are read.
+
+## BATCH CLOSED: root suite 146/146, All tests were successful (7m5s)
+
+Confirms the deferred result for #592 (polymorphic re-queue gate), #593 (both entry-point fixes and
+the harness correction) and #595 (comment-only). The 5 failures #593 diagnosed are gone; nothing new
+appeared. Every gate for this batch is now reported rather than pending:
+  vet 0 (checker + tests) · corpus 206/206 · corpus_vet 4/4 · entrypoint 10/10 + state 5/5 ·
+  parity 323/323 count=1 text=0 attrib=2 · parity_vet 323/323 count=1 text=0 attrib=2 ·
+  doccmp 29/29 · docflag pass · splitcheck 0/0 · citefn --check drifted=0 · root suite 146/146.
+
+The batching policy earned its keep on its first full cycle: the suite is what caught #593, and it
+caught it on a batch of three changes rather than costing 7 minutes per change. Cost paid as expected
+-- the failure did not name its cause, and identifying it took a targeted 4-test re-run.
+
+## #596 DONE: check_init_fini_common -- 6 citations, all stale by +7/+8, one a DUPLICATE
+
+Same species as #595's checker.cpp cluster and the opposite conclusion. Every citation pointed into
+generate_minimum_dependency_set_internal (2961-3116), which is CORRECT as a callee citation -- so
+--suspect flags it and always will -- but every LINE had drifted, and the port's block ORDER differs
+from C++'s, so no blanket shift was available. Verified against checker.cpp:3009-3085 read in full:
+    contextless + Suggestion   3015-3021 -> 3022-3029   (C++ 3022 `u64 feature_flags = ...`)
+    file scope, clears is_init 3023-3026 -> 3031-3034
+    @(disabled) warning        3028-3031 -> 3036-3039
+    the is_init=false claim    3037-3039 -> 3036-3039   (same block, start off by one)
+    blank ident, no clear      3033-3035 -> 3041-3043
+    the whole @(fini) arm      3042-3075 -> 3050-3085
+    the header's two arms      3015-3038/3056-3080 -> 3009-3049/3050-3085
+
+A DUPLICATE citation was removed: lines 1898 and 1899 both read "checker.cpp:3023-3026", the second
+carrying the actual note. Collapsed to one. Worth noting because --check cannot see a duplicate at all
+-- both resolved, so both were "clean".
+
+THE NOTES WERE ALL SEMANTICALLY RIGHT and only the numbers had rotted: which check clears is_init
+(file scope, disabled) and which does not (blank ident), and that C++'s fini arm has no disabled
+handling whatsoever. That last one is #282's finding and the comment still states it correctly.
+
+ALSO CHECKED AND NOT A GAP: this shared helper has no signature check where C++'s arm opens with one
+("@(init) procedures must have a signature type with no parameters nor results"). The port does it at
+the two CALL SITES instead -- check_decl.odin:1169 for init, :1186 for fini, both immediately before
+the call -- so the diagnostic exists and the split is a refactor, not a missing rule. Verified by
+grepping the message text, not inferred from the structure.
+
+TRIAGED. Unlike check_proc_decl (#595), every citation in this procedure was read, so
+check_init_fini_common IS added to citefn_triaged.txt. 15 procedures listed now; 7 more citations
+anchored. --check drifted=0, --apply rewrote 7.
+
+Gates: vet 0, splitcheck 0/0, citefn --check drifted=0. CODE BYTE-IDENTICAL to pre-#595 (verified by
+diffing with comment lines stripped), so #595 and #596 together are comment-only and parity/corpus
+are NOT required. Stated rather than assumed.
+
+## #597 (PARTIAL, 30 of 37): are_types_identical_internal -- the citations were in a DIFFERENT FUNCTION
+
+--suspect said "cites types.cpp is_type_nearly_simple_compare". Resolving by name: that function is at
+types.cpp:2931; the real are_types_identical_internal is at 3195-3437 (the 3123 hit is only a forward
+declaration, and 3125-3152 is the public are_types_identical wrapper). The port cited 2954-3191 --
+entirely BEFORE the function it documents. Right file, wrong function, ~250 lines out.
+
+δ=+241 LOOKED RIGHT AND WAS REFUTED. 2954->3195 lands exactly on the function header, which is
+seductive. Checked at five more anchors and every one failed: Type_Generic landed on `#endif`,
+Type_Dynamic_Array on Matrix, Type_Struct on Union, Type_Tuple on MultiPointer. The arms are in a
+different ORDER, so no offset exists. This is the strongest example yet of why one matching anchor is
+not a delta.
+
+METHOD: arm-to-arm by TYPE KIND, as in #584. Indexed C++'s 21 `case Type_X:` labels in 3195-3437 and
+the port's 21 `x.variant.(Type_X)` arms, normalising the naming difference (Type_DynamicArray vs
+Type_Dynamic_Array). STRUCTURAL RESULT WORTH KEEPING: the pairing is 1:1 and total -- 21 arms, 21
+cases, no port-only arm and no unhandled C++ kind. The port covers exactly C++'s kind set.
+
+Each arm's citation was re-anchored on its case label with the span preserved, then CLAMPED to end
+before the next label -- Type_Proc's preserved span would otherwise have run to 3404 and overlapped
+Type_Map at 3402. Asserted no two arm ranges overlap before writing. 22 fixes (21 arms + the header).
+
+Then 9 of the 15 arm-INTERNAL sub-citations, each content-anchored inside its parent arm rather than
+offset from it (offsetting assumes arm bodies did not grow, which is the very assumption this exercise
+disproves).
+
+A "VERIFIED" MARKER IS NOT IMMUNITY. port:302 carried "types.cpp:3352 (VERIFIED 2026-08-01; the old
+3106-3109 citation was stale -- that range is lookup_subtype_polymorphic_selection, another function)".
+That verification was correct when written and is stale AGAIN: 3352 is now `if (xf_flags != yf_flags)`,
+which is port:295's block, not the `return true` that skips polymorphic_params. The real target is
+3356-3358 (C++'s own commented-out check at 3356-3357, `return true` at 3358). Re-anchored and the note
+now says it went stale twice. Dated verification notes need re-checking like anything else.
+
+NOT TRIAGED, 7 citations still stale and named: port 129 (2963-2979, "commented out in C++" -- needs
+reading, may refer to the #if 0 block near is_type_nearly_simple_compare), 278 (3085-3105, resolved
+OUT OF ORDER against its neighbour so the token anchor is untrustworthy), 406/410/414/418 (four
+bit_field sub-citations that all collapsed onto the same candidate line, so they need reading
+individually), 431 (3190, the function tail -- no candidate found). are_types_identical_internal stays
+out of citefn_triaged.txt until those 7 are read.
+
+Gates: vet 0 · splitcheck 0/0 · citefn --check drifted=0 · corpus 206/206. CODE BYTE-IDENTICAL
+(diffed with comment lines stripped), so comment-only -- parity and the root suite are NOT required
+and were not run.
+
+## #597 COMPLETE: are_types_identical_internal, all 37 citations read; TRIAGED
+
+The 7 carried over from the partial pass are done, each read individually rather than offset from its
+parent arm:
+    the "(commented out in C++)" note   2963-2979 -> 3208-3224  (the `#if 0` type-alias unwrap block,
+                                                                 which is exactly what the note says)
+    struct: for_array over fields       3085-3105 -> 3335-3355
+    bit_field: for_array over fields    3172-3183 -> 3415-3430
+    bit_field: field type identity      3175-3176 -> 3418-3419
+    bit_field: field name               3177-3178 -> 3421-3422
+    bit_field: bit_sizes                3179-3180 -> 3424-3425
+    the function's final return false   3190      -> 3436
+The four bit_field sub-citations had all collapsed onto one candidate under token search; reading the
+arm (3412-3433) separated them cleanly, and they turn out to be consecutive pairs in both
+implementations -- the port is a faithful transcription of that loop, line for line.
+
+FINAL STATE: 0 of 37 citations stale (was 37), --check drifted=0, --suspect no longer lists it at all,
+38 citations anchored by --apply. citefn_triaged.txt 15 -> 16 procedures.
+
+Gates: vet 0 · corpus 206/206 · splitcheck 0/0 · citefn --check drifted=0. CODE BYTE-IDENTICAL to the
+pre-#597 backup (diffed with comment lines stripped) -- comment-only, so parity and the root suite were
+NOT required and were NOT run. Said explicitly rather than left silent.
+
+CUMULATIVE for the citation sweep so far: 16 procedures triaged. Two are deliberately NOT triaged and
+that is recorded where it matters -- check_proc_decl (#595, 44 citations all landing in the right
+function but only 26 individually read) and nothing else. The distinction is the point: "resolves
+inside the right function" is necessary and not sufficient, and only the second gets to claim the
+triage file's guarantee.
+
+## #598 -- check_range: right-file-wrong-function, uniform +669, two shape divergences dispositioned
+
+`check_expr_helpers.odin` `check_range` (port 1206-1330) carried 7 citations into
+`check_expr.cpp:8628-8673`. The real `check_range` is at **9247-9345**; the citations sat ~670 lines
+earlier, inside a different function. `--check` was drifted=0 throughout, because a
+RIGHT-FILE-WRONG-FUNCTION citation resolves perfectly -- it just resolves to the wrong thing. Only
+reading catches this class, which is the third time it has come up (#587, #592, now here).
+
+Unlike #592, the delta here IS uniform: **+669 at all seven anchors**. That was established by
+CONTENT at each of the seven, not inferred from one -- per the standing rule that a tied or
+non-uniform survey cannot pick the offset, and one matching anchor is not a delta.
+
+    is_for_loop type validation  8628-8638 -> 9297-9307
+    both-constant block          8640-8670 -> 9309-9339
+    op-selection switch          8647-8652 -> 9316-9322
+    compare_exact_values         8654-8659 -> 9323-9328
+    inline_for_depth             8661-8666 -> 9330-9335
+    else-if must-be-constant     8667-8670 -> 9336-9339
+    add_type_and_value pair      8672-8673 -> 9341-9342
+
+Citations from line 1334 onward belong to LATER procedures (check_range ends at 1330) and were left
+for their own triage rather than swept along.
+
+**THE LOGIC IS A FAITHFUL PORT.** Two shape divergences were examined; both are non-defects, and
+both are now documented AT THE SITE so a future reader does not "fix" them into real ones:
+
+1. **The range-operator `case:` default arm.** C++ reports and `break`s -- continuing with
+   `op = Token_Lt` and possibly emitting a second diagnostic. The port `return`s. UNREACHABLE IN
+   BOTH: the entry guard is `is_ast_range`, which reduces to `is_token_range`, accepting exactly
+   `{Ellipsis, RangeFull, RangeHalf}` in C++ (`parser.cpp:1694-1702`) and the same three in the port
+   (`check_stmt.odin:4649`). A divergence confined to dead code; #266 is explicit that these are to
+   be left alone, not "fixed".
+2. **The `inline_for_depth` computation guard.** C++ computes unconditionally and stores
+   conditionally; the port hoists the nil test around the whole computation. Observationally
+   identical ONLY because `exact_value_sub` and `exact_value_increment_one` are pure -- zero
+   error-emitting lines in either implementation (`src/exact_value.cpp:948`, `:961`), checked rather
+   than assumed. The in-place comment records exactly what would break the equivalence, since a
+   future diagnostic added to either would make the port's guard silently swallow it.
+
+COMMENT-ONLY. Proven by diffing HEAD against the working tree with comment lines stripped, both
+before and after `citefn.py --apply` (which rewrote 12 anchors tree-wide). Parity was therefore NOT
+required and NOT run. Vet clean, `--check` drifted=0, `check_range` cleared from `--suspect`.
+`citefn_triaged.txt` 16 -> 17 procedures.
+
+## #599 -- citefn --anchor: 1,396 citations pinned mechanically, backlog 3,610 -> 845
+
+Jon asked whether dropping line numbers entirely would cut the per-callsite cost, guessing that
+mid-body precision "should be a small subset". MEASURED across core/odin (3,306 citations), the guess
+is inverted -- spans of >=15 lines (where a number buys nothing over a name) are 1,049, i.e. 32%;
+the other 68% are narrow mid-body pointers where the range IS the information. #579 B is the standing
+example: the port turned on the distinction between check_expr.cpp:6798 and :6835 inside one ~400-line
+function. Dropping numbers would have destroyed exactly that.
+
+But the underlying complaint was right, and the fix is the OPPOSITE operation. The reason
+RIGHT-FILE-WRONG-FUNCTION drift is invisible to --check is not the numbers -- it is that 2,956 of
+3,610 citations were BARE. A bare citation asserts no function, so there is nothing for its line
+numbers to contradict. Adding the name is what makes the number checkable.
+
+New mode `--anchor`, deliberately SEPARATE from --apply because the two make different claims:
+    --apply   asserts "a human read this procedure against C++"  (scoped by citefn_triaged.txt)
+    --anchor  asserts "this citation names the function its lines already point into"
+
+THE CIRCULARITY, AND HOW IT IS BROKEN. Deriving the anchor from resolve() alone is worthless: --check
+would re-derive the same name from the same lines and certify it forever. A blind bulk pass would
+have converted ~2,900 unchecked citations into ~2,900 apparently-checked ones -- textbook #483, a
+gate that passes because it was taught the wrong answer. So --anchor requires TWO INDEPENDENT
+signals to agree:
+    1. the cited lines resolve wholly inside exactly one C++ function, AND
+    2. that function's name corroborates the enclosing ODIN procedure (related()), which is derived
+       from the port side and knows nothing about the line numbers.
+Signal 2 is what breaks the circularity. Where the two disagree, the citation is left BARE and stays
+on the --suspect worklist -- and those 845 are precisely the ones a blind pass would have cemented
+wrongly. related() is generous by design, so this is corroboration, not proof; the claim written is
+correspondingly weak ("points into F"), not "F was ported correctly".
+
+RESULT
+    anchored (self-checking)   351 -> 1747
+    read-required backlog      3,610 sites -> 845 citations
+    left bare, unresolvable    1,018  (522 range-spans-functions, 412 outside-any-function,
+                                       75 range-end-outside, 9 unknown-file) -- standing rule
+    uncorroborated, left bare    845  (the --suspect worklist)
+
+ANCHORING IS NOT READING, and the tool says so in its own output. None of the 1,396 went into
+citefn_triaged.txt, which stays the record of what was READ -- the distinction that matters, since
+the actual defects this order has produced (#592's missing polymorphic gate, #598's two shape
+divergences) came from reading logic, not from having exact line numbers.
+
+VERIFICATION. Idempotent (second --anchor adds 0). COMMENT-ONLY: 45 of 49 files byte-identical after
+stripping full-line comments; the other 4 differ on exactly 6 lines, each a TRAILING citation comment
+on a code line (which the line filter cannot strip) -- all six inspected individually, code prefix
+untouched. Vet rc=0. --check drifted=0. TWO positive controls, both RED:
+    A. renaming an anchor to a nonexistent function        -> DRIFT, now inside: create_scope
+    B. shifting a line +4000 out of its named function     -> DRIFT, range-spans-functions
+Parity NOT required and NOT run: comment-only.
+
+## #600 -- check_proc.odin: 3 real divergences + 64 citations, and #592's defect had a THIRD copy
+
+Four of the top --suspect clusters were all in check_proc.odin (lines 22, 89, 282, 484). Worked as one
+file pass. Deltas were NON-UNIFORM across the file -- +206 for the check_procedure_later family, +355
+for total_bodies_checked, +358 for the worker-data struct, +361 for check_procedure_bodies, and
+`checker.cpp:1` (DEBUG_CHECK_ALL_PROCEDURES) was already CORRECT and left alone. Every target was
+looked up BY NAME in the function index, never by offset.
+
+THREE REAL DIVERGENCES, all found by reading the logic rather than by any gate:
+
+1. **consume_proc_info was missing the polymorphic gate** -- the same defect #592 found in
+   check_proc_info_worker_proc, in the SIBLING copy. #592 fixed the worker; the sequential/drain copy
+   was still unguarded. C++ (checker.cpp:6745-6751) defers only when the parent is NOT an
+   unspecialized-polymorphic procedure; the port deferred unconditionally. Not cosmetic: an
+   unspecialized polymorphic parent never gets proc_body_checked (C++ returns early for exactly that
+   case at :6495-6497), and check_procedure_bodies' sequential loop re-evaluates
+   len(procs_to_check) every iteration -- so an unconditional re-defer feeds the loop its own work
+   indefinitely. The failure mode is a HANG, not a wrong diagnostic. REACHABILITY UNMEASURED: needs a
+   Proc_Info enqueued for a nested proc whose parent body is never checked, and no repro was built.
+   Ported for parity regardless. Two copies of one block have now each been fixed separately; the
+   lesson is that finding a defect in one copy obliges checking every copy.
+
+2. **check_procedure_later_from_entity asserted where C++ returns.** C++ tests `type == t_invalid`
+   (:6489-6493) and returns. The port tested only nil, then asserted kind == .Proc -- and t_invalid is
+   Basic-kinded, so an entity whose procedure type failed to check PANICKED the checker. The nil arm
+   is a port-only defence (C++ would segfault on base_type(nullptr)) and was kept deliberately, now
+   labelled as port-only rather than looking inherited.
+
+3. **The polymorphic test read a flag where C++ calls a predicate.** C++ calls
+   is_type_polymorphic(type) at :6495; the port read Type_Proc.is_polymorphic. The predicate is
+   strictly WIDER -- its .Proc arm returns true for the flag OR a polymorphic parameter tuple OR a
+   polymorphic result tuple. Reading the flag alone under-detects, so the port queued bodies C++
+   declines to check. (My first pass here wrongly suspected the port's is_type_polymorphic had no
+   .Proc arm at all -- that was a too-narrow grep window; the arm exists and carries all three
+   conditions.)
+
+Also corrected FIVE pre-existing WRONG-FUNCTION anchors that an earlier --apply had cemented:
+check_init_worker_data's three citations were anchored to `calculate_global_init_order`, and
+check_proc_info's two to `check_import_entities`. Both procedures were in citefn_triaged.txt, i.e.
+claimed as READ. --check could not see either, because the anchor had been DERIVED from the drifted
+line numbers -- name and line agree with each other while both point at the wrong function. That is
+the residual hole in --apply and it is worth stating plainly: --apply's safety rests entirely on the
+claim that a human read the citations, and #592's read of check_init_worker_data missed all three.
+
+GATES (full batch checkpoint, also clearing #592's deferred parity debt and confirming #589/#590/#593):
+vet 0 | corpus 206 FULL-MATCH 0 DIFFER | corpus_vet 4/4 | entrypoint 10/10 + state 5/5 |
+splitcheck 0/0 | citefn --check drifted=0 | parity 323/323 count=1 text=0 attrib=2 (baseline) |
+parity_vet 323/323 count=1 text=0 attrib=2 (baseline) | root suite 146 tests, ALL SUCCESSFUL.
+
+## #601 -- canonical names omitted `!` and `#optional_ok`: found by mirc, invisible to every gate here
+
+mirc reported an unresolvable symbol when linking against reference-compiled objects. The reference
+defines `runtime::append_elem:proc(...)->(...)#optional_ok`; the port referenced the same string
+without the tag -- byte-identical for 137 characters, then divergent.
+
+CAUSE: the port's `.Proc` case in write_type_to_canonical_string stopped after the results. C++
+(name_canonicalization.cpp:983-988) appends two further tags: `!` for diverging, `#optional_ok` for
+optional_ok. BOTH were missing. Fixed in C++'s order -- results, then `!`, then `#optional_ok`; order
+is load-bearing because this is a NAME and a different order is a different symbol.
+
+WHY NO GATE HERE COULD SEE IT, which is the more useful half. The canonical name is LINK-TIME
+IDENTITY, not a diagnostic. parity/corpus compare diagnostics; modelcmp compares layout THROUGH
+diagnostics; doccmp compares doc-visible state. None of them renders a canonical name. And the defect
+is symmetric under self-comparison -- port-vs-port agrees on the wrong name -- so only a cross-link
+against reference output could expose it. That is a genuine gap in the gate set, not an oversight in
+running them.
+
+VERIFIED BY DIRECT OBSERVATION, not by inspection: a probe calling type_to_canonical_string prints
+    div   = proc(x:int)!                              <- diverging tag present
+    opt   = proc(x:int)->(v:int,ok:bool)#optional_ok  <- the 12 chars that were missing
+    plain = proc(x:int)->(:int,:bool)                 <- no tag, so the emit is conditional
+`plain` is a built-in negative control: it proves the tags are gated rather than unconditional.
+
+TWO QUESTIONS FROM JON ON THAT OUTPUT, both resolved as FAITHFUL:
+  * `proc(x:int)!` rather than `proc(x:int) -> !`. C++ emits `->` only `if (result_count > 0)`
+    (:979-982) and appends `!` after that block. A `-> !` procedure has zero results, so the
+    reference writes no arrow either. Caveat: the #optional_ok form is confirmed against real
+    reference output (mirc's byte comparison of an emitted symbol), but the `!` POSITION is derived
+    from C++'s source order and is UNOBSERVED against reference output -- nothing linked has reached a
+    diverging procedure yet.
+  * the leading colons in `(:int,:bool)`. write_canonical_params appends `v->token.string` then
+    CANONICAL_TYPE_SEPARATOR UNCONDITIONALLY (:14-15); an unnamed result has an empty token, so the
+    colon survives with nothing before it. The port does the same unconditionally, so this is
+    faithful rather than an artefact.
+
+My own new citation named `write_canonical_type`; the function is `write_type_to_canonical_string`,
+and --check went RED on it within the same session. Corrected. That is the anchor format earning its
+keep on a citation twenty minutes old.
+
+GATES: vet 0 | corpus 206 FULL-MATCH | corpus_vet 4/4 | entrypoint 10/10 + state 5/5 |
+splitcheck 0/0 | citefn --check drifted=0 | parity 323/323 count=1 text=0 attrib=2 |
+parity_vet 323/323 count=1 text=0 attrib=2.
+
+## #602 DIAGNOSED, NOT LANDED (blocked on #603): calculate_global_init_order runs in the wrong phase
+
+Found while reading check_global_init.odin's check_all_global_entities cluster (7 citations, all of
+which resolved to `check_collect_value_decl` -- RIGHT-FILE-WRONG-FUNCTION for the fourth time).
+
+The loop body of check_all_global_entities is a faithful port of checker.cpp:5316-5340. But lines
+603-614 were an EXTRA phase C++ does not have there: the port called calculate_global_init_order and
+published info.variable_init_order from inside it. The port's own comment admitted the problem --
+"C++ Reference: calculate_global_init_order is called from check_init" -- and then called it anyway.
+
+C++ calls it exactly ONCE, at checker.cpp:7760, after check_procedure_bodies (:7343),
+check_deferred_procedures (:7754) and check_objc_context_provider_procedures (:7757). The port called
+it at the equivalent of :7331. The entity dependency graph is GROWN BY BODY CHECKING, so the port
+computed the order from a graph missing every edge that bodies contribute.
+
+TWO CONSEQUENCES:
+  * variable_init_order is BACKEND state -- its only reference consumer is llvm_backend.cpp:3374 --
+    so a wrong global initialisation order is invisible to every diagnostic gate here, the same
+    structural blind spot as #601.
+  * calculate_global_init_order also EMITS DIAGNOSTICS ("Cyclic initialization of '%s'" plus its
+    refers-to chain, :6425-6430), so the early call was also a potential UNDER-REJECTION. Parity is
+    at baseline either way, which means no corpus package exercises a global initialisation cycle:
+    the diagnostic half is UNMEASURED, not proven inert.
+
+calculate_global_init_order ITSELF is a faithful port (kind filter, dedup keyed on
+decl_info_of_entity, the cycle report, even bill's commented-out decl_info_has_init note). The only
+shape difference is the priority queue: C++ uses a min-heap with priority_queue_fix, the port
+re-sorts the whole queue each iteration. Same permutation, because the comparator's secondary key
+(order_in_src) breaks every tie deterministically.
+
+THE MOVE IS LOAD-BEARING, proven by A/B on a probe whose only dependency edge runs through a
+procedure BODY (`a := f()`, `b := 7`, `f :: proc() -> int { return b }`): variable_init_order goes
+from 7 entries to 44. So the early call really was working from a truncated graph.
+
+**NOT LANDED. The A/B also showed the move makes the published list WORSE for a consumer**, and that
+is a second, pre-existing defect:
+
+## #603 OPEN: for-loop iteration variables leak into info.entities
+
+After the move, variable_init_order contains ~30 entries with `is_global == false`. Their source
+positions identify them exactly -- they are FOR-LOOP ITERATION VARIABLES in base/runtime:
+    random_generator_chacha8_simd128.odin:231   for _ in 0..<4 {
+    thread_management.odin:18                   for &v in thread_local_cleaners {
+    print.odin:77                               loop: for arg, i in args {
+C++ cannot produce these: its calculate_global_init_order filter is only `kind != Entity_Variable`,
+and a loop variable IS an Entity_Variable, so C++ must be relying on info.entities containing
+globals only. C++ has exactly ONE writer of that array (check_add_entities_from_queues, :7436-7442,
+draining entity_queue) and the queue is fed only from add_entity_and_decl_info (:2267) -- the
+declaration path that assigns a DeclInfo. Locals go through plain add_entity and never get there.
+
+ROOT CAUSE NOT YET LOCATED. Ruled out so far: the port's range-statement variables DO use plain
+add_entity (check_stmt.odin:4971, matching C++ :1119/:2117); the port's add_entity_definition is
+faithful and feeds definition_queue, not entity_queue; the port's enqueue site is inside
+add_entity_and_decl_info exactly as C++'s is; and the two direct `append(&ctx.info.entities, e)`
+calls in check_decl.odin are `.Lazy`-gated and mirror C++'s check_entity_decl `end:` label
+(check_decl.cpp:2071-2075), which does the same append.
+
+NOTE THIS IS ALREADY LIVE, independent of #602: check_all_global_entities iterates info.entities and
+calls check_single_global_entity on every element, so loop variables have been passing through the
+global-entity path all along. Parity and parity_vet are clean, so it produces no diagnostic
+divergence on the 323-package corpus -- but "no gate sees it" is exactly what #601 taught.
+
+WHY #602 IS REVERTED RATHER THAN LANDED. Before the move the list held 7 entries, all genuinely
+global, in a wrong order. After, it holds 44 in the right order but polluted with locals -- which a
+backend would try to emit initialisers for. Adding an is_global filter to the publish step would
+paper over #603 and diverge from C++'s literal code, so it was not done. #602's edit is complete and
+verified; it is parked at $S/post602_check_files.odin and $S/post602_check_global_init.odin and can
+be re-landed in one step once #603 is fixed. Tree restored to pre-#602: vet 0, citefn --check
+drifted=0. No gates were run on the reverted state beyond those two, because nothing changed.
+
+## #603 CLOSED as NOT A DEFECT -- and my #602 blocker reasoning was WRONG in both premises
+
+The entry above parks #602 as "blocked on #603". That was wrong, and the correction matters more than
+the fix, because it was a reasoning failure of a specific recognisable shape: I inferred an invariant
+C++ "must" rely on, from the absence of a filter, without reading the two functions that decide it.
+
+I claimed: loop variables cannot be in C++'s info.entities, because C++ enqueues only from
+add_entity_and_decl_info (the declaration path) and locals go through plain add_entity. Instrumenting
+the port's four writers put the offender (`arg` at base/runtime/print.odin:77) squarely in the ENQUEUE
+path, so I went and read C++'s range-statement registration. BOTH premises collapse:
+
+  1. **C++ calls add_entity_and_decl_info for loop variables too.** check_stmt.cpp check_range_stmt:
+     2114-2120 does BOTH -- add_entity at :2117, then make_decl_info and add_entity_and_decl_info at
+     :2118-2119, for every entity in the range statement's variable list. The port's
+     check_stmt.odin:4621-4626 is a faithful port of exactly that loop. My earlier note that "range
+     vars use plain add_entity, matching C++ :1119/:2117" read one of the two calls and stopped.
+  2. **is_entity_a_dependency is byte-identical.** C++ (checker.cpp:3223-3234) and the port
+     (entity_helpers.odin:1488) have the same decision table, including `Entity_Variable: return
+     e->pkg != nullptr` -- and add_entity_and_decl_info SETS e->pkg (checker.cpp:2259), so a C++ loop
+     variable passes that gate exactly as the port's does. The port's only addition is a leading nil
+     guard, which C++ lacks because it dereferences e->kind directly.
+
+So all three deciding points -- registration, the dependency filter, and calculate_global_init_order's
+`kind != Entity_Variable` filter -- are the same in both implementations. C++ puts for-loop iteration
+variables into variable_init_order too. The port is FAITHFUL; there is nothing to fix.
+
+HONEST LIMIT ON THIS CONCLUSION: it is a code-equivalence argument, not an observation. No reference
+flag prints variable_init_order, so C++'s actual list was never dumped and compared. The argument is
+strong -- three functions, line for line -- but it is inference, and if a canonical state comparator
+is ever built (see #601's gate-set note) this is the first thing to check with it.
+
+WHAT WAS ACTUALLY WRONG WITH MY REASONING: I treated "C++ has no filter here, therefore C++ must
+filter earlier" as a deduction. It is a guess about code I had not read. The same move produced the
+`checker.cpp:7333` citation in #602, which I anchored to check_parsed_files by assuming rather than
+resolving -- 7333 is inside handle_raddbg_type_view, and --check went red on it in the same session.
+The real init_preload call site is checker.cpp:7706. Both errors were caught within minutes by
+mechanical checks; neither would have been caught by more thinking.
+
+## #602 LANDED: calculate_global_init_order moved to C++'s phase
+
+With #603 dissolved, the move is unambiguously correct and nothing is made worse by it. The call is
+gone from check_all_global_entities and now sits in check_files.odin between
+check_objc_context_provider_procedures and add_type_info_for_type_definitions, matching
+checker.cpp check_parsed_files:7759-7760. Publishing is split into store_global_init_order, with a
+comment recording why the two-step form cannot reintroduce duplicates (the dedup that matters is
+inside calculate_global_init_order, keyed on decl_info_of_entity).
+
+Load-bearing, by A/B on a probe whose only dependency edge runs through a procedure body
+(`a := f()`, `b := 7`, `f :: proc() -> int { return b }`): variable_init_order goes from 7 entries to
+44, because the early call was working from a dependency graph that predated body checking. The 30-odd
+loop variables in the larger list are what the reference produces too (#603).
+
+Also relevant: calculate_global_init_order EMITS DIAGNOSTICS ("Cyclic initialization of '%s'" plus its
+refers-to chain, checker.cpp:6425-6430), so the wrong phase was a potential UNDER-REJECTION as well as
+wrong backend state. Parity is at baseline before and after, which means no corpus package exercises a
+global initialisation cycle -- that half remains UNMEASURED, not proven inert.
+
+GATES (full batch): vet 0 | corpus 206 FULL-MATCH 0 DIFFER | corpus_vet 4/4 | entrypoint 10/10 +
+state 5/5 | splitcheck 0/0 | citefn --check drifted=0 | parity 323/323 count=1 text=0 attrib=2
+(baseline) | parity_vet 323/323 count=1 text=0 attrib=2 (baseline) | root suite 146 tests, ALL
+SUCCESSFUL. The #603 instrumentation was fully removed before any of these ran (verified by grep).
+
+## #604 -- check_proc.odin's last four clusters + check_all_global_entities: 39 citations, ZERO defects
+
+Read line-for-line against C++: check_unchecked_bodies, check_safety_all_procedures_for_unchecked,
+check_scope_usage_file_worker, check_scope_usage_pkg_worker, check_all_scope_usages,
+check_all_global_entities, and the two rawptr wrappers. **All faithful.** Recording a null result
+deliberately -- the hit rate is what tells us whether --suspect is still paying for itself, and it has
+now produced real defects in #587, #592, #598, #600 and #602 but nothing here.
+
+CITATION FINDINGS, all mapped by CONTENT:
+  * check_unchecked_bodies: :6288-6320 -> :6643-6675, uniform +355 verified at all six anchors.
+  * check_safety_all_procedures_for_unchecked: :6322-6348 -> :6677-6703. Its old SUB-citations ran to
+    :6359 -- PAST the cited function's own end of :6348. They were internally inconsistent, so no
+    shift could ever have been right; all ten mapped by content.
+  * the scope-usage trio: uniform +376. C++'s two workers ARE the WORKER_TASK_PROC macro forms
+    (checker.cpp:7590, :7598), and the port splits each into a rawptr wrapper plus a typed body --
+    an Odin-vs-macro shape difference, NOT an invention. The wrapper names have no C++ counterpart,
+    so both halves now cite the single C++ worker.
+  * check_all_global_entities: :4938-4995 resolved to check_collect_value_decl -- RIGHT-FILE-
+    WRONG-FUNCTION, the FIFTH instance (#587, #592, #598, #602, here). The cited extent was 57 lines
+    where the real function (:5316-5340) is 25, so this was never a shift either.
+  * one stray: the testing-procedures dedup cited :6370, a GB_ASSERT inside find_entity_path. Real
+    site is check_test_procedures:6725. Noted there that C++ spells the helper
+    `remove_neighbouring_duplicate_entires_from_sorted_array` (`entires`), and the port corrects the
+    typo deliberately, so the two names differ by exactly that.
+
+FOUR PORT-ONLY SHAPES verified benign and now documented AT THE SITE, so a later reader does not
+"fix" them into divergences:
+  * check_all_scope_usages has a thread-count branch C++ lacks (C++ always adds tasks then waits).
+    Needed because global_thread_pool may be nil in a hosted session; with one thread the two are
+    observationally identical, since C++'s pool runs the same tasks inside thread_pool_wait().
+  * that function iterates sorted_files/sorted_packages where C++ iterates MAPS in hash order. Safe
+    HERE specifically because these workers only emit diagnostics, which are collected and sorted
+    before printing, so submission order cannot reach the output (#50/#214 policy).
+  * check_unchecked_bodies reuses check_procedure_bodies_worker_data[0].untyped where C++ makes a
+    fresh local map; consume_proc_info clears it per procedure either way.
+  * two guards around what are no-ops in C++ (`queue_count > 0` before a reserve), and two plain reads
+    where C++ uses relaxed atomic loads on values it then DISCARDS (proc_checked_state, min_dep_count).
+    min_dep_count is never raised above zero at all (#272), so that loop finds nothing today.
+
+COMMENT-ONLY, proven on both files by diffing with comments stripped INCLUDING trailing ones -- every
+surviving difference is a blank line where sed removed an added comment. Parity therefore NOT required
+and NOT run. vet 0, citefn --check drifted=0, --apply rewrote 2 more, --suspect citations 821 -> 777,
+anchored 1344 -> 1389. citefn_triaged.txt 17 -> 25 procedures.
+
+## #605 -- the two cheap finishes: 38 more citations anchored, --suspect's worst cluster dissolved
+
+TWO items I had flagged rather than buried at the end of #604, both closed.
+
+**calculate_global_init_order + report_circular_dependency.** Their 15 citations resolved to THREE
+different wrong functions -- check_create_file_scopes, check_collect_entities_all_worker_proc and
+check_collect_entities_all. RIGHT-FILE-WRONG-FUNCTION, the SIXTH instance (#587, #592, #598, #602,
+#604, here). The real function is checker.cpp:6398-6465. Its body was read line-for-line in #602 and
+confirmed faithful, so all 15 were mapped by CONTENT against that read rather than by any shift.
+
+**populate_builtin_package_scope -- the 22-citation cluster that had been sitting at the top of
+--suspect looking like the worst drift in the tree.** It is the port's counterpart of C++
+init_universal (checker.cpp:1113-1592): a RENAME, which is exactly why corroborates() rejected it and
+why it ranked first. An earlier session had judged it "CLEARED as a renamed counterpart" and left it
+there -- which is the wrong end state, because a cleared cluster that stays bare keeps re-appearing at
+the top of the worklist and keeps costing a reader's attention.
+
+VERIFIED MECHANICALLY, and the scope of the claim stated precisely because it is not a full audit:
+  * 23 of 24 cited ranges resolve INSIDE init_universal; ZERO resolve to any other function. The other
+    3 are file-scope (two types.cpp basic_types entries, and checker.cpp:1104-1109 for the
+    odin_compile_timestamp global) and correctly stay bare.
+  * content verified by SAMPLE at four points spread across the 480-line range: the bedrock 128-bit
+    drop (:1120-1133), the ODIN_ARCH name table (:1201-1214), Odin_Sanitizer_Flag (:1399-1424) and the
+    objc intrinsics types (:1510-1516). All four are exactly what the port's comments claim.
+  * a full line-for-line audit of init_universal against populate_builtin_package_scope was NOT done
+    and is NOT claimed. The anchor asserts only "this citation points into init_universal", and that
+    much is verified for every one of the 23.
+
+RESULT: anchored 1389 -> 1427. --suspect 777 -> 745 citations, 538 -> 533 pairs, and its largest
+remaining cluster drops from 22 to 7 -- the worklist now has no entry big enough to suggest a
+systematic drift.
+
+TAIL, found while PROVING comment-only rather than by --suspect: check_global_init.odin's file-level
+/* */ doc block carried three more stale citations, and my line-comment filter could not see them --
+`sed 's,//.*,,'` leaves block comments untouched, so the first proof attempt reported a spurious
+CODE-CHANGED on line 17. Re-proved with a block-comment-aware stripper, which both confirmed
+comment-only AND exposed the three:
+    find_entity_path          :5995-6041 -> :6349-6395  (had resolved to collect_file_decl/decls)
+    check_all_global_entities :4971-4995 -> :5316-5340  (a stale DUPLICATE of the one fixed at :561 --
+                                                        fixing a citation in the body does not fix its
+                                                        copy in the file header, and --check cannot
+                                                        see either while both are bare)
+    checker.cpp:55-105        left deliberately BARE: it spans a file-scope struct plus three
+                              functions (entity_graph_node_set_add:66-68, _cmp:85-97, _swap ending
+                              at :105), so no single anchor is truthful.
+LESSON FOR THE COMMENT-ONLY PROOF ITSELF: strip BLOCK comments too. The line-comment-only version gave
+4 false CODE-CHANGED in #599 (trailing comments) and 1 here (a /* */ block). Both times the filter was
+wrong, not the code -- but a filter that cries wolf is one that gets ignored.
+
+COMMENT-ONLY, proven on both files with a block-comment-aware stripper. Parity NOT required and NOT
+run. vet 0, citefn --check drifted=0, --apply rewrote 23. citefn_triaged.txt 25 -> 28 procedures.
+
+## #606 -- a NEW drift sub-class: right file, RIGHT FUNCTION, wrong lines. Plus an instrument fix.
+
+Working checker.odin's file-level cluster (the `<file>` entry that --suspect ranked at 7). Two findings,
+and the first one changes how the anchor format should be trusted.
+
+**RIGHT-FILE, RIGHT-FUNCTION, WRONG-LINES.** The six citations at checker.odin:580-614 label groups in
+the Builtin_Proc_Info table -- "Math operations", "Bit manipulation", "Overflow-checking arithmetic",
+"Saturating arithmetic", "Floating-point intrinsics", "Fixed-point arithmetic" -- and cross-reference
+where C++ CHECKS those builtins. All six resolve cleanly INSIDE check_builtin_procedure, so anchoring
+them would have produced a name-and-line pair that agrees with itself and passes --check forever. But
+ALL SIX RANGES ARE WRONG BY CONTENT, because check_builtin_procedure is ~3,000 lines and a range can
+be deep inside the right function while describing entirely different builtins:
+    cited :3744-4258 as min/max/abs/clamp      -- :3744 is QUATERNION construction
+    cited :5193-5336 as bit manipulation       -- :5193 is soa_struct
+    cited :5338-5380 as overflow arithmetic    -- :5341 is BuiltinProc_concatenate
+    cited :6078-6150 as fixed-point arithmetic -- :6078 is generic invalid-operand handling
+Real ranges, taken from the `case BuiltinProc_*` labels and bounded by the next group's label:
+    min:4161 max:4338 abs:4521 clamp:4583, next soa_zip:4677              -> 4161-4676
+    count_ones:5610 .. byte_swap:5749, next overflow_add:5785             -> 5610-5784
+    overflow_add/sub/mul:5785-5787, next saturating_add:5837              -> 5785-5836
+    saturating_add/sub:5837-5838, next sqrt:5888                          -> 5837-5887
+    sqrt:5888 fused_mul_add:5924, next mem_copy:5977                      -> 5888-5976
+    fixed_point_mul/div/mul_sat/div_sat:6541-6544, next expect:6616       -> 6541-6615
+
+WHY THIS MATTERS BEYOND SIX COMMENTS: containment inside the named function is NECESSARY but NOT
+SUFFICIENT. #605 leaned on containment to anchor 23 citations into init_universal (480 lines) and said
+so explicitly, sampling content at four points. This is the case that shows why that hedge was the
+right call rather than pedantry -- in a function this large, "resolves to the right name" and "points at
+the right code" are genuinely different claims, and only the second is worth anything to a reader.
+
+**INSTRUMENT FIX (my own tool misreporting, the #558/#520 class).** Four citations to
+src/checker_builtin_procs.hpp were reported as 'unknown-file'. That file EXISTS; it is a pure table of
+builtin definitions with nothing the function index can see, and build_index skipped registering it
+because of `if spans: index[base] = spans`. So a benign file-scope reference was being reported with
+the verdict reserved for a DANGLING citation -- something a reader would rightly chase. Now every
+scanned file is registered even with an empty span list, so those four report 'outside-any-function'
+(leave bare, like every other table reference) and 'unknown-file' means what it claims: not in src/.
+unknown-file 9 -> 0.
+
+COMMENT-ONLY on checker.odin, proven with the block-and-line stripper. citefn.py itself changed (the
+index fix), which is tooling, not the checker. Parity NOT required and NOT run. vet 0, --check
+drifted=0.
+
+## #607 -- check_proc_decl's init/fini cross-references: all SEVEN wrong by content, #606's class again
+
+check_proc_decl has 55 citations; 42 were anchored by #595's partial pass, 13 were bare. The seven that
+--suspect flagged cite generate_minimum_dependency_set_internal from inside check_proc_decl, which LOOKS
+like right-file-wrong-function but is NOT: the port deliberately relocated the @(init)/@(fini) validation
+from that function to declaration time (#286, because generate_minimum_dependency_set does not exist in
+the port at all -- #272), and the port comments say so at length. The FUNCTION NAME was right.
+
+EVERY ONE OF THE SEVEN RANGES WAS WRONG BY CONTENT -- exactly #606's class, and caught only because
+#606 made "verify the content at the cited line" part of the routine:
+    cited :3001-3045 for the whole validation   -- :3001 is a bare `}`
+    cited :3007-3012 as "clears is_init"        -- :3007 is add_to_set; the signature check is 3015-3020
+    cited :3037-3040 as the init append         -- :3037 is the disabled-proc WARNING
+    cited :3042-3080 as the @(fini) arm         -- :3042 is the INIT blank-identifier error
+    cited :3047-3052 as "clears is_fini"        -- :3047 is add_to_set on the INIT path
+    cited :3072-3075 as the fini append         -- :3072 is the fini FILE-SCOPE check
+Real structure, read from the C++: init arm 3013-3049 (signature 3015-3020, contextless 3023-3029,
+file-scope 3031-3034, disabled 3036-3039, blank ident 3041-3043, append 3046-3049); fini arm 3050-3086
+(signature 3056-3061, contextless 3064-3070, file-scope 3072-3075, blank ident 3077-3079, append
+3081-3084). The drift is NON-UNIFORM (+8 to +14 across the seven), so no single shift would have worked.
+
+AND I GOT ONE WRONG ON THE FIRST PASS: I cited the fini append as 3083-3086, which overshoots by three
+lines into closing braces and the `break`. Corrected to 3081-3084, the `if (is_fini) { ... }` block.
+Worth recording because it is the same failure the entry above is about -- a range that contains the
+right code but is not the right range -- committed while fixing six instances of it.
+
+STILL OPEN ON THIS PROCEDURE, deliberately not claimed: the 42 citations #595 anchored into
+check_decl.cpp check_proc_decl (a 420-line function) are NON-MONOTONIC and OVERLAPPING -- :1123 cites
+1277-1282 while :1108 cites 1298-1316; :1451 cites 1497-1499 after :1421 cites 1537-1556; 1497-1506 and
+1497-1499 overlap. Port code order normally tracks C++ order, so repeated backwards jumps are a signal
+that some of those 42 are wrong lines too. They all pass --check because each is self-consistent. NOT
+audited here and NOT claimed clean; check_proc_decl therefore does NOT go into citefn_triaged.txt.
+
+COMMENT-ONLY -- but the PROOF failed first, for the THIRD distinct reason, so the ad-hoc stripper is
+now retired in favour of a checked-in tool.
+
+  #599  `sed 's,^\s*//.*,,'` strips only FULL-LINE comments  -> 4 false CODE-CHANGED on trailing comments
+  #605  `sed 's,//.*,,'` strips line comments but not /* */   -> 1 false CODE-CHANGED on a header block
+  #607  stripping both, then comparing whole text             -> false CODE-CHANGED on the BLANK LINES
+                                                                 left where added comments were stripped
+
+Each time the filter was wrong and the code was fine, which is the dangerous direction: "it's probably
+just comments" is exactly the reasoning that eventually waves a real change through. New tool
+.claude/tools/commentonly.py strips block comments, strips line comments, then compares the sequence of
+NON-BLANK lines -- so adding or removing comment lines cannot register, and a one-character code change
+must. PROVEN BY POSITIVE CONTROL: flipping `ac.init && ac.fini` to `ac.init || ac.fini` makes it print
+CODE-CHANGED with the exact line. Its docstring also records the one way it can give a FALSE PASS -- a
+`//` or `/*` inside a string literal is stripped too, so a code change after such a token on the same
+line would be invisible.
+
+Parity NOT required and NOT run. vet 0, citefn --check drifted=0.
+
+## #608 -- #595's anchoring of check_proc_decl is UNRELIABLE at scale. 3 fixed, ~12 still untrusted.
+
+Audited the 44 citations #595 anchored into check_decl.cpp check_proc_decl (1259-1680, ~420 lines),
+which #607 deliberately left unclaimed. The audit method is worth keeping: port code order normally
+tracks C++ order, so listing (port_line, cpp_line) in PORT order and flagging every backwards jump
+localises the suspects without reading all 44. Result: **15 inversions out of 44**. The first run
+(:1052 -> :1136, cpp 1259 -> 1339) is clean and monotonic; everything after it scatters.
+
+THREE CONFIRMED WRONG BY CONTENT and fixed here:
+    port :1414 cited 1475-1495 as the `main` entry-point block
+               -- :1475-1495 is instrumentation teardown + handle_link_name. Real block: 1529-1565.
+    port :1454 cited 1497-1499 as `if (is_foreign && is_export)`
+               -- :1497-1499 is ac.has_disabled_proc. Real site: 1567-1569.
+    port :1287 cited 1368-1385 as is_valid_instrumentation_call
+               -- :1368-1385 is the wasm/enable_target_feature error. The predicate is CALLED at
+                  1442 and 1462; the citation now names both, since the port defines a local helper
+                  and there is no single C++ line to point at.
+
+~12 MORE INVERSIONS REMAIN UNVERIFIED and are NOT fixed here: :1123 (cites 1277-1282 for the Type_Proc
+variant grab), :1247 (1335-1341 for the optimization_mode switch), :1271 (1351-1360 for `if ctx.file`),
+:1326 and :1345 (1405 / 1424 for the instrumentation mutex), :1459 (1501-1510 for `if pt.is_polymorphic`),
+:1471 (1512-1532 for `if pl.body != nil` -- :1512 is ac.linkage), :1487 (1524), :1503 (1563), :1539
+(1560-1605 for `if is_foreign`), :1562 (1582-1603), :1581 (1607-1609). Several look wrong on the same
+evidence as the three above; none has been checked line-by-line.
+
+WHY THIS IS STOPPED HERE RATHER THAN HALF-FINISHED. Remapping ~12 more requires reading the port body
+against a 420-line C++ function properly, which is its own batch. Fixing a few more would leave a MIX of
+verified and unverified anchors in one procedure -- and an unverified anchor is indistinguishable from a
+verified one by inspection, so a mix is WORSE than a set uniformly labelled untrusted. check_proc_decl
+therefore stays OUT of citefn_triaged.txt, and this entry is the record of which citations in it are
+known-good (the monotonic first run, plus #607's seven cross-references, plus the three fixed here) and
+which are not.
+
+THE LESSON ABOUT --apply, now demonstrated at scale. #600 found five wrong anchors in two procedures
+listed as read. This is the same failure with 15 candidates in ONE procedure: #595 ran --apply over
+check_proc_decl on the strength of a read that evidently was not thorough, and every one of those 44
+anchors has passed --check ever since, because each is internally self-consistent. --apply's safety is
+EXACTLY the quality of the read behind it and nothing else. citefn_triaged.txt is a claim, not a
+verification, and this is what it looks like when the claim outran the work.
+
+COMMENT-ONLY, proven by .claude/tools/commentonly.py (1587 code lines, unchanged). Parity NOT required
+and NOT run. vet 0, citefn --check drifted=0.
+
+## #609 -- check_proc_decl finished: 15 of 15 flagged inversions were REAL. The heuristic is 15/15.
+
+Completed the audit #608 deliberately left unfinished. All 44 citations anchored into
+check_decl.cpp check_proc_decl (1259-1680) are now verified BY CONTENT.
+
+**THE MONOTONICITY HEURISTIC WAS 15/15 PRECISE**, which is the transferable result. Method: list every
+citation as (port line, C++ line) in PORT order and flag each backwards jump, on the reasoning that port
+code order normally tracks C++ order. It flagged 15 of 44. Every single one was a genuinely wrong line
+range. No false positives. That makes it the cheapest reliable detector yet for
+right-function-wrong-lines, and it needs no reading to run -- worth applying to any procedure with many
+citations into a large C++ function.
+
+The twelve fixed here, all mapped by content:
+    pt assignment            1277-1282 -> 1319          (TypeProc *pt = &proc_type->Proc)
+    optimization_mode switch 1335-1341 -> 1381-1386
+    `if (file)`              1351-1360 -> 1402-1403
+    instrumentation mutex    1405      -> 1451          (enter arm MUTEX_GUARD)
+    instrumentation mutex    1424      -> 1470          (exit arm MUTEX_GUARD)
+    is_polymorphic           1501-1510 -> 1571-1579
+    `pl->body != nullptr`    1512-1532 -> 1582-1602     (:1512 was ac.linkage)
+    BlockStmt assert         1524      -> 1592
+    the else-branch          1563      -> 1596-1601
+    `if (is_foreign)`        1560-1605 -> 1630-1645
+    foreign_mutex            1582-1603 -> 1652
+    CustomLinkName           1607-1609 -> 1677-1679
+
+SELF-TEST AFTER THE REMAP: monotonicity re-run gives 44 citations / 1 inversion, down from 15. That
+residual one is LEGITIMATE and now documented at the site -- the port's is_valid_instrumentation_call is
+a NESTED procedure, which Odin requires declared before use, so it sits above the enter/exit dispatch;
+C++ has no nested definition and the only lines in check_proc_decl mentioning it are the two calls at
+1442/1462. Declaration-before-use versus call-order. Running the detector on your own fix is worth the
+thirty seconds: it is what turned "I think that is all of them" into a number.
+
+SCOPE OF THE CLAIM, stated precisely because it is not everything: check_proc_decl is now in
+citefn_triaged.txt on the basis that all 44 citations point at the C++ code they DESCRIBE. The port's
+BEHAVIOUR at those sites was NOT re-audited -- #607 read the init/fini arms and found them faithful; the
+rest were read only closely enough to identify the counterpart construct. A logic audit of
+check_proc_decl remains open work, and "citations correct" is not "port correct".
+
+TALLY ON #595's --apply OVER THIS PROCEDURE: 44 anchored, 15 wrong lines (34%), plus 7 more wrong in the
+bare cross-references #607 fixed. All 44 passed --check from the moment they were written, because
+self-consistency is the only thing --check can test. citefn_triaged.txt is a claim about who read what;
+it is not evidence.
+
+COMMENT-ONLY, proven by commentonly.py (1587 code lines, unchanged). Parity NOT required and NOT run.
+vet 0, citefn --check drifted=0. --apply rewrote 3 more; anchored 1445; --suspect 728 citations.
+citefn_triaged.txt 28 -> 29 procedures.
+
+## #610 -- citemono.py built and swept: 265 inversions tree-wide, 87 inside the claimed-read set
+
+#609 proved the monotonicity heuristic 15/15 precise on check_proc_decl. This turns it into a
+permanent tool (.claude/tools/citemono.py) and runs it over every anchored citation in the checker.
+
+RESULT: **265 inversions across 60 (procedure, C++ function) groups.** Of those, **87 inversions across
+17 groups sit in procedures already listed in citefn_triaged.txt** -- i.e. claimed as read. Worst:
+    23 / 31 citations  check_expr_base_internal  (74% of its citations inverted)  [TRIAGED]
+    22 / 46            check_proc_body                                           [TRIAGED]
+    18 / 20            check_type_decl                                           [untriaged]
+    16 / 27            check_compound_literal                                    [untriaged]
+    16 / 21            check_builtin_procedure_directive                         [untriaged]
+    15 / 21            check_get_params                                          [untriaged]
+    13 / 15            check_call_expr -> check_polymorphic_record_type          [TRIAGED]
+Baselines saved to citemono_baseline.txt and citemono_triaged.txt so the next run can diff.
+
+DELIBERATELY A REPORT, NOT A GATE, and the tool says so in its own output. Some inversions are
+legitimate: Odin requires a nested procedure to be declared before use, so wherever the port hoists a
+local helper its citation sits above the C++ call sites it points at -- check_proc_decl's
+is_valid_instrumentation_call is exactly that, and it is documented at the site. A gate firing on those
+would be noise, and a gate tuned until it stops firing is the #483 failure. So it exits 0, prints what
+to look at, and each case gets dispositioned AT THE SITE so the next run already has the answer.
+
+WHAT THIS SAYS ABOUT citefn_triaged.txt, written into the file itself as a header. Every line in it is
+a CLAIM that someone read a procedure's citations; it is not a verification, and --apply trusts it
+completely. 17 of its entries have unresolved inversions, so the honest reading of those is "claimed
+read, monotonicity NOT clean". The 1-inversion entries are probably the hoisted-helper shape, but only
+check_proc_decl's has actually been checked -- the rest are unexamined and I am not going to call them
+benign on a pattern match.
+
+REMEDIATION IS NOT ATTEMPTED HERE, on purpose. 265 inversions is many batches of work, and #608
+established why a partial remap is worse than none: an unverified anchor is indistinguishable from a
+verified one by inspection, so a procedure must be finished or left uniformly untrusted. The queue is
+worst-first, and the two 20-plus TRIAGED entries come first because they combine the highest inversion
+count with a standing claim of having been read.
+
+NO CHECKER CODE CHANGED -- this turn added a tool, two baselines, and a header comment. vet 0,
+citefn --check drifted=0. Parity NOT required and NOT run.

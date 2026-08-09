@@ -42,7 +42,7 @@ base_array_type :: proc(t: ^Type) -> ^Type {
 // base_any_array_type returns the element type of ANY array-like type, including the ones
 // base_array_type deliberately excludes: slice, dynamic array and fixed-capacity dynamic array.
 // C++ keeps both functions and they are not interchangeable.
-// C++ Reference: types.cpp:1816-1834
+// C++ Reference: types.cpp base_any_array_type:1816-1834
 base_any_array_type :: proc(t: ^Type) -> ^Type {
 	bt := base_type(t)
 	if bt == nil {

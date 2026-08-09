@@ -21,16 +21,16 @@ import "core:path/filepath"
 import "core:strings"
 import "core:sync"
 
-// C++ Reference: check_decl.cpp:4-124
+// C++ Reference: check_decl.cpp check_init_variable:4-124
 // NOTE(bill): 'content_name' is for debugging and error messages
 check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand, context_name: string) -> ^Type {
 	// Handle invalid operands
-	// C++ Reference: check_decl.cpp:5-41
+	// C++ Reference: check_decl.cpp check_init_variable:5-41
 	if operand.mode == .Invalid || operand.type == t_invalid || entity_type(e) == t_invalid {
 
-		// C++ Reference: check_decl.cpp:9-23
+		// C++ Reference: check_decl.cpp check_init_variable:9-23
 		if operand.mode == .Builtin {
-			// C++ Reference: check_decl.cpp:10. The block was noted here as a comment but
+			// C++ Reference: check_decl.cpp check_init_variable:10. The block was noted here as a comment but
 			// never opened, so the explanatory error_line below was emitted unblocked and
 			// did not reach the output attached to its error.
 			begin_error_block()
@@ -45,7 +45,7 @@ check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 			operand.mode = .Invalid
 		}
 
-		// C++ Reference: check_decl.cpp:26-35
+		// C++ Reference: check_decl.cpp check_init_variable:26-35
 		if operand.mode == .Proc_Group {
 			if entity_type(e) == nil {
 				error(operand.expr, "Cannot determine type from overloaded procedure '%s'", operand.proc_group.token.text)
@@ -57,21 +57,21 @@ check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 			}
 		}
 
-		// C++ Reference: check_decl.cpp:37-40
+		// C++ Reference: check_decl.cpp check_init_variable:37-40
 		if entity_type(e) == nil {
 			set_entity_type(e, t_invalid)
 		}
 		return nil
 	}
 
-	// C++ Reference: check_decl.cpp:43-45
+	// C++ Reference: check_decl.cpp check_init_variable:43-45
 	if e.kind == .Variable {
 		if var, ok := &e.variant.(Entity_Variable); ok {
 			var.init_expr = operand.expr
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:47-68
+	// C++ Reference: check_decl.cpp check_init_variable:47-68
 	if operand.mode == .Type {
 		entity_t := entity_type(e)
 		if entity_t != nil && is_type_typeid(entity_t) && !is_type_polymorphic(operand.type) {
@@ -96,12 +96,12 @@ check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:70-114
+	// C++ Reference: check_decl.cpp check_init_variable:70-114
 	if entity_type(e) == nil {
 		// NOTE(bill): Use the type of the operand
 		t := operand.type
 
-		// C++ Reference: check_decl.cpp:74-84
+		// C++ Reference: check_decl.cpp check_init_variable:74-84
 		if is_type_untyped(t) {
 			if is_type_untyped_uninit(t) {
 				error(e.token, "Invalid use of --- in %s", context_name)
@@ -115,13 +115,13 @@ check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 			t = default_type(t)
 		}
 
-		// C++ Reference: check_decl.cpp:86-89
+		// C++ Reference: check_decl.cpp check_init_variable:86-89
 		if is_type_asm_proc(t) {
 			error(e.token, "Invalid use of inline asm in %s", context_name)
 			set_entity_type(e, t_invalid)
 			return nil
 		} else if is_type_polymorphic(t) {
-			// C++ Reference: check_decl.cpp:90-104
+			// C++ Reference: check_decl.cpp check_init_variable:90-104
 			e2 := entity_of_node(ctx.info, operand.expr)
 			if e2 == nil {
 				set_entity_type(e, t_invalid)
@@ -136,14 +136,14 @@ check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 			set_entity_type(e, t_invalid)
 			return nil
 		} else if is_type_empty_union(t) {
-			// C++ Reference: check_decl.cpp:105-110
+			// C++ Reference: check_decl.cpp check_init_variable:105-110
 			str := type_to_string(t)
 			error(e.token, "An empty union '%s' cannot be instantiated in %s", str, context_name)
 			set_entity_type(e, t_invalid)
 			return nil
 		}
 
-		// C++ Reference: check_decl.cpp:112-113.
+		// C++ Reference: check_decl.cpp check_init_variable:112-113.
 		//
 		// C++ asserts here unguarded, and can afford to: every path that reaches this point
 		// has a non-nil type. The port CAN reach it with `t == nil`, because its parser
@@ -164,35 +164,35 @@ check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 		set_entity_type(e, t)
 	}
 
-	// C++ Reference: check_decl.cpp:116
+	// C++ Reference: check_decl.cpp check_init_variable:116
 	if _, ok := &e.variant.(Entity_Variable); ok {
 		e.parent_proc_decl = ctx.curr_proc_decl
 	}
 
-	// C++ Reference: check_decl.cpp:118-121
+	// C++ Reference: check_decl.cpp check_init_variable:118-121
 	check_assignment(ctx, operand, entity_type(e), context_name)
 	if operand.mode == .Invalid {
 		return nil
 	}
 
-	// C++ Reference: check_decl.cpp:123
+	// C++ Reference: check_decl.cpp check_init_variable:123
 	return entity_type(e)
 }
 
-// C++ Reference: check_decl.cpp:126-152
+// C++ Reference: check_decl.cpp check_init_variables:126-152
 check_init_variables :: proc(ctx: ^Checker_Context, lhs: []^Entity, inits: []^ast.Expr, context_name: string) {
-	// C++ Reference: check_decl.cpp:127-129
+	// C++ Reference: check_decl.cpp check_init_variables:127-129
 	if (lhs == nil || len(lhs) == 0) && len(inits) == 0 {
 		return
 	}
 
 	// NOTE(bill): If there is a bad syntax error, rhs > lhs which would mean there would need to be
 	// an extra allocation
-	// C++ Reference: check_decl.cpp:132-136
+	// C++ Reference: check_decl.cpp check_init_variables:132-136
 	operands := make([dynamic]Operand, 0, 2 * len(lhs), context.temp_allocator)
 	check_unpack_arguments(ctx, lhs, &operands, inits, {.Allow_Ok, .Allow_Undef})
 
-	// C++ Reference: check_decl.cpp:138-148
+	// C++ Reference: check_decl.cpp check_init_variables:138-148
 	rhs_count := len(operands)
 	max := min(len(lhs), rhs_count)
 	for i in 0 ..< max {
@@ -205,7 +205,7 @@ check_init_variables :: proc(ctx: ^Checker_Context, lhs: []^Entity, inits: []^as
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:149-151
+	// C++ Reference: check_decl.cpp check_init_variables:149-151
 	if rhs_count > 0 && len(lhs) != rhs_count {
 		error(lhs[0].token, "Assignment count mismatch '%d' = '%d'", len(lhs), rhs_count)
 	}
@@ -300,7 +300,7 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		if is_arch_wasm() && e_var.foreign_library != nil {
 			// LEDGER 346: `{` is a format verb in Odin's fmt; C++'s printf passes it through.
 			// Unescaped this printed "'foreign %!(MISSING ARGUMENT)%!(MISSING CLOSE BRACE)".
-			// C++ Reference: src/check_decl.cpp:1753
+			// C++ Reference: src/check_decl.cpp check_global_variable_decl:1753
 			error(e.token, "A foreign variable declaration can not be scoped to a module and must be declared in a 'foreign {{' (without a library) block")
 		}
 	}
@@ -311,7 +311,7 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		e_var.link_section = ac.link_section
 	}
 
-	// C++ Reference: check_decl.cpp:1693-1716
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1693-1716
 	if e_var.is_foreign || e_var.is_export {
 		name := e.token.text
 		if len(e_var.link_name) > 0 {
@@ -334,12 +334,12 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1718-1720
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1718-1720
 	if len(e_var.link_name) > 0 {
 		e.flags += {.Custom_Link_Name}
 	}
 
-	// C++ Reference: check_decl.cpp:1722-1727
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1722-1727
 	if init_expr == nil {
 		if type_expr == nil {
 			set_entity_type(e, t_invalid)
@@ -347,12 +347,12 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		return
 	}
 
-	// C++ Reference: check_decl.cpp:1729-1731
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1729-1731
 	o := Operand{}
 	check_expr_with_type_hint(ctx, &o, init_expr, entity_type(e))
 	check_init_variable(ctx, e, &o, "variable declaration")
 
-	// C++ Reference: check_decl.cpp:1732-1755
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1732-1755
 	if e_var.is_rodata && o.mode != .Constant {
 		// ERROR_BLOCK()
 		error(o.expr, "Variables declared with @(rodata) must have constant initialization")
@@ -368,7 +368,7 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 
 					elem_e := entity_of_node(ctx.info, elem)
 					tav := get_type_and_value(ctx, elem)
-					// NOTE: C++ check_decl.cpp:1746 structure difference
+					// NOTE: C++ check_decl.cpp check_global_variable_decl:1746 structure difference
 					// C++:   if (tav.mode != Constant && e == nil && elem->kind != Ast_ProcLit)
 					// Odin:  if (tav.mode != .Constant && elem_e == nil) { if !is_proc_lit { ... } }
 					// Both are functionally equivalent - Odin nests the proc_lit check for clarity
@@ -387,15 +387,15 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1757
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1757
 	check_rtti_type_disallowed(ctx, e.token, entity_type(e), "A variable declaration is using a type, %s, which has been disallowed")
 }
 
-// C++ Reference: check_decl.cpp:155-195
+// C++ Reference: check_decl.cpp override_entity_in_scope:155-195
 override_entity_in_scope :: proc(original_entity: ^Entity, new_entity: ^Entity) {
 	// NOTE(bill): The original_entity's scope may not be same scope that it was inserted into
 	// e.g. file entity inserted into its package scope
-	// C++ Reference: check_decl.cpp:156-164
+	// C++ Reference: check_decl.cpp override_entity_in_scope:156-164
 	original_name := original_entity.token.text
 	found_scope, _ := scope_lookup_parent(original_entity.scope, original_name)
 	if found_scope == nil {
@@ -408,25 +408,25 @@ override_entity_in_scope :: proc(original_entity: ^Entity, new_entity: ^Entity) 
 	//
 	// Therefore two things can be done: the type can be assigned to state that it
 	// has been "evaluated" and the variant data can be copied across
-	// C++ Reference: check_decl.cpp:166-176
+	// C++ Reference: check_decl.cpp override_entity_in_scope:166-176
 
 	// C++ uses mutex protection (rw_mutex_lock/unlock) for thread safety
 	sync.rw_mutex_lock(&found_scope.mutex)
 	found_scope.elements[original_name] = new_entity
 	sync.rw_mutex_unlock(&found_scope.mutex)
 
-	// C++ Reference: check_decl.cpp:177-188
+	// C++ Reference: check_decl.cpp override_entity_in_scope:177-188
 	original_entity.flags += {.Overridden}
 	set_entity_type(original_entity, entity_type(new_entity))
 	original_entity.kind = new_entity.kind
 
 	// Copy decl_info and aliased_of for proper aliasing semantics
-	// C++ Reference: check_decl.cpp:180-181
+	// C++ Reference: check_decl.cpp override_entity_in_scope:180-181
 	original_entity.decl_info = new_entity.decl_info
 	original_entity.aliased_of = new_entity
 
 	// AST node entity linking
-	// C++ Reference: check_decl.cpp:183-188
+	// C++ Reference: check_decl.cpp override_entity_in_scope:183-188
 	// Copy the identifier and update the AST node directly
 	original_entity.identifier = new_entity.identifier
 
@@ -441,7 +441,7 @@ override_entity_in_scope :: proc(original_entity: ^Entity, new_entity: ^Entity) 
 
 	// IMPORTANT NOTE(bill, 2021-04-10): copy only the variants
 	// This is most likely NEVER required, but it does not at all hurt to keep
-	// C++ Reference: check_decl.cpp:190-194
+	// C++ Reference: check_decl.cpp override_entity_in_scope:190-194
 	original_entity.variant = new_entity.variant
 }
 
@@ -504,7 +504,7 @@ check_try_override_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, entity:
 			return false
 		}
 
-		// C++ Reference: check_decl.cpp:251-260
+		// C++ Reference: check_decl.cpp check_try_override_const_decl:251-260
 		if we, ok := init_expr.derived.(^ast.Ternary_When_Expr); ok {
 			if we.cond == nil {
 				return false
@@ -520,7 +520,7 @@ check_try_override_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, entity:
 			}
 		}
 
-		// C++ Reference: check_decl.cpp:261-269
+		// C++ Reference: check_decl.cpp check_try_override_const_decl:261-269
 		if _, ok := init_expr.derived.(^ast.Proc_Lit); ok {
 			// NOTE(bill, 2024-07-04): Override as a procedure entity because this could be within a `when` statement
 			e.kind = .Procedure
@@ -536,7 +536,7 @@ check_try_override_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, entity:
 		return false
 	}
 
-	// C++ Reference: check_decl.cpp:273-287
+	// C++ Reference: check_decl.cpp check_try_override_const_decl:273-287
 	#partial switch entity.kind {
 	case .Type_Name:
 		if check_override_as_type_due_to_aliasing(ctx, e, entity, init, named_type) {
@@ -556,7 +556,7 @@ check_try_override_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, entity:
 		return true
 	}
 
-	// C++ Reference: check_decl.cpp:289-296
+	// C++ Reference: check_decl.cpp check_try_override_const_decl:289-296
 	if entity_type(e) != nil && entity_type(entity) != nil {
 		x := Operand {
 			type = entity_type(entity),
@@ -568,7 +568,7 @@ check_try_override_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, entity:
 	}
 
 	// NOTE(bill): Override aliased entity
-	// C++ Reference: check_decl.cpp:298-304
+	// C++ Reference: check_decl.cpp check_try_override_const_decl:298-304
 	#partial switch entity.kind {
 	case .Proc_Group, .Procedure:
 		override_entity_in_scope(e, entity)
@@ -584,7 +584,7 @@ check_entity_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, name
 		return
 	}
 
-	// C++ Reference: check_decl.cpp:1994-1996
+	// C++ Reference: check_decl.cpp check_entity_decl:1994-1996
 	if .Lazy in e.flags {
 		sync.recursive_mutex_lock(&ctx.info.lazy_mutex)
 	}
@@ -606,7 +606,7 @@ check_entity_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, name
 				e.state = .Resolved
 				set_base_type(named_type, t_invalid)
 				// goto end
-				// C++ Reference: check_decl.cpp:2071-2075 (the `end:` label). This is the
+				// C++ Reference: check_decl.cpp check_entity_decl:2071-2075 (the `end:` label). This is the
 				// early-exit path, and C++ reaches `end:` here too, so it registers and
 				// unlocks exactly as the normal path does.
 				if .Lazy in e.flags {
@@ -640,7 +640,7 @@ check_entity_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, name
 		}
 		e.state = .In_Progress
 
-		// C++ Reference: check_decl.cpp:2032-2046
+		// C++ Reference: check_decl.cpp check_entity_decl:2032-2046
 		// Entities whose type can name other entities take part in cycle detection: push
 		// them onto the shared type path for the duration of their declaration check.
 		track_cycle_path := false
@@ -674,7 +674,7 @@ check_entity_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, name
 
 	// end: label
 	// NOTE(bill): Add it to the list of checked entities
-	// C++ Reference: check_decl.cpp:2071-2075
+	// C++ Reference: check_decl.cpp check_entity_decl:2071-2075
 	//
 	// Both the append and the mutex were commented out. Consequences: lazily-checked entities
 	// never reached info.entities, so every later pass that walks that array (the unused-entity
@@ -710,7 +710,7 @@ check_init_constant :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 		return
 	}
 
-	// C++ Reference: check_decl.cpp:318-323
+	// C++ Reference: check_decl.cpp check_init_constant:318-323
 	if operand.mode != .Constant {
 		entity := entity_of_node(ctx.info, operand.expr)
 		if check_try_override_const_decl(ctx, e, entity, cast(^ast.Expr)operand.expr, nil) {
@@ -718,7 +718,7 @@ check_init_constant :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:325-333
+	// C++ Reference: check_decl.cpp check_init_constant:325-333
 	if operand.mode != .Constant {
 		str := expr_to_string(operand.expr)
 		defer delete(str)
@@ -729,27 +729,27 @@ check_init_constant :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 		return
 	}
 
-	// C++ Reference: check_decl.cpp:335-337
+	// C++ Reference: check_decl.cpp check_init_constant:335-337
 	if entity_type(e) == nil {
 		// NOTE(bill): type inference
 		set_entity_type(e, operand.type)
 	}
 
-	// C++ Reference: check_decl.cpp:339-342
+	// C++ Reference: check_decl.cpp check_init_constant:339-342
 	check_assignment(ctx, operand, entity_type(e), "constant declaration")
 	if operand.mode == .Invalid {
 		return
 	}
 
-	// C++ Reference: check_decl.cpp:344-346
+	// C++ Reference: check_decl.cpp check_init_constant:344-346
 	if is_type_proc(entity_type(e)) {
 		error(e.token, "Illegal declaration of a constant procedure value")
 	}
 
-	// C++ Reference: check_decl.cpp:348
+	// C++ Reference: check_decl.cpp check_init_constant:348
 	e.parent_proc_decl = ctx.curr_proc_decl // Track parent procedure
 
-	// C++ Reference: check_decl.cpp:350
+	// C++ Reference: check_decl.cpp check_init_constant:350
 	if constant, ok := &e.variant.(Entity_Constant); ok {
 		constant.value = operand.value
 	}
@@ -768,7 +768,7 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 	}
 	e.flags += {.Visited}
 
-	// C++ Reference: check_decl.cpp:633-641
+	// C++ Reference: check_decl.cpp check_const_decl:633-641
 	if type_expr != nil {
 		set_entity_type(e, check_type(ctx, type_expr))
 		if are_types_identical(entity_type(e), t_typeid) {
@@ -782,7 +782,7 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 
 	operand := Operand{}
 
-	// C++ Reference: check_decl.cpp:645-660
+	// C++ Reference: check_decl.cpp check_const_decl:645-660
 	if init != nil {
 		entity := check_entity_from_ident_or_selector(ctx, cast(^ast.Expr)init, false)
 		if check_override_as_type_due_to_aliasing(ctx, e, entity, cast(^ast.Expr)init, named_type) {
@@ -796,27 +796,27 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 			entity = check_selector(ctx, &operand, init, entity_type(e))
 		} else {
 			check_expr_or_type(ctx, &operand, init, entity_type(e))
-			// C++ Reference: check_decl.cpp:662
+			// C++ Reference: check_decl.cpp check_const_decl:662
 			// Retrieve entity from call expression (set by builtin checking)
 			if _, ok3 := init.derived.(^ast.Call_Expr); ok3 {
 				entity = get_ast_entity(ctx.info, init)
 			}
 		}
 
-		// C++ Reference: check_decl.cpp:662-705
+		// C++ Reference: check_decl.cpp check_const_decl:662-705
 		#partial switch operand.mode {
 		case .Type:
-			// C++ Reference: check_decl.cpp:663-666
+			// C++ Reference: check_decl.cpp check_const_decl:663-666
 			if entity_type(e) != nil && !is_type_typeid(entity_type(e)) {
 				check_assignment(ctx, &operand, entity_type(e), "constant declaration")
 			}
 
-			// C++ Reference: check_decl.cpp:668-669
+			// C++ Reference: check_decl.cpp check_const_decl:668-669
 			e.kind = .Type_Name
 			e.variant = Entity_Type_Name{}  // Update variant to match kind
 			set_entity_type(e, nil)
 
-			// C++ Reference: check_decl.cpp:671-683
+			// C++ Reference: check_decl.cpp check_const_decl:671-683
 			if entity != nil && entity_type(entity) != nil && is_type_polymorphic_record_unspecialized(entity_type(entity)) {
 				decl := decl_info_of_entity(e)
 				if decl != nil {
@@ -833,7 +833,7 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 
 		// NOTE(bill): Check to see if the expression it to be aliases
 		case .Builtin:
-			// C++ Reference: check_decl.cpp:688-695
+			// C++ Reference: check_decl.cpp check_const_decl:688-695
 			if entity_type(e) != nil {
 				error(type_expr, "A constant alias of a built-in procedure may not have a type initializer")
 			}
@@ -849,7 +849,7 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 			return
 
 		case .Proc_Group:
-			// C++ Reference: check_decl.cpp:697-704
+			// C++ Reference: check_decl.cpp check_const_decl:697-704
 			assert(operand.proc_group != nil)
 			assert(operand.proc_group.kind == .Proc_Group)
 			// NOTE(bill, 2020-06-10): It is better to just clone the contents than overriding the entity in the scope
@@ -865,10 +865,10 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 			return
 		}
 
-		// C++ Reference: check_decl.cpp:708-751
+		// C++ Reference: check_decl.cpp check_const_decl:708-751
 		if entity != nil {
 			if entity_type(e) != nil {
-				// C++ Reference: check_decl.cpp:710-730
+				// C++ Reference: check_decl.cpp check_const_decl:710-730
 				x := Operand{}
 				x.type = entity_type(entity)
 				x.mode = .Variable
@@ -886,7 +886,7 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 			}
 
 			// NOTE(bill): Override aliased entity
-			// C++ Reference: check_decl.cpp:733-750
+			// C++ Reference: check_decl.cpp check_const_decl:733-750
 			#partial switch entity.kind {
 			case .Proc_Group, .Procedure, .Library_Name, .Import_Name:
 				decl := decl_info_of_entity(e)
@@ -902,17 +902,17 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:754
+	// C++ Reference: check_decl.cpp check_const_decl:754
 	check_init_constant(ctx, e, &operand)
 
-	// C++ Reference: check_decl.cpp:756-761
+	// C++ Reference: check_decl.cpp check_const_decl:756-761
 	if operand.mode == .Invalid || base_type(operand.type) == t_invalid {
 		str := expr_to_string(init)
 		defer delete(str)
 		error(init, "Invalid declaration value '%s'", str)
 	}
 
-	// C++ Reference: check_decl.cpp:764-767
+	// C++ Reference: check_decl.cpp check_const_decl:764-767
 	// Process attributes for constant declarations
 	decl := decl_info_of_entity(e)
 	if decl != nil && len(decl.attributes) > 0 {
@@ -1049,10 +1049,10 @@ check_entity_from_ident_or_selector :: proc(ctx: ^Checker_Context, node: ^ast.Ex
 // - Polymorphic procedure validation
 // - Body checking and deferred processing
 check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
-	// C++ Reference: check_decl.cpp:1218
+	// C++ Reference: check_decl.cpp check_proc_decl:1259
 	assert(e.type == nil)
 
-	// C++ Reference: check_decl.cpp:1219-1223
+	// C++ Reference: check_decl.cpp check_proc_decl:1260-1264
 	if d.proc_lit == nil {
 		// Ternary produces ^Proc_Lit vs Token mismatch - use proper if/else
 		if d.proc_lit != nil {
@@ -1063,7 +1063,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		return
 	}
 
-	// C++ Reference: check_decl.cpp:1225-1230
+	// C++ Reference: check_decl.cpp check_proc_decl:1266-1271
 	// Determine procedure type (either from gen_proc_type or allocate new)
 	proc_type: ^Type
 	if d.gen_proc_type != nil {
@@ -1077,18 +1077,18 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 	// This is critical for entity_type() to return the correct procedure type
 	set_entity_type(e, proc_type)
 
-	// C++ Reference: check_decl.cpp:1232
+	// C++ Reference: check_decl.cpp check_proc_decl:1273
 	pl := d.proc_lit
 
-	// C++ Reference: check_decl.cpp:1234-1236
+	// C++ Reference: check_decl.cpp check_proc_decl:1275-1277
 	check_open_scope(ctx, pl.type)
 	defer check_close_scope(ctx)
 	ctx.scope.procedure = e
 
-	// C++ Reference: check_decl.cpp:1238
+	// C++ Reference: check_decl.cpp check_proc_decl:1279
 	decl_type: ^Type = nil
 
-	// C++ Reference: check_decl.cpp:1240-1247
+	// C++ Reference: check_decl.cpp check_proc_decl:1281-1288
 	if d.type_expr != nil {
 		decl_type = check_type_expr(ctx, d.type_expr, nil)
 		if !is_type_proc(decl_type) {
@@ -1097,7 +1097,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1250-1255
+	// C++ Reference: check_decl.cpp check_proc_decl:1291-1296
 	tmp_ctx := ctx^
 	tmp_ctx.allow_polymorphic_types = true
 	if decl_type != nil {
@@ -1105,7 +1105,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 	}
 	check_procedure_type(&tmp_ctx, proc_type, pl.type)
 
-	// C++ Reference: check_decl.cpp:1257-1275
+	// C++ Reference: check_decl.cpp check_proc_decl:1298-1316
 	if decl_type != nil {
 		x := Operand {
 			type = e.type,
@@ -1120,7 +1120,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1277-1282
+	// C++ Reference: check_decl.cpp check_proc_decl:1319
 	pt := &proc_type.variant.(Type_Proc)
 	proc_variant := &e.variant.(Entity_Procedure)
 	ac := make_attribute_context(proc_variant.link_prefix, proc_variant.link_suffix)
@@ -1129,16 +1129,17 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		check_decl_attributes(ctx, d.attributes, &ac, .Proc)
 	}
 
-	// C++ Reference: check_decl.cpp:1284-1293
+	// C++ Reference: check_decl.cpp check_proc_decl:1326-1335
 	if ac.test {
 		e.flags += {.Test}
 	}
-	// C++ Reference: check_decl.cpp:1337-1339, `-disable-init-fini`.
+	// C++ Reference: check_decl.cpp check_proc_decl:1337-1339, `-disable-init-fini`.
 	//
 	// ORDERING, and why this sits BEFORE the chain rather than after it as C++ does.
 	// C++ emits this at declaration time, but emits the init/fini VALIDATION (signature,
 	// "contextless", file-scope, blank-ident) later, from generate_minimum_dependency_set_internal
-	// at checker.cpp:3001-3045. Both land on e.token, and the same-position merge (#219) keeps the
+	// at checker.cpp generate_minimum_dependency_set_internal:3013-3086 (init arm 3013-3049,
+	// fini arm 3050-3086). Both land on e.token, and the same-position merge (#219) keeps the
 	// FIRST -- so under the flag C++ shows only this message and the validation is invisible.
 	// Measured, not assumed: with the flag, the oracle's "must have a signature type with no
 	// parameters nor results" DISAPPEARS. It is not a phase bail -- an unrelated decl-stage error
@@ -1158,7 +1159,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 	if ac.init && ac.fini {
 		error(e.token, "A procedure cannot be both declared as @(init) and @(fini)")
 	} else if ac.init {
-		// C++ Reference: checker.cpp:3001-3040, inside generate_minimum_dependency_set_internal.
+		// C++ Reference: checker.cpp generate_minimum_dependency_set_internal:3013-3049 (the @(init) arm).
 		// The port validates at declaration time instead (generate_minimum_dependency_set does not
 		// exist here -- task #272, scoped out);
 		// every one of these is a property of the entity and its type, so the placement is
@@ -1167,44 +1168,46 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		if pt.param_count != 0 || pt.result_count != 0 {
 			type_str := type_to_string(proc_type)
 			error(e.token, "@(init) procedures must have a signature type with no parameters nor results, got %s", type_str)
-			// C++ Reference: checker.cpp:3007-3012 -- clears is_init.
+			// C++ Reference: checker.cpp generate_minimum_dependency_set_internal:3015-3020 -- clears is_init
+			// at :3019.
 			sig_ok = false
 		}
 		eligible := check_init_fini_common(ctx, e, d, pt, "init", ac.disabled_proc)
 		e.flags += {.Init}
-		// C++ Reference: checker.cpp:3037-3040. The port allocated info.init_procedures, sorted
+		// C++ Reference: checker.cpp generate_minimum_dependency_set_internal:3046-3049. The port allocated info.init_procedures, sorted
 		// it and de-duplicated it, but NEVER appended to it -- so the whole sort phase ran on a
 		// permanently empty array. LEDGER #286.
 		if sig_ok && eligible {
 			append(&ctx.checker.info.init_procedures, e)
 		}
 	} else if ac.fini {
-		// C++ Reference: checker.cpp:3042-3080 - the @(fini) arm, identical in shape.
+		// C++ Reference: checker.cpp generate_minimum_dependency_set_internal:3050-3086 - the @(fini) arm,
+		// identical in shape.
 		sig_ok := true
 		if pt.param_count != 0 || pt.result_count != 0 {
 			type_str := type_to_string(proc_type)
 			error(e.token, "@(fini) procedures must have a signature type with no parameters nor results, got %s", type_str)
-			// C++ Reference: checker.cpp:3047-3052 -- clears is_fini.
+			// C++ Reference: checker.cpp generate_minimum_dependency_set_internal:3056-3061 -- clears is_fini.
 			sig_ok = false
 		}
 		eligible := check_init_fini_common(ctx, e, d, pt, "fini", ac.disabled_proc)
 		e.flags += {.Fini}
-		// C++ Reference: checker.cpp:3072-3075. See #286.
+		// C++ Reference: checker.cpp generate_minimum_dependency_set_internal:3081-3084. See #286.
 		if sig_ok && eligible {
 			append(&ctx.checker.info.fini_procedures, e)
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1295-1298
+	// C++ Reference: check_decl.cpp check_proc_decl:1341-1344
 	if ac.set_cold {
 		e.flags += {.Cold}
 	}
 	proc_variant.optimization_mode = Procedure_Optimization_Mode(ac.optimization_mode)
 
-	// C++ Reference: check_decl.cpp:1300
+	// C++ Reference: check_decl.cpp check_proc_decl:1346
 	check_objc_methods(ctx, e, &ac)
 
-	// C++ Reference: check_decl.cpp:1302-1333
+	// C++ Reference: check_decl.cpp check_proc_decl:1349-1380
 	// Target feature validation
 	{
 		if len(ac.require_target_feature) != 0 && len(ac.enable_target_feature) != 0 {
@@ -1219,7 +1222,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 
 		if len(ac.require_target_feature) != 0 {
 			pt.require_target_feature = ac.require_target_feature
-			// C++: build_settings.cpp:2067-2088
+			// C++: build_settings.cpp init_build_context:2067-2088
 			valid, invalid := check_target_feature_is_valid_globally(ac.require_target_feature)
 			if !valid {
 				error(e.token, "Required target feature '%s' is not a valid target feature", invalid)
@@ -1233,7 +1236,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 			}
 
 			pt.enable_target_feature = ac.enable_target_feature
-			// C++: build_settings.cpp:2067-2088
+			// C++: build_settings.cpp init_build_context:2067-2088
 			valid, invalid := check_target_feature_is_valid_globally(ac.enable_target_feature)
 			if !valid {
 				error(e.token, "Procedure enabled target feature '%s' is not a valid target feature", invalid)
@@ -1241,7 +1244,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1335-1341
+	// C++ Reference: check_decl.cpp check_proc_decl:1381-1386
 	#partial switch proc_variant.optimization_mode {
 	case .None:
 		if pl.inlining == .Inline {
@@ -1251,11 +1254,11 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 	// Other optimization modes don't conflict with #force_inline
 	}
 
-	// C++ Reference: check_decl.cpp:1343-1347
+	// C++ Reference: check_decl.cpp check_proc_decl:1392-1396
 	proc_variant.entry_point_only = ac.entry_point_only
 	proc_variant.is_export = ac.is_export
 
-	// C++ Reference: check_decl.cpp:1349-1366
+	// C++ Reference: check_decl.cpp check_proc_decl:1398-1415
 	// Instrumentation handling
 	has_instrumentation := false
 	if pl.body == nil {
@@ -1265,7 +1268,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		}
 	} else {
 		// Check file-level #no_instrumentation directive
-		// C++ Reference: check_decl.cpp:1351-1360
+		// C++ Reference: check_decl.cpp check_proc_decl:1402-1403
 		if ctx.file != nil {
 			// File flag is stored directly on ast.File.flags
 			has_instrumentation = .No_Instrumentation not_in ctx.file.flags
@@ -1281,7 +1284,16 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1368-1385
+	// C++ Reference: check_decl.cpp check_proc_decl:1442,1462 (both call sites)
+	//
+	// THE ONE LEGITIMATE MONOTONICITY INVERSION IN THIS PROCEDURE, recorded so a future audit does
+	// not re-flag it. #608/#609 audited all 44 citations here by listing (port line, C++ line) in
+	// PORT order and treating every backwards jump as a suspect -- 15 of 15 flagged that way turned
+	// out to be genuinely wrong lines. This one is not: Odin requires a nested procedure to be
+	// declared before use, so the helper sits here, ABOVE the enter/exit dispatch. C++ has no nested
+	// definition at all -- is_valid_instrumentation_call is a free function elsewhere in the file,
+	// and the only lines in check_proc_decl that mention it are the two CALLS at 1442 and 1462,
+	// which come after :1312's 1435-1479. Declaration-before-use versus call-order, nothing more.
 	// Instrumentation validation lambda
 	is_valid_instrumentation_call :: proc(c: ^Checker, type: ^Type) -> bool {
 		if type == nil || type.kind != .Proc {
@@ -1306,7 +1318,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 
 	instrumentation_proc_type_str :: "proc \"contextless\" (proc_address: rawptr, call_site_return_address: rawptr, loc: runtime.Source_Code_Location)"
 
-	// C++ Reference: check_decl.cpp:1389-1433
+	// C++ Reference: check_decl.cpp check_proc_decl:1435-1479
 	if ac.instrumentation_enter && ac.instrumentation_exit {
 		error(e.token, "A procedure cannot be marked with both @(instrumentation_enter) and @(instrumentation_exit)")
 		has_instrumentation = false
@@ -1320,7 +1332,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		if e.scope != nil && (e.scope.flags & {.File, .Pkg}) == {} {
 			error(e.token, "@(instrumentation_enter) procedures must be declared at the file scope")
 		}
-		// C++ Reference: check_decl.cpp:1405 - MUTEX_GUARD(&ctx.info.instrumentation_mutex)
+		// C++ Reference: check_decl.cpp check_proc_decl:1451 - MUTEX_GUARD(&ctx.info.instrumentation_mutex)
 		sync.mutex_lock(&ctx.info.instrumentation_mutex)
 		defer sync.mutex_unlock(&ctx.info.instrumentation_mutex)
 		if ctx.info.instrumentation_enter_entity != nil {
@@ -1339,7 +1351,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		if e.scope != nil && (e.scope.flags & {.File, .Pkg}) == {} {
 			error(e.token, "@(instrumentation_exit) procedures must be declared at the file scope")
 		}
-		// C++ Reference: check_decl.cpp:1424 - MUTEX_GUARD(&ctx.info.instrumentation_mutex)
+		// C++ Reference: check_decl.cpp check_proc_decl:1470 - MUTEX_GUARD(&ctx.info.instrumentation_mutex)
 		sync.mutex_lock(&ctx.info.instrumentation_mutex)
 		defer sync.mutex_unlock(&ctx.info.instrumentation_mutex)
 		if ctx.info.instrumentation_exit_entity != nil {
@@ -1351,24 +1363,24 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		e.flags += {.Require}
 	}
 
-	// C++ Reference: check_decl.cpp:1435-1441
+	// C++ Reference: check_decl.cpp check_proc_decl:1483-1489
 	proc_variant.has_instrumentation = has_instrumentation
 	proc_variant.no_sanitize_address = ac.no_sanitize_address
 	proc_variant.no_sanitize_memory = ac.no_sanitize_memory
-	proc_variant.no_sanitize_thread = ac.no_sanitize_thread   // C++ check_decl.cpp:1485
-	proc_variant.fast_math_flags = ac.fast_math_flags          // C++ check_decl.cpp:1487
+	proc_variant.no_sanitize_thread = ac.no_sanitize_thread   // C++ check_decl.cpp check_proc_decl:1485
+	proc_variant.fast_math_flags = ac.fast_math_flags          // C++ check_decl.cpp check_proc_decl:1487
 
 	e.deprecated_message = ac.deprecated_message
 	e.warning_message = ac.warning_message
 	ac.link_name = handle_link_name(ctx, e.token, ac.link_name, ac.link_prefix, ac.link_suffix)
 
-	// C++ Reference: check_decl.cpp:1493-1495. The port stored link_section on VARIABLES only
+	// C++ Reference: check_decl.cpp check_proc_decl:1493-1495. The port stored link_section on VARIABLES only
 	// (check_decl.odin:311); procedures dropped it.
 	if len(ac.link_section) > 0 {
 		proc_variant.link_section = ac.link_section
 	}
 
-	// C++ Reference: check_decl.cpp:1443-1452
+	// C++ Reference: check_decl.cpp check_proc_decl:1497-1506
 	if ac.has_disabled_proc {
 		if ac.disabled_proc {
 			e.flags += {.Disabled}
@@ -1380,7 +1392,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1454-1467
+	// C++ Reference: check_decl.cpp check_proc_decl:1509-1522
 	is_foreign := proc_variant.is_foreign
 	is_export := proc_variant.is_export
 
@@ -1400,7 +1412,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1469-1472
+	// C++ Reference: check_decl.cpp check_proc_decl:1523-1526
 	if ac.require_declaration {
 		e.flags += {.Require}
 		// Note: C++ sets pl.inlining = ProcInlining_no_inline here, but in Odin
@@ -1408,7 +1420,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		// and disable inlining accordingly.
 	}
 
-	// C++ Reference: check_decl.cpp:1475-1495
+	// C++ Reference: check_decl.cpp check_proc_decl:1529-1565
 	// Entry point (main) detection
 	if e.pkg != nil && e.token.text == "main" {
 		// Check if entry point is enabled (skip if no_entry_point flag is set)
@@ -1418,7 +1430,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 					str := type_to_string(proc_type)
 					error(e.token, "Procedure type of 'main' was expected to be 'proc()', got %s", str)
 				}
-				// C++ Reference: check_decl.cpp:1537-1556. The port had ONLY the `else` arm --
+				// C++ Reference: check_decl.cpp check_proc_decl:1537-1556. The port had ONLY the `else` arm --
 				// under `-bedrock` it applied the non-bedrock rule, which is both the wrong
 				// message and the wrong RULE: bedrock accepts "odin" OR "contextless", where
 				// default_calling_convention() is a single value.
@@ -1448,12 +1460,12 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1497-1499
+	// C++ Reference: check_decl.cpp check_proc_decl:1567-1569
 	if is_foreign && is_export {
 		error(pl.type, "A foreign procedure cannot have an 'export' tag")
 	}
 
-	// C++ Reference: check_decl.cpp:1501-1510
+	// C++ Reference: check_decl.cpp check_proc_decl:1571-1579
 	if pt.is_polymorphic {
 		if pl.body == nil {
 			error(e.token, "Polymorphic procedures must have a body")
@@ -1465,14 +1477,14 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1512-1532
+	// C++ Reference: check_decl.cpp check_proc_decl:1582-1602
 	if pl.body != nil {
 		if is_foreign {
 			error(pl.body, "A foreign procedure cannot have a body")
 		}
-		// NO c_vararg body check here. C++ check_decl.cpp:1587-1589 has that error COMMENTED OUT,
+		// NO c_vararg body check here. C++ check_decl.cpp check_proc_decl:1587-1589 has that error COMMENTED OUT,
 		// so the reference accepts a `#c_vararg` procedure with a body and reports at the USE
-		// instead (check_expr.cpp:2004, ported into check_expr's Ident arm). The port had it live,
+		// instead (check_expr.cpp check_ident:2004, ported into check_expr's Ident arm). The port had it live,
 		// which rejected code the reference compiles. Third instance of this family after #171
 		// and #333 -- the port faithfully reproducing something C++ disabled.
 
@@ -1481,7 +1493,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		assert(pl.body != nil) // Validate it's a block statement
 		if !pt.is_polymorphic {
 			// Create Proc_Info for deferred procedure checking
-			// C++ Reference: check_decl.cpp:1524
+			// C++ Reference: check_decl.cpp check_proc_decl:1592
 			// The body must be a Block_Stmt
 			body_block, body_ok := pl.body.derived.(^ast.Block_Stmt)
 			if !body_ok {
@@ -1497,7 +1509,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 				check_procedure_later(ctx.checker, info)
 			}
 		}
-	// C++ Reference: check_decl.cpp:1563
+	// C++ Reference: check_decl.cpp check_proc_decl:1596-1601
 	// Allow body-less procedures for foreign or Objective-C imported methods
 	} else if !is_foreign && !proc_variant.is_objc_impl_or_import {
 		if proc_variant.is_export {
@@ -1507,7 +1519,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1534-1542
+	// C++ Reference: check_decl.cpp check_proc_decl:1604-1612
 	if ac.require_results {
 		if pt.result_count == 0 {
 			error(pl.type, "'require_results' is not needed on a procedure with no results")
@@ -1518,7 +1530,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		pt.require_results = true
 	}
 
-	// C++ Reference: check_decl.cpp:1544-1553
+	// C++ Reference: check_decl.cpp check_proc_decl:1614-1623
 	if len(ac.link_name) > 0 {
 		ln := ac.link_name
 		proc_variant.link_name = ln
@@ -1527,13 +1539,13 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1555-1558
+	// C++ Reference: check_decl.cpp check_proc_decl:1625-1628
 	if ac.deferred_procedure.entity != nil {
 		proc_variant.deferred_procedure = ac.deferred_procedure
 		queue.mpsc_enqueue(&ctx.checker.procs_with_deferred_to_check, e)
 	}
 
-	// C++ Reference: check_decl.cpp:1560-1605
+	// C++ Reference: check_decl.cpp check_proc_decl:1630-1645
 	if is_foreign {
 		name := e.token.text
 		if len(proc_variant.link_name) > 0 {
@@ -1556,7 +1568,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 			name = proc_variant.link_name
 		}
 		if len(proc_variant.link_name) > 0 || is_export {
-			// C++ Reference: check_decl.cpp:1582-1603 - mutex_lock/unlock(&ctx.info.foreign_mutex)
+			// C++ Reference: check_decl.cpp check_proc_decl:1652 - mutex_lock/unlock(&ctx.info.foreign_mutex)
 			sync.mutex_lock(&ctx.info.foreign_mutex)
 			defer sync.mutex_unlock(&ctx.info.foreign_mutex)
 
@@ -1575,7 +1587,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1607-1609
+	// C++ Reference: check_decl.cpp check_proc_decl:1677-1679
 	if len(proc_variant.link_name) > 0 {
 		e.flags += {.Custom_Link_Name}
 	}
@@ -1614,7 +1626,7 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 			e: ^Entity = nil
 			o := Operand{}
 
-			// C++ Reference: check_decl.cpp:1856-1870 - `member where COND`.
+			// C++ Reference: check_decl.cpp check_proc_group_decl:1856-1870 - `member where COND`.
 			//
 			// Both parsers represent this as a Binary_Expr whose operator token is `where`
 			// (parser.cpp:2534-2538, and core/odin/parser/parser.odin:2566-2573 does the same), so
@@ -1716,7 +1728,7 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 					continue
 				}
 
-				// C++ Reference: check_decl.cpp:1927. Noted as a comment but never opened,
+				// C++ Reference: check_decl.cpp check_proc_group_decl:1927. Noted as a comment but never opened,
 				// so the "previous procedure at" line below never reached the output.
 				begin_error_block()
 				defer end_error_block()
@@ -1725,11 +1737,11 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 					continue
 				}
 
-				// C++ Reference: check_decl.cpp:1841
+				// C++ Reference: check_decl.cpp check_proc_group_decl:1841
 				kind := are_proc_types_overload_safe(entity_type(p), entity_type(q))
 				both_have_where_clauses := false
 
-				// C++ Reference: check_decl.cpp:1842-1853
+				// C++ Reference: check_decl.cpp check_proc_group_decl:1842-1853
 				if p.decl_info != nil && q.decl_info != nil && p.decl_info.proc_lit != nil && q.decl_info.proc_lit != nil {
 					if pl, ok := p.decl_info.proc_lit.derived.(^ast.Proc_Lit); ok {
 						if ql, ok2 := q.decl_info.proc_lit.derived.(^ast.Proc_Lit); ok2 {
@@ -1741,7 +1753,7 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 					}
 				}
 
-				// C++ Reference: check_decl.cpp:1855-1881
+				// C++ Reference: check_decl.cpp check_proc_group_decl:1855-1881
 				if !both_have_where_clauses {
 					#partial switch kind {
 					case .Identical:
@@ -1766,7 +1778,7 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 					}
 				}
 
-				// C++ Reference: check_decl.cpp:1883-1886
+				// C++ Reference: check_decl.cpp check_proc_group_decl:1883-1886
 				if is_invalid {
 					pos_str := token_pos_to_string(pos)
 					error_line("\tprevious procedure at %s\n", pos_str)
@@ -1782,7 +1794,7 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 		return
 	}
 
-	// C++ Reference: check_decl.cpp:1890-1892
+	// C++ Reference: check_decl.cpp check_proc_group_decl:1890-1892
 	ac := Attribute_Context{}
 	check_decl_attributes(ctx, d.attributes, &ac, .Proc_Group)
 	check_objc_methods(ctx, pg_entity, &ac)
@@ -1793,12 +1805,12 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 check_feature_flags :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> Opt_In_Feature_Flag {
 	file: ^ast.File = ctx.file
 
-	// C++ Reference: checker.cpp:567-570 -- fall back to the current procedure literal's file.
+	// C++ Reference: checker.cpp check_feature_flags:567-570 -- fall back to the current procedure literal's file.
 	if file == nil && ctx.curr_proc_decl != nil && ctx.curr_proc_decl.proc_lit != nil {
 		file = get_file_from_node(&ctx.checker.info, ctx.curr_proc_decl.proc_lit)
 	}
 
-	// C++ Reference: checker.cpp:572-574 -- `file = node->file()`. The port was MISSING this
+	// C++ Reference: checker.cpp check_feature_flags:572-574 -- `file = node->file()`. The port was MISSING this
 	// third fallback, and a stale comment here claimed Odin's AST has no node->file mapping.
 	// It does: get_file_from_node resolves through `node.pos.file`, which the tokenizer stamps
 	// on every position. Without it, `#+feature` lines were invisible from inside statement
@@ -1808,7 +1820,7 @@ check_feature_flags :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> Opt_In_Fe
 	}
 
 	// Check if file has feature flags set
-	// C++ Reference: checker.cpp:569-571
+	// C++ Reference: checker.cpp check_feature_flags:569-571
 	if file != nil && file.feature_flags_set {
 		// Convert ast.Feature_Flags to Opt_In_Feature_Flag
 		// Both have the same underlying bit values (u64 bitset with same enum indices)
@@ -1864,7 +1876,7 @@ clear_ast_state_flag :: proc(info: ^Checker_Info, node: ^ast.Node, flag: State_F
 // @(fini) beyond the signature check: the contextless requirement, the file-scope requirement,
 // and the blank-identifier ban. The `disabled` warning is included too.
 //
-// C++ Reference: checker.cpp:3015-3038 (@(init)) and :3056-3080 (@(fini)). The two arms are
+// C++ Reference: checker.cpp generate_minimum_dependency_set_internal:3009-3049 (@(init)) and :3050-3085 (@(fini)). The two arms are
 // literal duplicates in C++ apart from the attribute name in each message, so they are
 // factored here and the name is passed in.
 // RETURNS whether the entity is still eligible for registration in info.init_procedures /
@@ -1878,7 +1890,7 @@ check_init_fini_common :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info,
 	}
 
 	// "contextless" is required unless the file opted into `#+feature global-context`.
-	// C++ Reference: checker.cpp:3015-3021
+	// C++ Reference: checker.cpp generate_minimum_dependency_set_internal:3022-3029
 	feature_flags: Opt_In_Feature_Flag
 	if d != nil {
 		feature_flags = check_feature_flags(ctx, cast(^ast.Node)d.decl_node)
@@ -1895,15 +1907,14 @@ check_init_fini_common :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info,
 		}
 	}
 
-	// C++ Reference: checker.cpp:3023-3026
-	// C++ Reference: checker.cpp:3023-3026 -- reports AND clears is_init.
+	// C++ Reference: checker.cpp generate_minimum_dependency_set_internal:3031-3034 -- reports AND clears is_init.
 	if e.scope != nil && .File not_in e.scope.flags && .Pkg not_in e.scope.flags {
 		error(e.token, "@(%s) procedures must be declared at the file scope", kind)
 		eligible = false
 	}
 
-	// C++ Reference: checker.cpp:3028-3031. INIT ONLY -- this is the one place the two arms
-	// differ. C++'s @(init) arm has this block; the @(fini) arm (checker.cpp:3042-3075) has no
+	// C++ Reference: checker.cpp generate_minimum_dependency_set_internal:3036-3039. INIT ONLY -- this is the one place the two arms
+	// differ. C++'s @(init) arm has this block; the @(fini) arm (checker.cpp generate_minimum_dependency_set_internal:3050-3085) has no
 	// disabled handling whatsoever. Sharing it unconditionally made the port emit
 	// "This @(fini) procedure is disabled; you must call it manually" on valid code the oracle
 	// accepts silently -- a genuine OVER-WARNING. Probe finidis. LEDGER #282.
@@ -1913,7 +1924,7 @@ check_init_fini_common :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info,
 	// happened yet (it is set further down this same procedure).
 	//
 	// C++ also sets `is_init = false` here, keeping a disabled @(init) out of
-	// info.init_procedures (checker.cpp:3037-3039). That is now modelled: it was previously
+	// info.init_procedures (checker.cpp generate_minimum_dependency_set_internal:3036-3039). That is now modelled: it was previously
 	// left out because no instrument could observe registration, which triage_doc fixed.
 	// LEDGER #286. Note this clearing is INIT-ONLY, like the warning -- C++'s fini arm has no
 	// disabled handling at all, so a disabled @(fini) IS still registered.
@@ -1922,7 +1933,7 @@ check_init_fini_common :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info,
 		eligible = false
 	}
 
-	// C++ Reference: checker.cpp:3033-3035. Reports but does NOT clear is_init -- a blank-named
+	// C++ Reference: checker.cpp generate_minimum_dependency_set_internal:3041-3043. Reports but does NOT clear is_init -- a blank-named
 	// @(init) is still registered in C++.
 	if is_blank_ident(e.token.text) {
 		error(e.token, "An @(%s) procedure must not use a blank identifier as its name", kind)
@@ -2087,7 +2098,7 @@ check_foreign_import_fullpaths :: proc(ctx: ^Checker_Context) {
 		}
 
 		// Get file context for path resolution
-		// C++ Reference: checker.cpp:5728-5734 - `AstFile *f = decl->file();
+		// C++ Reference: checker.cpp check_foreign_import_fullpaths:5728-5734 - `AstFile *f = decl->file();
 		// reset_checker_context(&ctx, f, &untyped);` followed by
 		// `String base_dir = dir_from_path(decl->file()->fullpath);`
 		//
@@ -2110,7 +2121,7 @@ check_foreign_import_fullpaths :: proc(ctx: ^Checker_Context) {
 		// Evaluate path expressions to strings (C++ line 5401-5435)
 		// NOTE: this array outlives the loop iteration - `lib.paths` below aliases its backing
 		// storage and is read for the rest of the checker's life (and by the linker driver).
-		// C++ allocates it from permanent_allocator() for the same reason (checker.cpp:5738).
+		// C++ allocates it from permanent_allocator() for the same reason (checker.cpp check_foreign_import_fullpaths:5738).
 		fullpaths := make([dynamic]string, 0, len(decl.fullpaths), ctx.checker.allocator)
 
 		for fp_expr in decl.fullpaths {
@@ -2444,7 +2455,7 @@ generate_import_dependency_graph :: proc(checker: ^Checker, allocator := context
 
 	// Calculate edges from import declarations.
 	//
-	// C++ Reference: checker.cpp:5477-5486, inside generate_import_dependency_graph. (The
+	// C++ Reference: checker.cpp generate_import_dependency_graph:5477-5486, inside generate_import_dependency_graph. (The
 	// previous citation here, "C++ line 5143-5153", pointed at
 	// correct_type_alias_in_scope_backwards -- an unrelated function. Stale-citation drift, the
 	// same family LEDGER 134 measured at +193 to +334 in checker.cpp.)
@@ -2514,13 +2525,13 @@ ast_token :: proc(node: ^ast.Node) -> tokenizer.Token {
 }
 
 // check_rtti_type_disallowed validates that a type is allowed for RTTI
-// C++ Reference: checker.cpp:39-49
+// C++ Reference: checker.cpp check_rtti_type_disallowed:39-49
 //
 // Some types cannot be used with runtime type information (RTTI).
 // When RTTI is disabled via -no-rtti build flag, the 'any' type is disallowed.
 // Returns true if the type is disallowed and an error was reported.
 check_rtti_type_disallowed :: proc(ctx: ^Checker_Context, pos: tokenizer.Token, type: ^Type, format_message: string) -> bool {
-	// C++ Reference: checker.cpp:40-48
+	// C++ Reference: checker.cpp check_rtti_type_disallowed:40-48
 	if ctx.info.build_context != nil && ctx.info.build_context.no_rtti && type != nil {
 		if is_type_any(type) {
 			t := type_to_string(type)

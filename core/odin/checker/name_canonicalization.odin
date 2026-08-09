@@ -97,7 +97,7 @@ proc_calling_convention_strings := [Calling_Convention]string {
 }
 
 // quote_to_ascii escapes special characters in strings for canonical representation
-// C++ Reference: string.cpp:851 (String) and string.cpp:935 (String16)
+// C++ Reference: string.cpp quote_to_ascii:851 (String) and string.cpp quote_to_ascii:935 (String16)
 quote_to_ascii :: proc {
 	quote_to_ascii_string,
 	quote_to_ascii_string16,
@@ -105,7 +105,7 @@ quote_to_ascii :: proc {
 
 // quote_to_ascii_string escapes a UTF-8 string and wraps the result in `quote`.
 //
-// C++ Reference: string.cpp:851-919 (quote_to_ascii for String)
+// C++ Reference: string.cpp quote_to_ascii:851-919 (quote_to_ascii for String)
 //
 // The surrounding quote characters are part of the result, exactly as in C++.
 // All three call sites depend on that: exact_value_to_string renders a string
@@ -171,7 +171,7 @@ quote_to_ascii_string :: proc(s: string, allocator := context.allocator, quote: 
 // quote_to_ascii_string16 escapes a UTF-16 string to ASCII, wrapping the result
 // in `quote`.
 //
-// C++ Reference: string.cpp:935-1010 (quote_to_ascii for String16)
+// C++ Reference: string.cpp quote_to_ascii:935-1010 (quote_to_ascii for String16)
 quote_to_ascii_string16 :: proc(val: Exact_Value_String16, allocator := context.allocator, quote: byte = '"') -> string {
 	sb := strings.builder_make(0, val.len * 2 + 2, allocator)
 	strings.write_byte(&sb, quote)
@@ -203,7 +203,7 @@ quote_to_ascii_string16 :: proc(val: Exact_Value_String16, allocator := context.
 		}
 
 		// Handle invalid UTF-16 sequences
-		// C++ Reference: string.cpp:959-965
+		// C++ Reference: string.cpp quote_to_ascii:959-965
 		//
 		// UPSTREAM (LEDGER task 275): C++ indexes lower_hex with the full u16
 		// `s[0]>>4`, which for the surrogate values that are the only way to reach
@@ -216,7 +216,7 @@ quote_to_ascii_string16 :: proc(val: Exact_Value_String16, allocator := context.
 		}
 
 		// Handle quote and backslash escaping
-		// C++ Reference: string.cpp:967-971
+		// C++ Reference: string.cpp quote_to_ascii:967-971
 		if r == rune(quote) || r == '\\' {
 			strings.write_byte(&sb, '\\')
 			strings.write_byte(&sb, byte(r))
@@ -225,7 +225,7 @@ quote_to_ascii_string16 :: proc(val: Exact_Value_String16, allocator := context.
 		}
 
 		// Handle printable ASCII
-		// C++ Reference: string.cpp:972-975
+		// C++ Reference: string.cpp quote_to_ascii:972-975
 		if r < 0x80 && is_printable_ascii(r) {
 			strings.write_byte(&sb, byte(r))
 			i += width
@@ -342,15 +342,172 @@ type_writer_destroy_string :: proc(w: ^Type_Writer) {
 
 // C++ Reference: name_canonicalization.cpp:291-295
 type_writer_hasher_writer_proc :: proc(w: ^Type_Writer, ptr: rawptr, len: int) -> bool {
-	seed := cast(^u64)w.user_data
-	seed^ = fnv64a(ptr, len, seed^)
+	ctx := cast(^Typeid_Hash_Context)w.user_data
+	typeid_hash_context_update(ctx, ptr, len)
 	return true
 }
 
-// C++ Reference: name_canonicalization.cpp:297-300
-type_writer_make_hasher :: proc(w: ^Type_Writer, hash: ^u64) {
-	w.user_data = hash
+// C++ Reference: name_canonicalization.cpp:434-438
+type_writer_make_hasher :: proc(w: ^Type_Writer, ctx: ^Typeid_Hash_Context) {
+	typeid_hash_context_init(ctx)
+	w.user_data = ctx
 	w.proc_ = type_writer_hasher_writer_proc
+}
+
+// ======================================================================================
+// TYPEID HASH -- SipHash, matching C++ EXACTLY
+// C++ Reference: name_canonicalization.cpp:245-372
+//
+// A `typeid` IS this value: `lb_typeid` (llvm_backend_type.cpp:78-88) puts
+// `type_hash_canonical_type(type)` straight into the emitted constant. So this
+// is not an internal hash that merely has to be self-consistent -- it is the
+// RUNTIME IDENTITY of a type, shared with every object the reference compiler
+// has ever produced.
+//
+// This used to be FNV-1a, which is self-consistent and wrong: every typeid the
+// port computed disagreed with the reference's. Found by comparing computed
+// values against `typeid_of` in a running reference binary.
+//
+// NOT STANDARD SipHash, and it must not be "corrected". `rotate_left64` below
+// shifts right by a CONSTANT 62 rather than by `64 - s`, so it is not a rotate
+// at all. `core:crypto/siphash` therefore cannot be used here: standard
+// SipHash-2-4 of "int" under this key is 0xf8f180427c5584cc, where the reference
+// produces 0x967158c028419176. Reproducing the quirk is the requirement --
+// fixing it would change every typeid in the language and break compatibility
+// with every binary already built.
+// ======================================================================================
+
+SIP_BLOCK_SIZE :: 8
+
+Typeid_Hash_Context :: struct {
+	v0, v1, v2, v3: u64,
+	k0, k1:         u64,
+	c_rounds:       int,
+	d_rounds:       int,
+	buf:            [SIP_BLOCK_SIZE]u8,
+	last_block:     int,
+	total_length:   int,
+	is_initialized: bool,
+}
+
+// C++ Reference: name_canonicalization.cpp:263-281
+typeid_hash_context_init :: proc(ctx: ^Typeid_Hash_Context) {
+	ctx.c_rounds = 2
+	ctx.d_rounds = 4
+
+	// The C++ seed, verbatim -- "some random numbers to act as the seed".
+	ctx.k0 = 0xa6592ea25e04ac3c
+	ctx.k1 = 0xba3cba04ed28a9ae
+
+	ctx.v0 = 0x736f6d6570736575 ~ ctx.k0
+	ctx.v1 = 0x646f72616e646f6d ~ ctx.k1
+	ctx.v2 = 0x6c7967656e657261 ~ ctx.k0
+	ctx.v3 = 0x7465646279746573 ~ ctx.k1
+
+	ctx.last_block = 0
+	ctx.total_length = 0
+	ctx.is_initialized = true
+}
+
+// rotate_left64 reproduces C++'s `rotate_left64` INCLUDING ITS DEFECT.
+//
+// C++ Reference: name_canonicalization.cpp:283-287
+//
+//	u64 s = k & (n-1);
+//	return (x<<s) | (x>>(n-2));
+//
+// A rotate would shift right by `n - s`. This shifts by `n - 2` = 62, a
+// constant, so bits are lost and duplicated. It is wrong and it is load-bearing:
+// the typeid of every type in every Odin binary is defined by this expression.
+@(private)
+rotate_left64 :: proc(x: u64, k: u64) -> u64 {
+	n :: u64(64)
+	s := k & (n - 1)
+	return (x << s) | (x >> (n - 2))
+}
+
+// C++ Reference: name_canonicalization.cpp:289-305
+@(private)
+sip_compress :: proc(ctx: ^Typeid_Hash_Context) {
+	ctx.v0 += ctx.v1
+	ctx.v1 = rotate_left64(ctx.v1, 13)
+	ctx.v1 ~= ctx.v0
+	ctx.v0 = rotate_left64(ctx.v0, 32)
+	ctx.v2 += ctx.v3
+	ctx.v3 = rotate_left64(ctx.v3, 16)
+	ctx.v3 ~= ctx.v2
+	ctx.v0 += ctx.v3
+	ctx.v3 = rotate_left64(ctx.v3, 21)
+	ctx.v3 ~= ctx.v0
+	ctx.v2 += ctx.v1
+	ctx.v1 = rotate_left64(ctx.v1, 17)
+	ctx.v1 ~= ctx.v2
+	ctx.v2 = rotate_left64(ctx.v2, 32)
+}
+
+// C++ Reference: name_canonicalization.cpp:307-324
+@(private)
+sip_block :: proc(ctx: ^Typeid_Hash_Context, data: []u8) {
+	d := data
+	for len(d) >= SIP_BLOCK_SIZE {
+		m: u64
+		for i in 0 ..< 8 {
+			m |= u64(d[i]) << (8 * u64(i))
+		}
+		ctx.v3 ~= m
+		for _ in 0 ..< ctx.c_rounds {
+			sip_compress(ctx)
+		}
+		ctx.v0 ~= m
+		d = d[SIP_BLOCK_SIZE:]
+	}
+}
+
+// C++ Reference: name_canonicalization.cpp:326-355
+typeid_hash_context_update :: proc(ctx: ^Typeid_Hash_Context, ptr: rawptr, length: int) {
+	assert(ctx.is_initialized)
+	if length <= 0 {
+		return
+	}
+	data := slice.bytes_from_ptr(ptr, length)
+	ctx.total_length += length
+
+	if ctx.last_block > 0 {
+		n := min(SIP_BLOCK_SIZE - ctx.last_block, len(data))
+		copy(ctx.buf[ctx.last_block:], data[:n])
+		ctx.last_block += n
+		if ctx.last_block == SIP_BLOCK_SIZE {
+			sip_block(ctx, ctx.buf[:])
+			ctx.last_block = 0
+		}
+		data = data[n:]
+	}
+
+	if len(data) >= SIP_BLOCK_SIZE {
+		n := len(data) & ~int(SIP_BLOCK_SIZE - 1)
+		sip_block(ctx, data[:n])
+		data = data[n:]
+	}
+	if len(data) > 0 {
+		n := min(SIP_BLOCK_SIZE, len(data))
+		copy(ctx.buf[:], data[:n])
+		ctx.last_block = n
+	}
+}
+
+// C++ Reference: name_canonicalization.cpp:357-372
+typeid_hash_context_fini :: proc(ctx: ^Typeid_Hash_Context) -> u64 {
+	assert(ctx.is_initialized)
+	tmp: [SIP_BLOCK_SIZE]u8
+	copy(tmp[:], ctx.buf[:min(ctx.last_block, SIP_BLOCK_SIZE)])
+	tmp[7] = u8(ctx.total_length & 0xff)
+	sip_block(ctx, tmp[:])
+
+	ctx.v2 ~= 0xff
+	for _ in 0 ..< ctx.d_rounds {
+		sip_compress(ctx)
+	}
+	return ctx.v0 ~ ctx.v1 ~ ctx.v2 ~ ctx.v3
 }
 
 // ======================================================================================
@@ -412,7 +569,7 @@ write_canonical_params :: proc(w: ^Type_Writer, params: ^Type) {
 			}
 
 			// Handle default values for doc writer
-			// C++ Reference: name_canonicalization.cpp:472-488
+			// C++ Reference: name_canonicalization.cpp write_canonical_params:472-488
 			if is_in_doc_writer() {
 				var_ent := v.variant.(Entity_Variable)
 				// Get default value expression - try init_expr first, then param_value
@@ -436,7 +593,7 @@ write_canonical_params :: proc(w: ^Type_Writer, params: ^Type) {
 		case .Constant:
 			const_ent := v.variant.(Entity_Constant)
 			type_writer_appendc(w, CANONICAL_PARAM_CONST)
-			// C++ Reference: name_canonicalization.cpp:497 and :851 pass a string limit of
+			// C++ Reference: name_canonicalization.cpp write_canonical_params:497 and :851 pass a string limit of
 			// 1<<16. With the default (36) a constant string longer than 36 chars is ELIDED in
 			// the canonical name, so two distinct constants can canonicalise identically.
 			s := exact_value_to_string(const_ent.value, 1 << 16)
@@ -467,16 +624,45 @@ type_hash_canonical_type :: proc(type: ^Type) -> u64 {
 		return prev_hash
 	}
 
-	// Compute hash using TypeWriter hasher backend
-	// C++ Reference: line 381-385
-	hash: u64 = fnv64a(nil, 0) // Initialize with FNV offset basis
+	// A type ALIAS hashes as the type it aliases.
+	//
+	// C++ Reference: name_canonicalization.cpp:519-526 -- "Unwrap type aliases
+	// similar to are_types_identical*". The port wrote `type` directly, so
+	// `MyInt :: int` hashed differently from `int` here and identically in the
+	// reference. That is a second divergence, independent of the digest: it
+	// survives any change to the hash function.
+	type_unaliased := type
+	if type.kind == .Named {
+		if named, is_named := type.variant.(Type_Named); is_named {
+			if e := named.type_name; e != nil {
+				if tn, is_tn := e.variant.(Entity_Type_Name); is_tn && tn.is_type_alias {
+					type_unaliased = named.base
+				}
+			}
+		}
+	}
 
+	// C++ Reference: line 527-530
+	ctx: Typeid_Hash_Context
 	w: Type_Writer
-	type_writer_make_hasher(&w, &hash)
-	write_type_to_canonical_string(&w, type)
+	type_writer_make_hasher(&w, &ctx)
+	write_type_to_canonical_string(&w, type_unaliased)
+	hash := typeid_hash_context_fini(&ctx)
 
 	// Ensure hash is non-zero (C++ line 385)
 	hash = hash != 0 ? hash : 1
+
+	// C++ Reference: name_canonicalization.cpp:531-540.
+	//
+	// Deliberate and flag-gated, unlike the rotate defect above: clearing the
+	// top bit puts every typeid in [1, 2^63) so a type switch over `any` has a
+	// case span the WebKit wasm JIT can represent. Omitting it made the port
+	// disagree with the reference under `-webkit-switch-workaround`, which is a
+	// configuration nothing here had exercised.
+	if build_context.webkit_switch_workaround {
+		hash &= 0x7fffffffffffffff
+		hash = hash != 0 ? hash : 1
+	}
 
 	// Cache the hash (single-threaded, no atomics needed)
 	// C++ Reference: line 387
@@ -687,7 +873,7 @@ write_canonical_entity_name :: proc(w: ^Type_Writer, e: ^Entity) {
 		} else if .Builtin in s.flags {
 			// Jump to write_base_name
 		} else if e.kind == .Type_Name {
-			// C++ Reference: name_canonicalization.cpp:689-691 --
+			// C++ Reference: name_canonicalization.cpp write_canonical_entity_name:689-691 --
 			//     if (e->kind == Entity_TypeName) {
 			//         goto write_base_name;
 			//     }
@@ -698,7 +884,7 @@ write_canonical_entity_name :: proc(w: ^Type_Writer, e: ^Entity) {
 			// diagnostic. The old comment cited "C++ line 530-546", which is the typeid-hashing
 			// and WebKit-workaround block -- a drifted citation pointing at unrelated code.
 		} else {
-			// C++ Reference: name_canonicalization.cpp:693 onward -- C++ prints a detailed
+			// C++ Reference: name_canonicalization.cpp write_canonical_entity_name:693 onward -- C++ prints a detailed
 			// WEIRD ENTITY TYPE diagnostic (position, type, scope flags, decl_info) and then dies.
 			// The port keeps the die; the diagnostic detail is not reproduced.
 			panic(fmt.tprintf("write_canonical_entity_name: Weird entity %s", e.token.text))
@@ -829,7 +1015,7 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		write_type_to_canonical_string(w, dyn.elem)
 
 	case .Fixed_Capacity_Dynamic_Array:
-		// C++ Reference: name_canonicalization.cpp:812-814 --
+		// C++ Reference: name_canonicalization.cpp write_type_to_canonical_string:812-814 --
 		//     type_writer_append_fmt(w, "[dynamic;%lld]", capacity);
 		//     write_type_to_canonical_string(w, elem);
 		// LEDGER #482. This arm was MISSING, so `[dynamic; N]T` panicked in the canonical-name
@@ -916,7 +1102,7 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		type_writer_appendc(w, "union")
 
 		// Handle polymorphic_params for doc writer
-		// C++ Reference: name_canonicalization.cpp:853-855
+		// C++ Reference: name_canonicalization.cpp write_type_to_canonical_string:853-855
 		if is_in_doc_writer() && union_type.polymorphic_params != nil {
 			write_canonical_params(w, union_type.polymorphic_params)
 		}
@@ -965,7 +1151,7 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		type_writer_appendc(w, "struct")
 
 		// Handle polymorphic_params for doc writer
-		// C++ Reference: name_canonicalization.cpp:885-887
+		// C++ Reference: name_canonicalization.cpp write_type_to_canonical_string:885-887
 		if is_in_doc_writer() && struct_type.polymorphic_params != nil {
 			write_canonical_params(w, struct_type.polymorphic_params)
 		}
@@ -1043,6 +1229,33 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		if proc_type.result_count > 0 {
 			type_writer_appendc(w, "->")
 			write_canonical_params(w, proc_type.results)
+		}
+
+		// C++ Reference: name_canonicalization.cpp write_type_to_canonical_string:983-988
+		//
+		// BOTH TAGS WERE MISSING. The port stopped after the results, so every #optional_ok
+		// procedure got a canonical name 12 characters shorter than the reference's, and every
+		// diverging procedure lost its `!`.
+		//
+		// The canonical name is the LINK-TIME IDENTITY of an instantiation, so this is not
+		// cosmetic. mirc found it by cross-linking against reference-compiled objects: the
+		// reference defines
+		//     runtime::append_elem:proc(...)->(...)#optional_ok
+		// and mirc referenced the same string without the tag -- byte-identical for 137 characters,
+		// then divergent. Unresolved symbol. That covers `append`, map access and the `, ok` form
+		// of type assertions, i.e. everything spelled with an optional second result.
+		//
+		// It is INVISIBLE to any same-compiler comparison -- port-vs-port agrees on the wrong name
+		// -- which is why no gate here caught it and only a mixed link could.
+		//
+		// ORDER IS LOAD-BEARING: results, then `!`, then `#optional_ok`. This is a name; a different
+		// order is a different symbol. The doc writer already emitted both tags in this order
+		// (docs_writer.odin:1142-1145), which is corroboration that the fields carry what C++ reads.
+		if proc_type.diverging {
+			type_writer_appendc(w, "!")
+		}
+		if proc_type.optional_ok {
+			type_writer_appendc(w, "#optional_ok")
 		}
 
 	case .Generic:

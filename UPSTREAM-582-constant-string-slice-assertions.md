@@ -2,7 +2,11 @@
 
 **Component:** `src/check_expr.cpp` (`check_slice_expr`)
 **Severity:** **crash** — `GB_ASSERT` fires, compiler aborts with "This is a compiler error"
-**Status:** both reproduced 5/5 on 2026-08-08
+**Compiler:** `dev-2026-08:a64cb7bfd`
+**Status:** both reproduced 5/5 on 2026-08-08, and re-verified 5/5 from these exact inputs
+immediately before filing. Bug B has a clean control: the same `string16` declaration WITHOUT
+the slice exits 0. Both cited lines were re-read in `src/` at filing time and still say what is
+quoted below.
 
 Two independent defects, both in `check_slice_expr`'s constant-string handling. They are
 filed together because they sit in the same function and are found by the same probe family,

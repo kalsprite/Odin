@@ -350,7 +350,7 @@ get_feature_flag_from_name :: proc(name: string) -> Opt_In_Feature_Flag {
 	return {}
 }
 
-// C++: build_settings.cpp:396-401
+// C++: build_settings.cpp get_feature_flag_from_name:396-401
 Sanitizer_Flag :: distinct bit_set[Sanitizer_Flag_Bit;u32]
 Sanitizer_Flag_Bit :: enum {
 	Address = 0,
@@ -436,6 +436,19 @@ Build_Context :: struct {
 	// checker.cpp:4628.
 	custom_attributes:                  map[string]bool,
 	no_bounds_check:                    bool,
+	// `-webkit-switch-workaround`: clear the top bit of every `typeid`.
+	//
+	// C++ Reference: build_settings.cpp:551, main.cpp:656/1352.
+	//
+	// WebKit's B3/OMG wasm JIT computes a switch's value range as a SIGNED i64
+	// (max - min). A type switch over `any` -- core:fmt has several -- spans the
+	// typeid space, and a span >= 2^63 overflows that subtraction, so the JIT
+	// builds a pathologically-sized jump table and OOM-crashes the tab.
+	// Constraining typeids to [1, 2^63) keeps the span representable.
+	//
+	// WebKit bug: https://bugs.webkit.org/show_bug.cgi?id=317022
+	// Odin issue:  https://github.com/odin-lang/Odin/issues/6810
+	webkit_switch_workaround:           bool,
 	no_type_assert:                     bool,
 	dynamic_literals:                   bool, // Opt-in to `#+feature dynamic-literals` project-wide.
 	no_crt:                             bool,
@@ -976,14 +989,14 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	}
 
 	// Default host platform detection
-	// C++: build_settings.cpp:1750-1802
+	// C++: build_settings.cpp init_build_context:1750-1802
 	metrics := cross_target
 	if metrics == nil {
 		metrics = default_target_metrics()
 	}
 
 	// Check for cross-compilation
-	// C++: build_settings.cpp:1804-1808
+	// C++: build_settings.cpp init_build_context:1804-1808
 	if cross_target != nil {
 		// For checker, we can't detect host platform at runtime like C++
 		// so we assume cross_compiling if a target was explicitly provided
@@ -991,7 +1004,7 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	}
 
 	// Validate metrics
-	// C++: build_settings.cpp:1810-1820
+	// C++: build_settings.cpp init_build_context:1810-1820
 	assert(metrics.os != .Invalid, "init_build_context: Invalid target OS")
 	assert(metrics.arch != .Invalid, "init_build_context: Invalid target arch")
 	assert(metrics.ptr_size > 1, "init_build_context: Invalid ptr_size")
@@ -1004,7 +1017,7 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	}
 
 	// Copy metrics into build context
-	// C++: build_settings.cpp:1822-1830
+	// C++: build_settings.cpp init_build_context:1822-1830
 	bc.metrics = metrics^
 	bc.ODIN_OS = target_os_names[metrics.os]
 	bc.ODIN_ARCH = target_arch_names[metrics.arch]
@@ -1015,19 +1028,19 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	bc.max_simd_align = i64(metrics.max_simd_align)
 
 	// Freestanding defaults
-	// C++: build_settings.cpp:1844-1846
+	// C++: build_settings.cpp init_build_context:1844-1846
 	if metrics.os == .Freestanding {
 		bc.no_entry_point = true
 	}
 
 	// Default Windows subsystem
-	// C++: build_settings.cpp:1854-1856
+	// C++: build_settings.cpp init_build_context:1854-1856
 	if bc.ODIN_WINDOWS_SUBSYSTEM == .UNKNOWN && metrics.os == .Windows {
 		bc.ODIN_WINDOWS_SUBSYSTEM = .CONSOLE
 	}
 
 	// Handle subtargets (iPhone, iPhoneSimulator, Android)
-	// C++: build_settings.cpp:1882-1915
+	// C++: build_settings.cpp init_build_context:1882-1915
 	if metrics.os == .Darwin {
 		#partial switch subtarget {
 		case .IPhone:
@@ -1061,7 +1074,7 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	bc.subtarget = subtarget
 
 	// Minimum OS version defaults.
-	// C++: build_settings.cpp:2041-2053. Only darwin has a default; every other target
+	// C++: build_settings.cpp init_build_context:2041-2053. Only darwin has a default; every other target
 	// leaves the string empty, which init_universal turns into ODIN_MINIMUM_OS_VERSION == 0.
 	if metrics.os == .Darwin && !bc.minimum_os_version_string_given {
 		switch subtarget {
@@ -1074,7 +1087,7 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	}
 
 	// Optimization level defaults.
-	// C++: build_settings.cpp:2070-2081
+	// C++: build_settings.cpp init_build_context:2070-2081
 	if !bc.custom_optimization_level {
 		// C++: when building with `-debug` but no explicit optimization level, default to
 		// `-o:none` to improve debug symbol generation.
@@ -1083,7 +1096,7 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	bc.optimization_level = clamp(bc.optimization_level, -1, 3)
 
 	// Separate modules.
-	// C++: build_settings.cpp:2027 (wasm forces it off), 2083-2085 (-o:none/-o:minimal turn
+	// C++: build_settings.cpp init_build_context:2027 (wasm forces it off), 2083-2085 (-o:none/-o:minimal turn
 	// it on for non-wasm), 2087-2089 (`-use-single-module` turns it back off).
 	// The port has no LTO support, so the `-lto:thin` branch (C++ 2091-2110) is not ported.
 	if is_arch_wasm() {
@@ -1095,20 +1108,20 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 		bc.use_separate_modules = false
 	}
 
-	// C++: build_settings.cpp:2114-2121
+	// C++: build_settings.cpp init_build_context:2114-2121
 	bc.ODIN_VALGRIND_SUPPORT = false
 	if bc.metrics.os != .Windows && bc.metrics.arch == .Amd64 {
 		bc.ODIN_VALGRIND_SUPPORT = true
 	}
 
-	// C++: build_settings.cpp:2123-2125
+	// C++: build_settings.cpp init_build_context:2123-2125
 	if bc.metrics.os == .Freestanding {
 		bc.ODIN_DEFAULT_TO_NIL_ALLOCATOR = !bc.ODIN_DEFAULT_TO_PANIC_ALLOCATOR
 	}
 }
 
 // get_default_microarchitecture returns the microarchitecture used when none was requested.
-// C++: llvm_backend.cpp:33-52
+// C++: llvm_backend.cpp get_default_microarchitecture:33-52
 get_default_microarchitecture :: proc() -> string {
 	#partial switch build_context.metrics.arch {
 	case .Amd64:
@@ -1124,7 +1137,7 @@ get_default_microarchitecture :: proc() -> string {
 }
 
 // get_final_microarchitecture resolves ODIN_MICROARCH_STRING.
-// C++: llvm_backend.cpp:54-63
+// C++: llvm_backend.cpp get_final_microarchitecture:54-63
 //
 // DEVIATION: C++ resolves the literal string "native" through LLVMGetHostCPUName(). The
 // checker does not link LLVM, so "native" is returned verbatim. It can only be reached by an
@@ -1348,19 +1361,14 @@ has_ansi_terminal_colours :: proc() -> bool {
 // C++: build_settings_microarch.cpp and build_settings.cpp:2052-2092
 // ======================================================================================
 
-// Target features list per architecture
-// Generated from LLVM target features - see misc/featuregen in C++ source
-// C++: build_settings_microarch.cpp:27-44
-target_features_list := [Target_Arch_Kind]string {
-	.Invalid  = "",
-	.Amd64    = "16bit-mode,32bit-mode,64bit,64bit-mode,adx,aes,allow-light-256-bit,amx-avx512,amx-bf16,amx-complex,amx-fp16,amx-fp8,amx-int8,amx-movrs,amx-tf32,amx-tile,amx-transpose,avx,avx10.1-256,avx10.1-512,avx10.2-256,avx10.2-512,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512fp16,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vp2intersect,avx512vpopcntdq,avxifma,avxneconvert,avxvnni,avxvnniint16,avxvnniint8,bmi,bmi2,branch-hint,branchfusion,ccmp,cf,cldemote,clflushopt,clwb,clzero,cmov,cmpccxadd,crc32,cx16,cx8,egpr,enqcmd,ermsb,evex512,f16c,false-deps-getmant,false-deps-lzcnt-tzcnt,false-deps-mulc,false-deps-mullq,false-deps-perm,false-deps-popcnt,false-deps-range,fast-11bytenop,fast-15bytenop,fast-7bytenop,fast-bextr,fast-dpwssd,fast-gather,fast-hops,fast-imm16,fast-lzcnt,fast-movbe,fast-scalar-fsqrt,fast-scalar-shift-masks,fast-shld-rotate,fast-variable-crosslane-shuffle,fast-variable-perlane-shuffle,fast-vector-fsqrt,fast-vector-shift-masks,faster-shift-than-shuffle,fma,fma4,fsgsbase,fsrm,fxsr,gfni,harden-sls-ijmp,harden-sls-ret,hreset,idivl-to-divb,idivq-to-divl,inline-asm-use-gpr32,invpcid,kl,lea-sp,lea-uses-ag,lvi-cfi,lvi-load-hardening,lwp,lzcnt,macrofusion,mmx,movbe,movdir64b,movdiri,movrs,mwaitx,ndd,nf,no-bypass-delay,no-bypass-delay-blend,no-bypass-delay-mov,no-bypass-delay-shuffle,nopl,pad-short-functions,pclmul,pconfig,pku,popcnt,ppx,prefer-128-bit,prefer-256-bit,prefer-mask-registers,prefer-movmsk-over-vtest,prefer-no-gather,prefer-no-scatter,prefetchi,prfchw,ptwrite,push2pop2,raoint,rdpid,rdpru,rdrnd,rdseed,retpoline,retpoline-external-thunk,retpoline-indirect-branches,retpoline-indirect-calls,rtm,sahf,sbb-dep-breaking,serialize,seses,sgx,sha,sha512,shstk,slow-3ops-lea,slow-incdec,slow-lea,slow-pmaddwd,slow-pmulld,slow-shld,slow-two-mem-ops,slow-unaligned-mem-16,slow-unaligned-mem-32,sm3,sm4,soft-float,sse,sse-unaligned-mem,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,tagged-globals,tbm,tsxldtrk,tuning-fast-imm-vector-shift,uintr,use-glm-div-sqrt-costs,use-slm-arith-costs,usermsr,vaes,vpclmulqdq,vzeroupper,waitpkg,wbnoinvd,widekl,x87,xop,xsave,xsavec,xsaveopt,xsaves,zu",
-	.I386     = "16bit-mode,32bit-mode,64bit,64bit-mode,adx,aes,allow-light-256-bit,amx-avx512,amx-bf16,amx-complex,amx-fp16,amx-fp8,amx-int8,amx-movrs,amx-tf32,amx-tile,amx-transpose,avx,avx10.1-256,avx10.1-512,avx10.2-256,avx10.2-512,avx2,avx512bf16,avx512bitalg,avx512bw,avx512cd,avx512dq,avx512f,avx512fp16,avx512ifma,avx512vbmi,avx512vbmi2,avx512vl,avx512vnni,avx512vp2intersect,avx512vpopcntdq,avxifma,avxneconvert,avxvnni,avxvnniint16,avxvnniint8,bmi,bmi2,branch-hint,branchfusion,ccmp,cf,cldemote,clflushopt,clwb,clzero,cmov,cmpccxadd,crc32,cx16,cx8,egpr,enqcmd,ermsb,evex512,f16c,false-deps-getmant,false-deps-lzcnt-tzcnt,false-deps-mulc,false-deps-mullq,false-deps-perm,false-deps-popcnt,false-deps-range,fast-11bytenop,fast-15bytenop,fast-7bytenop,fast-bextr,fast-dpwssd,fast-gather,fast-hops,fast-imm16,fast-lzcnt,fast-movbe,fast-scalar-fsqrt,fast-scalar-shift-masks,fast-shld-rotate,fast-variable-crosslane-shuffle,fast-variable-perlane-shuffle,fast-vector-fsqrt,fast-vector-shift-masks,faster-shift-than-shuffle,fma,fma4,fsgsbase,fsrm,fxsr,gfni,harden-sls-ijmp,harden-sls-ret,hreset,idivl-to-divb,idivq-to-divl,inline-asm-use-gpr32,invpcid,kl,lea-sp,lea-uses-ag,lvi-cfi,lvi-load-hardening,lwp,lzcnt,macrofusion,mmx,movbe,movdir64b,movdiri,movrs,mwaitx,ndd,nf,no-bypass-delay,no-bypass-delay-blend,no-bypass-delay-mov,no-bypass-delay-shuffle,nopl,pad-short-functions,pclmul,pconfig,pku,popcnt,ppx,prefer-128-bit,prefer-256-bit,prefer-mask-registers,prefer-movmsk-over-vtest,prefer-no-gather,prefer-no-scatter,prefetchi,prfchw,ptwrite,push2pop2,raoint,rdpid,rdpru,rdrnd,rdseed,retpoline,retpoline-external-thunk,retpoline-indirect-branches,retpoline-indirect-calls,rtm,sahf,sbb-dep-breaking,serialize,seses,sgx,sha,sha512,shstk,slow-3ops-lea,slow-incdec,slow-lea,slow-pmaddwd,slow-pmulld,slow-shld,slow-two-mem-ops,slow-unaligned-mem-16,slow-unaligned-mem-32,sm3,sm4,soft-float,sse,sse-unaligned-mem,sse2,sse3,sse4.1,sse4.2,sse4a,ssse3,tagged-globals,tbm,tsxldtrk,tuning-fast-imm-vector-shift,uintr,use-glm-div-sqrt-costs,use-slm-arith-costs,usermsr,vaes,vpclmulqdq,vzeroupper,waitpkg,wbnoinvd,widekl,x87,xop,xsave,xsavec,xsaveopt,xsaves,zu",
-	.Arm32    = "32bit,8msecext,a12,a15,a17,a32,a35,a5,a53,a55,a57,a7,a72,a73,a75,a76,a77,a78c,a8,a9,aapcs-frame-chain,aclass,acquire-release,aes,armv4,armv4t,armv5t,armv5te,armv5tej,armv6,armv6-m,armv6j,armv6k,armv6kz,armv6s-m,armv6t2,armv7-a,armv7-m,armv7-r,armv7e-m,armv7k,armv7s,armv7ve,armv8-a,armv8-m.base,armv8-m.main,armv8-r,armv8.1-a,armv8.1-m.main,armv8.2-a,armv8.3-a,armv8.4-a,armv8.5-a,armv8.6-a,armv8.7-a,armv8.8-a,armv8.9-a,armv9-a,armv9.1-a,armv9.2-a,armv9.3-a,armv9.4-a,armv9.5-a,armv9.6-a,atomics-32,avoid-movs-shop,avoid-muls,avoid-partial-cpsr,bf16,big-endian-instructions,branch-align-64,cde,cdecp0,cdecp1,cdecp2,cdecp3,cdecp4,cdecp5,cdecp6,cdecp7,cheap-predicable-cpsr,clrbhb,cortex-a510,cortex-a710,cortex-a78,cortex-a78ae,cortex-x1,cortex-x1c,crc,crypto,d32,db,dfb,disable-postra-scheduler,dont-widen-vmovs,dotprod,dsp,execute-only,expand-fp-mlx,exynos,fix-cmse-cve-2021-35465,fix-cortex-a57-aes-1742098,fp-armv8,fp-armv8d16,fp-armv8d16sp,fp-armv8sp,fp16,fp16fml,fp64,fpao,fpregs,fpregs16,fpregs64,fullfp16,fuse-aes,fuse-literals,harden-sls-blr,harden-sls-nocomdat,harden-sls-retbr,hwdiv,hwdiv-arm,i8mm,iwmmxt,iwmmxt2,krait,kryo,lob,long-calls,loop-align,m3,m55,m7,m85,mclass,mp,muxed-units,mve,mve.fp,mve1beat,mve2beat,mve4beat,nacl-trap,neon,neon-fpmovs,neonfp,neoverse-v1,no-branch-predictor,no-bti-at-return-twice,no-movt,no-neg-immediates,noarm,nonpipelined-vfp,pacbti,perfmon,prefer-ishst,prefer-vmovsr,prof-unpr,r4,r5,r52,r52plus,r7,ras,rclass,read-tp-tpidrprw,read-tp-tpidruro,read-tp-tpidrurw,reserve-r9,ret-addr-stack,sb,sha2,slow-fp-brcc,slow-load-D-subreg,slow-odd-reg,slow-vdup32,slow-vgetlni32,slowfpvfmx,slowfpvmlx,soft-float,splat-vfp-neon,strict-align,swift,thumb-mode,thumb2,trustzone,use-mipipeliner,use-misched,v4t,v5t,v5te,v6,v6k,v6m,v6t2,v7,v7clrex,v8,v8.1a,v8.1m.main,v8.2a,v8.3a,v8.4a,v8.5a,v8.6a,v8.7a,v8.8a,v8.9a,v8m,v8m.main,v9.1a,v9.2a,v9.3a,v9.4a,v9.5a,v9.6a,v9a,vfp2,vfp2sp,vfp3,vfp3d16,vfp3d16sp,vfp3sp,vfp4,vfp4d16,vfp4d16sp,vfp4sp,virtualization,vldn-align,vmlx-forwarding,vmlx-hazards,wide-stride-vfp,xscale,zcz",
-	.Arm64    = "CONTEXTIDREL2,a320,a35,a510,a520,a520ae,a53,a55,a57,a64fx,a65,a710,a715,a72,a720,a720ae,a73,a75,a76,a77,a78,a78ae,a78c,addr-lsl-slow-14,aes,aggressive-fma,all,alternate-sextload-cvt-f32-pattern,altnzcv,alu-lsl-fast,am,ampere1,ampere1a,ampere1b,amvs,apple-a10,apple-a11,apple-a12,apple-a13,apple-a14,apple-a15,apple-a16,apple-a17,apple-a7,apple-m4,arith-bcc-fusion,arith-cbz-fusion,ascend-store-address,avoid-ldapur,balance-fp-ops,bf16,brbe,bti,call-saved-x10,call-saved-x11,call-saved-x12,call-saved-x13,call-saved-x14,call-saved-x15,call-saved-x18,call-saved-x8,call-saved-x9,carmel,ccdp,ccidx,ccpp,chk,clrbhb,cmp-bcc-fusion,cmpbr,complxnum,cortex-a725,cortex-r82,cortex-r82ae,cortex-x1,cortex-x2,cortex-x3,cortex-x4,cortex-x925,cpa,crc,crypto,cssc,d128,disable-fast-inc-vl,disable-latency-sched-heuristic,disable-ldp,disable-stp,dit,dotprod,ecv,el2vmsa,el3,enable-select-opt,ete,execute-only,exynos-cheap-as-move,exynosm3,exynosm4,f32mm,f64mm,f8f16mm,f8f32mm,falkor,faminmax,fgt,fix-cortex-a53-835769,flagm,fmv,force-32bit-jump-tables,fp-armv8,fp16fml,fp8,fp8dot2,fp8dot4,fp8fma,fpac,fprcvt,fptoint,fujitsu-monaka,fullfp16,fuse-address,fuse-addsub-2reg-const1,fuse-adrp-add,fuse-aes,fuse-arith-logic,fuse-crypto-eor,fuse-csel,fuse-literals,gcs,harden-sls-blr,harden-sls-nocomdat,harden-sls-retbr,hbc,hcx,i8mm,ite,jsconv,kryo,ldp-aligned-only,lor,ls64,lse,lse128,lse2,lsfe,lsui,lut,mec,mops,mpam,mte,neon,neoverse512tvb,neoversee1,neoversen1,neoversen2,neoversen3,neoversev1,neoversev2,neoversev3,neoversev3AE,nmi,no-bti-at-return-twice,no-neg-immediates,no-sve-fp-ld1r,no-zcz-fp,nv,occmo,olympus,oryon-1,outline-atomics,pan,pan-rwv,pauth,pauth-lr,pcdphint,perfmon,pops,predictable-select-expensive,predres,prfm-slc-target,rand,ras,rasv2,rcpc,rcpc-immo,rcpc3,rdm,reserve-lr-for-ra,reserve-x1,reserve-x10,reserve-x11,reserve-x12,reserve-x13,reserve-x14,reserve-x15,reserve-x18,reserve-x2,reserve-x20,reserve-x21,reserve-x22,reserve-x23,reserve-x24,reserve-x25,reserve-x26,reserve-x27,reserve-x28,reserve-x3,reserve-x4,reserve-x5,reserve-x6,reserve-x7,reserve-x9,rme,saphira,sb,sel2,sha2,sha3,slow-misaligned-128store,slow-paired-128,slow-strqro-store,sm4,sme,sme-b16b16,sme-f16f16,sme-f64f64,sme-f8f16,sme-f8f32,sme-fa64,sme-i16i64,sme-lutv2,sme-mop4,sme-tmop,sme2,sme2p1,sme2p2,spe,spe-eef,specres2,specrestrict,ssbs,ssve-aes,ssve-bitperm,ssve-fexpa,ssve-fp8dot2,ssve-fp8dot4,ssve-fp8fma,store-pair-suppress,stp-aligned-only,strict-align,sve,sve-aes,sve-aes2,sve-b16b16,sve-bfscale,sve-bitperm,sve-f16f32mm,sve-sha3,sve-sm4,sve2,sve2-aes,sve2-bitperm,sve2-sha3,sve2-sm4,sve2p1,sve2p2,tagged-globals,the,thunderx,thunderx2t99,thunderx3t110,thunderxt81,thunderxt83,thunderxt88,tlb-rmi,tlbiw,tme,tpidr-el1,tpidr-el2,tpidr-el3,tpidrro-el0,tracev8.4,trbe,tsv110,uaops,use-experimental-zeroing-pseudos,use-fixed-over-scalable-if-equal-cost,use-postra-scheduler,use-reciprocal-square-root,v8.1a,v8.2a,v8.3a,v8.4a,v8.5a,v8.6a,v8.7a,v8.8a,v8.9a,v8a,v8r,v9.1a,v9.2a,v9.3a,v9.4a,v9.5a,v9.6a,v9a,vh,wfxt,xs,zcm-fpr32,zcm-fpr64,zcm-gpr32,zcm-gpr64,zcz,zcz-fp-workaround,zcz-gp",
-	.Wasm32   = "atomics,bulk-memory,bulk-memory-opt,call-indirect-overlong,exception-handling,extended-const,fp16,multimemory,multivalue,mutable-globals,nontrapping-fptoint,reference-types,relaxed-simd,sign-ext,simd128,tail-call,wide-arithmetic",
-	.Wasm64p32= "atomics,bulk-memory,bulk-memory-opt,call-indirect-overlong,exception-handling,extended-const,fp16,multimemory,multivalue,mutable-globals,nontrapping-fptoint,reference-types,relaxed-simd,sign-ext,simd128,tail-call,wide-arithmetic",
-	.Riscv64  = "32bit,64bit,a,andes45,auipc-addi-fusion,b,c,conditional-cmv-fusion,d,disable-latency-sched-heuristic,dlen-factor-2,e,exact-asm,experimental,f,forced-atomics,h,i,ld-add-fusion,log-vrgather,lui-addi-fusion,m,mips-p8700,no-default-unroll,no-sink-splat-operands,no-trailing-seq-cst-fence,optimized-nf2-segment-load-store,optimized-nf3-segment-load-store,optimized-nf4-segment-load-store,optimized-nf5-segment-load-store,optimized-nf6-segment-load-store,optimized-nf7-segment-load-store,optimized-nf8-segment-load-store,optimized-zero-stride-load,predictable-select-expensive,prefer-vsetvli-over-read-vlenb,prefer-w-inst,q,relax,reserve-x1,reserve-x10,reserve-x11,reserve-x12,reserve-x13,reserve-x14,reserve-x15,reserve-x16,reserve-x17,reserve-x18,reserve-x19,reserve-x2,reserve-x20,reserve-x21,reserve-x22,reserve-x23,reserve-x24,reserve-x25,reserve-x26,reserve-x27,reserve-x28,reserve-x29,reserve-x3,reserve-x30,reserve-x31,reserve-x4,reserve-x5,reserve-x6,reserve-x7,reserve-x8,reserve-x9,rva20s64,rva20u64,rva22s64,rva22u64,rva23s64,rva23u64,rvb23s64,rvb23u64,rvi20u32,rvi20u64,save-restore,sdext,sdtrig,sha,shcounterenw,shgatpa,shifted-zextw-fusion,shlcofideleg,short-forward-branch-opt,shtvala,shvstvala,shvstvecd,sifive7,smaia,smcdeleg,smcntrpmf,smcsrind,smdbltrp,smepmp,smmpm,smnpm,smrnmi,smstateen,ssaia,ssccfg,ssccptr,sscofpmf,sscounterenw,sscsrind,ssdbltrp,ssnpm,sspm,ssqosid,ssstateen,ssstrict,sstc,sstvala,sstvecd,ssu64xl,supm,svade,svadu,svbare,svinval,svnapot,svpbmt,svvptc,tagged-globals,unaligned-scalar-mem,unaligned-vector-mem,use-postra-scheduler,v,ventana-veyron,vl-dependent-latency,vxrm-pipeline-flush,xandesbfhcvt,xandesperf,xandesvbfhcvt,xandesvdot,xandesvpackfph,xandesvsintload,xcvalu,xcvbi,xcvbitmanip,xcvelw,xcvmac,xcvmem,xcvsimd,xmipscbop,xmipscmov,xmipslsp,xsfcease,xsfmm128t,xsfmm16t,xsfmm32a16f,xsfmm32a32f,xsfmm32a8f,xsfmm32a8i,xsfmm32t,xsfmm64a64f,xsfmm64t,xsfmmbase,xsfvcp,xsfvfnrclipxfqf,xsfvfwmaccqqq,xsfvqmaccdod,xsfvqmaccqoq,xsifivecdiscarddlone,xsifivecflushdlone,xtheadba,xtheadbb,xtheadbs,xtheadcmo,xtheadcondmov,xtheadfmemidx,xtheadmac,xtheadmemidx,xtheadmempair,xtheadsync,xtheadvdot,xventanacondops,xwchc,za128rs,za64rs,zaamo,zabha,zacas,zalrsc,zama16b,zawrs,zba,zbb,zbc,zbkb,zbkc,zbkx,zbs,zca,zcb,zcd,zce,zcf,zclsd,zcmop,zcmp,zcmt,zdinx,zexth-fusion,zextw-fusion,zfa,zfbfmin,zfh,zfhmin,zfinx,zhinx,zhinxmin,zic64b,zicbom,zicbop,zicboz,ziccamoa,ziccamoc,ziccif,zicclsm,ziccrse,zicntr,zicond,zicsr,zifencei,zihintntl,zihintpause,zihpm,zilsd,zimop,zk,zkn,zknd,zkne,zknh,zkr,zks,zksed,zksh,zkt,zmmul,ztso,zvbb,zvbc,zve32f,zve32x,zve64d,zve64f,zve64x,zvfbfmin,zvfbfwma,zvfh,zvfhmin,zvkb,zvkg,zvkn,zvknc,zvkned,zvkng,zvknha,zvknhb,zvks,zvksc,zvksed,zvksg,zvksh,zvkt,zvl1024b,zvl128b,zvl16384b,zvl2048b,zvl256b,zvl32768b,zvl32b,zvl4096b,zvl512b,zvl64b,zvl65536b,zvl8192b",
-}
+// target_features_list -- the per-architecture set of feature names LLVM accepts -- now lives in
+// build_settings_microarch.odin, GENERATED from src/build_settings_microarch.cpp by
+// .claude/tools/gen_microarch.py.
+//
+// #612: the hand-copied table that used to sit here was stale against LLVM 22 on ALL SEVEN real
+// architectures, in BOTH directions at once -- it rejected 34 arm64 and 55 riscv64 feature names
+// C++ accepts, while accepting `tme`, `zcz`, `nacl-trap` and `amx-transpose`, which C++ rejects.
+// Hand-maintaining a 200 KB generated table IS the defect; do not paste rows back in here.
 
 // ---------------------------------------------------------------------------------------------
 // TARGET FEATURE ENABLEMENT (LEDGER #543)
@@ -1376,31 +1384,66 @@ target_features_list := [Target_Arch_Kind]string {
 // code is indistinguishable from checked-and-clean. It surfaced only through the model comparison
 // (#542), as three entities missing from core/hash/xxhash.
 
-// microarch_default_features maps a microarchitecture to the feature set LLVM enables for it.
+// microarch_default_features returns the features LLVM enables by default for the CURRENT TARGET's
+// microarchitecture -- i.e. exactly what C++ seeds build_context.target_features_set from.
 //
-// SCOPE, STATED RATHER THAN IMPLIED. C++ carries the full generated table for every
-// microarchitecture of every architecture (src/build_settings_microarch.cpp, 2241 lines, produced
-// by misc/featuregen and gated on LLVM_VERSION_MAJOR). Reproduced here are the entries reachable
-// as a DEFAULT -- which is every microarch the checker can select without an explicit
-// `-microarch:` flag, and therefore all of what any gate in this tree exercises. An unlisted
-// microarch returns "" and has_target_feature answers false for everything, which is the old
-// behaviour confined to a case that no longer silently covers the default path.
-// TO EXTEND: copy the corresponding `{ str_lit("name"), str_lit("features") }` row from C++.
+// C++ Reference: llvm_backend.cpp get_default_features:66-116
+//
+// It reads build_context.metrics.arch because C++ reads build_context, and because the arch is
+// LOAD-BEARING, not incidental: the same microarch NAME denotes different feature sets on different
+// architectures. Both amd64 and wasm32 define `generic`, and the port's default microarch is `generic`
+// for every arch except amd64 and riscv64 (get_default_microarchitecture above). The previous
+// implementation was a flat `switch microarch`, so wasm32, wasm64p32, arm32, arm64 and i386 were all
+// told they had the x86-64 feature set -- sse2, x87 and all. That was #612.
 microarch_default_features :: proc(microarch: string) -> string {
-	switch microarch {
-	case "x86-64":
-		return "64bit,64bit-mode,cmov,cx8,fxsr,idivq-to-divl,macrofusion,mmx,nopl,slow-3ops-lea,slow-incdec,sse,sse2,vzeroupper,x87"
-	case "x86-64-v2":
-		return "64bit,64bit-mode,cmov,crc32,cx16,cx8,false-deps-popcnt,fast-15bytenop,fast-scalar-fsqrt,fast-shld-rotate,fxsr,idivq-to-divl,macrofusion,mmx,nopl,popcnt,sahf,slow-3ops-lea,slow-unaligned-mem-32,sse,sse2,sse3,sse4.1,sse4.2,ssse3,vzeroupper,x87"
-	case "generic-rv64":
-		return "64bit,i,optimized-nf2-segment-load-store"
-	case "generic":
-		return "64bit,64bit-mode,cx8,fast-15bytenop,fast-scalar-fsqrt,idivq-to-divl,macrofusion,slow-3ops-lea,sse,sse2,vzeroupper,x87"
+	arch := build_context.metrics.arch
+
+	// C++ Reference: llvm_backend.cpp get_default_features:69-80
+	// DIVERGENCE, deliberate and recorded: `-microarch:native` asks LLVM for the HOST's feature string
+	// via LLVMGetHostCPUFeatures. The checker does not link LLVM, so no faithful answer exists here.
+	// "" means has_target_feature answers false for everything under -microarch:native. Matches the
+	// existing "native" deviation documented on get_final_microarchitecture.
+	if microarch == "native" {
+		return ""
 	}
+
+	// C++ Reference: llvm_backend.cpp get_default_features:89-106
+	// riscv64's generic-rv64 is OVERRIDDEN rather than read from the table -- C++'s own note says this
+	// is to avoid defaulting to "a potato feature set". The table row for generic-rv64 is NOT this
+	// string, so reading the table here would be wrong.
+	if arch == .Riscv64 && microarch == "generic-rv64" {
+		return "64bit,a,c,d,f,m,relax,zicsr,zifencei"
+	}
+
+	// C++ Reference: llvm_backend.cpp get_default_features:82-86 -- sum the counts of every arch
+	// BEFORE this one to find where this arch's slice of the flat table begins.
+	off := 0
+	for a in Target_Arch_Kind {
+		if a == arch {
+			break
+		}
+		off += target_microarch_counts[a]
+	}
+
+	// C++ Reference: llvm_backend.cpp get_default_features:108-112 -- match the name WITHIN this
+	// arch's slice only. Matching across the whole table by name is the #612 defect.
+	for i in off ..< off + target_microarch_counts[arch] {
+		if microarch_features_list[i].microarch == microarch {
+			return microarch_features_list[i].features
+		}
+	}
+
+	// C++ Reference: llvm_backend.cpp get_default_features:114 -- C++ reaches GB_PANIC("unknown
+	// microarch") here.
+	// DIVERGENCE, deliberate: the checker is a LIBRARY and must not abort its host, which is the whole
+	// point of #12 (the error cap used to call os.exit and killed the calling process). An unknown
+	// microarch can only arrive from an embedder setting build_context.microarch to a name LLVM does
+	// not have, since the checker parses no flags. It yields "" -- has_target_feature answers false --
+	// rather than taking the process down.
 	return ""
 }
 
-// target_feature_is_enabled ports check_target_feature_is_enabled (build_settings.cpp:2200)
+// target_feature_is_enabled ports check_target_feature_is_enabled (build_settings.cpp check_target_feature_is_enabled:2200)
 // line for line, including the two details that are easy to drop:
 //   - a leading '+' or '-' inverts what the caller is ASKING (want_enabled), it does not merely
 //     decorate the name
@@ -1453,6 +1496,30 @@ enabled_target_features :: proc() -> string {
 	// applies the "empty means default" rule. An earlier draft of this reintroduced that logic as
 	// a second copy of get_default_microarchitecture; deleted -- one implementation, not two.
 	return microarch_default_features(get_final_microarchitecture())
+}
+
+// check_target_feature_is_superset_of asks whether every feature in `of` also appears in `superset`,
+// reporting the FIRST one that does not.
+//
+// C++ Reference: build_settings.cpp check_target_feature_is_superset_of:2232-2243
+//
+// #613: this had no port counterpart at all, which is why the `#force_inline` half of the call-site
+// target-feature check could not be ported. C++ needs it because LLVM cannot inline a call whose callee
+// enables a SUPERSET of the caller's features -- see check_expr.cpp:9023.
+//
+// Note it delegates to check_single_target_feature_is_valid, i.e. plain membership. The +/- sign
+// handling of target_feature_is_enabled deliberately does NOT apply here: C++ asks the same question.
+check_target_feature_is_superset_of :: proc(superset: string, of: string) -> (ok: bool, missing: string) {
+	rest := of
+	for feature in strings.split_iterator(&rest, ",") {
+		if len(feature) == 0 {
+			continue
+		}
+		if !check_single_target_feature_is_valid(superset, feature) {
+			return false, feature
+		}
+	}
+	return true, ""
 }
 
 // check_single_target_feature_is_valid checks if a single feature is in the feature list
@@ -1567,7 +1634,13 @@ check_target_feature_is_valid_globally :: proc(feature: string) -> (valid: bool,
 	return true, ""
 }
 
-// Note: check_target_feature_is_enabled is not implemented here because it requires
-// target_features_set which is populated by the compiler frontend, not available
-// in standalone checker. The backend/LLVM will validate enabled features.
-// C++: build_settings.cpp:2094-2118
+// #611: a note here used to claim "check_target_feature_is_enabled is not implemented here because it
+// requires target_features_set ... not available in standalone checker. The backend/LLVM will validate
+// enabled features." Every clause of that was false, and it was load-bearing -- it is why the wasm
+// atomics gate was never ported. The counterpart IS implemented, as target_feature_is_enabled above
+// (C++: build_settings.cpp check_target_feature_is_enabled:2200); the enabled set IS derivable, via
+// enabled_target_features(); and deferring to the backend is not available to a CHECKER, whose whole job
+// is to reject the program before a backend ever runs.
+//
+// Compose the two to answer C++'s check_target_feature_is_enabled(feature, nullptr):
+//     target_feature_is_enabled("atomics", enabled_target_features())

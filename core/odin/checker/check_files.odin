@@ -192,7 +192,7 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	check_procedure_bodies(c)
 
 	// Resolve `foreign import` library paths and finish WASM foreign declarations.
-	// C++ Reference: checker.cpp:7710-7711 - "check foreign import fullpaths", between
+	// C++ Reference: checker.cpp check_parsed_files:7710-7711 - "check foreign import fullpaths", between
 	// check_procedure_bodies and the merge below. This is the sole consumer of
 	// foreign_imports_to_check_fullpaths and foreign_decls_to_check; both are producer-side
 	// queues filled during collection, so if this never runs their contents are stranded and
@@ -239,8 +239,26 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// dead end and no @(objc_context_provider) signature is ever validated.
 	check_objc_context_provider_procedures(c)
 
+	// C++ Reference: check_parsed_files, TIME_SECTION("calculate global init order") --
+	// checker.cpp check_parsed_files:7759-7760. THIS IS THE CORRECT PHASE and the port used to run
+	// it in the wrong one: the call lived inside check_all_global_entities, which runs at line 152
+	// above, BEFORE check_procedure_bodies. The entity dependency graph is grown by body checking,
+	// so computing the order there used a graph missing every edge that bodies, deferred procedures
+	// and objc context providers contribute.
+	//
+	// TWO CONSEQUENCES, one of which no gate here can see:
+	//   * variable_init_order is BACKEND state -- its only consumer is llvm_backend.cpp:3374 -- so a
+	//     wrong global initialisation order is invisible to every diagnostic gate, exactly like the
+	//     canonical-name tags in #601.
+	//   * calculate_global_init_order also EMITS DIAGNOSTICS ("Cyclic initialization of '%s'" plus
+	//     its refers-to chain, checker.cpp:6425-6430). Fewer graph edges means fewer detectable
+	//     cycles, so the early call was also a potential UNDER-REJECTION.
+	// Parity was at baseline before this move, which means no corpus package exercises a global
+	// initialisation cycle -- the diagnostic half of this is UNMEASURED, not proven inert.
+	store_global_init_order(c)
+
 	// C++ Reference: check_parsed_files, TIME_SECTION("add type info for type definitions")
-	// through TIME_SECTION("check #soa types") -- checker.cpp:7755-7768. THREE phases that the
+	// through TIME_SECTION("check #soa types") -- checker.cpp check_parsed_files:7755-7768. THREE phases that the
 	// port implemented but never called.
 	//
 	// LEDGER task 222 claimed "all 28 phases present and called except one". That was wrong:
@@ -296,7 +314,7 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	check_sort_init_and_fini_procedures(c)
 
 	// Report intrinsics.__entry_point calls made in a program that has no entry point.
-	// C++ Reference: checker.cpp:7900-7909
+	// C++ Reference: checker.cpp check_parsed_files:7900-7909
 	check_intrinsics_entry_point_usage(c)
 
 	// Check test procedures
@@ -437,10 +455,17 @@ register_packages_from_files :: proc(c: ^Checker, files: []^ast.File) {
 
 		// Check for special packages
 		// C++ line 7294-7303: Special package detection
-		if pkg.kind == .Init {
-			c.info.init_package = pkg
-			c.info.init_fullpath = pkg.fullpath
-		}
+		//
+		// init_package is NOT set here. C++ sets it from the SCOPE FLAG, in the same loop that
+		// creates the scopes (checker.cpp:7671-7673), because the flag is a disjunction of the
+		// kind and a fullpath comparison -- a kind test alone misses the case where the requested
+		// package is base/runtime. See create_package_scopes below.
+		//
+		// init_fullpath is not set here either: it belongs to the loader, which is this port's
+		// analogue of C++'s parser (parser.cpp:7099), and is the value the caller ASKED for.
+		// Setting it from a loaded package's kind was circular -- the only writer sat inside
+		// `if pkg.kind == .Init`, and nothing ever stamped that kind, so both halves of
+		// checker.cpp:268 were permanently false (#589).
 		if pkg.kind == .Runtime {
 			c.info.runtime_package = pkg
 		}
@@ -456,12 +481,35 @@ create_package_scopes :: proc(c: ^Checker) {
 	ctx := make_checker_context(c)
 	defer destroy_checker_context(&ctx)
 	for pkg in sorted_packages(&c.info) {
-		// Skip if already has a scope
-		if get_package_scope(&c.info, pkg) != nil {
-			continue
+		pkg_scope := get_package_scope(&c.info, pkg)
+		if pkg_scope == nil {
+			pkg_scope = create_scope_from_package(&ctx, pkg, c.allocator)
+			set_package_scope(&c.info, pkg, pkg_scope)
 		}
-		pkg_scope := create_scope_from_package(&ctx, pkg, c.allocator)
-		set_package_scope(&c.info, pkg, pkg_scope)
+
+		// C++ Reference: checker.cpp:7671-7673
+		//     if (scope->flags&ScopeFlag_Init) {
+		//         c->info.init_package = p;
+		//         c->info.init_scope = scope;
+		//     }
+		//
+		// Read the FLAG, not the kind. create_scope_from_package set it from C++'s disjunction
+		// (`pkg.fullpath == info.init_fullpath || pkg.kind == .Init`, checker.cpp:268), so this
+		// also catches the package that could not be stamped `.Init` because the runtime seed
+		// claimed its queue slot -- i.e. when the requested package IS base/runtime, which then
+		// carries both `.Init` and `.Global`.
+		//
+		// The pair must be written TOGETHER. init_scope was previously never written at all,
+		// and check_entry_point returns early on `init_scope == nil`, so info.entry_point was
+		// never populated and C++'s "no main" diagnostic had no working counterpart (#589).
+		//
+		// This runs even when the scope already existed: the assignment is a property of the
+		// package, not of who created its scope, and the early `continue` this replaces would
+		// have skipped it.
+		if .Init in pkg_scope.flags {
+			c.info.init_package = pkg
+			c.info.init_scope = pkg_scope
+		}
 	}
 }
 
@@ -657,52 +705,75 @@ check_for_inline_cycles :: proc(c: ^Checker) {
 // For executable builds (not libraries or tests), there must be a 'main' procedure
 // in the init package.
 //
-// C++ Reference: checker.cpp:7441-7463
+// C++ Reference: checker.cpp:7789-7811 (`TIME_SECTION("check entry point")`)
 check_entry_point :: proc(c: ^Checker) {
-	// Only check entry point for executable builds
-	// C++ Reference: checker.cpp:7442
-	if build_context.build_mode != .Executable {
-		return
-	}
-	if build_context.no_entry_point {
-		return
-	}
-	if .Test in build_context.command_kind {
-		return
-	}
-
-	// Get the init scope
-	// C++ Reference: checker.cpp:7443-7445
-	init_scope := c.info.init_scope
-	if init_scope == nil {
-		return
-	}
-
-	// Look up 'main' in the init scope
-	// C++ Reference: checker.cpp:7446
-	main_entity := scope_lookup_current(init_scope, "main")
-	if main_entity == nil {
-		// Get a token for the error message
-		// C++ Reference: checker.cpp:7448-7457
-		token: tokenizer.Token
-		token.pos.line = 1
-		token.pos.column = 1
-
-		// Try to get a better position from the init package's first file
-		if c.info.init_package != nil {
-			for file in sorted_files(c.info.init_package.files) {
-				if file != nil {
-					// Use the package token as a reasonable error location
-					token = file.pkg_token
-					break
-				}
-			}
+	// C++ Reference: checker.cpp:7790
+	//     if (build_context.build_mode == BuildMode_Executable && !build_context.no_entry_point &&
+	//         build_context.command_kind != Command_test) {
+	// Kept as C++'s single if / else-if rather than three early returns, because the else-if
+	// arm below is REACHABLE and an early return on no_entry_point would skip it.
+	if build_context.build_mode == .Executable &&
+	   !build_context.no_entry_point &&
+	   .Test not_in build_context.command_kind {
+		// C++ Reference: checker.cpp:7791-7793
+		//     Scope *s = c->info.init_scope;
+		//     GB_ASSERT(s != nullptr);
+		//     GB_ASSERT(s->flags&ScopeFlag_Init);
+		//
+		// DELIBERATE DIVERGENCE: C++ asserts, this returns. C++ can assert because its driver
+		// has already exited on an unresolvable init path, so by here a package always exists.
+		// This checker is a LIBRARY and is reachable with a path that resolved to nothing, which
+		// leaves no package to carry the Init flag; aborting the host process over a bad argument
+		// would be wrong.
+		//
+		// This return is also what hid #589 for so long -- init_scope was NEVER written, so the
+		// whole procedure was a no-op and no gate could see it. It is now a genuine
+		// nothing-was-loaded guard rather than a permanent one.
+		init_scope := c.info.init_scope
+		if init_scope == nil {
+			return
 		}
 
-		error(token, "Undefined entry point procedure 'main'")
-	} else {
-		// Store the entry point for later use
-		c.info.entry_point = main_entity
+		// C++ Reference: checker.cpp:7794
+		main_entity := scope_lookup_current(init_scope, "main")
+		if main_entity == nil {
+			// C++ Reference: checker.cpp:7795-7807. C++ starts from a zeroed token with
+			// line/column forced to 1, then replaces it with the first token of the init
+			// package's first file if there is one. That first token is the `package` keyword,
+			// which is what pkg_token holds (#197 pinned the anchor to the keyword, not the
+			// package name).
+			token: tokenizer.Token
+			token.pos.line = 1
+			token.pos.column = 1
+
+			if c.info.init_package != nil {
+				for file in sorted_files(c.info.init_package.files) {
+					if file != nil {
+						token = file.pkg_token
+						break
+					}
+				}
+			}
+
+			error(token, "Undefined entry point procedure 'main'")
+		} else {
+			// Store the entry point for later use
+			c.info.entry_point = main_entity
+		}
+	} else if build_context.build_mode == .Dynamic_Library && build_context.no_entry_point {
+		// C++ Reference: checker.cpp:7808-7810
+		//     } else if (build_context.build_mode == BuildMode_DynamicLibrary &&
+		//                build_context.no_entry_point) {
+		//         c->info.entry_point = nullptr;
+		//     }
+		//
+		// NOT redundant with entry_point's zero value: check_decl.odin's proc-declaration path
+		// (C++ check_decl.cpp:1557) writes info.entry_point for any `main` in the init package,
+		// with no regard for build mode. A dynamic library built with -no-entry-point therefore
+		// arrives here with a non-nil entry_point that must be cleared, or a backend would emit
+		// an entry symbol for a library. Unreachable before #589 -- nothing was ever the init
+		// package, so nothing ever set it in the first place.
+		c.info.entry_point = nil
 	}
 }
 
