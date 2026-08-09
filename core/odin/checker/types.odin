@@ -150,118 +150,29 @@ t_untyped_quaternion: ^Type
 
 // Objective-C runtime types
 // C++ Reference: checker.cpp:1408-1419
-t_objc_object: ^Type // intrinsics.objc_object (struct)
-t_objc_selector: ^Type // intrinsics.objc_selector (struct)
-t_objc_class: ^Type // intrinsics.objc_class (struct)
-t_objc_ivar: ^Type // intrinsics.objc_ivar (struct)
-t_objc_id: ^Type // ^objc_object
-t_objc_SEL: ^Type // ^objc_selector
-t_objc_Class: ^Type // ^objc_class
-t_objc_Ivar: ^Type // ^objc_ivar
-t_objc_instancetype: ^Type // intrinsics.objc_instancetype, an alias of ^objc_object
 
 // C variadic types
 // C++ Reference: checker.cpp:1589-1590
-t_c_va_list: ^Type // intrinsics.c_va_list (struct)
-t_c_va_list_ptr: ^Type // ^c_va_list
 
 // intrinsics.Odin_Calling_Convention, the result type of type_proc_calling_convention
 // C++ Reference: checker.cpp:1338
-t_odin_calling_convention: ^Type
 
 // RTTI (Runtime Type Information) types
 // C++ Reference: checker.cpp:3253-3319
-t_type_info: ^Type // core:runtime.Type_Info
-t_type_info_ptr: ^Type // ^Type_Info
-t_type_info_enum_value: ^Type // Type_Info_Enum_Value
-t_type_info_enum_value_ptr: ^Type // ^Type_Info_Enum_Value
-t_type_info_string_encoding_kind: ^Type // Type_Info_String_Encoding_Kind
 
 // Type_Info variant types (from core:runtime)
-t_type_info_named: ^Type // Type_Info_Named
-t_type_info_integer: ^Type // Type_Info_Integer
-t_type_info_rune: ^Type // Type_Info_Rune
-t_type_info_float: ^Type // Type_Info_Float
-t_type_info_quaternion: ^Type // Type_Info_Quaternion
-t_type_info_complex: ^Type // Type_Info_Complex
-t_type_info_string: ^Type // Type_Info_String
-t_type_info_boolean: ^Type // Type_Info_Boolean
-t_type_info_any: ^Type // Type_Info_Any
-t_type_info_typeid: ^Type // Type_Info_Type_Id
-t_type_info_pointer: ^Type // Type_Info_Pointer
-t_type_info_multi_pointer: ^Type // Type_Info_Multi_Pointer
-t_type_info_procedure: ^Type // Type_Info_Procedure
-t_type_info_array: ^Type // Type_Info_Array
-t_type_info_enumerated_array: ^Type // Type_Info_Enumerated_Array
-t_type_info_dynamic_array: ^Type // Type_Info_Dynamic_Array
-t_type_info_slice: ^Type // Type_Info_Slice
-t_type_info_parameters: ^Type // Type_Info_Parameters
-t_type_info_struct: ^Type // Type_Info_Struct
-t_type_info_union: ^Type // Type_Info_Union
-t_type_info_enum: ^Type // Type_Info_Enum
-t_type_info_map: ^Type // Type_Info_Map
-t_type_info_bit_set: ^Type // Type_Info_Bit_Set
-t_type_info_simd_vector: ^Type // Type_Info_Simd_Vector
-t_type_info_matrix: ^Type // Type_Info_Matrix
-t_type_info_soa_pointer: ^Type // Type_Info_Soa_Pointer
-t_type_info_bit_field: ^Type // Type_Info_Bit_Field
 
 // Pointer types for Type_Info variants
 // C++ Reference: types.cpp:697-723
-t_type_info_named_ptr: ^Type // ^Type_Info_Named
-t_type_info_integer_ptr: ^Type // ^Type_Info_Integer
-t_type_info_rune_ptr: ^Type // ^Type_Info_Rune
-t_type_info_float_ptr: ^Type // ^Type_Info_Float
-t_type_info_quaternion_ptr: ^Type // ^Type_Info_Quaternion
-t_type_info_complex_ptr: ^Type // ^Type_Info_Complex
-t_type_info_string_ptr: ^Type // ^Type_Info_String
-t_type_info_boolean_ptr: ^Type // ^Type_Info_Boolean
-t_type_info_any_ptr: ^Type // ^Type_Info_Any
-t_type_info_typeid_ptr: ^Type // ^Type_Info_Type_Id
-t_type_info_pointer_ptr: ^Type // ^Type_Info_Pointer
-t_type_info_multi_pointer_ptr: ^Type // ^Type_Info_Multi_Pointer
-t_type_info_procedure_ptr: ^Type // ^Type_Info_Procedure
-t_type_info_array_ptr: ^Type // ^Type_Info_Array
-t_type_info_enumerated_array_ptr: ^Type // ^Type_Info_Enumerated_Array
-t_type_info_dynamic_array_ptr: ^Type // ^Type_Info_Dynamic_Array
-t_type_info_slice_ptr: ^Type // ^Type_Info_Slice
-t_type_info_parameters_ptr: ^Type // ^Type_Info_Parameters
-t_type_info_struct_ptr: ^Type // ^Type_Info_Struct
-t_type_info_union_ptr: ^Type // ^Type_Info_Union
-t_type_info_enum_ptr: ^Type // ^Type_Info_Enum
-t_type_info_map_ptr: ^Type // ^Type_Info_Map
-t_type_info_bit_set_ptr: ^Type // ^Type_Info_Bit_Set
-t_type_info_simd_vector_ptr: ^Type // ^Type_Info_Simd_Vector
-t_type_info_matrix_ptr: ^Type // ^Type_Info_Matrix
-t_type_info_soa_pointer_ptr: ^Type // ^Type_Info_Soa_Pointer
-t_type_info_bit_field_ptr: ^Type // ^Type_Info_Bit_Field
 
 // Core runtime types
 // C++ Reference: types.cpp:725-732
-t_allocator: ^Type // core:runtime.Allocator
-t_allocator_ptr: ^Type // ^Allocator
-t_allocator_error: ^Type // core:runtime.Allocator_Error
-t_context: ^Type // core:runtime.Context
-t_context_ptr: ^Type // ^Context
-t_source_code_location: ^Type // core:runtime.Source_Code_Location
-t_source_code_location_ptr: ^Type // ^Source_Code_Location
-t_atomic_memory_order: ^Type // core:runtime.Atomic_Memory_Order
-t_fast_math_flags:     ^Type // base:intrinsics.Fast_Math_Flags
 
 // Load directory file types
 // C++ Reference: types.cpp:734-736
-t_load_directory_file: ^Type // core:runtime.Load_Directory_File
-t_load_directory_file_ptr: ^Type // ^Load_Directory_File
-t_load_directory_file_slice: ^Type // []Load_Directory_File
 
 // Map runtime types
 // C++ Reference: types.cpp:738-743
-t_map_info: ^Type // core:runtime.Map_Info
-t_map_cell_info: ^Type // core:runtime.Map_Cell_Info
-t_raw_map: ^Type // core:runtime.Raw_Map
-t_map_info_ptr: ^Type // ^Map_Info
-t_map_cell_info_ptr: ^Type // ^Map_Cell_Info
-t_raw_map_ptr: ^Type // ^Raw_Map
 
 // Comparison/hashing procedure types for maps
 // C++ Reference: types.cpp:750-751
@@ -290,158 +201,6 @@ runtime_type_globals_mutex: sync.Mutex
 // removing it exposes a latent race elsewhere. Find and fix that race first; the contention win
 // is worthless next to an intermittent hang in a compiler.
 
-// reset_runtime_type_globals clears all runtime-dependent type globals
-// This MUST be called in destroy_checker to prevent stale pointers when
-// tests use temp_allocator. Without this, the next test would read freed memory.
-reset_runtime_type_globals :: proc() {
-	sync.mutex_lock(&runtime_type_globals_mutex)
-	defer sync.mutex_unlock(&runtime_type_globals_mutex)
-
-	// NO SESSION EXEMPTION HERE, and the absence is load-bearing. #354 put one in -- "the session
-	// owns these, so there is nothing stale to clear" -- and it leaked one checker's types into
-	// the next one's check. Measured, single-threaded, one process:
-	//     core/sync then core/odin/parser, no session  ->  0 errors, 0 errors
-	//     acquire_runtime_session then core/odin/parser -> 37 errors, cap reached
-	// Every one of the 37 was "Cannot determine type for implicit selector expression" in
-	// core/sync. The probe printed the globals either side of the check: without a session they
-	// are 0x0 going in and the checker repopulates them from its OWN scopes; with a session they
-	// arrive already pointing at the session checker's Atomic_Memory_Order, so the lazy "resolve
-	// once" guards never fire and the package is checked against a type it does not own. A check
-	// that starts from a clean slate is correct; one that inherits is not. LEDGER #368.
-
-	// Reset Objective-C runtime types
-	// These are resolved out of the owning Checker's base:intrinsics scope
-	// (init_objc_types), so they are owned by that checker's allocator and must not
-	// survive it -- see t_objc_* usage in check_builtin.odin.
-	t_objc_object = nil
-	t_objc_selector = nil
-	t_objc_class = nil
-	t_objc_ivar = nil
-	t_objc_id = nil
-	t_objc_SEL = nil
-	t_objc_Class = nil
-	t_objc_Ivar = nil
-	t_objc_instancetype = nil
-
-	// Reset C variadic types (resolved out of the owning checker's base:intrinsics scope)
-	t_c_va_list = nil
-	t_c_va_list_ptr = nil
-
-	// Reset the calling-convention enum (owned by the universe scope's allocator)
-	t_odin_calling_convention = nil
-
-	// Reset RTTI types
-	t_type_info = nil
-	t_type_info_ptr = nil
-	t_type_info_enum_value = nil
-	t_type_info_enum_value_ptr = nil
-	t_type_info_string_encoding_kind = nil
-
-	// Reset Type_Info variant types
-	t_type_info_named = nil
-	t_type_info_integer = nil
-	t_type_info_rune = nil
-	t_type_info_float = nil
-	t_type_info_quaternion = nil
-	t_type_info_complex = nil
-	t_type_info_string = nil
-	t_type_info_boolean = nil
-	t_type_info_any = nil
-	t_type_info_typeid = nil
-	t_type_info_pointer = nil
-	t_type_info_multi_pointer = nil
-	t_type_info_procedure = nil
-	t_type_info_array = nil
-	t_type_info_enumerated_array = nil
-	t_type_info_dynamic_array = nil
-	t_type_info_slice = nil
-	t_type_info_parameters = nil
-	t_type_info_struct = nil
-	t_type_info_union = nil
-	t_type_info_enum = nil
-	t_type_info_map = nil
-	t_type_info_bit_set = nil
-	t_type_info_simd_vector = nil
-	t_type_info_matrix = nil
-	t_type_info_soa_pointer = nil
-	t_type_info_bit_field = nil
-
-	// Reset pointer types for Type_Info variants
-	t_type_info_named_ptr = nil
-	t_type_info_integer_ptr = nil
-	t_type_info_rune_ptr = nil
-	t_type_info_float_ptr = nil
-	t_type_info_quaternion_ptr = nil
-	t_type_info_complex_ptr = nil
-	t_type_info_string_ptr = nil
-	t_type_info_boolean_ptr = nil
-	t_type_info_any_ptr = nil
-	t_type_info_typeid_ptr = nil
-	t_type_info_pointer_ptr = nil
-	t_type_info_multi_pointer_ptr = nil
-	t_type_info_procedure_ptr = nil
-	t_type_info_array_ptr = nil
-	t_type_info_enumerated_array_ptr = nil
-	t_type_info_dynamic_array_ptr = nil
-	t_type_info_slice_ptr = nil
-	t_type_info_parameters_ptr = nil
-	t_type_info_struct_ptr = nil
-	t_type_info_union_ptr = nil
-	t_type_info_enum_ptr = nil
-	t_type_info_map_ptr = nil
-	t_type_info_bit_set_ptr = nil
-	t_type_info_simd_vector_ptr = nil
-	t_type_info_matrix_ptr = nil
-	t_type_info_soa_pointer_ptr = nil
-	t_type_info_bit_field_ptr = nil
-
-	// Reset core runtime types
-	t_allocator = nil
-	t_allocator_ptr = nil
-	t_allocator_error = nil
-	t_context = nil
-	t_context_ptr = nil
-	t_source_code_location = nil
-	t_source_code_location_ptr = nil
-	t_atomic_memory_order = nil
-
-	// t_fast_math_flags was MISSING from this list until #566's derived audit. It is built by the
-	// block immediately after Atomic_Memory_Order's in populate_builtin_package_scope
-	// (checker_lifecycle.odin:1236-1264) and is checker-owned in every respect the one above is:
-	// create_scope(builtin_scope, allocator), alloc_entity_type_name(..., allocator), and a
-	// scope_insert into that checker's intrinsics_scope. Two adjacent declarations
-	// (types.odin:248-249), two identical construction blocks, and only one of them was reset.
-	//
-	// Not caught earlier because the omission is benign on the common path: the block is guarded
-	// on `intrinsics_scope != nil`, not on the global, so a second checker OVERWRITES the dangling
-	// pointer before anything reads it. The failure needs a second checker whose intrinsics_scope
-	// is nil -- then the block is skipped, the stale pointer survives, and the sole reader
-	// (check_decl_helpers.odin:1184, @(fast_math) attribute values) dereferences freed memory.
-	// That is exactly the shape #368 documents above for Atomic_Memory_Order.
-	t_fast_math_flags = nil
-
-	// Reset load directory file types
-	t_load_directory_file = nil
-	t_load_directory_file_ptr = nil
-	t_load_directory_file_slice = nil
-
-	// Reset map runtime types
-	t_map_info = nil
-	t_map_cell_info = nil
-	t_raw_map = nil
-	t_map_info_ptr = nil
-	t_map_cell_info_ptr = nil
-	t_raw_map_ptr = nil
-
-	// Reset comparison/hashing procedure types
-	// t_equal_proc / t_hasher_proc / t_map_get_proc are NOT reset here, and must not be. Before
-	// #577 they were in this list, which was harmless only because nothing ever assigned them.
-	// Now that init_basic_types builds them (types.odin, from the default allocator alongside the
-	// basics), resetting them would be an outright bug: init_basic_types is reached through the
-	// `t_int == nil` guard at checker_lifecycle.odin:206, so nil'ing these on session teardown
-	// would leave them permanently nil for every later checker in the process -- t_int stays
-	// non-nil, so nothing would ever rebuild them. They are process-lifetime, like the basics.
-}
 
 // init_basic_types initializes the basic type singletons
 init_basic_types :: proc(allocator := context.allocator) {
@@ -1685,10 +1444,34 @@ type_size_of :: proc(t: ^Type) -> int {
 	#partial switch bt.kind {
 	case .Basic:
 		basic := bt.variant.(Type_Basic)
+		// C++ Reference: types.cpp type_size_of, `if (t->kind == Type_Basic)`. The word-sized
+		// basics do NOT carry their size in the type: C++'s basic_types[] table stores -1 for
+		// int/uint/uintptr/rawptr/string/cstring and resolves them from build_context on every
+		// call, so one Type object serves every target.
+		//
+		// The port stored a size at init_basic_types instead, taken from the HOST via
+		// `when size_of(int) == 8` and a literal 8 for rawptr. That is right for a host-targeted
+		// check and wrong for every other target, and it is not a small wrongness: under
+		// -target:linux_i386 the oracle accepts `#assert(size_of(int) == 4)` and the port
+		// rejected it, along with size_of(rawptr) == 4 and size_of(string) == 8. LEDGER #580.
+		#partial switch basic.kind {
+		case .String, .String16:
+			return 2 * int(build_context.int_size)
+		case .Cstring, .Cstring16:
+			return int(build_context.ptr_size)
+		case .Any:
+			return 16
+		case .Typeid:
+			return 8
+		case .Int, .Uint:
+			return int(build_context.int_size)
+		case .Uintptr, .Rawptr:
+			return int(build_context.ptr_size)
+		}
 		return basic.size
 
 	case .Pointer, .Multi_Pointer:
-		return 8 // Assuming 64-bit
+		return int(build_context.ptr_size)
 
 	case .Soa_Pointer:
 		// C++ Reference: types.cpp type_size_of_internal, `case Type_SoaPointer: return
@@ -1742,7 +1525,9 @@ type_size_of :: proc(t: ^Type) -> int {
 		return stride * int(earr.count - 1) + elem_size
 
 	case .Slice:
-		return 16 // ptr + len
+		// C++ Reference: types.cpp type_size_of_internal, `case Type_Slice: return
+		// 2*build_context.int_size;` -- {data, len}, both one word.
+		return 2 * int(build_context.int_size)
 
 	case .Dynamic_Array:
 		// C++ Reference: types.cpp type_size_of_internal, `3*int_size + 2*ptr_size`.
@@ -1803,11 +1588,15 @@ type_size_of :: proc(t: ^Type) -> int {
 		return 4 * int(build_context.ptr_size)
 
 	case .Struct:
-		// C++ Reference: types.cpp:4436-4474
+		// C++ Reference: types.cpp:4786-4823 (type_size_of_internal, case Type_Struct)
+		// DRIFT REPAIR (#571): this block cited 4436-4474, which upstream motion moved into
+		// type_align_of_internal -- a different function entirely. Every citation in this arm was
+		// off by a uniform +350, i.e. one insertion above it, and nothing noticed for as long as it
+		// took citefn.py to exist. Found by resolving each line to its enclosing C++ function.
 		struc := bt.variant.(Type_Struct)
 
 		// Handle raw_union case
-		// C++ Reference: types.cpp:4437-4450
+		// C++ Reference: types.cpp:4787-4800
 		if struc.is_raw_union {
 			count := len(struc.fields)
 			align := type_align_of(bt)
@@ -1837,7 +1626,7 @@ type_size_of :: proc(t: ^Type) -> int {
 		}
 
 		// Handle regular struct case
-		// C++ Reference: types.cpp:4451-4473
+		// C++ Reference: types.cpp:4801-4822
 		count := len(struc.fields)
 		if count == 0 {
 			return 0
@@ -1846,7 +1635,7 @@ type_size_of :: proc(t: ^Type) -> int {
 		align := type_align_of(bt)
 
 		// Calculate offset of last field + its size
-		// C++ Reference: types.cpp:4471
+		// C++ Reference: types.cpp:4821
 		last_field_offset := type_offset_of(bt, i64(count - 1))
 		// See the note in the raw_union arm above: struct field types live on the variant,
 		// so read them through entity_type().
@@ -1854,12 +1643,12 @@ type_size_of :: proc(t: ^Type) -> int {
 		size := int(last_field_offset) + last_field_size
 
 		// Align final struct size to struct alignment
-		// C++ Reference: types.cpp:4472
+		// C++ Reference: types.cpp:4822
 		result := size + align - 1
 		return result - (result % align)
 
 	case .Matrix:
-		// C++ Reference: types.cpp:4495-4502
+		// C++ Reference: types.cpp:4845-4852
 		mat := bt.variant.(Type_Matrix)
 		stride_in_bytes := matrix_type_stride_in_bytes(t)
 		if mat.is_row_major {
@@ -2296,7 +2085,7 @@ is_type_nearly_simple_compare :: proc(t: ^Type) -> bool {
 // Returns the nesting level (> 0) if assignable, 0 otherwise
 // C++ Reference: types.cpp:4666-4709
 check_is_assignable_to_using_subtype :: proc(src_param: ^Type, dst: ^Type, level: int = 0, src_is_ptr_param: bool = false, allow_polymorphic: bool = false) -> int {
-	// C++ Reference: types.cpp:4667-4671
+	// C++ Reference: types.cpp:5044-5048
 	prev_src := src_param
 	src := type_deref(src_param)
 	src_is_ptr := src_is_ptr_param
@@ -2305,18 +2094,18 @@ check_is_assignable_to_using_subtype :: proc(src_param: ^Type, dst: ^Type, level
 	}
 	src = base_type(src)
 
-	// C++ Reference: types.cpp:4674-4676
+	// C++ Reference: types.cpp:5051-5053
 	if !is_type_struct(src) {
 		return 0
 	}
 
-	// C++ Reference: types.cpp:4678
+	// C++ Reference: types.cpp:5055
 	dst_is_polymorphic := is_type_polymorphic(dst)
 
-	// C++ Reference: types.cpp:4680-4706
+	// C++ Reference: types.cpp:5057-5083
 	struct_type := src.variant.(Type_Struct)
 	for field in struct_type.fields {
-		// C++ Reference: types.cpp:4682-4684, and entity.cpp:92
+		// C++ Reference: types.cpp:5059-5061, and entity.cpp:92
 		//     EntityFlags_IsSubtype = EntityFlag_Using|EntityFlag_Subtype
 		// C++ tests `f->flags & EntityFlags_IsSubtype`, i.e. EITHER bit — it is a MASK,
 		// not a required pair. The port required BOTH flags to be present, so a plain
@@ -2341,7 +2130,7 @@ check_is_assignable_to_using_subtype :: proc(src_param: ^Type, dst: ^Type, level
 		// why it looked like a call-site problem rather than a field-type problem.
 		field_type := entity_type(field)
 
-		// C++ Reference: types.cpp:4685-4692
+		// C++ Reference: types.cpp:5062-5069
 		// Special handling for polymorphic types
 		if allow_polymorphic && dst_is_polymorphic {
 			fb := base_type(type_deref(field_type))
@@ -2353,19 +2142,19 @@ check_is_assignable_to_using_subtype :: proc(src_param: ^Type, dst: ^Type, level
 			}
 		}
 
-		// C++ Reference: types.cpp:4694-4696
+		// C++ Reference: types.cpp:5071-5073
 		if are_types_identical(field_type, dst) {
 			return level + 1
 		}
 
-		// C++ Reference: types.cpp:4697-4701
+		// C++ Reference: types.cpp:5074-5078
 		if src_is_ptr && is_type_pointer(dst) {
 			if are_types_identical(field_type, type_deref(dst)) {
 				return level + 1
 			}
 		}
 
-		// C++ Reference: types.cpp:4702-4705
+		// C++ Reference: types.cpp:5079-5082
 		// Recursively check nested fields
 		nested_level := check_is_assignable_to_using_subtype(field_type, dst, level + 1, src_is_ptr, allow_polymorphic)
 		if nested_level > 0 {
@@ -2373,7 +2162,7 @@ check_is_assignable_to_using_subtype :: proc(src_param: ^Type, dst: ^Type, level
 		}
 	}
 
-	// C++ Reference: types.cpp:4708
+	// C++ Reference: types.cpp:5085
 	return 0
 }
 
@@ -2905,9 +2694,9 @@ make_optional_ok_type :: proc(value: ^Type, typed := true) -> ^Type {
 // This function creates the lookup_result_type for a map, which is the tuple
 // type returned by map indexing: (value, bool). It's lazily initialized on
 // first access to avoid circular dependencies during type construction.
-init_map_internal_types :: proc(type: ^Type) {
+init_map_internal_types :: proc(c: ^Checker, type: ^Type) {
 	assert(type.kind == .Map, "init_map_internal_types requires a Map type")
-	assert(t_allocator != nil, "t_allocator must be initialized")
+	assert(c.t_allocator != nil, "c.t_allocator must be initialized")
 
 	map_type := &type.variant.(Type_Map)
 
@@ -3243,8 +3032,8 @@ alloc_type_matrix :: proc(elem: ^Type, row_count: i64, column_count: i64, generi
 // lookup_field looks up a field by name in a type
 // Wrapper around lookup_field_with_selection
 // Ported from types.cpp:3444-3446
-lookup_field :: proc(type: ^Type, field_name: string, is_type: bool, allow_blank_ident := false) -> Selection {
-	return lookup_field_with_selection(type, field_name, is_type, empty_selection, allow_blank_ident)
+lookup_field :: proc(c: ^Checker, type: ^Type, field_name: string, is_type: bool, allow_blank_ident := false) -> Selection {
+	return lookup_field_with_selection(c, type, field_name, is_type, empty_selection, allow_blank_ident)
 }
 
 // lookup_field_with_selection recursively looks up a field in a type
@@ -3253,7 +3042,7 @@ lookup_field :: proc(type: ^Type, field_name: string, is_type: bool, allow_blank
 // C++ Reference: types.cpp:3756-4196 (lookup_field_with_selection)
 // The previous citation began ~250 lines earlier, at an unrelated predicate
 // (union_variant_index_types_equal). The definition is at 3756; 3698 is only the forward decl.
-lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: bool, sel: Selection, allow_blank_ident := false) -> Selection {
+lookup_field_with_selection :: proc(c: ^Checker, type_: ^Type, field_name: string, is_type: bool, sel: Selection, allow_blank_ident := false) -> Selection {
 	if type_ == nil {
 		return empty_selection
 	}
@@ -3339,7 +3128,7 @@ lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: b
 		if type.kind == .Bit_Set {
 			bitset := type.variant.(Type_Bit_Set)
 			// For bit sets, lookup in the element type (e.g., enum values)
-			return lookup_field_with_selection(bitset.elem, field_name, true, sel, allow_blank_ident)
+			return lookup_field_with_selection(c, bitset.elem, field_name, true, sel, allow_blank_ident)
 		}
 
 		// Generic type specialized lookup
@@ -3347,7 +3136,7 @@ lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: b
 		if type.kind == .Generic {
 			generic := type.variant.(Type_Generic)
 			if generic.specialized != nil {
-				return lookup_field_with_selection(generic.specialized, field_name, is_type, sel, allow_blank_ident)
+				return lookup_field_with_selection(c, generic.specialized, field_name, is_type, sel, allow_blank_ident)
 			}
 		}
 
@@ -3368,7 +3157,7 @@ lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: b
 				sel_out.entity = alloc_entity_field(
 					nil,
 					make_token_ident("allocator"),
-					t_allocator,
+					c.t_allocator,
 					false,
 					3,
 				)
@@ -3379,7 +3168,7 @@ lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: b
 				sel_out.entity = alloc_entity_field(
 					nil,
 					make_token_ident("allocator"),
-					t_allocator,
+					c.t_allocator,
 					false,
 					2,
 				)
@@ -3416,7 +3205,7 @@ lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: b
 				// C++ Reference: types.cpp:3612-3617
 				objc_ivar_type := type_name_entity.objc_ivar
 				if objc_ivar_type != nil {
-					sel = lookup_field_with_selection(objc_ivar_type, field_name, false, sel, allow_blank_ident)
+					sel = lookup_field_with_selection(c, objc_ivar_type, field_name, false, sel, allow_blank_ident)
 					if sel.entity != nil {
 						sel.pseudo_field = true
 						return sel
@@ -3461,7 +3250,7 @@ lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: b
 						prev_indirect := sel.indirect
 						selection_add_index(&sel, i)
 
-						sel = lookup_field_with_selection(variable.type, field_name, is_type, sel, allow_blank_ident)
+						sel = lookup_field_with_selection(c, variable.type, field_name, is_type, sel, allow_blank_ident)
 
 						if sel.entity != nil {
 							if is_type_pointer(variable.type) {
@@ -3494,7 +3283,7 @@ lookup_field_with_selection :: proc(type_: ^Type, field_name: string, is_type: b
 					mapped_field_name = "w"
 				}
 				if mapped_field_name != "" {
-					return lookup_field_with_selection(type, mapped_field_name, is_type, sel, allow_blank_ident)
+					return lookup_field_with_selection(c, type, mapped_field_name, is_type, sel, allow_blank_ident)
 				}
 			}
 
@@ -3931,8 +3720,8 @@ is_type_valid_atomic_type :: proc(elem: ^Type) -> bool {
 
 // is_type_objc_object checks if a type is compatible with objc_object
 // C++ Reference: types.cpp:4734-4736
-is_type_objc_object :: proc(t: ^Type) -> bool {
-	return internal_check_is_assignable_to(t, t_objc_object)
+is_type_objc_object :: proc(c: ^Checker, t: ^Type) -> bool {
+	return internal_check_is_assignable_to(t, c.t_objc_object)
 }
 
 // has_type_got_objc_class_attribute checks if a type has objc_class attribute
@@ -4197,7 +3986,7 @@ type_offset_of :: proc(t: ^Type, index: i64) -> i64 {
 // Returns: Total offset in bytes
 //
 // Note: sel.indirect must be false (cannot calculate offset through pointers)
-type_offset_of_from_selection :: proc(type: ^Type, sel: Selection) -> i64 {
+type_offset_of_from_selection :: proc(c: ^Checker, type: ^Type, sel: Selection) -> i64 {
 	// C++ Reference: types.cpp:4612
 	assert(sel.indirect == false, "Cannot calculate offset with indirect selection (pointer dereference)")
 
@@ -4276,7 +4065,7 @@ type_offset_of_from_selection :: proc(type: ^Type, sel: Selection) -> i64 {
 			case 2:
 				t = t_int // Cap
 			case 3:
-				t = t_allocator // Allocator
+				t = c.t_allocator // Allocator
 			}
 		}
 	}

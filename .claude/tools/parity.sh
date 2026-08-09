@@ -194,6 +194,22 @@ while read -r p; do
     #     oracle vs ITSELF   1 event / 6 sweeps   (rsp/tools)
     #     #404 port build    2 events / 12 sweeps (mos65816/tools, mos6502/tools)
     # -- an identical ~17% rate, so the port arm is fully accounted for by oracle noise.
+    #
+    # THE COUNT MISMATCH ON x86/tools IS THE SAME FINDING, and it is now MECHANISM-COMPLETE
+    # (LEDGER #582). Do not re-investigate it; it is not a missing rule.
+    #   That package has FOUR files each declaring `main`. scope_insert never inserts the colliding
+    #   entity, so every collision pairs (new, incumbent); redeclaration_error then SORTS the pair
+    #   by position (checker.cpp, "order the pair by position") and prints the LATER as the anchor.
+    #   print_all_errors then MERGES neighbouring errors that share a position (error.cpp, "merge
+    #   neighbouring errors") -- and for two redeclarations whose sorted anchors coincide, the
+    #   second contributes no new text and is REMOVED outright.
+    #   The oracle's incumbent varies by collection race, so ~19 runs in 20 two pairs normalise to
+    #   the same anchor and one is merged away: 2 printed. The port's insertion order is FIXED
+    #   (#271), so its three anchors are always distinct, nothing merges, and 3 are printed.
+    #   Measured: oracle 20 runs -> 19x{2 diagnostics}, 1x{3}; port 20 runs -> 20x{3}, byte-identical.
+    #   The port implements BOTH the sort and the merge (error.odin, "merge neighbouring errors").
+    #   Matching the oracle here would mean reproducing a RACE, i.e. undoing #271. The port emits
+    #   the strictly more complete result. IRREDUCIBLE BY DESIGN.
     # Do NOT revert a change over one of these, and do not re-run the A/B: it cannot separate
     # anything, because line 88 re-runs the oracle every sweep rather than using a cached
     # reference, so a mismatch never says WHICH SIDE moved. #197/#201/#173/#185 are the same
@@ -208,7 +224,7 @@ while read -r p; do
     sed -E 's/^[^ ]*\.odin\([0-9]+:[0-9]+\) //' "$TMP/p" | sort > "$TMP/pm"
     if diff -q "$TMP/om" "$TMP/pm" >/dev/null; then
       att_mismatch=$((att_mismatch+1))
-      printf "ATTRIB %-46s (%s diagnostics, same TEXT, different site -- still investigate)\n" "$p" "$o"
+      printf "ATTRIB %-46s (%s diagnostics, same TEXT, different site)\n" "$p" "$o"
     else
       txt_mismatch=$((txt_mismatch+1))
       printf "TEXT   %-46s (%s diagnostics, same count, different text)\n" "$p" "$o"

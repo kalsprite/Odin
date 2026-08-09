@@ -78,7 +78,7 @@ check_compound_literal_field_values :: proc(ctx: ^Checker_Context, elems: []^ast
 
 		// Look up field in struct
 		// Reference: C++ lines 9585-9590
-		sel := lookup_field(type, field_name, o.mode == .Type)
+		sel := lookup_field(ctx.checker, type, field_name, o.mode == .Type)
 		if sel.entity == nil {
 			error(field_expr, "Unknown field '%s' in %s", field_name, assignment_str)
 			continue
@@ -1543,7 +1543,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 						field_name := ident.name
 
 						// Look up field in any type
-						sel := lookup_field(type, field_name, o.mode == .Type)
+						sel := lookup_field(ctx.checker, type, field_name, o.mode == .Type)
 						if sel.entity == nil {
 							error(elem, "Unknown field '%s' in 'any' literal", field_name)
 							continue

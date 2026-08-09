@@ -583,39 +583,39 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 					#partial switch src_basic.kind {
 					case .Untyped_Bool:
 						if is_type_boolean(dst) {
-							return 1
+							return 1 if are_types_identical(dst, default_type(src)) else 2
 						}
 					case .Untyped_Rune:
 						if is_type_integer(dst) || is_type_rune(dst) {
-							return 1
+							return 1 if are_types_identical(dst, default_type(src)) else 2
 						}
 					case .Untyped_Integer:
 						if is_type_integer(dst) || is_type_rune(dst) {
-							return 1
+							return 1 if are_types_identical(dst, default_type(src)) else 2
 						}
 					case .Untyped_String:
 						if is_type_string(dst) {
-							return 1
+							return 1 if are_types_identical(dst, default_type(src)) else 2
 						}
 					case .Untyped_Float:
 						if is_type_float(dst) {
-							return 1
+							return 1 if are_types_identical(dst, default_type(src)) else 2
 						}
 					case .Untyped_Complex:
 						if is_type_complex(dst) {
-							return 1
+							return 1 if are_types_identical(dst, default_type(src)) else 2
 						}
 						if is_type_quaternion(dst) {
 							return 2
 						}
 					case .Untyped_Quaternion:
 						if is_type_quaternion(dst) {
-							return 1
+							return 1 if are_types_identical(dst, default_type(src)) else 2
 						}
 					}
 				}
 				// C++ Reference: check_expr.cpp:765
-				return 2
+					return 3
 			}
 			// Non-constant untyped values
 			// C++ Reference: check_expr.cpp:769-821
@@ -838,7 +838,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 		if !is_type_polymorphic(src) {
 			// Check if trying to convert context to Any (not allowed)
 			// C++ Reference: check_expr.cpp:967-969
-			if operand.mode == .Context && are_types_identical(operand.type, t_context) {
+			if operand.mode == .Context && are_types_identical(operand.type, c.checker.t_context) {
 				return -1
 			}
 			// NOTE: Anything can cast to 'Any'

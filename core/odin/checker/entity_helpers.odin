@@ -1555,7 +1555,7 @@ init_mem_allocator :: proc(c: ^Checker) {
 	// (checker.cpp:3570). reset_runtime_type_globals clears the globals but not the cached_ fields,
 	// so guarding on the cached field would return early on a second checker in the same process
 	// and leave t_allocator nil.
-	if t_allocator != nil {
+	if c.t_allocator != nil {
 		return
 	}
 
@@ -1569,17 +1569,17 @@ init_mem_allocator :: proc(c: ^Checker) {
 	// C++ Reference: checker.cpp:3573-3575. The checker reads the GLOBALS (t_allocator has 9 read
 	// sites); the info.cached_ fields are written here for symmetry but are not read anywhere.
 	// Assigning only the cached fields was why every `context.allocator` failed.
-	t_allocator = allocator_type
-	t_allocator_ptr = alloc_type_pointer(allocator_type)
+	c.t_allocator = allocator_type
+	c.t_allocator_ptr = alloc_type_pointer(allocator_type)
 
 	info.cached_allocator = allocator_type
-	info.cached_allocator_ptr = t_allocator_ptr
+	info.cached_allocator_ptr = c.t_allocator_ptr
 
 	// Also cache Allocator_Error enum type
 	// C++ Reference: checker.cpp:3575
 	allocator_error := find_core_type(c, "Allocator_Error")
 	if allocator_error != nil {
-		t_allocator_error = allocator_error
+		c.t_allocator_error = allocator_error
 		info.cached_allocator_error = allocator_error
 	}
 }
@@ -1590,7 +1590,7 @@ init_core_context :: proc(c: ^Checker) {
 	info := &c.info
 
 	// NOTE: guard on the GLOBAL, matching C++ (checker.cpp:3579). See init_mem_allocator.
-	if t_context != nil {
+	if c.t_context != nil {
 		return
 	}
 
@@ -1606,11 +1606,11 @@ init_core_context :: proc(c: ^Checker) {
 	// check_deferred.odin:353 compare against it. Leaving t_context nil made every `context.X`
 	// selector report "Cannot use a selector expression on nil-value expression", which is why
 	// `allocator := context.allocator` - the most common idiom in core - failed everywhere.
-	t_context = context_type
-	t_context_ptr = alloc_type_pointer(context_type)
+	c.t_context = context_type
+	c.t_context_ptr = alloc_type_pointer(context_type)
 
 	info.cached_context = context_type
-	info.cached_context_ptr = t_context_ptr
+	info.cached_context_ptr = c.t_context_ptr
 }
 
 // init_core_map_type initializes the cached map-internal types from core:runtime
@@ -1624,7 +1624,7 @@ init_core_context :: proc(c: ^Checker) {
 // dynamic_map_internal.odin does exactly this at line 242 (`INFO_HS := intrinsics.type_map_cell_info(Map_Hash)`).
 init_core_map_type :: proc(c: ^Checker) {
 	// NOTE: guard on the GLOBAL, matching C++ (checker.cpp:3605). See init_mem_allocator.
-	if t_map_info != nil {
+	if c.t_map_info != nil {
 		return
 	}
 
@@ -1641,13 +1641,13 @@ init_core_map_type :: proc(c: ^Checker) {
 	}
 
 	// C++ Reference: checker.cpp:3609-3616
-	t_map_info = map_info
-	t_map_cell_info = map_cell_info
-	t_raw_map = raw_map
+	c.t_map_info = map_info
+	c.t_map_cell_info = map_cell_info
+	c.t_raw_map = raw_map
 
-	t_map_info_ptr = alloc_type_pointer(map_info)
-	t_map_cell_info_ptr = alloc_type_pointer(map_cell_info)
-	t_raw_map_ptr = alloc_type_pointer(raw_map)
+	c.t_map_info_ptr = alloc_type_pointer(map_info)
+	c.t_map_cell_info_ptr = alloc_type_pointer(map_cell_info)
+	c.t_raw_map_ptr = alloc_type_pointer(raw_map)
 }
 
 // init_preload initializes core runtime types that the checker needs

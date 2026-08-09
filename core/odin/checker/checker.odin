@@ -1263,4 +1263,114 @@ Checker :: struct {
 	global_untyped_queue:                      queue.MPSC_Queue(Untyped_Expr_Info), // C++ line 601
 	soa_types_to_complete:                     queue.MPSC_Queue(^Type), // C++ line 602
 	allocator:                                 runtime.Allocator,
+
+	// ---- CHECKER-OWNED RUNTIME TYPES (#566) -------------------------------------------------
+	// These 89 were package globals. They are resolved out of, or allocated into, THIS checker's
+	// scopes, so they cannot outlive it -- which is why reset_runtime_type_globals had to exist at
+	// all (LEDGER #368: "one checker's types escaped into the next check").
+	//
+	// Moving them here removes the MECHANISM, not merely the storage. init_core_type_info's
+	// once-guard was `if t_type_info != nil` on a GLOBAL, so it was process-wide: a second checker
+	// that adopted the runtime session hit the guard and silently reused the first checker's types.
+	// The guard is now per-checker, so the second checker re-resolves through the SAME shared scope
+	// and gets the same ^Type objects -- shared by construction instead of by cache.
+	//
+	// The other 73 `t_*` globals stay package-level in types.odin. They are built by
+	// init_basic_types from build_context alone and legitimately outlive any Checker. The split is
+	// legible at every use site (`c.t_x` vs bare `t_x`) and ENFORCED by .claude/tools/splitcheck.py.
+	//
+	// PRECONDITION THIS DOES NOT REMOVE: build_context is still a package-level global
+	// (build_settings.odin), and init_basic_types is still reached through a process-wide
+	// `t_int == nil` guard. So two checkers in one process may not target different platforms --
+	// the first one's target freezes the basics for the process. #566 makes the checker re-entrant
+	// across SESSIONS, not across TARGETS. LEDGER #572, mir's condition 2.
+	t_objc_object: ^Type, // intrinsics.objc_object (struct)
+	t_objc_selector: ^Type, // intrinsics.objc_selector (struct)
+	t_objc_class: ^Type, // intrinsics.objc_class (struct)
+	t_objc_ivar: ^Type, // intrinsics.objc_ivar (struct)
+	t_objc_id: ^Type, // ^objc_object
+	t_objc_SEL: ^Type, // ^objc_selector
+	t_objc_Class: ^Type, // ^objc_class
+	t_objc_Ivar: ^Type, // ^objc_ivar
+	t_objc_instancetype: ^Type, // intrinsics.objc_instancetype, an alias of ^objc_object
+	t_c_va_list: ^Type, // intrinsics.c_va_list (struct)
+	t_c_va_list_ptr: ^Type, // ^c_va_list
+	t_odin_calling_convention: ^Type,
+	t_type_info: ^Type, // core:runtime.Type_Info
+	t_type_info_ptr: ^Type, // ^Type_Info
+	t_type_info_enum_value: ^Type, // Type_Info_Enum_Value
+	t_type_info_enum_value_ptr: ^Type, // ^Type_Info_Enum_Value
+	t_type_info_string_encoding_kind: ^Type, // Type_Info_String_Encoding_Kind
+	t_type_info_named: ^Type, // Type_Info_Named
+	t_type_info_integer: ^Type, // Type_Info_Integer
+	t_type_info_rune: ^Type, // Type_Info_Rune
+	t_type_info_float: ^Type, // Type_Info_Float
+	t_type_info_quaternion: ^Type, // Type_Info_Quaternion
+	t_type_info_complex: ^Type, // Type_Info_Complex
+	t_type_info_string: ^Type, // Type_Info_String
+	t_type_info_boolean: ^Type, // Type_Info_Boolean
+	t_type_info_any: ^Type, // Type_Info_Any
+	t_type_info_typeid: ^Type, // Type_Info_Type_Id
+	t_type_info_pointer: ^Type, // Type_Info_Pointer
+	t_type_info_multi_pointer: ^Type, // Type_Info_Multi_Pointer
+	t_type_info_procedure: ^Type, // Type_Info_Procedure
+	t_type_info_array: ^Type, // Type_Info_Array
+	t_type_info_enumerated_array: ^Type, // Type_Info_Enumerated_Array
+	t_type_info_dynamic_array: ^Type, // Type_Info_Dynamic_Array
+	t_type_info_slice: ^Type, // Type_Info_Slice
+	t_type_info_parameters: ^Type, // Type_Info_Parameters
+	t_type_info_struct: ^Type, // Type_Info_Struct
+	t_type_info_union: ^Type, // Type_Info_Union
+	t_type_info_enum: ^Type, // Type_Info_Enum
+	t_type_info_map: ^Type, // Type_Info_Map
+	t_type_info_bit_set: ^Type, // Type_Info_Bit_Set
+	t_type_info_simd_vector: ^Type, // Type_Info_Simd_Vector
+	t_type_info_matrix: ^Type, // Type_Info_Matrix
+	t_type_info_soa_pointer: ^Type, // Type_Info_Soa_Pointer
+	t_type_info_bit_field: ^Type, // Type_Info_Bit_Field
+	t_type_info_named_ptr: ^Type, // ^Type_Info_Named
+	t_type_info_integer_ptr: ^Type, // ^Type_Info_Integer
+	t_type_info_rune_ptr: ^Type, // ^Type_Info_Rune
+	t_type_info_float_ptr: ^Type, // ^Type_Info_Float
+	t_type_info_quaternion_ptr: ^Type, // ^Type_Info_Quaternion
+	t_type_info_complex_ptr: ^Type, // ^Type_Info_Complex
+	t_type_info_string_ptr: ^Type, // ^Type_Info_String
+	t_type_info_boolean_ptr: ^Type, // ^Type_Info_Boolean
+	t_type_info_any_ptr: ^Type, // ^Type_Info_Any
+	t_type_info_typeid_ptr: ^Type, // ^Type_Info_Type_Id
+	t_type_info_pointer_ptr: ^Type, // ^Type_Info_Pointer
+	t_type_info_multi_pointer_ptr: ^Type, // ^Type_Info_Multi_Pointer
+	t_type_info_procedure_ptr: ^Type, // ^Type_Info_Procedure
+	t_type_info_array_ptr: ^Type, // ^Type_Info_Array
+	t_type_info_enumerated_array_ptr: ^Type, // ^Type_Info_Enumerated_Array
+	t_type_info_dynamic_array_ptr: ^Type, // ^Type_Info_Dynamic_Array
+	t_type_info_slice_ptr: ^Type, // ^Type_Info_Slice
+	t_type_info_parameters_ptr: ^Type, // ^Type_Info_Parameters
+	t_type_info_struct_ptr: ^Type, // ^Type_Info_Struct
+	t_type_info_union_ptr: ^Type, // ^Type_Info_Union
+	t_type_info_enum_ptr: ^Type, // ^Type_Info_Enum
+	t_type_info_map_ptr: ^Type, // ^Type_Info_Map
+	t_type_info_bit_set_ptr: ^Type, // ^Type_Info_Bit_Set
+	t_type_info_simd_vector_ptr: ^Type, // ^Type_Info_Simd_Vector
+	t_type_info_matrix_ptr: ^Type, // ^Type_Info_Matrix
+	t_type_info_soa_pointer_ptr: ^Type, // ^Type_Info_Soa_Pointer
+	t_type_info_bit_field_ptr: ^Type, // ^Type_Info_Bit_Field
+	t_allocator: ^Type, // core:runtime.Allocator
+	t_allocator_ptr: ^Type, // ^Allocator
+	t_allocator_error: ^Type, // core:runtime.Allocator_Error
+	t_context: ^Type, // core:runtime.Context
+	t_context_ptr: ^Type, // ^Context
+	t_source_code_location: ^Type, // core:runtime.Source_Code_Location
+	t_source_code_location_ptr: ^Type, // ^Source_Code_Location
+	t_atomic_memory_order: ^Type, // core:runtime.Atomic_Memory_Order
+	t_fast_math_flags: ^Type, // base:intrinsics.Fast_Math_Flags
+	t_load_directory_file: ^Type, // core:runtime.Load_Directory_File
+	t_load_directory_file_ptr: ^Type, // ^Load_Directory_File
+	t_load_directory_file_slice: ^Type, // []Load_Directory_File
+	t_map_info: ^Type, // core:runtime.Map_Info
+	t_map_cell_info: ^Type, // core:runtime.Map_Cell_Info
+	t_raw_map: ^Type, // core:runtime.Raw_Map
+	t_map_info_ptr: ^Type, // ^Map_Info
+	t_map_cell_info_ptr: ^Type, // ^Map_Cell_Info
+	t_raw_map_ptr: ^Type, // ^Raw_Map
 }

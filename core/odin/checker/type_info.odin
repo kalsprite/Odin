@@ -38,7 +38,7 @@ init_core_type_info :: proc(c: ^Checker) {
 
 	// Early return if already initialized (C++ line 3254-3256)
 	// This check must be inside the mutex to prevent double initialization
-	if t_type_info != nil {
+	if c.t_type_info != nil {
 		return
 	}
 
@@ -59,8 +59,8 @@ init_core_type_info :: proc(c: ^Checker) {
 	}
 
 	// Initialize core type info globals (C++ line 3264-3266)
-	t_type_info = type_info_entity.type
-	t_type_info_ptr = alloc_type_pointer(t_type_info)
+	c.t_type_info = type_info_entity.type
+	c.t_type_info_ptr = alloc_type_pointer(c.t_type_info)
 
 	// Verify Type_Info is a struct (C++ line 3266-3267)
 	if !is_type_struct(type_info_entity.type) {
@@ -79,14 +79,14 @@ init_core_type_info :: proc(c: ^Checker) {
 	// Find Type_Info_Enum_Value (C++ line 3269-3272)
 	type_info_enum_value := find_core_entity(c, "Type_Info_Enum_Value")
 	if type_info_enum_value != nil && type_info_enum_value.type != nil {
-		t_type_info_enum_value = type_info_enum_value.type
-		t_type_info_enum_value_ptr = alloc_type_pointer(t_type_info_enum_value)
+		c.t_type_info_enum_value = type_info_enum_value.type
+		c.t_type_info_enum_value_ptr = alloc_type_pointer(c.t_type_info_enum_value)
 	}
 
 	// Find Type_Info_String_Encoding_Kind (C++ line 3276-3277)
 	type_info_string_encoding_kind := find_core_entity(c, "Type_Info_String_Encoding_Kind")
 	if type_info_string_encoding_kind != nil {
-		t_type_info_string_encoding_kind = type_info_string_encoding_kind.type
+		c.t_type_info_string_encoding_kind = type_info_string_encoding_kind.type
 	}
 
 	// Verify variant field is a union (C++ line 3279-3281)
@@ -99,33 +99,33 @@ init_core_type_info :: proc(c: ^Checker) {
 
 	// Find all Type_Info variant types from core:runtime (C++ line 3283-3319)
 	// These are the actual type info structures for different type kinds
-	t_type_info_named = find_core_type(c, "Type_Info_Named")
-	t_type_info_integer = find_core_type(c, "Type_Info_Integer")
-	t_type_info_rune = find_core_type(c, "Type_Info_Rune")
-	t_type_info_float = find_core_type(c, "Type_Info_Float")
-	t_type_info_quaternion = find_core_type(c, "Type_Info_Quaternion")
-	t_type_info_complex = find_core_type(c, "Type_Info_Complex")
-	t_type_info_string = find_core_type(c, "Type_Info_String")
-	t_type_info_boolean = find_core_type(c, "Type_Info_Boolean")
-	t_type_info_any = find_core_type(c, "Type_Info_Any")
-	t_type_info_typeid = find_core_type(c, "Type_Info_Type_Id")
-	t_type_info_pointer = find_core_type(c, "Type_Info_Pointer")
-	t_type_info_multi_pointer = find_core_type(c, "Type_Info_Multi_Pointer")
-	t_type_info_procedure = find_core_type(c, "Type_Info_Procedure")
-	t_type_info_array = find_core_type(c, "Type_Info_Array")
-	t_type_info_enumerated_array = find_core_type(c, "Type_Info_Enumerated_Array")
-	t_type_info_dynamic_array = find_core_type(c, "Type_Info_Dynamic_Array")
-	t_type_info_slice = find_core_type(c, "Type_Info_Slice")
-	t_type_info_parameters = find_core_type(c, "Type_Info_Parameters")
-	t_type_info_struct = find_core_type(c, "Type_Info_Struct")
-	t_type_info_union = find_core_type(c, "Type_Info_Union")
-	t_type_info_enum = find_core_type(c, "Type_Info_Enum")
-	t_type_info_map = find_core_type(c, "Type_Info_Map")
-	t_type_info_bit_set = find_core_type(c, "Type_Info_Bit_Set")
-	t_type_info_simd_vector = find_core_type(c, "Type_Info_Simd_Vector")
-	t_type_info_matrix = find_core_type(c, "Type_Info_Matrix")
-	t_type_info_soa_pointer = find_core_type(c, "Type_Info_Soa_Pointer")
-	t_type_info_bit_field = find_core_type(c, "Type_Info_Bit_Field")
+	c.t_type_info_named = find_core_type(c, "Type_Info_Named")
+	c.t_type_info_integer = find_core_type(c, "Type_Info_Integer")
+	c.t_type_info_rune = find_core_type(c, "Type_Info_Rune")
+	c.t_type_info_float = find_core_type(c, "Type_Info_Float")
+	c.t_type_info_quaternion = find_core_type(c, "Type_Info_Quaternion")
+	c.t_type_info_complex = find_core_type(c, "Type_Info_Complex")
+	c.t_type_info_string = find_core_type(c, "Type_Info_String")
+	c.t_type_info_boolean = find_core_type(c, "Type_Info_Boolean")
+	c.t_type_info_any = find_core_type(c, "Type_Info_Any")
+	c.t_type_info_typeid = find_core_type(c, "Type_Info_Type_Id")
+	c.t_type_info_pointer = find_core_type(c, "Type_Info_Pointer")
+	c.t_type_info_multi_pointer = find_core_type(c, "Type_Info_Multi_Pointer")
+	c.t_type_info_procedure = find_core_type(c, "Type_Info_Procedure")
+	c.t_type_info_array = find_core_type(c, "Type_Info_Array")
+	c.t_type_info_enumerated_array = find_core_type(c, "Type_Info_Enumerated_Array")
+	c.t_type_info_dynamic_array = find_core_type(c, "Type_Info_Dynamic_Array")
+	c.t_type_info_slice = find_core_type(c, "Type_Info_Slice")
+	c.t_type_info_parameters = find_core_type(c, "Type_Info_Parameters")
+	c.t_type_info_struct = find_core_type(c, "Type_Info_Struct")
+	c.t_type_info_union = find_core_type(c, "Type_Info_Union")
+	c.t_type_info_enum = find_core_type(c, "Type_Info_Enum")
+	c.t_type_info_map = find_core_type(c, "Type_Info_Map")
+	c.t_type_info_bit_set = find_core_type(c, "Type_Info_Bit_Set")
+	c.t_type_info_simd_vector = find_core_type(c, "Type_Info_Simd_Vector")
+	c.t_type_info_matrix = find_core_type(c, "Type_Info_Matrix")
+	c.t_type_info_soa_pointer = find_core_type(c, "Type_Info_Soa_Pointer")
+	c.t_type_info_bit_field = find_core_type(c, "Type_Info_Bit_Field")
 
 	// LEDGER #577 tail. C++ closes init_core_type_info with exactly this block
 	// (checker.cpp:3539-3566); the port declared all 27 globals, RESET them, and never assigned
@@ -137,33 +137,33 @@ init_core_type_info :: proc(c: ^Checker) {
 	// reaches through the model -- mir is a real such consumer -- and because a global that is
 	// declared and reset but never written is indistinguishable from a defect until someone
 	// re-derives this, which is the cost #577 already paid once.
-	t_type_info_named_ptr = alloc_type_pointer(t_type_info_named)
-	t_type_info_integer_ptr = alloc_type_pointer(t_type_info_integer)
-	t_type_info_rune_ptr = alloc_type_pointer(t_type_info_rune)
-	t_type_info_float_ptr = alloc_type_pointer(t_type_info_float)
-	t_type_info_quaternion_ptr = alloc_type_pointer(t_type_info_quaternion)
-	t_type_info_complex_ptr = alloc_type_pointer(t_type_info_complex)
-	t_type_info_string_ptr = alloc_type_pointer(t_type_info_string)
-	t_type_info_boolean_ptr = alloc_type_pointer(t_type_info_boolean)
-	t_type_info_any_ptr = alloc_type_pointer(t_type_info_any)
-	t_type_info_typeid_ptr = alloc_type_pointer(t_type_info_typeid)
-	t_type_info_pointer_ptr = alloc_type_pointer(t_type_info_pointer)
-	t_type_info_multi_pointer_ptr = alloc_type_pointer(t_type_info_multi_pointer)
-	t_type_info_procedure_ptr = alloc_type_pointer(t_type_info_procedure)
-	t_type_info_array_ptr = alloc_type_pointer(t_type_info_array)
-	t_type_info_enumerated_array_ptr = alloc_type_pointer(t_type_info_enumerated_array)
-	t_type_info_dynamic_array_ptr = alloc_type_pointer(t_type_info_dynamic_array)
-	t_type_info_slice_ptr = alloc_type_pointer(t_type_info_slice)
-	t_type_info_parameters_ptr = alloc_type_pointer(t_type_info_parameters)
-	t_type_info_struct_ptr = alloc_type_pointer(t_type_info_struct)
-	t_type_info_union_ptr = alloc_type_pointer(t_type_info_union)
-	t_type_info_enum_ptr = alloc_type_pointer(t_type_info_enum)
-	t_type_info_map_ptr = alloc_type_pointer(t_type_info_map)
-	t_type_info_bit_set_ptr = alloc_type_pointer(t_type_info_bit_set)
-	t_type_info_simd_vector_ptr = alloc_type_pointer(t_type_info_simd_vector)
-	t_type_info_matrix_ptr = alloc_type_pointer(t_type_info_matrix)
-	t_type_info_soa_pointer_ptr = alloc_type_pointer(t_type_info_soa_pointer)
-	t_type_info_bit_field_ptr = alloc_type_pointer(t_type_info_bit_field)
+	c.t_type_info_named_ptr = alloc_type_pointer(c.t_type_info_named)
+	c.t_type_info_integer_ptr = alloc_type_pointer(c.t_type_info_integer)
+	c.t_type_info_rune_ptr = alloc_type_pointer(c.t_type_info_rune)
+	c.t_type_info_float_ptr = alloc_type_pointer(c.t_type_info_float)
+	c.t_type_info_quaternion_ptr = alloc_type_pointer(c.t_type_info_quaternion)
+	c.t_type_info_complex_ptr = alloc_type_pointer(c.t_type_info_complex)
+	c.t_type_info_string_ptr = alloc_type_pointer(c.t_type_info_string)
+	c.t_type_info_boolean_ptr = alloc_type_pointer(c.t_type_info_boolean)
+	c.t_type_info_any_ptr = alloc_type_pointer(c.t_type_info_any)
+	c.t_type_info_typeid_ptr = alloc_type_pointer(c.t_type_info_typeid)
+	c.t_type_info_pointer_ptr = alloc_type_pointer(c.t_type_info_pointer)
+	c.t_type_info_multi_pointer_ptr = alloc_type_pointer(c.t_type_info_multi_pointer)
+	c.t_type_info_procedure_ptr = alloc_type_pointer(c.t_type_info_procedure)
+	c.t_type_info_array_ptr = alloc_type_pointer(c.t_type_info_array)
+	c.t_type_info_enumerated_array_ptr = alloc_type_pointer(c.t_type_info_enumerated_array)
+	c.t_type_info_dynamic_array_ptr = alloc_type_pointer(c.t_type_info_dynamic_array)
+	c.t_type_info_slice_ptr = alloc_type_pointer(c.t_type_info_slice)
+	c.t_type_info_parameters_ptr = alloc_type_pointer(c.t_type_info_parameters)
+	c.t_type_info_struct_ptr = alloc_type_pointer(c.t_type_info_struct)
+	c.t_type_info_union_ptr = alloc_type_pointer(c.t_type_info_union)
+	c.t_type_info_enum_ptr = alloc_type_pointer(c.t_type_info_enum)
+	c.t_type_info_map_ptr = alloc_type_pointer(c.t_type_info_map)
+	c.t_type_info_bit_set_ptr = alloc_type_pointer(c.t_type_info_bit_set)
+	c.t_type_info_simd_vector_ptr = alloc_type_pointer(c.t_type_info_simd_vector)
+	c.t_type_info_matrix_ptr = alloc_type_pointer(c.t_type_info_matrix)
+	c.t_type_info_soa_pointer_ptr = alloc_type_pointer(c.t_type_info_soa_pointer)
+	c.t_type_info_bit_field_ptr = alloc_type_pointer(c.t_type_info_bit_field)
 
 	// NOT ported, and the absence is CONSISTENT rather than half-done: C++ also resolves
 	// Type_Info_Fixed_Capacity_Dynamic_Array here (checker.cpp:3537) and its pointer (:3566). The
@@ -241,7 +241,7 @@ add_type_info_type :: proc(ctx: ^Checker_Context, t: ^Type) {
 	// If runtime types not initialized, skip RTTI registration
 	// This can happen during early checking before init_preload runs
 	// C++ doesn't need this check since globals persist for process lifetime
-	if t_type_info == nil {
+	if ctx.checker.t_type_info == nil {
 		return
 	}
 
@@ -498,22 +498,22 @@ init_objc_types :: proc(c: ^Checker) {
 	// Initialize objc_object struct type
 	objc_object := find_intrinsics_type(c, "objc_object")
 	if objc_object != nil {
-		t_objc_object = objc_object
-		t_objc_id = alloc_type_pointer(objc_object)
+		c.t_objc_object = objc_object
+		c.t_objc_id = alloc_type_pointer(objc_object)
 	}
 
 	// Initialize objc_selector struct type
 	objc_selector := find_intrinsics_type(c, "objc_selector")
 	if objc_selector != nil {
-		t_objc_selector = objc_selector
-		t_objc_SEL = alloc_type_pointer(objc_selector)
+		c.t_objc_selector = objc_selector
+		c.t_objc_SEL = alloc_type_pointer(objc_selector)
 	}
 
 	// Initialize objc_class struct type
 	objc_class := find_intrinsics_type(c, "objc_class")
 	if objc_class != nil {
-		t_objc_class = objc_class
-		t_objc_Class = alloc_type_pointer(objc_class)
+		c.t_objc_class = objc_class
+		c.t_objc_Class = alloc_type_pointer(objc_class)
 	}
 }
 
@@ -527,8 +527,8 @@ init_objc_types :: proc(c: ^Checker) {
 init_c_va_list_types :: proc(c: ^Checker) {
 	c_va_list := find_intrinsics_type(c, "c_va_list")
 	if c_va_list != nil {
-		t_c_va_list = c_va_list
-		t_c_va_list_ptr = alloc_type_pointer(c_va_list)
+		c.t_c_va_list = c_va_list
+		c.t_c_va_list_ptr = alloc_type_pointer(c_va_list)
 	}
 }
 
@@ -676,22 +676,22 @@ add_min_dep_type_info :: proc(c: ^Checker, t: ^Type) {
 
 		case .Complex64:
 			// complex64 is {float32, float32} (C++ lines 2418-2421)
-			add_min_dep_type_info(c, t_type_info_float)
+			add_min_dep_type_info(c, c.t_type_info_float)
 			add_min_dep_type_info(c, t_f32)
 
 		case .Complex128:
 			// complex128 is {float64, float64} (C++ lines 2422-2425)
-			add_min_dep_type_info(c, t_type_info_float)
+			add_min_dep_type_info(c, c.t_type_info_float)
 			add_min_dep_type_info(c, t_f64)
 
 		case .Quaternion128:
 			// quaternion128 components (C++ lines 2426-2429)
-			add_min_dep_type_info(c, t_type_info_float)
+			add_min_dep_type_info(c, c.t_type_info_float)
 			add_min_dep_type_info(c, t_f32)
 
 		case .Quaternion256:
 			// quaternion256 components (C++ lines 2430-2433)
-			add_min_dep_type_info(c, t_type_info_float)
+			add_min_dep_type_info(c, c.t_type_info_float)
 			add_min_dep_type_info(c, t_f64)
 		}
 
@@ -732,7 +732,7 @@ add_min_dep_type_info :: proc(c: ^Checker, t: ^Type) {
 		add_min_dep_type_info(c, dyn_array.elem)
 		add_min_dep_type_info(c, alloc_type_pointer(dyn_array.elem))
 		add_min_dep_type_info(c, t_int)
-		add_min_dep_type_info(c, t_allocator)
+		add_min_dep_type_info(c, c.t_allocator)
 
 	case .Slice:
 		// Register slice element type (C++ lines 2468-2472)
@@ -754,7 +754,7 @@ add_min_dep_type_info :: proc(c: ^Checker, t: ^Type) {
 		if union_tag_size(actual_type) > 0 {
 			add_min_dep_type_info(c, union_tag_type(actual_type))
 		} else {
-			add_min_dep_type_info(c, t_type_info_ptr)
+			add_min_dep_type_info(c, c.t_type_info_ptr)
 		}
 
 		// Register polymorphic params (C++ line 2484)
@@ -780,8 +780,8 @@ add_min_dep_type_info :: proc(c: ^Checker, t: ^Type) {
 				#partial switch struct_type.soa_kind {
 				case .Dynamic:
 					// StructSoa_Dynamic (C++ lines 2514-2517)
-					add_min_dep_type_info(c, t_type_info_ptr) // append_soa
-					add_min_dep_type_info(c, t_allocator)
+					add_min_dep_type_info(c, c.t_type_info_ptr) // append_soa
+					add_min_dep_type_info(c, c.t_allocator)
 					fallthrough
 				case .Slice:
 					// StructSoa_Slice (C++ lines 2518-2521)
@@ -817,11 +817,11 @@ add_min_dep_type_info :: proc(c: ^Checker, t: ^Type) {
 	case .Map:
 		// Register map key, value, and allocator types (C++ lines 2542-2548)
 		map_type := bt.variant.(Type_Map)
-		init_map_internal_types(bt)
+		init_map_internal_types(c, bt)
 		add_min_dep_type_info(c, map_type.key)
 		add_min_dep_type_info(c, map_type.value)
 		add_min_dep_type_info(c, t_uintptr) // hash value
-		add_min_dep_type_info(c, t_allocator)
+		add_min_dep_type_info(c, c.t_allocator)
 
 	case .Tuple:
 		// Register tuple element types (C++ lines 2550-2554)

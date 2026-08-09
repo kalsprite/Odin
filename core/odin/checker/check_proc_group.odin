@@ -851,8 +851,9 @@ check_call_arguments_internal :: proc(
 		// serves identically -- call_node when there are no variadic args (C++ uses
 		// ast_token(call).pos) and the first variadic argument otherwise.
 		//
-		// C++'s `dummy_argument_count` (declared check_expr.cpp:6745, incremented 6785 and 6822)
-		// is deliberately NOT ported: it is written twice and never read anywhere in that file.
+		// C++'s `dummy_argument_count` is incremented here in C++ (the empty-variadic slot) but
+		// NOT here in the port: this block only builds the operand array for instantiation, and
+		// the counter lives with the scoring further down. See its declaration below.
 		operands: []Operand
 		defer delete(operands)
 		if pt.params != nil && pt.params.kind == .Tuple {
@@ -1025,6 +1026,34 @@ check_call_arguments_internal :: proc(
 	// Score accumulator
 	total_score: i64 = 0
 
+	// C++ Reference: check_expr.cpp check_call_arguments_internal -- `dummy_argument_count`,
+	// incremented at the empty-variadic slot and once per parameter filled from its default
+	// value, then spent at the two `score -= dummy_argument_count * (...)` sites.
+	//
+	// THIS COMMENT USED TO SAY the counter was "written twice and never read anywhere in that
+	// file" and therefore deliberately not ported. That was true when it was written and is not
+	// true now: merge a64cb7bfd (PR #7227) added both readers. A documented divergence is only
+	// as good as its stated reason, so it goes when the reason does.
+	//
+	// What the counter buys, in C++'s own words: "A synthesised default argument is not evidence
+	// of a better match: it contributes assign_score_function(1) as a dummy bonus and is then
+	// scored again as a perfect-match argument. Discount both, plus 1 to break the resulting tie,
+	// so an exact-arity overload wins."
+	//
+	// So the two dummies are NOT symmetric, and the arithmetic is worth writing down:
+	//   default-filled parameter -- adds asf(1) at fill time and asf(0) when the synthesised
+	//     operand is scored, then gives back asf(0)+asf(1)+1. Net -1: a hair's-breadth penalty
+	//     that only decides otherwise-exact ties.
+	//   empty variadic slot -- adds NOTHING (C++'s scoring loop `continue`s on the variadic
+	//     parameter, and the variadic_operands loop has nothing to iterate), then gives back the
+	//     same asf(0)+asf(1)+1 = 602. Net -602: a real penalty, roughly two perfect arguments.
+	// Porting only the subtraction would have made both of those wrong in the same direction, and
+	// silently -- which is why the fill and the bonus below are ported alongside it.
+	dummy_argument_count: i64 = 0
+	dummy_argument_penalty :: #force_inline proc() -> i64 {
+		return assign_score_function(0) + assign_score_function(1) + 1
+	}
+
 	// Handle named arguments by creating ordered operand array
 	// Reference: check_expr.cpp:6291-6364
 	if len(named_operands) > 0 {
@@ -1085,6 +1114,48 @@ check_call_arguments_internal :: proc(
 			}
 		}
 
+		// Synthesise an operand for every parameter left unfilled that carries a default value,
+		// so the scoring loop below scores it like any other argument.
+		// C++ Reference: check_expr.cpp check_call_arguments_internal, the
+		// `for (isize i = 0; i < pt->param_count; i++) { if (!visited[i]) ... }` loop.
+		//
+		// C++'s `-vet explicit-allocators` arm inside that loop is NOT ported here, and its
+		// absence is deliberate rather than an omission: C++ gates it on `!checking_proc_group`,
+		// and every path through this file is a proc-group candidate. The direct-call copy in
+		// check_expr.odin owns that diagnostic and has it.
+		for i in 0 ..< len(ordered_operands) {
+			if visited[i] {
+				continue
+			}
+			e := params.variables[i]
+			if e == nil || e.kind != .Variable {
+				continue
+			}
+			var_e := &e.variant.(Entity_Variable)
+			if var_e.param_value.kind == .Invalid {
+				continue
+			}
+			o := Operand {
+				mode = .Value,
+				type = entity_type(e),
+				expr = var_e.param_value.original_ast_expr,
+			}
+			if var_e.param_value.kind == .Nil {
+				o.type = t_untyped_nil
+			}
+			ordered_operands[i] = o
+			visited[i] = true
+			total_score += assign_score_function(1)
+			dummy_argument_count += 1
+		}
+		// An empty variadic slot is a dummy too. C++ fills it with a `nil` ident of type
+		// t_untyped_nil, which its scoring loop then skips (`param_is_variadic` -> continue), so
+		// the slot contributes nothing but is still counted -- hence the full 602 penalty rather
+		// than the default's net 1.
+		if pt.variadic && pt.variadic_index >= 0 && int(pt.variadic_index) < len(visited) && !visited[pt.variadic_index] {
+			dummy_argument_count += 1
+		}
+
 		// C++ Reference: check_expr.cpp:6879. C++'s `err` is a value the scoring loop SETS and
 		// keeps going with, not a bail. Mirrored here so a mis-typed argument no longer hides a
 		// separate missing-parameter error reported after the loop.
@@ -1127,6 +1198,8 @@ check_call_arguments_internal :: proc(
 		if !missing_ok || had_wrong_types {
 			return false
 		}
+
+		total_score -= dummy_argument_count * dummy_argument_penalty()
 
 		data.result_type = pt.results
 		data.final_proc_type = specialized_proc_type
@@ -1233,6 +1306,50 @@ check_call_arguments_internal :: proc(
 		total_score += arg_score
 	}
 
+	// The default-value fill, positional twin of the block in the named path above. This path has
+	// no ordered_operands array to write into, so the synthesised operand is scored on the spot;
+	// the score it produces is identical either way, because C++'s scoring loop would have reached
+	// it with exactly this (type, expr) pair.
+	{
+		first_unfilled := min(len(positional_operands), len(params.variables))
+		for i in first_unfilled ..< len(params.variables) {
+			if pt.variadic && i == int(pt.variadic_index) {
+				continue
+			}
+			e := params.variables[i]
+			if e == nil || e.kind != .Variable {
+				continue
+			}
+			var_e := &e.variant.(Entity_Variable)
+			if var_e.param_value.kind == .Invalid {
+				continue
+			}
+			param_type := entity_type(e)
+			o := Operand {
+				mode = .Value,
+				type = param_type,
+				expr = var_e.param_value.original_ast_expr,
+			}
+			if var_e.param_value.kind == .Nil {
+				o.type = t_untyped_nil
+			}
+			total_score += assign_score_function(1)
+			dummy_argument_count += 1
+			arg_err := false
+			total_score += eval_param_and_score(ctx, &o, param_type, &arg_err, false, e, show_error)
+			if arg_err {
+				had_wrong_types = true
+			}
+		}
+		// The empty variadic slot. `len(positional_operands) <= variadic_index` is exactly
+		// C++'s `!visited[variadic_index] && variadic_operands.count == 0`: the variadic
+		// parameter is always last, so no argument reached it. It also excludes `xs..`, which
+		// cannot occur with zero variadic arguments.
+		if pt.variadic && pt.variadic_index >= 0 && len(positional_operands) <= int(pt.variadic_index) {
+			dummy_argument_count += 1
+		}
+	}
+
 	{
 		// Every parameter past the positional operands is unfilled.
 		positional_visited := make([]bool, len(params.variables), context.temp_allocator)
@@ -1248,8 +1365,10 @@ check_call_arguments_internal :: proc(
 		return false
 	}
 
+	total_score -= dummy_argument_count * dummy_argument_penalty()
+
 	data.result_type = pt.results
-		data.final_proc_type = specialized_proc_type
+	data.final_proc_type = specialized_proc_type
 	data.score = int(total_score)
 	return true
 }
@@ -2052,9 +2171,46 @@ check_procedure_group_call :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 			score = i64(candidate_data.score),
 		}
 
-		// Prefer non-polymorphic over polymorphic
+		// C++ Reference: check_expr.cpp check_call_arguments_proc_group. The flat
+		// `assign_score_function(1)` penalty that used to sit here was REPLACED upstream (merge
+		// a64cb7bfd, PR #7227) by an ordering:
+		//
+		//   value-polymorphic > concrete > specialized generic > unconstrained generic
+		//
+		// `proc($S: string)` specialises on a compile-time VALUE, so it is more specific than a
+		// concrete overload. `proc(x: $T)` specialises on a TYPE and is a fallback, so it should
+		// lose to an exact concrete overload. `proc(x: $T/[]$E)` constrains that type, so it sits
+		// between the two.
+		//
+		// The tie-breaks are deliberately small integers: assign_score_function(1) is roughly a
+		// full perfect-match unit and would swamp argument match quality, which is why the old
+		// flat bonus could not express this ordering at all.
 		if is_type_polymorphic(proc_type) {
-			candidate.score += assign_score_function(1)
+			has_polymorphic_constant := false
+			has_specialized_generic := false
+			if pt.params != nil {
+				if ptup, tuple_ok := &pt.params.variant.(Type_Tuple); tuple_ok {
+					for param in ptup.variables {
+						if param == nil {
+							continue
+						}
+						if _, is_const := param.variant.(Entity_Constant); is_const {
+							has_polymorphic_constant = true
+						}
+						bt := base_type(param.type)
+						if bt != nil {
+							if gen, gen_ok := bt.variant.(Type_Generic); gen_ok && gen.specialized != nil {
+								has_specialized_generic = true
+							}
+						}
+					}
+				}
+			}
+			if has_polymorphic_constant {
+				candidate.score += 2
+			} else {
+				candidate.score += -1 if has_specialized_generic else -2
+			}
 		}
 
 		// Track max matched target features across all candidates

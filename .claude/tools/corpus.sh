@@ -28,6 +28,28 @@ CORPUS=(
   soa_minb soa_minc swval sx_slice_badfld sx_soa_arr_bad sx_soa_badfld
   sx_soa_dyn_bad sx_soa_goodfld sx_soa_ok ti1 ti2 typearg
   vetstyle mxidx trunc divwarn finidis objcsuper objcimpl objcnamed objcctx2 dupdefault sel288 sel288b u288 objcdup objcdup2 instty3 instty5 p_cte p_cte1 fieldclose sepgap postdir2 pd3 bcval dirw
+  # #579 (merge a64cb7bfd / PR #7227) overload-scoring refinements. These two exist because the
+  # 323-package parity corpus could NOT distinguish "ported correctly" from "ported nothing":
+  # both changes are inert across every package, so a clean sweep proved neither. Each probe goes
+  # AMBIGUOUS on the pre-#579 checker and resolves on the post-merge oracle, so they can fail --
+  # which is what makes them worth running.
+  # Both are compared with `odin build`, so both need a `main` -- a probe without one scores as a
+  # difference on the entry-point error alone, which is a comparator artefact and not a finding.
+  #   p579def  untyped constant prefers its DEFAULT type: f(1) over f(int)/f(i64) picks int
+  #   p579val  candidate ordering: proc($S: string) beats proc(x: $T)
+  #   p579def2 dummy_argument_count, default arm: h(1) picks proc(x: int) over proc(x: int, y := 0)
+  #   p579vard dummy_argument_count, variadic arm: v(1) picks proc(x: int) over proc(x: int, ..int)
+  p579def p579val p579def2 p579vard
+  # #571. Constant string slicing: an inverted constant range (the "[%d > %d]" message) and a
+  # non-constant index into a constant string (which the port used to accept silently).
+  # NOT added: the sibling probe `S :: "hello"; x := S[3:1]`, which the ORACLE cannot check --
+  # it dies on src/string.cpp(77) `lo <= hi && hi <= max`. A probe whose reference side aborts
+  # cannot be a corpus member; the port's guarded behaviour there is a documented divergence.
+  p571sl
+  # #584. check_index: three divergences in one probe -- the 'Cannot index a constant' message
+  # and its Suggestion, and an INVENTED `if !index_ok { .Invalid; return }` bail that suppressed
+  # the assignment diagnostic on the following line (oracle 3 diagnostics, port 2).
+  p584a
   # #305 file-tag parsing. One probe per distinct path through parse_file_tag /
   # parse_vet_tag / parse_feature_tag, not one per syntactic variation:
   #   vettag  bare `#+vet` turns every vet check on

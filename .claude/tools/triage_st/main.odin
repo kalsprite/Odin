@@ -18,6 +18,23 @@ main :: proc() {
 	// checks while the oracle does not, and every package declaring `main` would report diagnostics
 	// the reference never emits -- a harness mismatch masquerading as a regression (cf. #45, #275).
 	// Set the flag here so the two sides are measured under the same configuration.
+	// -target:<name> must be handled BEFORE ensure_build_context_initialized, which is a no-op once
+	// a target is set (it guards on metrics.os != .Invalid). The oracle takes the same spelling:
+	//     ./odin check <pkg> -no-entry-point -target:linux_i386
+	// Without this the harness could only ever be run host-to-host, so every target-dependent rule
+	// -- int/uint/uintptr/rawptr widths, string and slice sizes, `#+build` arch tags -- was
+	// measured at exactly one point and any divergence away from it was invisible. LEDGER #572.
+	for a in args[1:] {
+		if len(a) > 8 && a[:8] == "-target:" {
+			name := a[8:]
+			metrics := checker.get_target_metrics_from_name(name)
+			if metrics == nil {
+				fmt.eprintf("triage_st: unknown target '%s'\n", name)
+				os.exit(2)
+			}
+			checker.init_build_context(metrics)
+		}
+	}
 	checker.ensure_build_context_initialized()
 	checker.build_context.no_entry_point = true
 	// The sweeps run `odin check`, and C++ keys several exemptions off command_kind -- notably
@@ -63,7 +80,9 @@ main :: proc() {
 		case:
 			// LEDGER #418. -dump-model:<path> writes a canonical dump of the semantic model.
 			// Handled in the default arm rather than as its own case because it carries a value.
-			if len(a) > 12 && a[:12] == "-dump-model:" {
+			if len(a) > 8 && a[:8] == "-target:" {
+				// Already consumed by the pre-scan above; swallow it so it is not read as a path.
+			} else if len(a) > 12 && a[:12] == "-dump-model:" {
 				checker.build_context.dump_model_path = a[12:]
 			} else if len(a) > 10 && a[:10] == "-dump-doc:" {
 				// LEDGER #480. Doc FLAG BITS, which doccmp cannot see.

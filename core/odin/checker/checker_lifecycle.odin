@@ -242,7 +242,7 @@ init_checker :: proc(c: ^Checker, allocator := context.allocator) {
 
 	// Populate builtin package with type entities (int, bool, string, etc.)
 	// This enables scope lookup for builtin type names
-	populate_builtin_package_scope(&c.info, allocator)
+	populate_builtin_package_scope(c, allocator)
 
 	// Initialize processing arrays
 	c.procs_to_check = make([dynamic]^Proc_Info, allocator)
@@ -278,7 +278,8 @@ destroy_checker :: proc(c: ^Checker) {
 	// Reset runtime type globals to prevent stale pointers
 	// This is critical for tests that use temp_allocator - without this,
 	// the next test would read freed memory and panic with "unhandled type kind"
-	reset_runtime_type_globals()
+	// #566: reset_runtime_type_globals is GONE. The types it nil'd are now fields on the
+	// Checker being destroyed, so they die with it -- there is nothing process-wide left to clear.
 }
 
 // destroy_global_thread_pool cleans up the global thread pool
@@ -480,26 +481,26 @@ add_global_type_name :: proc(scope: ^Scope, name: string, base: ^Type, alloc: me
 // init_c_va_list_type: base:intrinsics is never parsed, so these must be synthesised rather
 // than looked up. They are opaque — no field of them is ever named by user code — so an
 // empty struct is the whole definition, exactly as in C++.
-init_objc_intrinsics_types :: proc(intrinsics_scope: ^Scope, alloc: mem.Allocator) {
+init_objc_intrinsics_types :: proc(c: ^Checker, intrinsics_scope: ^Scope, alloc: mem.Allocator) {
 	if intrinsics_scope == nil {
 		return
 	}
 
-	t_objc_object   = add_global_type_name(intrinsics_scope, "objc_object",   alloc_type_struct_complete(), alloc)
-	t_objc_selector = add_global_type_name(intrinsics_scope, "objc_selector", alloc_type_struct_complete(), alloc)
-	t_objc_class    = add_global_type_name(intrinsics_scope, "objc_class",    alloc_type_struct_complete(), alloc)
-	t_objc_ivar     = add_global_type_name(intrinsics_scope, "objc_ivar",     alloc_type_struct_complete(), alloc)
+	c.t_objc_object   = add_global_type_name(intrinsics_scope, "objc_object",   alloc_type_struct_complete(), alloc)
+	c.t_objc_selector = add_global_type_name(intrinsics_scope, "objc_selector", alloc_type_struct_complete(), alloc)
+	c.t_objc_class    = add_global_type_name(intrinsics_scope, "objc_class",    alloc_type_struct_complete(), alloc)
+	c.t_objc_ivar     = add_global_type_name(intrinsics_scope, "objc_ivar",     alloc_type_struct_complete(), alloc)
 
-	t_objc_id    = alloc_type_pointer(t_objc_object)
-	t_objc_SEL   = alloc_type_pointer(t_objc_selector)
-	t_objc_Class = alloc_type_pointer(t_objc_class)
-	t_objc_Ivar  = alloc_type_pointer(t_objc_ivar)
+	c.t_objc_id    = alloc_type_pointer(c.t_objc_object)
+	c.t_objc_SEL   = alloc_type_pointer(c.t_objc_selector)
+	c.t_objc_Class = alloc_type_pointer(c.t_objc_class)
+	c.t_objc_Ivar  = alloc_type_pointer(c.t_objc_ivar)
 
 	// C++ line 1524. Unlike the four above, this is an ALIAS: its backing type is t_objc_id
 	// (i.e. ^objc_object), not a fresh struct. Probes oi_ivar/oi_inst confirmed both names were
 	// simply absent from the port -- `'objc_ivar' is not declared by 'intrinsics'` where the
 	// reference resolves them silently (#295).
-	t_objc_instancetype = add_global_type_name(intrinsics_scope, "objc_instancetype", t_objc_id, alloc)
+	c.t_objc_instancetype = add_global_type_name(intrinsics_scope, "objc_instancetype", c.t_objc_id, alloc)
 }
 
 // init_c_va_list_type synthesises `intrinsics.c_va_list` and registers it.
@@ -515,7 +516,7 @@ init_objc_intrinsics_types :: proc(intrinsics_scope: ^Scope, alloc: mem.Allocato
 // taking a `^va_list`) therefore failed.
 //
 // The layout is platform-specific and must match the C ABI.
-init_c_va_list_type :: proc(intrinsics_scope: ^Scope, alloc: mem.Allocator) {
+init_c_va_list_type :: proc(c: ^Checker, intrinsics_scope: ^Scope, alloc: mem.Allocator) {
 	if intrinsics_scope == nil {
 		return
 	}
@@ -566,8 +567,8 @@ init_c_va_list_type :: proc(intrinsics_scope: ^Scope, alloc: mem.Allocator) {
 	st.scope = scope
 	st.fields = fields
 
-	t_c_va_list = add_global_type_name(intrinsics_scope, "c_va_list", va_list_struct, alloc)
-	t_c_va_list_ptr = alloc_type_pointer(t_c_va_list)
+	c.t_c_va_list = add_global_type_name(intrinsics_scope, "c_va_list", va_list_struct, alloc)
+	c.t_c_va_list_ptr = alloc_type_pointer(c.t_c_va_list)
 }
 
 add_global_enum_type :: proc(
@@ -773,7 +774,8 @@ parse_minimum_os_version :: proc(s: string) -> i64 {
 // host, because the checker supports cross-target checking. C++ guarantees the ordering by
 // running init_build_context in main before init_universal; the port has no main, so this
 // calls ensure_build_context_initialized directly.
-populate_builtin_package_scope :: proc(info: ^Checker_Info, allocator := context.allocator) {
+populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocator) {
+	info := &c.info
 	if info.builtin_package == nil {
 		return
 	}
@@ -1078,7 +1080,7 @@ populate_builtin_package_scope :: proc(info: ^Checker_Info, allocator := context
 			{"PreserveAll", 13},
 		}
 		fields, named_type := add_global_enum_type(builtin_scope, "Odin_Calling_Convention", values, t_u8, allocator)
-		t_odin_calling_convention = named_type
+		c.t_odin_calling_convention = named_type
 		add_global_enum_constant(
 			builtin_scope,
 			fields,
@@ -1227,7 +1229,7 @@ populate_builtin_package_scope :: proc(info: ^Checker_Info, allocator := context
 			{"Seq_Cst", 5},
 		}
 		_, named_type := add_global_enum_type(builtin_scope, "Atomic_Memory_Order", values, nil, allocator)
-		t_atomic_memory_order = named_type
+		c.t_atomic_memory_order = named_type
 		scope_insert(intrinsics_scope, named_type.variant.(Type_Named).type_name)
 	}
 
@@ -1259,15 +1261,15 @@ populate_builtin_package_scope :: proc(info: ^Checker_Info, allocator := context
 		named_type := alloc_type_named(TYPE_NAME, bit_set_type, entity)
 		set_base_type(named_type, bit_set_type)
 		set_type_name_entity_type(entity, named_type)
-		t_fast_math_flags = named_type
+		c.t_fast_math_flags = named_type
 
 		scope_insert(intrinsics_scope, entity)
 	}
 
 	// intrinsics.c_va_list and the objc opaque types — synthesised, not sourced.
 	// See init_c_va_list_type for why.
-	init_c_va_list_type(intrinsics_scope, allocator)
-	init_objc_intrinsics_types(intrinsics_scope, allocator)
+	init_c_va_list_type(c, intrinsics_scope, allocator)
+	init_objc_intrinsics_types(c, intrinsics_scope, allocator)
 
 	for id in Builtin_Proc_Id {
 		proc_info := builtin_proc_infos[id]

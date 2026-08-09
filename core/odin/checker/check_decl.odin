@@ -1026,7 +1026,7 @@ check_entity_from_ident_or_selector :: proc(ctx: ^Checker_Context, node: ^ast.Ex
 				if is_type_dynamic_array(type_deref(operand.type)) {
 					init_mem_allocator(ctx.checker)
 				}
-				sel := lookup_field(operand.type, field_name, operand.mode == .Type)
+				sel := lookup_field(ctx.checker, operand.type, field_name, operand.mode == .Type)
 				entity = sel.entity
 			}
 
@@ -1283,7 +1283,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 
 	// C++ Reference: check_decl.cpp:1368-1385
 	// Instrumentation validation lambda
-	is_valid_instrumentation_call :: proc(type: ^Type) -> bool {
+	is_valid_instrumentation_call :: proc(c: ^Checker, type: ^Type) -> bool {
 		if type == nil || type.kind != .Proc {
 			return false
 		}
@@ -1301,7 +1301,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		p0 := params.variables[0].type
 		p1 := params.variables[1].type
 		p2 := params.variables[2].type
-		return is_type_rawptr(p0) && is_type_rawptr(p1) && are_types_identical(p2, t_source_code_location)
+		return is_type_rawptr(p0) && is_type_rawptr(p1) && are_types_identical(p2, c.t_source_code_location)
 	}
 
 	instrumentation_proc_type_str :: "proc \"contextless\" (proc_address: rawptr, call_site_return_address: rawptr, loc: runtime.Source_Code_Location)"
@@ -1313,7 +1313,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		e.flags += {.Require}
 	} else if ac.instrumentation_enter {
 		init_core_source_code_location(ctx.checker)
-		if !is_valid_instrumentation_call(e.type) {
+		if !is_valid_instrumentation_call(ctx.checker, e.type) {
 			s := type_to_string(e.type)
 			error(e.token, "@(instrumentation_enter) procedures must have the type '%s', got %s", instrumentation_proc_type_str, s)
 		}
@@ -1332,7 +1332,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 		e.flags += {.Require}
 	} else if ac.instrumentation_exit {
 		init_core_source_code_location(ctx.checker)
-		if !is_valid_instrumentation_call(e.type) {
+		if !is_valid_instrumentation_call(ctx.checker, e.type) {
 			s := type_to_string(e.type)
 			error(e.token, "@(instrumentation_exit) procedures must have the type '%s', got %s", instrumentation_proc_type_str, s)
 		}

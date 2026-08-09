@@ -549,7 +549,7 @@ check_procedure_bodies :: proc(c: ^Checker) {
 //   untyped: Map for storing untyped expression info (may be nil)
 check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Expr_Info) -> bool {
 	// Early validation
-	// C++ Reference: checker.cpp:6168-6173
+	// C++ Reference: checker.cpp:6522-6527
 	if pi == nil {
 		return false
 	}
@@ -558,14 +558,14 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Check procedure state with mutex protection
-	// C++ Reference: checker.cpp:6175-6196
+	// C++ Reference: checker.cpp:6529-6550
 	decl := pi.decl
 	if decl == nil {
 		return false
 	}
 
 	// State machine transition, guarded by this declaration's own mutex.
-	// C++ Reference: checker.cpp:6175-6196 - the C++ MUTEX_GUARD is scoped to exactly this
+	// C++ Reference: checker.cpp:6529-6550 - the C++ MUTEX_GUARD is scoped to exactly this
 	// block and locks DeclInfo::proc_checked_mutex, not a global.
 	//
 	// The guard MUST NOT extend over check_proc_body below. It is only here to make
@@ -581,17 +581,17 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 		defer sync.unlock(&decl.proc_checked_mutex)
 
 		// State machine check
-		// C++ Reference: checker.cpp:6181-6195
+		// C++ Reference: checker.cpp:6535-6549
 		state := sync.atomic_load(&decl.proc_checked_state)
 		#partial switch state {
 		case .In_Progress:
 			// Currently being checked (by another thread in parallel mode)
-			// C++ Reference: checker.cpp:6182-6186
+			// C++ Reference: checker.cpp:6536-6540
 			return false
 
 		case .Checked:
 			// Already checked successfully
-			// C++ Reference: checker.cpp:6187-6191
+			// C++ Reference: checker.cpp:6541-6545
 			if decl.entity != nil {
 				assert(sync.atomic_load(&decl.entity.proc_body_checked))
 			}
@@ -599,18 +599,18 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 
 		case .Unchecked:
 			// Proceed with checking
-			// C++ Reference: checker.cpp:6192-6194
+			// C++ Reference: checker.cpp:6546-6548
 			break
 		}
 
 		// Claim the procedure. From here on this thread owns the body check, and every
 		// exit path below must move the state off In_Progress.
-		// C++ Reference: checker.cpp:6196
+		// C++ Reference: checker.cpp:6550
 		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.In_Progress)
 	}
 
 	// Validate procedure type
-	// C++ Reference: checker.cpp:6198-6200
+	// C++ Reference: checker.cpp:6552-6554
 	assert(pi.type.kind == .Proc)
 	pt, pt_ok := &pi.type.variant.(Type_Proc)
 	if !pt_ok {
@@ -621,17 +621,17 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	name := pi.token.text
 
 	// Check for unspecialized polymorphic procedures
-	// C++ Reference: checker.cpp:6202-6210
+	// C++ Reference: checker.cpp:6556-6564
 	if pt.is_polymorphic && !pt.is_poly_specialized {
 		token := pi.token
 		if pi.poly_def_node != nil {
 			// Use polymorphic definition node's token if available
-			// C++ Reference: checker.cpp:6204-6206
+			// C++ Reference: checker.cpp:6558-6560
 			token = ast_token(pi.poly_def_node)
 		}
 
 		// Error: Cannot check unspecialized polymorphic procedures
-		// C++ Reference: checker.cpp:6207
+		// C++ Reference: checker.cpp:6561
 		error(token, "Unspecialized polymorphic procedure '%s'", name)
 
 		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Unchecked)
@@ -639,13 +639,13 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Skip unused specialized polymorphic procedures
-	// C++ Reference: checker.cpp:6212-6221
+	// C++ Reference: checker.cpp:6566-6575
 	if pt.is_polymorphic && pt.is_poly_specialized {
 		e := pi.decl.entity
 		assert(e != nil)
 		if .Used not_in e.flags {
 			// Never used, don't check
-			// C++ Reference: checker.cpp:6216-6218
+			// C++ Reference: checker.cpp:6570-6572
 			// NOTE: This may need to be checked later if used elsewhere
 			sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Unchecked)
 			return false
@@ -653,7 +653,7 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Create and setup checker context
-	// C++ Reference: checker.cpp:6223-6226
+	// C++ Reference: checker.cpp:6577-6580
 	ctx := make_checker_context(c)
 	defer destroy_checker_context(&ctx)
 
@@ -661,18 +661,18 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	ctx.decl = pi.decl
 
 	// Process procedure tags
-	// C++ Reference: checker.cpp:6228-6248
+	// C++ Reference: checker.cpp:6582-6602
 	tags := pi.tags
 
 	// Extract tag bits using direct bitmask (Proc_Tag values are already 1<<n)
-	// C++ Reference: checker.cpp:6228-6232
+	// C++ Reference: checker.cpp:6582-6586
 	bounds_check := (tags & u64(Proc_Tag.Bounds_Check)) != 0
 	no_bounds_check := (tags & u64(Proc_Tag.No_Bounds_Check)) != 0
 	type_assert := (tags & u64(Proc_Tag.Type_Assert)) != 0
 	no_type_assert := (tags & u64(Proc_Tag.No_Type_Assert)) != 0
 
 	// Apply bounds checking flags
-	// C++ Reference: checker.cpp:6234-6240
+	// C++ Reference: checker.cpp:6588-6594
 	if bounds_check {
 		ctx.state_flags += {.Bounds_Check}
 		ctx.state_flags -= {.No_Bounds_Check}
@@ -682,7 +682,7 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Apply type assertion flags
-	// C++ Reference: checker.cpp:6242-6248
+	// C++ Reference: checker.cpp:6596-6602
 	if type_assert {
 		ctx.state_flags += {.Type_Assert}
 		ctx.state_flags -= {.No_Type_Assert}
@@ -692,20 +692,20 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Check the procedure body
-	// C++ Reference: checker.cpp:6250
+	// C++ Reference: checker.cpp:6604
 	body_was_checked := check_proc_body(&ctx, pi.token, pi.decl, pi.type, pi.body)
 
 	// Update entity state based on checking result
-	// C++ Reference: checker.cpp:6252-6268
+	// C++ Reference: checker.cpp:6606-6622
 	if body_was_checked {
 		// Success: Mark as checked (atomic store for thread safety)
-		// C++ Reference: checker.cpp:6253-6259
+		// C++ Reference: checker.cpp:6607-6613
 		//
 		// DEVIATION (ordering): C++ stores ProcCheckedState_Checked first and sets
 		// EntityFlag_ProcBodyChecked second. It can afford to, because its
 		// proc_checked_mutex is held for the whole of check_proc_body_for_proc_info - so
 		// no other thread can be inside the `case ProcCheckedState_Checked` arm that
-		// asserts on the flag (checker.cpp:6532-6536) while this window is open.
+		// asserts on the flag (checker.cpp:6541-6545) while this window is open.
 		//
 		// This port deliberately narrows that guard to the state transition alone (see the
 		// long comment above the claim, and CPP_DEVIATIONS): the C++ shape would serialise
@@ -726,7 +726,7 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Checked)
 	} else {
 		// Failure: Mark as unchecked (atomic store for thread safety)
-		// C++ Reference: checker.cpp:6260-6267
+		// C++ Reference: checker.cpp:6614-6621
 		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Unchecked)
 		if pi.body != nil {
 			e := pi.decl.entity
@@ -738,11 +738,11 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Add untyped expressions to global queue
-	// C++ Reference: checker.cpp:6270
+	// C++ Reference: checker.cpp:6624
 	add_untyped_expressions(&c.info, ctx.untyped)
 
 	// Check dependencies and queue unchecked procedures
-	// C++ Reference: checker.cpp:6272-6279
+	// C++ Reference: checker.cpp:6626-6633
 	// Thread-safe read access to dependencies
 	sync.rw_mutex_shared_lock(&ctx.decl.deps_mutex)
 	defer sync.rw_mutex_shared_unlock(&ctx.decl.deps_mutex)
@@ -852,19 +852,19 @@ Proc_Using_Var :: struct {
 // Returns:
 //   true if all clauses pass, false if any fail
 evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scope: ^Scope, clauses: []^ast.Expr, print_err: bool) -> bool {
-	// C++ Reference: check_expr.cpp:6718
+	// C++ Reference: check_expr.cpp:7122
 	if clauses == nil || len(clauses) == 0 {
 		return true
 	}
 
 	// Check each clause
-	// C++ Reference: check_expr.cpp:6719-6792
+	// C++ Reference: check_expr.cpp:7123-7196
 	for clause in clauses {
 		operand := Operand{}
 		check_expr(ctx, &operand, clause)
 
 		// Must be a constant
-		// C++ Reference: check_expr.cpp:6722-6725
+		// C++ Reference: check_expr.cpp:7126-7129
 		if operand.mode != .Constant {
 			if print_err {
 				error(clause, "'where' clauses expect a constant boolean evaluation")
@@ -876,7 +876,7 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 		}
 
 		// Must be a boolean
-		// C++ Reference: check_expr.cpp:6726-6729
+		// C++ Reference: check_expr.cpp:7130-7133
 		value_bool, is_bool := operand.value.(bool)
 		if !is_bool {
 			if print_err {
@@ -889,7 +889,7 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 		}
 
 		// Must evaluate to true
-		// C++ Reference: check_expr.cpp:6730-6776
+		// C++ Reference: check_expr.cpp:7134-7180
 		if !value_bool {
 			if print_err {
 				// C++ opens an ERROR_BLOCK here (check_expr.cpp:7113) so the header, the
@@ -907,7 +907,7 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 				error(clause, "'where' clause evaluated to false:\n\t%s", clause_str)
 
 				// Display polymorphic definitions from scope
-				// C++ Reference: check_expr.cpp:6746-6778
+				// C++ Reference: check_expr.cpp:7150-7182
 				if scope != nil {
 					print_count := 0
 
@@ -949,7 +949,7 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 						#partial switch e.kind {
 						case .Type_Name:
 							// Display type definitions: name :: type;
-							// C++ Reference: check_expr.cpp:6751-6758
+							// C++ Reference: check_expr.cpp:7155-7162
 							// Note: The C++ comment says to print header only on first entity,
 							// but then doesn't actually use that check (line 6752 is commented out)
 							// The header fires from THIS arm too now. It used to be commented out
@@ -966,7 +966,7 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 
 						case .Constant:
 							// Display constant definitions
-							// C++ Reference: check_expr.cpp:6760-6774
+							// C++ Reference: check_expr.cpp:7164-7178
 							// C++ Reference: check_expr.cpp:7149.
 							//
 							// THE TWO LEADING SPACES ARE LOAD-BEARING, and they are the whole of
@@ -995,11 +995,11 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 
 							if is_type_untyped(e.type) {
 								// Untyped constant: name :: value;
-								// C++ Reference: check_expr.cpp:6764-6765
+								// C++ Reference: check_expr.cpp:7168-7169
 								error_line("\t\t%s :: %s;\n", e.token.text, value_str)
 							} else {
 								// Typed constant: name : type : value;
-								// C++ Reference: check_expr.cpp:6766-6770
+								// C++ Reference: check_expr.cpp:7170-7174
 								type_str := type_to_string(e.type)
 								error_line("\t\t%s : %s : %s;\n", e.token.text, type_str, value_str)
 							}
@@ -1022,19 +1022,19 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 		}
 
 		// Style check: prefer comma over &&
-		// C++ Reference: check_expr.cpp:6780-6791
+		// C++ Reference: check_expr.cpp:7184-7195
 		if ast_file_vet_style(ctx.file) {
 			c := unparen_expr(clause)
 			// Check if it's a binary expression with Cmp_And (&&)
-			// C++ Reference: check_expr.cpp:6781-6791
+			// C++ Reference: check_expr.cpp:7185-7195
 			if binary, ok := c.derived.(^ast.Binary_Expr); ok {
 				if binary.op.kind == .Cmp_And {
 					// Error: Prefer comma over &&
-					// C++ Reference: check_expr.cpp:6783-6789
+					// C++ Reference: check_expr.cpp:7187-7193
 					error(c, "Prefer to separate 'where' clauses with a comma rather than '&&'")
 
 					// Show suggestion with left and right parts
-					// C++ Reference: check_expr.cpp:6784-6787
+					// C++ Reference: check_expr.cpp:7188-7191
 					x := expr_to_string(binary.left)
 					defer delete(x)
 					y := expr_to_string(binary.right)
@@ -2098,13 +2098,17 @@ type_align_of :: proc(t: ^Type) -> int {
 		// a later field was pushed to the next 16-byte boundary and the struct grew.
 		// core/nbio's `Operation` measured 400 instead of 384 and failed its own
 		// `#assert(size_of(Operation) <= 384)`.
+		//
+		// The widths themselves come from build_context, not from a literal 8 and not from
+		// the size baked into the basic type: C++ reads build_context.int_size / ptr_size on
+		// every call so one Type serves every target. LEDGER #580.
 		#partial switch basic.kind {
 		case .String, .String16, .Int, .Uint:
-			return 8 // int_size
+			return int(build_context.int_size)
 		case .Cstring, .Cstring16, .Uintptr, .Rawptr:
-			return 8 // ptr_size
+			return int(build_context.ptr_size)
 		case .Any, .Typeid:
-			return 8
+			return 8 // C++ returns a literal 8 for both, not a word
 		case .Complex32, .Complex64, .Complex128:
 			return max(basic.size / 2, 1)
 		case .Quaternion64, .Quaternion128, .Quaternion256:
@@ -2114,11 +2118,20 @@ type_align_of :: proc(t: ^Type) -> int {
 		// to its own size.
 		return min(basic.size, 16) if basic.size > 0 else 1
 
-	case .Pointer, .Multi_Pointer, .Soa_Pointer:
-		return 8 // 64-bit pointers
+	// C++ has NO explicit Type_Pointer / Type_MultiPointer / Type_Proc arm in
+	// type_align_of_internal -- all three fall to its tail,
+	//     gb_clamp(next_pow2(type_size_of_internal(t, path)), 1, build_context.max_align)
+	// which for a one-word type is exactly ptr_size. Spelling it out here rather than
+	// reproducing the clamp keeps the arms readable; the value is the same for every target in
+	// the metrics table, where ptr_size is always a power of two. Type_SoaPointer DOES have its
+	// own arm and returns int_size, so it is separated out. LEDGER #580.
+	case .Pointer, .Multi_Pointer, .Proc:
+		return int(build_context.ptr_size)
 
-	case .Proc:
-		return 8 // Procedure pointers
+	case .Soa_Pointer:
+		// C++ Reference: types.cpp type_align_of_internal, `case Type_SoaPointer: return
+		// build_context.int_size;` -- one word, even though the type is two words wide.
+		return int(build_context.int_size)
 
 	case .Array:
 		arr := bt.variant.(Type_Array)
@@ -2128,14 +2141,17 @@ type_align_of :: proc(t: ^Type) -> int {
 		earr := bt.variant.(Type_Enumerated_Array)
 		return type_align_of(earr.elem)
 
+	// C++ Reference: types.cpp type_align_of_internal -- Slice and DynamicArray return
+	// build_context.int_size, Map returns build_context.ptr_size. They are NOT all "pointer
+	// alignment": on a target where int_size != ptr_size the three would disagree. LEDGER #580.
 	case .Slice:
-		return 8 // Pointer alignment
+		return int(build_context.int_size)
 
 	case .Dynamic_Array:
-		return 8 // Pointer alignment
+		return int(build_context.int_size)
 
 	case .Map:
-		return 8 // Pointer alignment
+		return int(build_context.ptr_size)
 
 	// C++ Reference: types.cpp type_align_of_internal, case Type_BitField --
 	//     return type_align_of_internal(t->BitField.backing_type, path);
@@ -2255,7 +2271,30 @@ type_align_of :: proc(t: ^Type) -> int {
 		return matrix_align_of(mat)
 
 	case:
-		return 8 // Default to pointer alignment
+		// KNOWN DIVERGENCE, left alone deliberately. C++'s tail is
+		//     return gb_clamp(next_pow2(type_size_of_internal(t, path)), 1, build_context.max_align);
+		// The arms above cover every Type_Kind except Invalid, Generic and Tuple (Named is stripped
+		// by base_type before the switch). For Invalid and Generic C++'s formula yields 1, not 8;
+		// for Tuple C++ has its OWN arm, computing the maximum member alignment, which the port
+		// does not have at all.
+		//
+		// MEASURED DEAD, which is why it stays a literal. #580 left this as "no probe I have
+		// reaches this arm", which is an absence of evidence; #581 replaced it with evidence.
+		// A counter on this arm, swept over all 323 packages in pkglist.txt:
+		//
+		//     ALIGNTAIL lines: 0
+		//
+		// and the detector is not vacuous -- deleting the `.Enum` arm as a positive control made
+		// it print `ALIGNTAIL Enum=282` on core/strings alone. So Invalid, Generic and Tuple never
+		// reach type_align_of anywhere in the corpus, and the value returned here is unobservable.
+		//
+		// The C++ arms are still worth naming, because "unreachable on this corpus" is not
+		// "unreachable": for Invalid and Generic C++'s tail yields 1, and Tuple has its OWN arm
+		// (`i64 max = 1; for each variable: max = gb_max(max, align)`) that the port lacks
+		// entirely. If anything ever makes this arm fire, that is what to port. Writing those arms
+		// now would be #266's mistake pointing the other way -- code no input reaches, verified by
+		// nothing.
+		return 8
 	}
 }
 

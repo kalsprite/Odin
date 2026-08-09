@@ -17482,3 +17482,744 @@ tooling needs the same positive controls the checker gates get.
 
 Attempt 3 should re-run the same sequence with the guard in place. The threading step (8 procedures,
 40 edits) is known-good and reproducible from this entry.
+
+## #579 fourth merge catch-up (a64cb7bfd = PR #7227, kalsprite/poly): A and C ported, B is NOT a transcription
+
+The merge touched exactly ONE file in src/: check_expr.cpp, +53/-10. Port was stale at all three
+changes. Two are landed; the third turns out to need analysis rather than copying.
+
+**A -- untyped-constant distance, LANDED** (check_equivalence.odin:584-618). Each `Basic_Untyped*`
+arm went from `return 1` to `return 1 if are_types_identical(dst, default_type(src)) else 2`, so an
+untyped constant now prefers its DEFAULT type -- `g(1)` picks `int` over `i64` instead of scoring
+them identically and going ambiguous. The post-switch fallthrough went `2 -> 3`, ranking a
+cross-family constant conversion below a same-family one. The UntypedComplex->quaternion arm keeps
+its explicit `return 2` and was left alone. Applied by line number with every target's current text
+asserted first, so a drifted line aborts rather than silently rewriting the wrong statement.
+
+**C -- proc-group candidate ordering, LANDED** (check_proc_group.odin:2055). The flat
+`candidate.score += assign_score_function(1)` penalty is replaced by C++'s ordering:
+value-polymorphic > concrete > specialized generic > unconstrained generic. `has_polymorphic_constant`
+(any parameter entity of kind Constant) scores +2; otherwise -1 if any parameter's base type is a
+Type_Generic with a non-nil `specialized`, else -2. The tie-breaks are small on purpose --
+assign_score_function(1) is roughly a full perfect-match unit and would swamp argument match
+quality, which is exactly why the old flat bonus could not express this ordering.
+
+**B -- dummy_argument_count discount, NOT LANDED, and the reason matters.**
+
+This one was a DOCUMENTED DIVERGENCE whose stated reason has expired. check_proc_group.odin:854
+says dummy_argument_count "is deliberately NOT ported: it is written twice and never read anywhere
+in that file". That was TRUE; this merge makes it read at check_expr.cpp:7019 and :7053. By standing
+policy a documented divergence whose reason is false counts as wrong, so the note must change
+regardless.
+
+But the fix is not the two-line discount. C++ increments the counter at exactly two places
+(:6798, :6835) and the SECOND one is paired with `score += assign_score_function(1)`:
+
+    dummy_argument_count += 1;
+    score += assign_score_function(1);   // <-- the bonus the discount later cancels
+
+**The port has no such bonus.** Its default-value fill does not add assign_score_function(1) at all
+(the only other occurrence, check_proc_group.odin:346, is inside score_type_name_argument and
+unrelated). So copying C++'s `score -= dummy_argument_count * (...)` verbatim would subtract a
+correction for a bonus that was never added -- over-penalising every call that relies on a default
+argument, silently, across the whole corpus.
+
+Establishing what the port actually scores for a defaulted parameter is the real work here, and it
+is analysis, not transcription. Left open on #579 with both C++ increment sites identified and the
+missing-bonus asymmetry as the crux. Site 1 (:6798, the empty-variadic branch) DOES map verbatim
+onto check_proc_group.odin:876-886, which already has the identical `else { o.type = t_untyped_nil }`
+shape -- so half the counter is trivial and half is not.
+
+**Housekeeping, not mine to delete:** an untracked file named `[]` sits in the repo root -- a git
+merge commit-message template ("Merge branch 'master' into poly"), debris from the merge.
+
+### #579 verification is BLOCKED on a stale oracle -- caught before the result was quoted
+
+Ran parity + corpus after landing A and C. Both came back clean (parity count=1 attrib=2, the same
+three #575/#578 redeclaration items unchanged; corpus 198/198 FULL-MATCH). **That result is not
+admissible and must not be quoted as verification.**
+
+    merge commit      2026-08-08 13:56:40 -0700
+    ./odin built at   2026-08-07 18:34:50 -0700   <-- ~19.5 hours STALE, predates the merge
+    src/check_expr.cpp 2026-08-08 13:56:40 -0700
+
+The oracle therefore still implements the PRE-merge scoring, while the port now implements the
+post-merge scoring. A clean parity run against it shows only that A and C are inert with respect to
+the OLD behaviour -- the opposite of the claim I wanted to make. Same shape as the third catch-up,
+where "./odin predated the merge by ~53 min" and the first clean run was against the wrong compiler.
+
+The oracle needs rebuilding from post-merge src/ before #579 can be verified either way. NOT done
+unilaterally: the standing constraint is that build_odin.sh is never run directly, because it
+hardcodes `-o odin` and overwrites the oracle every gate trusts. The one prior authorisation was
+explicitly scoped to that single post-merge rebuild, so this one needs its own.
+
+A and C remain landed and compile clean (`-vet -strict-style` RC=0); they are simply UNVERIFIED
+until the oracle matches the source it is supposed to be an oracle for.
+
+### #579 A and C VERIFIED -- and the corpus could not have told me
+
+Oracle rebuilt from post-merge src/ (authorised; previous binary saved to $S/odin_pre579_backup
+first). New oracle 2026-08-08 14:08:50, GIT_SHA a64cb7bfd, sanity-clean on core/strings.
+
+Re-ran the gates against it: **parity 323/323 count=1 text=0 attrib=2, corpus 198/198 FULL-MATCH**
+-- the same three known #575/#578 redeclaration items, nothing new.
+
+**But that number is IDENTICAL to the stale-oracle run**, which means these changes are inert on
+this corpus in both directions. Corpus agreement was therefore consistent with correctness and
+equally consistent with having ported nothing at all. It is not evidence either way, and I nearly
+reported it as verification twice: once against the wrong oracle, and once as though "no change"
+proved "right change".
+
+What actually verifies them is a probe that DISCRIMINATES, with the pre-fix binary as the control:
+
+    probe                              oracle   port+579   port BEFORE 579
+    A  f(1) over f(int)/f(i64)          int      int        Ambiguous procedure group call
+    C  g("hi") over $S:string / x:$T    int      int        Ambiguous procedure group call
+
+Both probes go ambiguous on the pre-fix port -- the old code scored the candidates identically,
+which is exactly the defect the merge fixed -- and both match the oracle afterwards. That is the
+positive control doing its job: it proves the probe can fail, so passing means something.
+
+Kept as $S/poly579/{a2,c2}. Worth folding into the corpus, since nothing in 323 packages exercises
+either rule.
+
+**B remains open and unported**, for the reason in the previous entry: C++'s discount cancels a
+bonus the port never adds. The corpus run also shows B's absence is invisible at this scale, so
+there is no empirical pressure to guess -- which is an argument for doing it properly rather than
+quickly.
+
+### #579 follow-up: the two probes are now permanent corpus members (200)
+
+Folded into `corpus.sh` as `p579def` / `p579val`. Corpus **200/200 FULL-MATCH, missing=0**.
+
+Two instrument faults on the way in, both worth recording because both would have read as findings:
+
+1. I first named the probes `polydef` / `polyval` and wrote `main.odin` into them. `$S/polydef`
+   ALREADY EXISTED -- an unrelated scratch dir from 2026-08-05 holding `a.odin`/`b.odin`. My file
+   collided with its `use` proc, so the probe reported a *redeclaration* diagnostic whose anchor is
+   the #575 nondeterminism. A brand-new probe that fails on contact with a known-flaky rule is a
+   trap; the fix is fresh directory names, and checking for the directory before creating it.
+2. `cmpfull.py` runs BOTH sides as `odin build`, so a probe with no `main` scores a difference on
+   the entry-point error alone. `polyval` had none and reported FULL-DIFFER while its two
+   diagnostics were byte-identical. The corpus convention (a `main :: proc()`) is not cosmetic.
+
+Both are now stated in the CORPUS comment so the next probe does not rediscover them.
+
+Positive control re-run at fold time, against the current binaries:
+
+    probe      oracle   port (post-#579)   port (st577c, pre-#579)
+    p579def    int      int                Ambiguous procedure group call 'f'
+    p579val    int      int                Ambiguous procedure group call 'g'
+
+The pre-fix column is the point: these two probes can fail, so 200/200 now means more than 198/198
+did.
+
+--------------------------------------------------------------------------------------------------
+### #579 B DONE -- dummy_argument_count ported in full, and it was a real OVER-REJECTION
+
+The blocker recorded last entry was: "C++ increments the counter at exactly two places and the
+SECOND one is paired with `score += assign_score_function(1)` ... The port has no such bonus. So
+copying C++'s `score -= dummy_argument_count * (...)` verbatim would subtract a correction for a
+bonus that was never added -- over-penalising every call that relies on a default argument."
+
+That was the right worry and the wrong conclusion. The answer is not to port the subtraction alone
+nor to skip it, but to port the WHOLE mechanism: the fill, the bonus, and the discount. Worked out:
+
+    default-filled parameter   C++ adds asf(1) at fill time, then its scoring loop scores the
+                               synthesised operand (type == the parameter's own type) as a perfect
+                               match, asf(0). Discount gives back asf(0)+asf(1)+1.
+                               NET -1 -- a tiebreak, nothing more.
+    empty variadic slot        C++ adds NOTHING: the scoring loop `continue`s on the variadic
+                               parameter and the variadic_operands loop has zero iterations.
+                               Discount still gives back the full 602.
+                               NET -602 -- roughly two perfect arguments.
+
+The two dummies are NOT symmetric, which is exactly what makes "port only the subtraction" wrong
+in one direction and "port nothing" wrong in the other. The port did the latter: it added 0 for
+both, so an overload relying on a default and an overload not relying on one scored IDENTICALLY.
+
+WHAT THAT COST, measured -- not inferred:
+
+    probe      source                                    oracle   port BEFORE                port AFTER
+    p579def2   h(1) over proc(x:int) / proc(x:int,y:=0)   int      Ambiguous procedure group  int
+    p579vard   v(1) over proc(x:int) / proc(x:int,..int)  int      Ambiguous procedure group  int
+
+Both are OVER-REJECTIONS of code the reference compiler accepts, and both are byte-identical to
+the oracle afterwards. `proc(x: int)` alongside `proc(x: int, y := 0)` is not an exotic shape.
+
+WHERE IT LANDED. check_proc_group.odin, in both scoring paths of check_call_arguments_internal
+(the port split C++'s single function; the named-argument path and the positional path each needed
+it). The named path writes the synthesised operand into ordered_operands and lets the existing loop
+score it; the positional path has no such array, so it scores on the spot -- same (type, expr)
+pair, same result.
+
+Two arms of C++'s loop are deliberately NOT here, each for a stated reason rather than by omission:
+  - the `-vet explicit-allocators` diagnostic: C++ gates it on `!checking_proc_group`, and every
+    path through this file IS a proc-group candidate. The direct-call copy in check_expr.odin owns
+    it and has it.
+  - the discount on the direct-call path: that path never computes a score at all (grep for
+    `data.score` in check_expr.odin returns nothing -- Call_Argument_Data.score is written only in
+    check_proc_group.odin), so there is nothing to discount. Adding a counter there would be #266's
+    mistake.
+
+THE COMMENT THAT HAD TO GO. check_proc_group.odin carried "`dummy_argument_count` is deliberately
+NOT ported: it is written twice and never read anywhere in that file." True when written; merge
+a64cb7bfd (PR #7227) added both readers. Per the standing policy, a documented divergence whose
+stated REASON has expired is a defect in its own right, and this one was actively misleading -- it
+told the next reader the counter was dead code.
+
+GATES, all after the edit:
+    vet (checker)                      0 lines
+    corpus                             202 FULL-MATCH / 0 FULL-DIFFER (12 named exclusions)
+    corpus_vet                         4/4
+    parity plain                       323/323 compared, 0 excluded, count=1 text=0 attrib=2
+    parity vet                         323/323 compared, 0 excluded, count=1 text=0 attrib=2
+    spec                               432 tests, 0 failures (10 packages)
+    root                               146 tests, 0 failures
+The count=1/attrib=2 in both parity runs are the three known #575/#578 redeclaration-anchor items,
+unchanged from before the edit.
+
+p579def2 and p579vard are now corpus members -- 200 -> 202. Like p579def/p579val they exist because
+NOTHING in 323 packages exercises the rule: the corpus was 198 FULL-MATCH both before and after a
+change that fixed two real over-rejections. Four probes now cover the whole of #579, and every one
+of them fails on the pre-fix binary.
+
+#579 is closed: A, B and C all ported and all probe-verified against a firing positive control.
+
+--------------------------------------------------------------------------------------------------
+### #572 conditions 1 and 2 -- and condition 2 turned out to be a LIVE DEFECT, not a note to write
+
+mir's two remaining conditions on #566 were (1) enforce the globals/consumer split by access syntax
+rather than assume it, and (2) name the build_context coupling as a precondition, since
+build_context stays package-level and so still forbids two sessions with different targets.
+
+CONDITION 1: splitcheck.py, with a firing positive control.
+
+    SPLITCHECK checker_owned=89 target_derived=73
+      owned    bare=189   qualified=0     <- the #566 burn-down, reported, does not gate
+      derived  bare=749   qualified=1     <- MUST be 0; gates
+
+The classification is DERIVED (it reuses resetaudit's rule), never hand-listed. Only the dangerous
+direction gates: a target-derived global read off a Checker means one of the basics has been moved
+by mistake -- which is precisely what globalmove.py's argv-leak bug would have produced, and the
+compiler would have ACCEPTED it in the ~200 procedures that have a Checker in scope. That column is
+meaningful today, before #566, because it must be 0 in both worlds. `owned_bare` is reported but
+does not gate, because gating on it would leave the tool permanently red until #566 lands, and per
+#483 a permanently-red gate proves as little as one that never fails.
+
+Positive control run on a scratch copy with `positive_control :: proc(c: ^Checker) { _ = c.t_int }`
+appended: `derived_qualified=1`, rc=1, exact file:line named. Removed after.
+
+CONDITION 2, and here the answer is bigger than the question. Naming the coupling meant checking
+it, and the check failed: **the port does not consult build_context for the word-sized basics at
+all.** C++'s basic_types[] stores size -1 for int/uint/uintptr/rawptr/string/cstring and resolves
+them from build_context on EVERY type_size_of call, so one Type object serves every target. The
+port instead baked a size at init_basic_types from the HOST -- `when size_of(int) == 8`,
+`size_of(uintptr)`, and a literal 8 for rawptr -- and read it back.
+
+Reproduced, not inferred. triage_st gained `-target:<name>` (it must run before
+ensure_build_context_initialized, which is a no-op once a target is set), and a probe that forces
+each quantity to be PRINTED as an array length, so a text diff shows the values rather than merely
+whether an assertion held:
+
+    -target:linux_i386      oracle   port BEFORE
+    size_of(int)               4         8
+    size_of(rawptr)            4         8
+    size_of(string)            8        16
+    size_of([]int)             8        16
+    align_of(string)           4         8
+    ... 20 of 24 quantities differed; [dynamic]int (20) and map (16) were already right,
+        because those two arms already read build_context.
+
+FIXED, against C++ arm for arm: type_size_of's Basic arm (string/string16 -> 2*int_size, cstring/
+cstring16 -> ptr_size, any -> 16, typeid -> 8, int/uint -> int_size, uintptr/rawptr -> ptr_size),
+its Pointer/Multi_Pointer and Slice arms; type_align_of's Basic arm, its Pointer/Multi_Pointer/Proc
+arms (C++ has no explicit arm for these -- they fall to a clamp that equals ptr_size), Soa_Pointer
+(int_size, its own C++ arm), and Slice/Dynamic_Array (int_size) / Map (ptr_size), which the port had
+all three as "pointer alignment" and which disagree whenever int_size != ptr_size.
+
+A FIFTH site, found by grepping for every direct read of a Basic type's stored size rather than
+assuming the two functions were all of them: check_representable_as_constant read `basic.size`
+where C++ reads `type_size_of(type)`. That is not a layout nicety, it is an UNDER-REJECTION --
+
+    BIG :: 8589934592        // 2^33
+    x: int = BIG             // -target:linux_i386
+    oracle       Error: Cannot convert numeric value '8589934592' ... maximum ... is '2147483647'
+    port BEFORE  accepted silently, 0 diagnostics
+    port AFTER   matches the oracle
+
+VERIFICATION SHAPE, which is what makes this safe: the change is **provably inert at the host
+target and only there**. Every substituted value equals 8 when int_size == ptr_size == 8, and the
+stored sizes it replaces were all already correct at host (string 16, cstring 8, any 16, typeid 8).
+Measured, not argued: on -target:linux_amd64 the pre-fix and post-fix binaries agree on all 24
+quantities; on linux_i386 and linux_arm32 they differ on 20. So the host gates must be unchanged,
+and they are.
+
+NOT FIXED, and stated rather than guessed: type_align_of's tail `return 8`. C++'s tail is
+`gb_clamp(next_pow2(type_size_of_internal(t, path)), 1, build_context.max_align)`. The arms cover
+every Type_Kind except Invalid, Generic and Tuple; for the first two C++ yields 1, and Tuple has its
+OWN C++ arm (maximum member alignment) that the port lacks entirely. That is two separate defects
+wearing one literal and neither has a repro -- no probe I have reaches that arm. Left alone with the
+reasoning written at the site, because guessing a value there is #266's mistake pointing the other
+way.
+
+modelsweep is NOT quoted here, deliberately. It runs at the host target, where the change is
+measurably inert, so it cannot distinguish the two binaries -- running it would produce a number
+that looks like verification and is not. (The available ref binary is also pre-merge, the #579
+stale-oracle hazard again.) What verifies this change is the cross-target probe with its pre-fix
+control; what verifies it broke nothing is parity + corpus + spec + root at host.
+
+GATES, all after both edits:
+    vet (checker)                      0 lines
+    parity plain                       323/323 compared, count=1 text=0 attrib=2 (the known #575/#578 items)
+    corpus                             202 FULL-MATCH / 0 FULL-DIFFER
+    xtarget probe                      24 quantities x {linux_i386, linux_arm32, linux_amd64}, MATCH on all three
+    spec                               432 tests, 0 failures
+    root                               146 tests, 0 failures
+
+--------------------------------------------------------------------------------------------------
+### #566 LANDED on attempt 3 -- 89 type globals are Checker fields, reset_runtime_type_globals gone
+
+Attempt 1 was reverted at 36 compile errors. Attempt 2 destroyed every file in the package. Attempt
+3 went through, and the difference was not care: it was that the two preconditions from #572 existed
+this time -- splitcheck.py to say when the move is COMPLETE, and globalmove.py's hard guard to make
+the catastrophic direction refuse rather than depend on me reading a number.
+
+THE ORDER, and why it is the order. globalmove derives `owned` FROM types.odin's declarations, so
+deleting them first makes the pattern empty -- which is exactly attempt 2. The declarations
+therefore come out LAST:
+
+  1. 89 fields onto Checker, generated from the real declaration lines (0 mixed lines: no
+     declaration names both a checker-owned and a target-derived global, so the split needed no
+     hand-editing).                                                              -- tree green
+  2. thread the procedures with no Checker in scope.                             -- tree green
+  3. globalmove --apply, owned=89 read off the canary first.  189 rewritten.     -- tree green
+  4. delete the 89 declarations AND reset_runtime_type_globals (241 lines).      -- tree green
+     This is the safety net: while the globals still exist a missed rewrite compiles silently.
+     Zero errors on the first build after the deletion.
+
+BUG E IN globalmove, found on the first --apply and NOT one of the four already documented.
+PROC_START anchored at column 0, so a procedure declared INSIDE another
+(`\tis_valid_instrumentation_call :: proc(type: ^Type) -> bool {`, check_decl.odin) did not match
+and `sig` stayed on the ENCLOSING procedure. The outer one has `ctx`; the nested one does not --
+Odin procedures are not closures -- so the rewrite wrote `ctx.checker.t_*` into a body with no
+`ctx`. Same SITE as bug B, different CAUSE, which is why fixing B had not fixed it. walk() now
+keeps a stack keyed on brace depth, counted on comment-stripped code. Reverted, fixed the tool,
+re-applied: 189 rewrites, tree compiles.
+
+WHAT THE MOVE ACTUALLY FIXES, which is a bug and not tidiness. init_core_type_info opened with
+`if t_type_info != nil { return }` on a GLOBAL, so the guard was process-wide: checker B, having
+adopted the runtime session, hit it and silently reused checker A's types. That is #368's shape
+("one checker's types escaped into the next check"), and reset_runtime_type_globals existed only to
+paper over it. The guard is now `if c.t_type_info != nil`, per-checker; B re-resolves through the
+same shared scope and gets the same ^Type objects. Shared by CONSTRUCTION rather than by cache --
+and with the cache goes the only reason the reset list existed.
+
+TWO INSTRUMENTS RETARGETED RATHER THAN LEFT GREEN ON NOTHING (#483):
+  splitcheck.py  now reads the partition from where each class LIVES -- Checker fields vs types.odin
+                 globals -- instead of re-deriving it. The pre-#566 derivation is kept as a
+                 fallback, selected by ABSENCE of the field block so it cannot be chosen by mistake.
+                 Also fixed a counter that could go negative: `nb = bare - nq` double-counted,
+                 because the bare pattern's `(?<![a-zA-Z_0-9.])` already excludes qualified hits.
+                 Harmless at 189/0, it printed `owned bare=-189` the moment the rewrite landed.
+  resetaudit.py  RETIRED, and it refuses (exit 2) rather than reporting. Its subject no longer
+                 exists, so it would have printed `checker_owned=0 ... missing=0 spurious=0` -- a
+                 clean bill of health over an empty set. Its functions stay, imported by
+                 splitcheck's fallback.
+
+ONE DELIBERATE DIVERGENCE FROM C++'s SHAPE, restated so a citation audit does not read it as drift:
+C++ keeps all of these global, so `is_type_objc_object(Type *t)` reads `t_objc_object` directly.
+Threading a Checker into an Odin predicate departs from that. #566 is a port-only architectural
+change; CLAUDE.md's parity requirement is over SEMANTIC ANALYSIS, and the gates below show the
+semantics did not move.
+
+GATES:
+    vet (checker)   0 lines
+    splitcheck      checker_owned=89 target_derived=73, owned_bare=0, derived_qualified=0
+    parity plain    323/323 compared, count=1 text=0 attrib=2  (the known #575/#578 items)
+    corpus          202 FULL-MATCH / 0 FULL-DIFFER
+    spec            432 tests, 0 failures
+    root            146 tests, 0 failures          <- the multi-session lifecycle suite, the point
+    oracle md5      c1083ddd0af2e02aad3ac4d6d44e99b1, unchanged before and after
+
+--------------------------------------------------------------------------------------------------
+### #581 -- type_align_of's tail is MEASURED DEAD, and the measurement caught my own instrument first
+
+#580 left this arm with the note "no probe I have reaches this arm". That is an absence of evidence
+dressed as a finding, and it is exactly the shape #122 had to be re-opened over. Instrumented it
+instead: a per-Type_Kind counter on the default arm, swept over all 323 packages in pkglist.txt.
+
+    ALIGNTAIL lines: 0     across 323 packages
+
+POSITIVE CONTROL FIRST, because a counter that never fires and a counter that cannot fire look
+identical (#483). Deleted the `.Enum` arm so Enum would fall through, rebuilt, and ran ONE package:
+
+    ALIGNTAIL Enum=282     on core/strings alone
+
+Detector proven, arm restored (verified byte-identical against the pre-instrument copy, not by
+eye). So Invalid, Generic and Tuple never reach type_align_of anywhere in the corpus, and the
+`return 8` is unobservable.
+
+AND THE FIRST NUMBER I READ WAS WRONG. The sweep's raw line count said `hits=180`, which I nearly
+reported as "the arm fires 180 times". It does not: the harness writes diagnostics to stderr too,
+so I was counting continuation lines like `\tmain :: proc() {` and `\t^`. Grepping for the actual
+`^ALIGNTAIL` prefix gives 0. Third time this session that a pipeline measured something other than
+what its name said (#553's `2>&1 > log`, #572's negative splitcheck counter, this). The rule that
+keeps catching it: never count lines from a stream you did not filter to your own marker.
+
+DISPOSITION: no code change. The arm stays a literal with the measurement written at the site,
+replacing the vague note. C++'s arms are NAMED there anyway -- Invalid/Generic yield 1 from its
+`gb_clamp(next_pow2(size), 1, max_align)` tail, and Tuple has its own arm (max of member
+alignments) the port lacks entirely -- so if anything ever makes this fire, what to port is on
+record. Writing those arms now would be #266's mistake pointing the other way: code no input
+reaches, verified by nothing.
+
+    vet 0 lines · splitcheck owned_bare=0 derived_qualified=0 · corpus 202 FULL-MATCH
+
+--------------------------------------------------------------------------------------------------
+### #578 + #576 ANSWERED as ONE finding: the "dropped" diagnostic is a PRINT-TIME MERGE, and the
+### residual is irreducible without undoing #271
+
+These were filed as two open questions -- "C++ DROPS a redeclaration diagnostic when n>2" and "the
+n=3 outlier names TWO incumbents in one run, which the exclusive scope lock should prevent". They
+are the same mechanism, and neither premise survives.
+
+THE CHAIN, all of it in current src/ (checked clean: `git status --porcelain src/` is empty, so this
+is upstream code and not a local instrument):
+
+  1. scope_insert (checker.cpp) does NOT insert a colliding entity -- `found` short-circuits to
+     `goto end` before scope_map_insert. So every collision pairs (new entity, the ONE incumbent
+     that won the insert).
+  2. redeclaration_error SORTS that pair by position -- "order the pair by position; the later
+     declaration stays the anchor" -- and prints `error(second, "...\n\tat %s", first)`.
+  3. print_all_errors (error.cpp) MERGES neighbouring errors sharing a position: it skips the
+     first `default_lines_to_skip` lines of the second message and appends only the remainder, and
+     only `if (addition.len > 0 && !string_contains_string(current, addition))`. For two
+     redeclarations of the same name whose sorted anchors coincide, that remainder is empty or
+     already present, so the second is `array_ordered_remove`d -- gone, not merged.
+
+So nothing is dropped at COLLECTION. The n>2 loss happens at PRINT, and only when the position sort
+happens to map two different collisions onto the same anchor.
+
+MEASURED, 20 runs each on core/rexcode/isa/x86/tools (four files, four `main`s, no build tags -- the
+file SET is identical for both, checked first, because a file-selection difference would have made
+this a port defect instead):
+
+    oracle   19/20  ->  2 diagnostics   (anchors dump:101, verify_against_llvm:146)
+              1/20  ->  3 diagnostics   (anchors gen:50, dump:101, verify_against_llvm:146)
+    port     20/20  ->  3 diagnostics, byte-identical every run
+
+In the oracle's 19-run majority the incumbent is dump_verify_input.odin:101, and two of the three
+pairs -- (verify_tables:15, dump:101) and (gen:50, dump:101) -- both sort to anchor dump:101. One is
+merged away. verify_tables never appears at all, which is exactly the "never names verify_tables"
+observation from #578.
+
+#576's "two incumbents in one run" is therefore NOT a lock violation. The incumbent in the map is
+fixed for a given run; what varies across the printed lines is which member of each pair lands in
+the anchor slot after the position sort. The exclusive scope lock is doing its job.
+
+IRREDUCIBLE, and the port is on the better side of it. The port implements BOTH halves -- the sort
+and the same-position merge (error.odin, citing error.cpp) -- so this is not a missing rule. Its
+insertion order is DETERMINISTIC (#271 fixed exactly that), so its three anchors are always
+distinct, the merge never fires, and all three collisions are reported. Matching the oracle's count
+would require reproducing a RACE: undoing #271 to make the port's publish order nondeterministic,
+so that sometimes two anchors collide. That is a regression dressed as parity.
+
+parity.sh now carries this reasoning at the known-noise block and its ATTRIB line no longer says
+"still investigate", because it has been.
+
+    count_mismatches=1 attrib_mismatches=2 on every sweep are these three packages and are CLOSED.
+
+--------------------------------------------------------------------------------------------------
+### #571 part 1: citefn.py built, and it changed the plan before it changed a single citation
+
+MY OWN LOOP PROMPT WAS WRONG about the starting point: it said "extend .claude/tools/citefn.py (it
+already detects drift and knows macro forms)". There is no citefn.py -- not in .claude/tools, not in
+the scratchpad. The name comes from a commit message about a throwaway that was never kept. Built
+from scratch instead. Worth recording because the prompt was written by me one tick earlier and read
+as authoritative; a plan is not evidence that the thing it names exists.
+
+CENSUS FIRST. 3,594 citations carry a line number (2,819 ranges + 775 single) across the checker,
+plus 361 bare file mentions. Top files: checker.cpp 895, check_expr.cpp 790, check_builtin.cpp 381.
+
+THE DESIGN CHANGED ONCE, ON EVIDENCE. The task said "replace line numbers with function names". That
+would have destroyed information: check_call_arguments_internal is ~400 lines, and #579 B was ported
+correctly this session precisely because :6798 (empty-variadic) and :6835 (default fill) are
+distinguishable. So the anchor is ADDITIVE --
+    check_expr.cpp:6798  ->  check_expr.cpp check_call_arguments_internal:6798
+-- name for durability, line for precision, and --check can then ask a question that needs no
+baseline: is 6798 still inside that function?
+
+INSTRUMENT BUG, CAUGHT BEFORE APPLYING. The first index counted 2,853 "functions"; 507 of them were
+FORWARD DECLARATIONS. Each opened a span running to the next definition, so citations landing in the
+prototype block were attributed to whichever prototype preceded them. Fixed by scanning forward to
+whichever of `{` or `;` comes first (headers wrap, so testing one line is not enough). Index 2,853 ->
+2,321, and 39 citations stopped resolving to a prototype.
+
+    bare citations 3594 | resolvable 2516 | outside-any-function 462
+    range-spans-functions 530 | range-end-outside 77 | unknown-file 9
+The 1,078 unresolvable are LEFT ALONE and reported: .hpp struct and enum bodies, the basic_types[]
+table, Build_Context's field list. Anchoring those to a function would be a lie.
+
+**AND THEN --apply WAS NOT RUN, WHICH IS THE ACTUAL FINDING.** A random sample of 8 resolutions was
+checked against src/ by hand. Seven were right. The eighth:
+
+    types.odin  case .Struct: in type_size_of   cites types.cpp:4436-4474
+    4436-4474 is inside type_align_of_internal (4354-...); the struct SIZE code is in
+    type_size_of_internal, which starts at 4612.
+
+That citation has already drifted ~180 lines into a different function. Anchoring it would have
+written `types.cpp type_align_of_internal:4436-4474` -- recording the error as an assertion, which
+--check would then certify as clean forever. **The rewrite must come AFTER the drift audit, or it
+launders rot into permanence.** That sequencing is now the loudest paragraph in the tool's header.
+
+SO --suspect WAS ADDED: for each citation, compare the resolved C++ function against the enclosing
+Odin procedure, and rank the mismatches by cluster size, because a systematic drift repeats and a
+one-off usually does not. 643 pairs / 1,122 citations -- too noisy to read line by line (a procedure
+legitimately citing a HELPER of its counterpart looks identical to drift), but the CLUSTERS are
+actionable. Second one checked, second drift confirmed:
+
+    port check_slice (check_expr.odin:6162) cites check_expr.cpp:11154-11199 six times
+    those lines are now inside check_compound_literal
+    the real slice-expression code is check_slice_expr, at 12054
+    -- and the SAME procedure's `check_expr.cpp:12060-12070` citation is correct, so this block was
+       half-updated at some point and the 11xxx range was left behind.
+
+STATE: tool committed with --report / --suspect / --apply / --check. --check currently returns 0
+vacuously (nothing is anchored yet) and that is stated rather than quoted as a pass. Two drifts
+confirmed, both by reading src/ rather than by trusting the ranking. NOTHING in the checker has been
+edited -- this tick produced a tool and a worklist, not a rewrite.
+
+--------------------------------------------------------------------------------------------------
+### #571 part 2: both confirmed drift clusters repaired -- 17 citations, every one verified in src/
+
+CLUSTER A -- types.odin, type_size_of's Struct/Matrix arms (6 citations).
+Cited types.cpp:4436-4474 and neighbours; those lines are inside type_align_of_internal. The struct
+SIZE code is in type_size_of_internal, whose Type_Struct arm is 4786-4823. The whole block was off
+by a uniform +350 -- one upstream insertion above it:
+
+    4436-4474 -> 4786-4823   (case Type_Struct, whole arm)
+    4437-4450 -> 4787-4800   (raw_union branch)
+    4451-4473 -> 4801-4822   (regular struct branch)
+    4471      -> 4821        (offsets[count-1] + size of last field)
+    4472      -> 4822        (align_formula(size, align))
+    4495-4502 -> 4845-4852   (case Type_Matrix)
+
+CLUSTER B -- check_expr.odin, check_slice (9 citations). Cited check_expr.cpp:11154-11217, now
+inside check_compound_literal. The real code is check_slice_expr from 12054.
+
+**AND THE OFFSET IS NOT UNIFORM HERE, which is the reason each one was checked by hand rather than
+shifted by arithmetic.** Cases up to Dynamic_Array moved +916; the Struct/SOA arm moved further,
+because Type_FixedCapacityDynamicArray was INSERTED between them upstream. A blanket +916 would have
+put the SOA citation on `case Type_FixedCapacityDynamicArray` -- still inside check_slice_expr, so
+--check would have called it clean, and the error would have been invisible forever. The tool
+resolves to a FUNCTION; only reading resolves to a place.
+
+    11154-11169 -> 12070-12085   11162-11168 -> 12078-12084
+    11172-11184 -> 12088-12100   (and the error sub-block -> 12091-12098)
+    11186-11189 -> 12102-12105   11191-11194 -> 12107-12110
+    11196-11199 -> 12112-12115   11201-11217 -> 12130-12146
+    11204-11217 -> 12133-12145
+
+TWO MORE, of a class citefn CANNOT see. The same procedure's Fixed_Capacity arm cited
+check_expr.cpp:12060-12070 and its SOA addressability check cited 12077-12084. Both resolve to
+check_slice_expr -- the right FUNCTION -- but 12060 is the procedure's prologue and 12077 is the
+string16 branch. Right function, wrong region. --check verifies containment only, so this class
+survives the gate by construction; it is caught by reading, and the note now says so at both sites.
+Corrected to 12117-12128 and 12135-12142.
+
+INERTNESS, which is the whole verification for a comment-only change -- if any gate moves, the edit
+touched code:
+    vet (checker)   0 lines
+    corpus          202 FULL-MATCH / 0 DIFFER      (unchanged)
+    parity          323/323, count=1 text=0 attrib=2  (unchanged; the closed #578/#576 items)
+    splitcheck      derived_qualified=0 owned_bare=0 (unchanged)
+
+citefn --suspect 1122 -> 1108. The remaining clusters are NOT yet triaged and are NOT assumed to be
+drift: the ranking is deliberately generous, and a procedure citing a HELPER of its counterpart is
+indistinguishable from rot until someone reads src/. --apply still must not run until they are.
+
+--------------------------------------------------------------------------------------------------
+### #571 part 3: cluster 1 was drift (26 fixed), cluster 2 was NOT -- and the difference is the point
+
+CLUSTER 1, check_proc_info (25 citations) -- REAL DRIFT. The port's check_proc_info cited
+checker.cpp:6168-6196; those lines are inside check_import_entities (6159+). C++'s check_proc_info
+is at 6521. Uniform +354.
+
+Rather than shift and hope, the rewrite was made CONDITIONAL and self-verifying: for each citation,
+shift only if the current target does NOT resolve to check_proc_info AND the shifted one DOES.
+Anything else is left untouched. That turned the offset from an assumption into a per-citation test,
+and it earned its keep immediately -- two of the 27 citations in range were NOT part of the block:
+
+    checker.cpp:1695-1697   already correct (destroy_checker_context), and it is not even inside
+                            check_proc_info -- it heads the comment block of the NEXT procedure.
+                            My span arithmetic swept it in; the conditional rewrite refused it.
+    checker.cpp:6532-6536   already resolves to check_proc_info, so no shift -- but the comment
+                            calls it "the case ProcCheckedState_Checked arm that asserts on the
+                            flag", and that arm is 6541-6545. RIGHT FUNCTION, WRONG REGION again,
+                            the class --check cannot see. Tightened by hand.
+
+Spot-checked four of the shifted results against src/ by printing the C++ line: 6522 `if (pi ==
+nullptr)`, 6535 `switch (pi->decl->proc_checked_state.load())`, 6536 `case
+ProcCheckedState_InProgress:`, 6550 `...store(ProcCheckedState_InProgress)`. Each matches what the
+port's comment says it is.
+
+CLUSTER 2, populate_builtin_package_scope -> init_universal (22 citations) -- **NOT DRIFT, CLEARED.**
+C++ has no populate_builtin_package_scope; init_universal (checker.cpp:1113) is what populates the
+builtin package scope, and the port simply named its counterpart differently. Every cited line
+(1120-1477) is inside init_universal, and the content matches: port checker_lifecycle.odin:919 cites
+1160-1180 for the Windows_Subsystem enum, and C++:1160 is
+`GlobalEnumValue values[Windows_Subsystem_COUNT]`. This is exactly the false positive --suspect is
+generous about, and it is the reason the ranking may never be applied automatically.
+
+DISPOSITIONED SO FAR, so later ticks do not re-litigate:
+    check_proc_info -> check_import_entities          DRIFT, fixed (+354)
+    check_slice -> check_compound_literal             DRIFT, fixed (part 2)
+    type_size_of Struct arm -> type_align_of_internal DRIFT, fixed (part 2)
+    populate_builtin_package_scope -> init_universal  LEGITIMATE, renamed counterpart
+
+--suspect is deliberately STATELESS -- it will list the cleared pair again next run. That is a
+feature, not an oversight: after the next merge, "cleared" is a claim about a src/ that no longer
+exists, and a suppression file would quietly assert it anyway.
+
+    citations flagged: 1122 (part 2 start) -> 1108 -> 1083
+
+INERTNESS (comment-only; if a gate moves, the edit touched code):
+    vet 0 lines · corpus 202 FULL-MATCH · parity 323/323 count=1 text=0 attrib=2 -- all unchanged
+
+--------------------------------------------------------------------------------------------------
+### #571 part 4: two more clusters fixed (+363, +404) -- and the offset SEARCH was not sharp enough
+
+Two more uniform block-moves repaired, 26 citations:
+
+    update_untyped_expr_type   check_expr.cpp  +363   12 citations
+    evaluate_where_clauses     check_expr.cpp  +404   14 citations
+
+THE SEARCH ALONE CANNOT PICK THE OFFSET, and nearly picked a wrong one. I wrote a survey that tries
+every shift and counts how many of a procedure's citations land inside its C++ counterpart. For
+evaluate_where_clauses it reported a three-way tie:
+
+    shift +403 -> 14 land in evaluate_where_clauses
+    shift +404 -> 14
+    shift +405 -> 14
+
+which is exactly what a large function does: any shift inside a window keeps the citations in
+bounds. The count is insensitive to the thing that matters. Resolved by CONTENT instead -- four
+anchors, each read in src/:
+
+    port "6722-6725" labels `if operand.mode != .Constant` + both errors + `return false`
+    C++  7126 `if (o.mode != Addressing_Constant) {` ... 7129 `return false;`      -> +404, not +403
+
+Had I taken the first tied value the citations would have been one line off everywhere, still inside
+the right function, and --check would have called it clean forever. Same trap as part 2's
+FixedCapacity insertion, reached from a different direction: **a gate that verifies containment
+cannot verify correctness, so the offset must come from reading, never from a counter.**
+update_untyped_expr_type was pinned the same way (port "4481-4493" -> C++ 4844 `check_get_expr_info`
+... 4856, and "4483-4492" -> 4846 `if (type != nullptr...)` ... 4855 `return;`).
+
+TWO CLUSTERS DELIBERATELY NOT TOUCHED, because they are NOT uniform moves:
+
+    check_expr_base_internal   40 citations,  9 already correct, best shift moves only 22
+    check_call_expr            39 citations,  6 already correct, best shift moves only 17
+
+Both are large dispatchers, so roughly half their citations legitimately point at HELPERS rather
+than at their own counterpart -- the populate_builtin_package_scope situation, but mixed into the
+same procedure instead of covering all of it. A blanket shift would corrupt the correct half to fix
+the wrong half. These need per-citation reading, which is slow and is the honest cost of the
+remaining worklist; they are recorded here so the next pass does not re-derive the finding.
+
+    flagged: 1083 -> 1057
+
+INERTNESS (comment-only): vet 0 lines · corpus 202 FULL-MATCH · parity 323/323 count=1 text=0
+attrib=2 -- all unchanged.
+
+## #582 — check_slice ported from C++; two upstream aborts found on the way
+
+Started as #571 citation work on `check_slice`. Six citations in the tail were shifted +934
+(content-anchored: 11244→12178, 11269→12203, 11279→12213, 11287→12221, 11300→12234), and the
+`case .Enumerated_Array:` arm was carrying TWO wrong citations at once — a stale `11219-11230`
+(now `check_compound_literal`) and, from an earlier partial fix, `12090-12106`, which is
+`check_slice_expr`'s **Type_Array** case. Right function, wrong arm: the class `--check` cannot
+catch. Correct range is 12148-12164.
+
+Reading the code to resolve them surfaced four real divergences, none citation-related:
+
+1. `"Invalid slice indices: low index greater than high index"` → `"Invalid slice indices: [%d > %d]"`.
+   Reachable, oracle-verified.
+2. `"Cannot slice constant '%s'"` → `"Cannot slice constant value '%s'"`.
+3. The whole constant-folding tail was a REIMPLEMENTATION. C++'s
+   `"Cannot slice '%s' with non-constant indices"` + Suggestion (check_expr.cpp:12245-12256) was
+   **never emitted at all** — a silent under-rejection: `S :: "hello"; i := 1; _ = S[i:3]` was
+   accepted. Also missing: the `String16` folding arm, and `o->type = t` (12258). Ported in full;
+   port now byte-identical to the oracle on the probe.
+4. An invented `operand.value != nil` guard on the tail's condition (inert, but removed).
+
+**Two UPSTREAM aborts, written up in UPSTREAM-582-constant-string-slice-assertions.md:**
+
+* **A.** C++ diagnoses `low > high` at 12208 but does not return, then calls `substring()` with
+  those indices. `string.cpp:77 GB_ASSERT_MSG(lo <= hi && hi <= max)` fires.
+  `S :: "hello"; x := S[3:1]` kills the reference compiler, 5/5. The port guards the fold and
+  records the reason at the site — a documented divergence whose reason is *demonstrated*, not
+  assumed.
+* **B.** `check_expr.cpp:12081 GB_ASSERT(o->value.kind == ExactValue_String16)` fires on **any**
+  slice of a `string16` constant, valid indices included, because such a constant keeps the
+  literal's `ExactValue_String`. Control: same declaration unsliced is clean. This one has a
+  port-side tail — see below.
+
+**Port defect left open:** the port's `string16` arm reads the value with a checked assertion, so
+it does not abort, but it leaves `max_count = -1` and then emits a spurious
+"Cannot slice constant value 'S'" on a valid slice. Pre-existing (the arm is untouched by this
+work). Not fixed here because it cannot be oracle-verified while B stands — the reference has no
+observable behaviour on the input.
+
+Gates: vet 0 · corpus **203**/203 FULL-MATCH (p571sl added; the two oracle-killing probes
+deliberately NOT added — a probe whose reference side aborts cannot be a corpus member) ·
+corpus_vet 4/4 · parity 323/323 count=1 text=0 attrib=2 · parity_vet 323/323 count=1 text=0
+attrib=2 · splitcheck 0/0 · root suite 146/146.
+
+## #584 — check_index: 11 citations repaired, and the same lesson as #582 twice over
+
+Continuing #571's --suspect worklist. check_index had 10 citations, 1 of which citefn scored as
+already correct.
+
+**The survey offset was a trap.** --suspect ranked +877/878/879 for this cluster, three-way tied.
++877 maps the first citation to check_expr.cpp:11917 -- which is `check_index_expr`'s FUNCTION
+HEADER. That satisfies the function-name test without being the right code, which is exactly how a
+tie arises: several offsets all land somewhere inside the target function. The content anchor
+(`add_map_get_dependencies` / `add_map_set_dependencies`) puts them at **11948-11949**, δ=+908. And
+δ is not uniform anyway -- +910 at the is_const branches, because C++ gained two `// Okay` arms,
+and the matrix helper lives in a different function entirely. Every citation was matched
+individually.
+
+**The "already correct" one was wrong too.** 11918-11934 resolves to check_index_expr, so --check
+passes it, but that range is the function's PROLOGUE (header through the map-key check), not the
+`if (!valid)` error block it annotates. Real range 11974-11993. Second right-function-wrong-region
+find in two ticks.
+
+**I broke my own conditional-rewrite rule.** Two of the ranges were not unique to check_index, and
+a blind string replace rewrote them in `get_constant_field_value`'s neighbour and in
+check_expr_base_internal. Caught by counting the replacements (x3 and x2 where I had located 1 and
+1) rather than by any gate. Both corrected individually afterwards:
+  * get_constant_array_element_value now cites get_constant_field_single (5473-5637), the
+    counterpart it reimplements -- a blanket shift would have pointed it at its own CALLER.
+  * the Matrix_Index_Expr dispatch arm now cites check_expr_base_internal's own switch
+    (12599-12602), matching its sibling arms, with the callee noted separately.
+LESSON: a replace whose match count exceeds the sites you located is a failed edit, not a bonus.
+
+**Four behavioural divergences, all found by reading rather than by any gate.** Three fixed:
+  1. `"Cannot index constant '%s' with a variable index"` -> C++'s `"Cannot index a constant '%s'"`
+     plus the Suggestion line, which was missing entirely.
+  2. An INVENTED `if !index_ok { mode = .Invalid; return }`. C++ keeps `ok` as a local and consults
+     it only inside the is_const arm -- a failed check_index_value does not invalidate the operand.
+     Measured: `a: [4]int; b: string = a[10]` gave the oracle 3 diagnostics and the port 2, the
+     missing one being the assignment error. Real under-rejection.
+  3. An INVENTED CALL: the port ran `check_matrix_type_hint` where C++'s block (12047-12050) is
+     EMPTY but for bill's TODO. The helper exists in C++ and has six other callers, so this is not
+     an invented function -- which makes it harder to spot and no less wrong. Restored to a no-op.
+The fourth is filed as #585: the port's get_constant_field_single dropped C++'s `success`
+out-param, so `"Cannot index a constant '%s' with index %lld"` cannot be emitted. Needs a signature
+change and a caller audit, so it is not landed here.
+
+Gates: vet 0 · corpus **204**/204 FULL-MATCH (p584a added) · corpus_vet 4/4 · parity 323/323
+count=1 text=0 attrib=2 · parity_vet 323/323 count=1 text=0 attrib=2 · splitcheck 0/0 ·
+citefn --check drifted=0 · root suite 146/146.

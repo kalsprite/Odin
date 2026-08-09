@@ -1006,8 +1006,8 @@ check_builtin_type_info_of :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 
 	// Register type for RTTI (C++ line 2938-2940)
 	add_type_info_type(ctx, t)
-	assert(t_type_info_ptr != nil, "t_type_info_ptr not initialized")
-	add_type_info_type(ctx, t_type_info_ptr)
+	assert(ctx.checker.t_type_info_ptr != nil, "ctx.checker.t_type_info_ptr not initialized")
+	add_type_info_type(ctx, ctx.checker.t_type_info_ptr)
 
 	// Handle runtime typeid case (C++ line 2942-2947)
 	if is_operand_value(o) && is_type_typeid(t) {
@@ -1020,7 +1020,7 @@ check_builtin_type_info_of :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 
 	// Set result (C++ line 2949-2951)
 	operand.mode = .Value
-	operand.type = t_type_info_ptr
+	operand.type = ctx.checker.t_type_info_ptr
 	return true
 }
 
@@ -1108,7 +1108,7 @@ Atomic_Memory_Order_Strings := [Atomic_Memory_Order]string {
 check_atomic_memory_order_argument :: proc(ctx: ^Checker_Context, expr: ^ast.Expr, builtin_name: string, out_order: ^Atomic_Memory_Order = nil, extra_message := "") -> bool {
 	x: Operand
 	// Check with type hint if t_atomic_memory_order is available (set when core:runtime is loaded)
-	type_hint := t_atomic_memory_order // May be nil if runtime not yet loaded
+	type_hint := ctx.checker.t_atomic_memory_order // May be nil if runtime not yet loaded
 	check_expr_with_type_hint(ctx, &x, expr, type_hint)
 	if x.mode == .Invalid {
 		return false
@@ -1506,7 +1506,7 @@ check_builtin_objc_send :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	self: Operand
 	check_expr_or_type(ctx, &self, call.args[1])
 
-	sel_type := t_objc_SEL
+	sel_type := ctx.checker.t_objc_SEL
 
 	if self.mode == .Type {
 		// Class method: Type.selector()
@@ -1518,7 +1518,7 @@ check_builtin_objc_send :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		// #185's faithful truncation: `@(obj_class=` (missing the 'c', plus a space before the
 		// comma) at check_builtin.cpp:331/357, and "pointer OF a value" at :347 where we had
 		// written "pointer to". Parity is the goal, not prose. LEDGER #378.
-		if !is_type_objc_object(self.type) {
+		if !is_type_objc_object(ctx.checker, self.type) {
 			// C++ ref: check_builtin.cpp:323-327
 			type_str := type_to_string(self.type)
 			error_node(self.expr, "'%s' expected a type or value derived from intrinsics.objc_object, got type %s", builtin_name, type_str)
@@ -1530,8 +1530,8 @@ check_builtin_objc_send :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 			error_node(self.expr, "'%s' expected a named type with the attribute @(obj_class=<string>) , got type %s", builtin_name, type_str)
 			return false
 		}
-		sel_type = t_objc_Class
-	} else if !is_operand_value(self) || !check_is_assignable_to(ctx, &self, t_objc_id) {
+		sel_type = ctx.checker.t_objc_Class
+	} else if !is_operand_value(self) || !check_is_assignable_to(ctx, &self, ctx.checker.t_objc_id) {
 		// ONE branch, as C++ has it (check_builtin.cpp:337-343). The port had SPLIT this into two,
 		// and the second half's "expected a value assignable to objc_id" was INVENTED -- C++ has no
 		// such message anywhere. Splitting an `||` into two arms is only safe when both arms say
@@ -1639,9 +1639,9 @@ check_builtin_objc_find_register :: proc(ctx: ^Checker_Context, operand: ^Operan
 	// C++ ref: check_builtin.cpp:389-398
 	#partial switch id {
 	case .Objc_Find_Selector, .Objc_Register_Selector:
-		operand.type = t_objc_SEL
+		operand.type = ctx.checker.t_objc_SEL
 	case .Objc_Find_Class, .Objc_Register_Class:
-		operand.type = t_objc_Class
+		operand.type = ctx.checker.t_objc_Class
 	case:
 		error_node(call, "Unknown objc builtin '%s'", builtin_name)
 		return false
@@ -1684,7 +1684,7 @@ check_builtin_objc_ivar_get :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 		return false
 	}
 
-	if !check_is_assignable_to(ctx, &self, t_objc_id) {
+	if !check_is_assignable_to(ctx, &self, ctx.checker.t_objc_id) {
 		error_node(self.expr, "'objc_ivar_get' expected a value assignable to objc_id")
 		return false
 	}
@@ -2107,7 +2107,7 @@ check_builtin_offset_of_impl :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 
 	// Look up the field
 	// C++ Reference: check_builtin.cpp:2758-2776
-	sel := lookup_field(type, field_name, false)
+	sel := lookup_field(ctx.checker, type, field_name, false)
 	if sel.entity == nil {
 		type_str := type_to_string_shorthand(type)
 		error_node(call.args[0], "'%s' has no field named '%s'", type_str, field_name)
@@ -2133,7 +2133,7 @@ check_builtin_offset_of_impl :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 	// Calculate offset and set result
 	// C++ Reference: check_builtin.cpp:2785-2791
 	operand.mode = .Constant
-	operand.value = exact_value_i64(type_offset_of_from_selection(type, sel))
+	operand.value = exact_value_i64(type_offset_of_from_selection(ctx.checker, type, sel))
 	operand.type = t_uintptr
 	return true
 }
@@ -2198,7 +2198,7 @@ check_builtin_offset_of_by_string :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 	// Look up field
 	// C++ Reference: check_builtin.cpp:2837-2856
-	sel := lookup_field(type, field_name, false)
+	sel := lookup_field(ctx.checker, type, field_name, false)
 	if sel.entity == nil {
 		type_str := type_to_string_shorthand(type)
 		error_node(call.args[0], "'%s' has no field named '%s'", type_str, field_name)
@@ -2224,7 +2224,7 @@ check_builtin_offset_of_by_string :: proc(ctx: ^Checker_Context, operand: ^Opera
 	// Calculate offset and return
 	// C++ Reference: check_builtin.cpp:2865-2868
 	operand.mode = .Constant
-	operand.value = exact_value_i64(type_offset_of_from_selection(type, sel))
+	operand.value = exact_value_i64(type_offset_of_from_selection(ctx.checker, type, sel))
 	operand.type = t_uintptr
 	return true
 }
@@ -3377,7 +3377,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		// global set, returns early, and leaves its own cached_ field nil -- and then this arm
 		// rejected code both compilers accept. LEDGER #354.
 		init_core_source_code_location(ctx.checker)
-		operand.type = t_source_code_location
+		operand.type = ctx.checker.t_source_code_location
 		operand.mode = .Value
 		return true
 	}
@@ -3862,8 +3862,8 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		// C++:2247-2250 -- resolve the result type lazily, then set the operand BEFORE
 		// reading the directory so the type is in place even on the error paths.
 		init_core_load_directory_file(ctx.checker)
-		if t_load_directory_file_slice != nil {
-			operand.type = t_load_directory_file_slice
+		if ctx.checker.t_load_directory_file_slice != nil {
+			operand.type = ctx.checker.t_load_directory_file_slice
 		}
 		operand.mode = .Value
 
@@ -4537,7 +4537,7 @@ check_builtin_soa_zip :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 			}
 			if !fail && first_is_field_value {
 				for name, i in names {
-					sel := lookup_field(et, name, false)
+					sel := lookup_field(ctx.checker, et, name, false)
 					if sel.entity == nil || len(sel.index) != 1 {
 						break hint_matches
 					}
@@ -5626,7 +5626,7 @@ check_builtin_type_map_info :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 	add_map_key_type_dependencies(ctx, bt)
 
 	operand.mode = .Value
-	operand.type = t_map_info_ptr
+	operand.type = ctx.checker.t_map_info_ptr
 	return true
 }
 
@@ -5646,7 +5646,7 @@ check_builtin_type_map_cell_info :: proc(ctx: ^Checker_Context, operand: ^Operan
 	}
 
 	operand.mode = .Value
-	operand.type = t_map_cell_info_ptr
+	operand.type = ctx.checker.t_map_cell_info_ptr
 	return true
 }
 
@@ -7616,7 +7616,7 @@ check_builtin_type_field_type :: proc(ctx: ^Checker_Context, operand: ^Operand, 
 	field_name, _ := name_op.value.(string)   // raw string, as C++ reads ev.value_string
 
 	// C++ Reference: check_builtin.cpp, BuiltinProc_type_field_type:
-	//     Selection sel = lookup_field(type, field_name, false);
+	//     Selection sel = lookup_field(ctx.checker, type, field_name, false);
 	//     if (sel.index.count == 0) { error(...); }
 	//     operand->type = sel.entity->type;
 	//
@@ -7625,7 +7625,7 @@ check_builtin_type_field_type :: proc(ctx: ^Checker_Context, operand: ^Operand, 
 	// an embedded struct -- core/sys/orca's `str8_elt`, whose `listElt` comes from an
 	// embedded member -- was reported as absent, so `container_of`'s `where` clause
 	// failed on a type that genuinely has the field.
-	sel := lookup_field(type_op.type, field_name, false)
+	sel := lookup_field(ctx.checker, type_op.type, field_name, false)
 	if len(sel.index) == 0 || sel.entity == nil {
 		error_node(call, "Type '%s' has no field named '%s'", type_to_string(type_op.type), field_name)
 		return false
@@ -7673,7 +7673,7 @@ check_builtin_type_has_field :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 	}
 
 	// C++ Reference: check_builtin.cpp, BuiltinProc_type_has_field:
-	//     Selection sel = lookup_field(type, field_name, false);
+	//     Selection sel = lookup_field(ctx.checker, type, field_name, false);
 	//     operand->value = exact_value_bool(sel.index.count != 0);
 	//
 	// Two things the port had wrong. `is_type` must be FALSE -- passing true asks for
@@ -7681,7 +7681,7 @@ check_builtin_type_has_field :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 	// `type_has_field(S, "a")` never found `a` and the intrinsic answered false for
 	// EVERY struct field. And the result is the SELECTION PATH being non-empty, not
 	// `sel.entity != nil`.
-	sel := lookup_field(type_op.type, field_name, false)
+	sel := lookup_field(ctx.checker, type_op.type, field_name, false)
 	result := len(sel.index) != 0
 
 	operand.mode = .Constant
@@ -8472,7 +8472,7 @@ check_builtin_type_proc_calling_convention :: proc(ctx: ^Checker_Context, operan
 	pt := base_type(operand.type).variant.(Type_Proc)
 
 	operand.mode = .Constant
-	operand.type = t_odin_calling_convention
+	operand.type = ctx.checker.t_odin_calling_convention
 	operand.value = exact_value_i64(odin_calling_convention_enum_value(pt.calling_convention))
 	return true
 }
@@ -8501,13 +8501,13 @@ check_builtin_c_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 		if x.mode == .Invalid {
 			return false
 		}
-		if t_c_va_list_ptr == nil {
+		if ctx.checker.t_c_va_list_ptr == nil {
 			// 'intrinsics.c_va_list' never resolved, so there is nothing to compare against.
 			error_node(expr, "'%s' expected a value of type ^intrinsics.c_va_list, but 'intrinsics.c_va_list' could not be resolved", builtin_name)
 			return false
 		}
-		if !are_types_identical(x.type, t_c_va_list_ptr) {
-			list_str := type_to_string(t_c_va_list_ptr)
+		if !are_types_identical(x.type, ctx.checker.t_c_va_list_ptr) {
+			list_str := type_to_string(ctx.checker.t_c_va_list_ptr)
 			type_str := type_to_string(x.type)
 			error_node(expr, "'%s' expected a value of type %s, got type %s", builtin_name, list_str, type_str)
 			return false

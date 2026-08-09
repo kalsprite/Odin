@@ -51,7 +51,18 @@ import resetaudit as R
 R.CHECKER = CHECKER
 
 # A procedure header may span lines; accumulate until parens balance.
-PROC_START = re.compile(r'^([a-zA-Z_][a-zA-Z_0-9]*)\s*::\s*proc\b')
+#
+# BUG E, FIXED HERE -- NESTED PROCEDURE LITERALS. This used to anchor at column 0, so a proc
+# declared INSIDE another (`\tis_valid_instrumentation_call :: proc(type: ^Type) -> bool {` in
+# check_decl.odin) did not match, and `cur`/`sig` stayed on the ENCLOSING procedure. The enclosing
+# one has `ctx`, the nested one does not -- Odin procedures are not closures, so the outer
+# parameters are genuinely out of scope inside it -- and the rewrite wrote `ctx.checker.t_*` into a
+# body with no `ctx`. That is the same SITE as bug B and a different CAUSE, which is why fixing B
+# did not fix it; attempt 3 hit it again on the first --apply.
+#
+# The match now allows leading whitespace, and walk() maintains a STACK keyed on brace depth so the
+# enclosing signature is restored when the nested procedure closes.
+PROC_START = re.compile(r'^\s*([a-zA-Z_][a-zA-Z_0-9]*)\s*::\s*proc\b')
 # `[(,]` not just `,`: sig is the WHOLE header line here, so the FIRST parameter is preceded by
 # the open paren. Requiring ^ or , silently missed every proc whose Checker is parameter one --
 # which is nearly all of them (reported 32 procs needing threading instead of 8).
@@ -94,26 +105,34 @@ def strip_comments(line, in_block):
 
 
 def walk(path, owned, pat):
-    """Yield (index, raw_line, code, proc_name, signature) for one file."""
+    """Yield (index, raw_line, code, proc_name, signature) for one file.
+
+    Scope is tracked with a stack of (name, sig, depth_at_entry) so a nested procedure literal
+    shadows its enclosing one for exactly its own body and no longer -- see BUG E above. Depth is
+    counted on COMMENT-STRIPPED code, because a brace inside a comment or a string would otherwise
+    unbalance the stack and silently mis-attribute the rest of the file."""
     lines = open(path).read().split("\n")
-    cur, sig, blk = "<file>", "", False
+    stack = [("<file>", "", 0)]
+    depth, blk = 0, False
     pending = None                      # accumulating a multi-line header
     for idx, raw in enumerate(lines):
+        code, blk = strip_comments(raw, blk)
         if pending is not None:
             pending += " " + raw
             if pending.count("(") <= pending.count(")"):
-                sig, pending = pending, None
+                stack[-1] = (stack[-1][0], pending, stack[-1][2])
+                pending = None
         else:
             m = PROC_START.match(raw)
             if m:
-                cur = m.group(1)
+                stack.append((m.group(1), raw, depth))
                 if raw.count("(") > raw.count(")"):
                     pending = raw          # header continues on later lines
-                    sig = raw
-                else:
-                    sig = raw
-        code, blk = strip_comments(raw, blk)
+        cur, sig, _ = stack[-1]
         yield idx, raw, code, cur, sig
+        depth += code.count("{") - code.count("}")
+        while len(stack) > 1 and depth <= stack[-1][2] and stack[-1][1].count("{"):
+            stack.pop()
     return
 
 

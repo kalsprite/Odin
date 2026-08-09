@@ -133,7 +133,8 @@ acquire_runtime_session :: proc() -> bool {
 	// Only two things are meant to be shared, and adopt_runtime_session copies exactly those:
 	// info.runtime_package and its scope. Nothing here needs the globals -- an adopting checker
 	// re-resolves them from the session scope on demand through find_core_entity.
-	reset_runtime_type_globals()
+	// #566: reset_runtime_type_globals is GONE. The types it nil'd are now fields on the
+	// Checker being destroyed, so they die with it -- there is nothing process-wide left to clear.
 	return true
 }
 

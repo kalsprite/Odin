@@ -1181,7 +1181,7 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				if value == nil {
 					error(elem, "Expected a constant bit_set of type 'intrinsics.Fast_Math_Flags' for '%s'", name)
 				} else {
-					ev := check_decl_attribute_value(ctx, value, t_fast_math_flags)
+					ev := check_decl_attribute_value(ctx, value, ctx.checker.t_fast_math_flags)
 					if bi, ok := ev.(big.Int); !ok {
 						error(elem, "Expected a constant bit_set of type 'intrinsics.Fast_Math_Flags' for '%s'", name)
 					} else {
@@ -2069,7 +2069,7 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 					nt := named_type.variant.(Type_Named)
 
 					// C++ Reference: check_decl.cpp:581-584
-					if !is_type_objc_object(named_type) {
+					if !is_type_objc_object(ctx.checker, named_type) {
 						error(e.token, "@(objc_superclass) Superclass '%s' must be an Objective-C class", nt.name)
 						break
 					}
@@ -2413,7 +2413,7 @@ check_foreign_procedure :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info
 // #load_directory could never produce its []Load_Directory_File result type. Called lazily
 // from the directive arm, exactly as C++ calls it from check_load_directory_directive.
 init_core_load_directory_file :: proc(c: ^Checker) {
-	if t_load_directory_file != nil {
+	if c.t_load_directory_file != nil {
 		return
 	}
 	ldf := find_core_type(c, "Load_Directory_File")
@@ -2421,9 +2421,9 @@ init_core_load_directory_file :: proc(c: ^Checker) {
 		// Runtime package not loaded -- leave the globals nil; the caller guards on them.
 		return
 	}
-	t_load_directory_file       = ldf
-	t_load_directory_file_ptr   = alloc_type_pointer(ldf)
-	t_load_directory_file_slice = alloc_type_slice(ldf)
+	c.t_load_directory_file       = ldf
+	c.t_load_directory_file_ptr   = alloc_type_pointer(ldf)
+	c.t_load_directory_file_slice = alloc_type_slice(ldf)
 }
 
 // init_core_source_code_location ensures core:runtime.Source_Code_Location is loaded
@@ -2431,7 +2431,7 @@ init_core_load_directory_file :: proc(c: ^Checker) {
 init_core_source_code_location :: proc(c: ^Checker) {
 	// C++ Reference: checker.cpp:3587-3589 - Early return if already loaded.
 	// NOTE: guard on the GLOBAL, matching C++. See init_mem_allocator.
-	if t_source_code_location != nil {
+	if c.t_source_code_location != nil {
 		return
 	}
 
@@ -2444,9 +2444,9 @@ init_core_source_code_location :: proc(c: ^Checker) {
 
 	// C++ Reference: checker.cpp:3591 - Create pointer type.
 	// The checker reads the globals; the cached_ fields are not read anywhere.
-	t_source_code_location = scl
-	t_source_code_location_ptr = alloc_type_pointer(scl)
+	c.t_source_code_location = scl
+	c.t_source_code_location_ptr = alloc_type_pointer(scl)
 
 	c.info.cached_source_code_location = scl
-	c.info.cached_source_code_location_ptr = t_source_code_location_ptr
+	c.info.cached_source_code_location_ptr = c.t_source_code_location_ptr
 }

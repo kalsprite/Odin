@@ -3145,14 +3145,14 @@ update_untyped_expr_type :: proc(ctx: ^Checker_Context, expr: ^ast.Node, type: ^
 	}
 
 	// Get expr info from TEMPORARY storage (not permanent tav map)
-	// C++ Reference: check_expr.cpp:4481-4493
+	// C++ Reference: check_expr.cpp:4844-4856
 	// NOTE: check_get_expr_info requires ^ast.Expr, but we have ^ast.Node.
 	// Since Expr embeds Node, we can cast if this is an expression node.
 	expr_node := cast(^ast.Expr)expr
 	old := check_get_expr_info(ctx, expr_node)
 	if old == nil {
 		// No expr info found - try updating tav directly as fallback
-		// C++ Reference: check_expr.cpp:4483-4492
+		// C++ Reference: check_expr.cpp:4846-4855
 		if type != nil && type != t_invalid {
 			if tv, found := tav_lookup(ctx.info, expr); found {
 				if tv.type == nil || tv.type == t_invalid {
@@ -3171,24 +3171,24 @@ update_untyped_expr_type :: proc(ctx: ^Checker_Context, expr: ^ast.Node, type: ^
 	}
 
 	// Handle recursive propagation for different expression types
-	// C++ Reference: check_expr.cpp:4495-4581
+	// C++ Reference: check_expr.cpp:4858-4944
 	// NOTE: We skip constant expressions (old.value != Invalid) as they'll be
 	// updated later during the general checking stage
 
 	#partial switch e in expr.derived {
 	case ^ast.Paren_Expr:
-		// C++ Reference: check_expr.cpp:4578-4580
+		// C++ Reference: check_expr.cpp:4941-4943
 		update_untyped_expr_type(ctx, e.expr, type, final)
 
 	case ^ast.Unary_Expr:
-		// C++ Reference: check_expr.cpp:4496-4504
+		// C++ Reference: check_expr.cpp:4859-4867
 		if old.value == nil {
 			// Non-constant unary - propagate to operand
 			update_untyped_expr_type(ctx, e.expr, type, final)
 		}
 
 	case ^ast.Binary_Expr:
-		// C++ Reference: check_expr.cpp:4506-4519
+		// C++ Reference: check_expr.cpp:4869-4882
 		if old.value == nil {
 			// Non-constant binary - propagate to operands
 
@@ -3220,7 +3220,7 @@ update_untyped_expr_type :: proc(ctx: ^Checker_Context, expr: ^ast.Node, type: ^
 		}
 
 	case ^ast.Ternary_If_Expr:
-		// C++ Reference: check_expr.cpp:4521-4537
+		// C++ Reference: check_expr.cpp:4884-4900
 		if old.value == nil {
 			// Check expressibility of branches before updating
 			// If a branch has a constant value, verify it can be represented in the target type
@@ -3239,26 +3239,26 @@ update_untyped_expr_type :: proc(ctx: ^Checker_Context, expr: ^ast.Node, type: ^
 		}
 
 	case ^ast.Ternary_When_Expr:
-		// C++ Reference: check_expr.cpp:4540-4548
+		// C++ Reference: check_expr.cpp:4903-4911
 		if old.value == nil {
 			update_untyped_expr_type(ctx, e.x, type, final)
 			update_untyped_expr_type(ctx, e.y, type, final)
 		}
 
 	case ^ast.Or_Return_Expr:
-		// C++ Reference: check_expr.cpp:4550-4557
+		// C++ Reference: check_expr.cpp:4913-4920
 		if old.value == nil {
 			update_untyped_expr_type(ctx, e.expr, type, final)
 		}
 
 	case ^ast.Or_Branch_Expr:
-		// C++ Reference: check_expr.cpp:4559-4566
+		// C++ Reference: check_expr.cpp:4922-4929
 		if old.value == nil {
 			update_untyped_expr_type(ctx, e.expr, type, final)
 		}
 
 	case ^ast.Or_Else_Expr:
-		// C++ Reference: check_expr.cpp:4568-4576
+		// C++ Reference: check_expr.cpp:4931-4939
 		if old.value == nil {
 			update_untyped_expr_type(ctx, e.x, type, final)
 			update_untyped_expr_type(ctx, e.y, type, final)
@@ -3266,7 +3266,7 @@ update_untyped_expr_type :: proc(ctx: ^Checker_Context, expr: ^ast.Node, type: ^
 	}
 
 	// Final processing
-	// C++ Reference: check_expr.cpp:4583-4601
+	// C++ Reference: check_expr.cpp:4946-4964
 	if !final && is_type_untyped(type) {
 		old.type = base_type(type)
 		return
@@ -3536,7 +3536,13 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 			return false
 		}
 		basic := bt.variant.(Type_Basic)
-		byte_size := basic.size
+		// C++ Reference: check_expr.cpp check_representable_as_constant,
+		//     i64 byte_size = type_size_of(type);
+		// NOT the size stored in the basic type. For `int`/`uint` those differ on any target whose
+		// word size is not the host's: the stored value is baked at init_basic_types, type_size_of
+		// resolves from build_context. Reading the stored one made a constant that overflows a
+		// 32-bit `int` pass the range check under -target:linux_i386. LEDGER #580.
+		byte_size := type_size_of(bt)
 
 		// Handle i128/u128 sizes using BigInt range checking
 		// C++ Reference: check_expr.cpp:2162-2179
@@ -4831,7 +4837,10 @@ get_constant_field_value :: proc(ctx: ^Checker_Context, comp_lit: ^ast.Comp_Lit,
 }
 
 // get_constant_array_element_value extracts an element value from a constant array compound literal
-// C++ Reference: check_expr.cpp:11110-11128
+// C++ Reference: check_expr.cpp:5473-5637 (get_constant_field_single, the ExactValue_Compound arm
+// from 5494). DRIFT REPAIR (#584): was 11110-11128, which is now check_compound_literal; a blanket
+// shift would have moved it to check_index_expr's CALL SITE, describing the caller rather than the
+// counterpart this helper actually implements.
 // Returns the value and true if one was found and is constant. See get_constant_field_value for
 // why this returns by value rather than by pointer.
 get_constant_array_element_value :: proc(ctx: ^Checker_Context, comp_lit: ^ast.Comp_Lit, elem_idx: i64) -> (value: Exact_Value, ok: bool) {
@@ -5204,7 +5213,7 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 				init_mem_allocator(ctx.checker)
 			}
 
-			sel = lookup_field(operand.type, field_name, operand.mode == .Type)
+			sel = lookup_field(ctx.checker, operand.type, field_name, operand.mode == .Type)
 			entity = sel.entity
 
 			if entity != nil && .Type_Field in entity.flags {
@@ -5900,8 +5909,10 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 		operand.expr = node
 
 		// Add runtime dependencies for map access
-		// Reference: check_expr.cpp:11040-11041
-		// C++ Reference: check_expr.cpp:11905-11906. A map INDEX registers BOTH -- reading through
+		// C++ Reference: check_expr.cpp:11948-11949 (check_index_expr, the map arm).
+		// DRIFT REPAIR (#584): was 11040-11041 (now check_compound_literal) and, from a later
+		// partial fix, 11905-11906 -- which is check_selector_call_expr, the function BEFORE this
+		// one. A map INDEX registers BOTH -- reading through
 		// `m[k]` can also be the target of an assignment, so C++ pairs get with set here. The port
 		// had only the get.
 		add_map_get_dependencies(ctx)
@@ -5920,14 +5931,14 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 			// These types can be indexed when constant
 		} else if is_type_matrix(t) {
 			// Matrix constants can be indexed
-			// Reference: check_expr.cpp:11057-11058
+			// Reference: check_expr.cpp:11967-11968
 		} else {
 			valid = false
 		}
 	}
 
 	if !valid {
-		// C++ Reference: check_expr.cpp:11918-11934
+		// C++ Reference: check_expr.cpp:11974-11993
 		begin_error_block()
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
@@ -5950,7 +5961,7 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 	// Check for missing index
 	if ie.index == nil {
-		// C++ Reference: check_expr.cpp:11080-11082
+		// C++ Reference: check_expr.cpp:11995-12002
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
 		error(operand.expr, "Missing index for '%s'", expr_str)
@@ -5971,27 +5982,34 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	index: i64 = 0
 	index_ok := check_index_value(ctx, t, false, ie.index, max_count, &index, index_type_hint)
 
-	// If index validation failed (wrong type, out of bounds, etc.), mark as invalid
-	if !index_ok {
-		operand.mode = .Invalid
-		operand.expr = node
-		return kind
-	}
+	// NO BAIL HERE. C++ (check_expr.cpp:12012) keeps `ok` as a local and consults it only inside
+	// the is_const arm below -- a failed check_index_value does NOT invalidate the operand, which
+	// still carries the element type check_set_index_data gave it. The port had an invented
+	// `if !index_ok { mode = .Invalid; return }`, which suppressed every downstream diagnostic
+	// about the indexed value. Measured (#584): `a: [4]int; b: string = a[10]` reported 2
+	// diagnostics against the oracle's 3 -- the missing one being
+	//     Cannot assign value 'a[10]' of type 'int' to 'string' in a variable declaration
 
 	// Handle constant array/string indexing
 	if is_const {
 		if index < 0 {
-			// Negative index into constant - not allowed
-			// C++ Reference: check_expr.cpp:11100-11108
+			// C++ Reference: check_expr.cpp:12013-12024. `index < 0` is how check_index_value
+			// reports a NON-CONSTANT index, so this is the "variable index into a constant" case.
+			// The message was reworded and the Suggestion was dropped entirely; both restored.
+			begin_error_block()
+			defer end_error_block()
 			expr_str := expr_to_string(operand.expr)
 			defer delete(expr_str)
-			error(operand.expr, "Cannot index constant '%s' with a variable index", expr_str)
+			error(operand.expr, "Cannot index a constant '%s'", expr_str)
+			if !build_context.terse_errors {
+				error_line("\tSuggestion: store the constant into a variable in order to index it with a variable index\n")
+			}
 			operand.mode = .Invalid
 			operand.expr = node
 			return kind
 		} else if index_ok && !is_type_matrix(t) {
 			// Extract constant value from indexed constant
-			// Reference: check_expr.cpp:11110-11128
+			// Reference: check_expr.cpp:12025-12044
 			if operand.value != nil {
 				str_val, is_string := operand.value.(string)
 				if is_string && index >= 0 && index < i64(len(str_val)) {
@@ -6005,7 +6023,7 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 				}
 
 				// Handle constant array indexing from compound literals
-				// C++ Reference: check_expr.cpp:11110-11128
+				// C++ Reference: check_expr.cpp:12025-12044
 				if compound, is_compound := operand.value.(Exact_Value_Compound); is_compound {
 					if compound.expr != nil {
 						if comp_lit, is_comp := compound.expr.derived.(^ast.Comp_Lit); is_comp {
@@ -6021,18 +6039,27 @@ check_index :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 		}
 	}
 
-	// Matrix type hint handling
-	// Reference: check_expr.cpp:11131-11134
-	if type_hint != nil && is_type_matrix(t) {
-		operand.type = check_matrix_type_hint(operand.type, type_hint)
-	}
+	// C++ Reference: check_expr.cpp:12047-12050. The condition is real but the BODY IS EMPTY --
+	// it holds only bill's TODO, "allow matrix columns to be assignable to other types which are
+	// the same internally if a type hint exists". The port filled it in with a
+	// `check_matrix_type_hint` call, retyping the operand where the reference does nothing.
+	// That helper does exist in C++ (check_expr.cpp:4177) and is called from six other sites, so
+	// this is not an invented FUNCTION -- it is an invented CALL, which is harder to spot and has
+	// the same effect: the port silently implements a feature C++ has deliberately not written.
+	// Restored to C++'s no-op; the condition is kept, commented, so the site stays findable if
+	// upstream ever fills the TODO in.
+	//
+	//	if type_hint != nil && is_type_matrix(t) {
+	//		// TODO(bill): allow matrix columns to be assignable to other types which are the
+	//		// same internally if a type hint exists
+	//	}
 
 	operand.expr = node
 	return kind
 }
 
 // check_matrix_index_expr checks matrix indexing (mat[row, col])
-// Reference: check_expr.cpp:11212-11261
+// Reference: check_expr.cpp:9519-9584
 //
 // Matrix indexing extracts a single element from a matrix using row and column indices.
 // Both indices must be integers within the bounds of the matrix dimensions.
@@ -6185,7 +6212,13 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	#partial switch t.kind {
 	case .Basic:
 		// String slicing
-		// Reference: check_expr.cpp:11154-11169
+		// Reference: check_expr.cpp:12070-12085 (check_slice_expr, case Type_Basic)
+		// DRIFT REPAIR (#571): this whole procedure cited the 11154-11217 block, which upstream
+		// motion moved into check_compound_literal. The real slice code is check_slice_expr from
+		// 12054. Note the shift is NOT uniform -- +916 for the cases up to Dynamic_Array, but the
+		// Struct/SOA arm moved further because Type_FixedCapacityDynamicArray was INSERTED ahead of
+		// it. Each citation below was matched against src/ individually rather than offset by
+		// arithmetic, which would have been wrong for exactly that one.
 		basic := t.variant.(Type_Basic)
 		if basic.kind == .String || basic.kind == .Untyped_String {
 			valid = true
@@ -6197,7 +6230,7 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 			}
 			operand.type = type_deref(operand.type)
 		} else if basic.kind == .String16 {
-			// String16 slicing support (check_expr.cpp:11162-11168)
+			// String16 slicing support (check_expr.cpp:12078-12084)
 			valid = true
 			// Extract length from constant String16 values
 			if operand.mode == .Constant && operand.value != nil {
@@ -6210,14 +6243,14 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 	case .Array:
 		// Array slicing: [N]T -> []T
-		// Reference: check_expr.cpp:11172-11184
+		// Reference: check_expr.cpp:12088-12100
 		valid = true
 		array_type := t.variant.(Type_Array)
 		max_count = array_type.count
 
 		// Arrays require addressability to be sliced
 		if operand.mode != .Variable && !is_type_pointer(operand.type) {
-			// C++ Reference: check_expr.cpp:11172-11184
+			// C++ Reference: check_expr.cpp:12091-12098
 			expr_str := expr_to_string(operand.expr)
 			defer delete(expr_str)
 			error(node, "Cannot slice array '%s', value is not addressable", expr_str)
@@ -6231,26 +6264,28 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 	case .Multi_Pointer:
 		// Multi-pointer slicing
-		// Reference: check_expr.cpp:11186-11189
+		// Reference: check_expr.cpp:12102-12105
 		valid = true
 		operand.type = type_deref(operand.type)
 
 	case .Slice:
 		// Slice sub-slicing: []T -> []T
-		// Reference: check_expr.cpp:11191-11194
+		// Reference: check_expr.cpp:12107-12110
 		valid = true
 		operand.type = type_deref(operand.type)
 
 	case .Dynamic_Array:
 		// Dynamic array slicing: [dynamic]T -> []T
-		// Reference: check_expr.cpp:11196-11199
+		// Reference: check_expr.cpp:12112-12115
 		valid = true
 		da_type := t.variant.(Type_Dynamic_Array)
 		operand.type = alloc_type_slice(da_type.elem)
 
 	case .Fixed_Capacity_Dynamic_Array:
 		// `[dynamic; N]T` slices to []T, as [dynamic]T does.
-		// C++ Reference: check_expr.cpp:12060-12070.
+		// C++ Reference: check_expr.cpp:12117-12128 (check_slice_expr, case Type_FixedCapacityDynamicArray).
+		// Was 12060-12070, which is check_slice_expr's PROLOGUE, not this case. citefn --check would
+		// not have caught it: the function was right, only the region was wrong.
 		valid = true
 		// The addressability guard was cited by the comment above but never written, so slicing a
 		// fixed-capacity dynamic array RVALUE (e.g. `f()[:]`) was silently accepted. C++ 12062.
@@ -6269,14 +6304,14 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 	case .Struct:
 		// SOA struct slicing
-		// Reference: check_expr.cpp:11201-11217
+		// Reference: check_expr.cpp:12130-12146
 		strct := &t.variant.(Type_Struct)
 		if strct.soa_kind != .None {
 			// SOA struct slicing - result is a SOA slice
-			// C++ lines 11204-11217
+			// C++ lines 12133-12145
 			if strct.soa_kind == .Fixed {
 				// Fixed SOA: needs addressability check
-				// C++ check_expr.cpp:12077-12084.
+				// C++ check_expr.cpp:12135-12142 (was 12077-12084, the string16 branch -- wrong region).
 				//
 				// TWO divergences fixed here. The condition tested `.Soa_Variable` where C++
 				// tests `!is_type_pointer(o->type)` -- a different question, so a pointer to a
@@ -6305,8 +6340,11 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 	case .Enumerated_Array:
 		// Enumerated arrays explicitly cannot be sliced
-		// C++ Reference: check_expr.cpp:11219-11230
-		// C++ check_expr.cpp:12090-12106. Three divergences: the message was reworded, the
+		// C++ Reference: check_expr.cpp:12148-12164 (check_slice_expr, case Type_EnumeratedArray).
+		// DRIFT REPAIR (#571): this arm carried TWO wrong citations. 11219-11230 now lands in
+		// check_compound_literal; 12090-12106 is check_slice_expr's Type_Array case -- the right
+		// function, the wrong arm, which is exactly the class --check cannot catch. The three
+		// divergences recorded below were real and are already repaired: the message was reworded, the
 		// Suggestion line was missing entirely, and it anchored at `node` where C++ anchors at
 		// o->expr (the sliced expression, not the whole slice expression).
 		begin_error_block()
@@ -6323,7 +6361,7 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 	// Validate that type is sliceable
 	if !valid {
-		// C++ Reference: check_expr.cpp:11233-11242
+		// C++ Reference: check_expr.cpp:12167-12176
 		expr_str := expr_to_string(operand.expr)
 		defer delete(expr_str)
 		type_str := type_to_string(operand.type)
@@ -6334,10 +6372,10 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	}
 
 	// Validate slice indices
-	// Reference: check_expr.cpp:11244-11277
+	// Reference: check_expr.cpp:12178-12211
 
 	// Handle nil low index (defaults to 0)
-	// Reference: check_expr.cpp:11244-11246
+	// Reference: check_expr.cpp:12178-12180
 
 	indices: [2]i64
 	nodes := [2]^ast.Expr{se.low, se.high}
@@ -6370,29 +6408,29 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	}
 
 	// Validate that low <= high
-	// Reference: check_expr.cpp:11269-11277
+	// Reference: check_expr.cpp:12203-12211
 	for i in 0 ..< len(indices) {
 		a := indices[i]
 		for j in i + 1 ..< len(indices) {
 			b := indices[j]
 			if a > b && b >= 0 {
-				error(se.close, "Invalid slice indices: low index greater than high index")
+				error(se.close, "Invalid slice indices: [%d > %d]", a, b)
 			}
 		}
 	}
 
 	// Check for slicing constants without known bounds
-	// C++ Reference: check_expr.cpp:11279-11285
+	// C++ Reference: check_expr.cpp:12213-12219
 	if max_count < 0 {
 		if operand.mode == .Constant {
 			expr_str := expr_to_string(se.expr)
 			defer delete(expr_str)
-			error(se.expr, "Cannot slice constant '%s'", expr_str)
+			error(se.expr, "Cannot slice constant value '%s'", expr_str)
 		}
 	}
 
 	// Multi-pointer special semantics
-	// Reference: check_expr.cpp:11287-11295
+	// Reference: check_expr.cpp:12221-12229
 	// x[:]   -> [^]T (multi-pointer)
 	// x[i:]  -> [^]T (multi-pointer)
 	// x[:n]  -> []T  (slice)
@@ -6405,44 +6443,71 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	// Default mode is Value
 	operand.mode = .Value
 
-	// Constant string slicing
-	// Reference: check_expr.cpp:11300-11338
-	if is_type_string(t) && max_count >= 0 && operand.value != nil {
-		// Check if we have a constant string with constant indices
-		str_val, is_string := operand.value.(string)
-		if is_string {
-			// Check if both indices are constant
-			low_const := true
-			high_const := true
-
-			if se.low != nil {
-				_, low_val, low_mode := type_and_value_of_expr(ctx, se.low)
-				low_const = low_mode == .Constant && low_val != nil
-			}
-
-			if se.high != nil {
-				_, high_val, high_mode := type_and_value_of_expr(ctx, se.high)
-				high_const = high_mode == .Constant && high_val != nil
-			}
-
-			if low_const && high_const {
-				// Both indices are constant - extract substring at compile time
-				// indices[0] is low, indices[1] is high
-				low_idx := indices[0]
-				high_idx := indices[1]
-
-				// Default high to string length if not specified
-				if high_idx < 0 {
-					high_idx = i64(len(str_val))
+	// Constant string slicing.
+	// C++ Reference: check_expr.cpp:12234-12272 (check_slice_expr, tail).
+	//
+	// This block was a REIMPLEMENTATION of C++'s, not a port, and carried four divergences:
+	//   1. It never emitted "Cannot slice '%s' with non-constant indices" (C++ 12248) at all --
+	//      it just fell out of the `if`, leaving the operand a plain non-constant string. So
+	//      `S :: "hello"; i := 1; _ = S[i:3]` was ACCEPTED where the oracle rejects it.
+	//   2. It type-asserted operand.value to `string`, so a constant `string16` skipped the whole
+	//      block and kept its ORIGINAL, unsliced value. C++ has a String16 arm (12260-12263).
+	//   3. It never assigned `operand.type = t` (C++ 12258), so the deref applied in the Basic arm
+	//      above was not re-narrowed for the constant result.
+	//   4. It re-defaulted a negative `high` to len(str). That is dead: `indices` already carries
+	//      C++'s defaults -- indices[i] starts at max_count, and only i==0 is forced to 0 when its
+	//      node is absent, which is exactly C++ 12197-12199.
+	// The extra `operand.value != nil` guard on the condition was inert (max_count >= 0 is only
+	// reached from the constant-string arms) but is dropped anyway, since C++ does not have it.
+	if is_type_string(t) && max_count >= 0 {
+		// C++ 12235-12244.
+		all_constant := true
+		for i in 0 ..< len(nodes) {
+			if nodes[i] != nil {
+				_, _, tav_mode := type_and_value_of_expr(ctx, nodes[i])
+				if tav_mode != .Constant {
+					all_constant = false
+					break
 				}
+			}
+		}
 
-				// Validate indices are in bounds (should already be validated by check_index_value)
-				if low_idx >= 0 && high_idx >= 0 && low_idx <= high_idx && high_idx <= i64(len(str_val)) {
-					// Extract the substring
-					substring := str_val[low_idx:high_idx]
-					operand.mode = .Constant
-					operand.value = substring
+		// C++ 12245-12256. Note the mode is left at Value, not Invalid: C++ comments that this
+		// keeps subsequent checking going rather than cascading.
+		if !all_constant {
+			begin_error_block()
+			defer end_error_block()
+			str := expr_to_string(operand.expr)
+			defer delete(str)
+			error(operand.expr, "Cannot slice '%s' with non-constant indices", str)
+			if !build_context.terse_errors {
+				error_line("\tSuggestion: store the constant into a variable in order to index it with a variable index\n")
+			}
+			operand.mode = .Value
+			operand.expr = node
+			return kind
+		}
+
+		// C++ 12257-12258.
+		operand.mode = .Constant
+		operand.type = t
+
+		// C++ 12260-12271. DELIBERATE DIVERGENCE, and the reason is demonstrated rather than
+		// assumed: the low > high case is diagnosed above (C++ 12208) but NOT returned from, so
+		// C++ reaches substring() with lo > hi and dies on its own assertion --
+		//     src/string.cpp(77): Assertion Failure: `lo <= hi && hi <= max` 3..1..5
+		// reproduced with `S :: "hello"; x := S[3:1]` against the reference compiler. Reproducing
+		// that would mean reproducing a compiler crash, so the extraction is skipped when the
+		// range is inverted; the diagnostic the oracle emits before dying is already reported.
+		if indices[0] <= indices[1] {
+			#partial switch v in operand.value {
+			case Exact_Value_String16:
+				operand.value = Exact_Value_String16{
+					text = v.text[indices[0]:],
+					len  = int(indices[1] - indices[0]),
 				}
+			case string:
+				operand.value = v[indices[0]:indices[1]]
 			}
 		}
 	}
@@ -7320,7 +7385,7 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 		// Probe pos2.
 		init_core_source_code_location(ctx.checker)
 		error(node, "#caller_location may only be used as a default argument parameter")
-		o.type = t_source_code_location
+		o.type = ctx.checker.t_source_code_location
 		o.mode = .Value
 		o.expr = node
 		return .Expr
@@ -7357,7 +7422,7 @@ check_basic_directive_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^as
 			}
 		}
 		init_core_source_code_location(ctx.checker)
-		o.type = t_source_code_location
+		o.type = ctx.checker.t_source_code_location
 		o.mode = .Value
 		o.expr = node
 		return .Expr
@@ -7842,7 +7907,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Type_Cast:
 		// Type cast expression: cast(T)expr or transmute(T)expr
-		// Reference: check_expr.cpp:11544-11575
+		// Reference: check_expr.cpp:12495-12525
 		tc := node.derived.(^ast.Type_Cast)
 
 		// First, check the type expression
@@ -7886,7 +7951,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Auto_Cast:
 		// Auto cast expression: auto_cast expr
-		// Reference: check_expr.cpp:11577-11590
+		// Reference: check_expr.cpp:12528-12540
 		ac := node.derived.(^ast.Auto_Cast)
 
 		check_expr_base(ctx, o, ac.expr, type_hint)
@@ -7909,7 +7974,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Index_Expr:
 		// Index expression: x[i]
-		// Reference: check_expr.cpp:11623-11625
+		// Reference: check_expr.cpp:12591-12592
 		ie_kind := check_index(ctx, o, node, type_hint)
 		// C++ Reference: check_expr.cpp:11864 (inside check_index_expr) -- viral flags propagate
 		// from the indexed operand. The port had no counterpart, so `arr[x or_break]` set the flag
@@ -7921,17 +7986,18 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Matrix_Index_Expr:
 		// Matrix index expression: mat[row, col]
-		// Reference: check_expr.cpp:11212-11261
+		// C++ Reference: check_expr.cpp:12599-12602 (check_expr_base_internal, the MatrixIndexExpr arm).
+		// The callee itself is check_matrix_index_expr at 9519-9584.
 		return check_matrix_index_expr(ctx, o, node, type_hint)
 
 	case ^ast.Slice_Expr:
 		// Slice expression: x[low:high]
-		// Reference: check_expr.cpp:11626-11628
+		// Reference: check_expr.cpp:12595-12596
 		return check_slice(ctx, o, node, type_hint)
 
 	case ^ast.Selector_Expr:
 		// Selector expression: x.y
-		// Reference: check_expr.cpp:11617-11620
+		// Reference: check_expr.cpp:12578-12580
 		check_selector(ctx, o, node, type_hint)
 		// C++ Reference: check_expr.cpp:12523 -- viral flags propagate from the operand.
 		// Missing here meant an or_break/or_return/deferred call inside `x` never reached the
@@ -7944,7 +8010,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 	case ^ast.Selector_Call_Expr:
 		// Arrow call: `x->y(123)` desugars to `x.y(x, 123)`.
 		//
-		// C++ Reference: check_expr.cpp:11714-11845. C++ REWRITES THE AST - it prepends the
+		// C++ Reference: check_expr.cpp:11770-11914. C++ REWRITES THE AST - it prepends the
 		// receiver to the call's argument list and latches se->modified_call so the rewrite
 		// happens exactly once. The port did neither: it checked sc.call verbatim, so the
 		// receiver was never passed and every arrow call was short one argument. `o->bare()`
@@ -8049,37 +8115,37 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Call_Expr:
 		// Call expression: f(x, y, z)
-		// Reference: check_expr.cpp:8155-8418
+		// Reference: check_expr.cpp:8780-9070
 		return check_call_expr(ctx, o, node, type_hint)
 
 	case ^ast.Comp_Lit:
 		// Compound literal: T{...}
-		// Reference: check_expr.cpp:9763-10728
+		// Reference: check_expr.cpp:10609-11627
 		return check_compound_literal(ctx, o, node, type_hint)
 
 	case ^ast.Ternary_If_Expr:
 		// Ternary if expression: x if cond else y
-		// Reference: check_expr.cpp:11499-11501
+		// Reference: check_expr.cpp:12450-12451
 		return check_ternary_if_expr(ctx, o, node, type_hint)
 
 	case ^ast.Ternary_When_Expr:
 		// Ternary when expression: x when cond else y
-		// Reference: check_expr.cpp:11503-11505
+		// Reference: check_expr.cpp:12454-12455
 		return check_ternary_when_expr(ctx, o, node, type_hint)
 
 	case ^ast.Type_Assertion:
 		// Type assertion expression: value.(Type)
-		// Reference: check_expr.cpp:11541-11543
+		// Reference: check_expr.cpp:12491-12492
 		return check_type_assertion(ctx, o, node, type_hint)
 
 	case ^ast.Implicit_Selector_Expr:
 		// Implicit selector expression: .field
-		// Reference: check_expr.cpp:11625-11627
+		// Reference: check_expr.cpp:12587-12588
 		return check_implicit_selector_expr(ctx, o, node, type_hint)
 
 	case ^ast.Or_Else_Expr:
 		// Or else expression: value or_else default_value
-		// Reference: check_expr.cpp:9235-9360
+		// Reference: check_expr.cpp:10016-10142
 		return check_or_else_expr(ctx, o, node, type_hint)
 
 	case ^ast.Or_Return_Expr:
@@ -8091,12 +8157,12 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Or_Branch_Expr:
 		// Or branch expression: value or_break label, value or_continue label
-		// Reference: check_expr.cpp:9445-9545
+		// Reference: check_expr.cpp:10227-10332
 		return check_or_branch_expr(ctx, o, node, type_hint)
 
 	case ^ast.Paren_Expr:
 		// Parenthesized expression: (expr)
-		// Reference: check_expr.cpp:11524-11528
+		// Reference: check_expr.cpp:12475-12478
 		pe := node.derived.(^ast.Paren_Expr)
 		kind := check_expr_base(ctx, o, pe.expr, type_hint)
 		node.viral_state_flags |= pe.expr.viral_state_flags
@@ -8105,7 +8171,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Tag_Expr:
 		// Tag expression: #tag expr
-		// Reference: check_expr.cpp:11530-11538
+		// Reference: check_expr.cpp:12481-12488
 		te := node.derived.(^ast.Tag_Expr)
 		name := te.name
 		error(node, "Unknown tag expression, #%s", name)
@@ -8119,7 +8185,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Implicit:
 		// Implicit values like 'context'
-		// Reference: check_expr.cpp:11382-11409
+		// Reference: check_expr.cpp:12325-12351
 		impl := node.derived.(^ast.Implicit)
 
 		// Check if this is the context implicit value
@@ -8163,7 +8229,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 			// parameter reported "Cannot use a selector expression on nil-value expression".
 			init_core_context(ctx.checker)
 			o.mode = .Context
-			o.type = t_context
+			o.type = ctx.checker.t_context
 			return .Expr
 		} else {
 			error(node, "Illegal implicit name '%s'", impl.tok.text)
@@ -8172,7 +8238,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Undef:
 		// Uninitialized literal (---)
-		// Reference: check_expr.cpp:11415-11419
+		// Reference: check_expr.cpp:12366-12369
 		// Note: ast.Uninit doesn't exist, it's ast.Undef
 		o.mode = .Value
 		o.type = t_untyped_uninit
@@ -8184,19 +8250,19 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Basic_Directive:
 		// Directive expression: #file, #line, #procedure, #column, #load, etc.
-		// Reference: check_expr.cpp:9058-9188, 11446-11448
+		// Reference: check_expr.cpp:9711-9839, 11446-11448
 		return check_basic_directive_expr(ctx, o, node, type_hint)
 
 	case ^ast.Proc_Group:
 		// Procedure group - illegal in expression context
-		// Reference: check_expr.cpp:11450-11453
+		// Reference: check_expr.cpp:12401-12403
 		error(node, "Illegal use of a procedure group")
 		o.mode = .Invalid
 		return .Stmt
 
 	case ^ast.Proc_Lit:
 		// Procedure literal (inline procedure)
-		// C++ Reference: check_expr.cpp:11630-11672
+		// C++ Reference: check_expr.cpp:12406-12447
 		pl := node.derived.(^ast.Proc_Lit)
 
 		// Create a new context for the procedure literal
@@ -8292,7 +8358,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	case ^ast.Deref_Expr:
 		// Explicit dereference: ^ptr
-		// Reference: check_expr.cpp:11647-11689
+		// Reference: check_expr.cpp:12609-12650
 		de := node.derived.(^ast.Deref_Expr)
 
 		check_expr_or_type(ctx, o, de.expr)
@@ -8408,7 +8474,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 	// Type expression nodes - these are all types, not expressions
 	case ^ast.Distinct_Type, ^ast.Typeid_Type, ^ast.Poly_Type, ^ast.Proc_Type, ^ast.Pointer_Type, ^ast.Multi_Pointer_Type, ^ast.Array_Type, ^ast.Dynamic_Array_Type, ^ast.Fixed_Capacity_Dynamic_Array_Type, ^ast.Struct_Type, ^ast.Union_Type, ^ast.Enum_Type, ^ast.Map_Type, ^ast.Bit_Set_Type, ^ast.Matrix_Type:
-		// Reference: check_expr.cpp:11738-11756
+		// Reference: check_expr.cpp:12700-12718
 		o.mode = .Type
 		o.type = check_type(ctx, node)
 		return .Expr
@@ -8441,7 +8507,7 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 
 // check_assignment validates that an operand can be assigned to a target type
 // This is the main entry point for type checking assignments, parameters, returns, etc.
-// Ported from check_expr.cpp:1081-1267
+// Ported from check_expr.cpp:1137-1391
 //
 // Key responsibilities:
 // 1. Reject tuple expressions (must be single values)
@@ -10875,7 +10941,7 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	// self_type read at check_expr.cpp:8708 is genuinely backend-only.
 	if proc_entity := entity_of_node(ctx.info, call.expr); proc_entity != nil {
 		if pv, is_proc := &proc_entity.variant.(ast.Entity_Procedure); is_proc && pv.is_objc_impl_or_import {
-			if o.type != nil && o.type == t_objc_instancetype {
+			if o.type != nil && o.type == ctx.checker.t_objc_instancetype {
 				if pv.is_objc_class_method {
 					// C++ 8676-8683: prefer the SELECTOR's type (`P.make()` names P directly);
 					// otherwise fall back to the procedure's recorded objc_class entity.

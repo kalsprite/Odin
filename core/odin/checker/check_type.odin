@@ -3955,8 +3955,8 @@ check_map_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Map_Type, type: ^^Ty
 	// find_core_type returns nil and init_mem_allocator returns early by design (see its comment).
 	// In that case t_allocator stays nil and init_map_internal_types' assert would fire, so gate on
 	// the precondition C++ gets for free rather than on a weakened assert.
-	if t_allocator != nil {
-		init_map_internal_types(type^)
+	if ctx.checker.t_allocator != nil {
+		init_map_internal_types(ctx.checker, type^)
 	}
 
 	// C++ Reference: check_type.cpp:3084-3086
@@ -4176,7 +4176,7 @@ check_procedure_type :: proc(ctx: ^Checker_Context, proc_type: ^Type, proc_type_
 			if len(tuple.variables) >= 2 {
 				second := tuple.variables[1]
 				second_type := entity_type(second)
-				if !are_types_identical(second_type, t_allocator_error) {
+				if !are_types_identical(second_type, ctx.checker.t_allocator_error) {
 					type_str := type_to_string(second_type)
 					error_node(proc_type_node, "A procedure type with the #optional_allocator_error expects a `runtime.Allocator_Error`, got '%s'", type_str)
 				}
@@ -4449,7 +4449,7 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 				// t_source_code_location unconditionally. See the #location arm in
 				// check_builtin.odin for why the cached_ read was wrong. LEDGER #354.
 				param_value.kind = .Location
-				o.type = t_source_code_location
+				o.type = ctx.checker.t_source_code_location
 				o.mode = .Value
 				o.expr = expr
 
@@ -6605,7 +6605,7 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 			// C++ line 3043: init_mem_allocator(checker)
 			init_mem_allocator(checker)
 			allocator_token := make_token_ident("allocator")
-			allocator_field := alloc_entity_field(scope, allocator_token, t_allocator, false, i32(field_count) + 2)
+			allocator_field := alloc_entity_field(scope, allocator_token, checker.t_allocator, false, i32(field_count) + 2)
 			ts.fields[field_count + 2] = allocator_field
 			add_entity_to_scope(scope, allocator_field)
 			allocator_field.flags += {.Used}

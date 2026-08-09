@@ -94,6 +94,26 @@ def main():
     reset = reset_list(types_path)
     assigned = assignment_procs(declared)
 
+    # RETIRED BY #566, and refusing rather than reporting is the point.
+    #
+    # This tool audits reset_runtime_type_globals. That procedure no longer exists: the 89
+    # checker-owned type globals are now fields on the Checker, so they die with it and there is
+    # nothing process-wide left to clear. Everything still declared in types.odin is target-derived
+    # and must NOT be reset.
+    #
+    # Left running, it would print `checker_owned=0 ... missing=0 spurious=0` -- a clean bill of
+    # health computed over an empty set, which is #483's failure mode exactly (a gate that cannot
+    # fail proves nothing) dressed up as a pass. The successor is splitcheck.py, which gates the
+    # property that replaced this one: a target-derived global must never be read off a Checker.
+    #
+    # The FUNCTIONS above are still imported by splitcheck.py's pre-#566 fallback path, so the
+    # module stays; only the standalone verdict is withdrawn.
+    if not reset:
+        print("RESETAUDIT RETIRED: reset_runtime_type_globals no longer exists (#566).")
+        print("  declared=%d (all target-derived); checker-owned types are Checker fields now." % len(declared))
+        print("  Use splitcheck.py -- it gates the invariant that replaced this one.")
+        return 2
+
     checker_owned, target_derived, unassigned = set(), set(), set()
     for n in declared:
         procs = assigned.get(n, set())

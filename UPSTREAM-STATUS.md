@@ -43,9 +43,8 @@ re-run from their recorded inputs, and the text claims re-grepped at their cited
 
 ## NOT ready — reproduction must be re-established first
 
-| item | claim | why it is held |
-|---|---|---|
-| `#342` | `complex()` into a union-typed return panics at `src/types.cpp:1985` | **does not reproduce.** The original source was recovered from git (`core/odin/checker/tmp/file.odin`, since deleted) and run 3× with and without `-no-entry-point`: `rc=0` every time. The note recorded 3/3 panics when written. Needs re-establishing before it can be filed. |
+*(empty)*
+
 
 ## What the merge cost the port
 
@@ -73,3 +72,9 @@ behaviour, so the behaviour has to be observed at the time of filing, not rememb
 The same rule applied to retiring them. "Upstream merged my fix" is also a claim about behaviour:
 each of the ten entries above was re-measured, and one — `#119` — turned out to be a *relocation*
 rather than a fix, which a status-file edit made from memory would have wrongly closed.
+
+## Struck — investigated, nothing to file
+
+| item | claim | disposition |
+|---|---|---|
+| `#342` | `complex()` into a union-typed return panics at `src/types.cpp:1985` | **struck 2026-08-08.** Held since the first check found it did not reproduce. Re-verified independently with the exact original source recovered from git (`core/odin/checker/tmp/file.odin`, deleted in `b04c5b43`): oracle `rc=0` and **no output** on 3 runs with `-no-entry-point` and 3 without; the port agrees, 0 errors. Six clean runs across two sittings. No `UPSTREAM-342-*.md` exists because there is nothing to file. The note recorded 3/3 panics when written, but recorded a conclusion without its input, so the original observation cannot be recovered or dated. |
