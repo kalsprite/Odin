@@ -272,3 +272,18 @@ if [ "$mism" -ne 0 ]; then
     split(e, a, " "); printf "  probe[%s] oracle=%s port=%s\n", $1, $2, $3 }'
 fi
 echo "MODEL-DONE probes=$probes oracle_values=$o port_values=$p mismatches=$mism"
+
+# ------------------------------------------------------------------------------------------------
+# EXIT GATE (#749). This script already ABORTED correctly on a missing binary (:32/:34) and on a
+# coverage shortfall (:261) -- but the actual COMPARISON, the thing it exists to do, ended on the
+# bare `echo` above and returned 0 no matter how many probes disagreed. That is #747's split with
+# only half of it built: the "inputs are broken" path was gated, the "port and oracle DISAGREE"
+# path was not. Baseline measured at #749: probes=151 oracle_values=151 port_values=151
+# mismatches=0 -- a clean zero, so unlike parity.sh this one gates on the real column directly.
+#   exit 0 = all probes agree | exit 1 = MODEL-FAILED, values diverge (a valid measurement that
+#   failed) | exit 2 = MODEL-ABORTED, inputs or coverage broken (numbers are NOT a measurement)
+if [ "$mism" -ne 0 ]; then
+  echo "MODEL-FAILED $mism of $probes probes have DIFFERENT MODEL VALUES -- see the MODEL MISMATCHES block above" >&2
+  exit 1
+fi
+exit 0

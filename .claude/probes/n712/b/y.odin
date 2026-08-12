@@ -1,0 +1,3 @@
+package dup
+
+B :: proc() {}

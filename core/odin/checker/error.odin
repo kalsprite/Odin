@@ -1752,7 +1752,7 @@ Distance_And_Target :: struct {
 }
 
 // levenshtein_distance computes the edit distance between two strings (case insensitive)
-// C++ Reference: common.cpp:859-918 (levenstein_distance_case_insensitive)
+// C++ Reference: common.cpp levenstein_distance_case_insensitive:857-908
 levenshtein_distance :: proc(s1, s2: string) -> int {
 	// C++ keeps the FULL matrix because its transposition term reads matrix[i-2][j-2] -- two
 	// rows back. The port used a two-row rolling optimisation, which structurally cannot
@@ -1760,11 +1760,19 @@ levenshtein_distance :: proc(s1, s2: string) -> int {
 	// raised from 2 to 3 to compensate. The two are not equivalent: C++ scored "alph" against
 	// "beta" at 2 (suggested), the port at 4 (rejected). Full matrix restored.
 	//
-	// NOTE(parity): C++'s transposition branch does NOT check that the two characters are
-	// actually transposed -- it allows matrix[i-2][j-2]+1 whenever i > 1 && j > 1, which lets
-	// ANY two-character block be repaired for the price of one edit. That is much weaker than
-	// real Damerau-Levenshtein and is almost certainly a bug, but it is what decides which
-	// suggestions the compiler prints, so it is reproduced exactly. Flagged upstream.
+	// NOTE(parity): this branch USED to be unguarded here, deliberately, because C++'s was --
+	// it allowed matrix[i-2][j-2]+1 whenever i > 1 && j > 1, which lets ANY two-character block
+	// be repaired for the price of one edit. That was reported as a bug and UPSTREAM HAS SINCE
+	// FIXED IT (common.cpp:892-894 now guards on the two characters actually being swapped,
+	// `a_c == lower(b[j-2]) && b_c == lower(a[i-2])`, and calls itself the "optimal string
+	// alignment" variant). LEDGER #159 recorded the upstream fix but the port was never
+	// followed here, so this comment asserted the opposite of what src/ does.
+	//
+	// The consequence was not cosmetic. With the guard absent every distance is understated,
+	// so the `MAX_DID_YOU_MEAN_DISTANCE == 2` cutoff stopped cutting: for `simd.u8x4` the
+	// oracle offers 7 candidates, all genuinely within 2, while the port offered 17 --
+	// including `sqrt` and `iota`, which are distance 4 -- and ordered the survivors wrongly
+	// (i32x4 ahead of u8x16). Guarded now, matching src/ exactly.
 	//
 	// C++ lowercases with gb_char_to_lower, which is ASCII-only; strings.to_lower is
 	// Unicode-aware and can change the byte length, which would shift the matrix. Lowered
@@ -1794,8 +1802,12 @@ levenshtein_distance :: proc(s1, s2: string) -> int {
 			minimum := d[(i - 1) * w + j] + 1 // remove
 			minimum = min(minimum, d[i * w + j - 1] + 1) // insert
 			minimum = min(minimum, d[(i - 1) * w + j - 1] + 1) // substitute
-			if i > 1 && j > 1 {
-				// See NOTE(parity) above: deliberately unguarded, as in C++.
+			// Damerau-Levenshtein (transposition extension), the "optimal string alignment"
+			// variant. C++ Reference: common.cpp:891-899. The discount applies only when the
+			// two characters really are swapped -- see NOTE(parity) above.
+			if i > 1 && j > 1 &&
+			   a_c == lower(s2[j - 2]) &&
+			   b_c == lower(s1[i - 2]) {
 				minimum = min(minimum, d[(i - 2) * w + j - 2] + 1)
 			}
 			d[i * w + j] = minimum
@@ -2007,7 +2019,13 @@ check_did_you_mean_scope :: proc(name: string, scope: ^Scope, prefix := "") {
 	targets: [dynamic]string
 	defer delete(targets)
 
-	for entity in scope_map_slot_order(ordered[:], context.temp_allocator) {
+	// #657: the starting CAPACITY is part of the layout, not just a size hint. C++ reserves
+	// package and file scopes before the first insert (checker.cpp:240/261), so their maps never
+	// pass through the 16 -> 32 -> 64 doublings this simulation used to assume. Measured: a
+	// 6-name scope matched already (2*6=12 does not exceed the inline cap, so C++ stays at 16),
+	// while 11 and 40 did not -- and 11 is still BELOW the growth threshold, which is what ruled
+	// out the rehash path as the cause.
+	for entity in scope_map_slot_order(ordered[:], context.temp_allocator, scope_map_initial_cap(scope)) {
 		target := entity.token.text
 		if len(target) == 0 || target == "_" {
 			continue

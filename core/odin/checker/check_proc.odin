@@ -911,19 +911,19 @@ Proc_Using_Var :: struct {
 // Returns:
 //   true if all clauses pass, false if any fail
 evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scope: ^Scope, clauses: []^ast.Expr, print_err: bool) -> bool {
-	// C++ Reference: check_expr.cpp evaluate_where_clauses:7122
+	// C++ Reference: check_expr.cpp evaluate_where_clauses:7140
 	if clauses == nil || len(clauses) == 0 {
 		return true
 	}
 
 	// Check each clause
-	// C++ Reference: check_expr.cpp evaluate_where_clauses:7123-7196
+	// C++ Reference: check_expr.cpp evaluate_where_clauses:7141-7217
 	for clause in clauses {
 		operand := Operand{}
 		check_expr(ctx, &operand, clause)
 
 		// Must be a constant
-		// C++ Reference: check_expr.cpp evaluate_where_clauses:7126-7129
+		// C++ Reference: check_expr.cpp evaluate_where_clauses:7144-7147
 		if operand.mode != .Constant {
 			if print_err {
 				error(clause, "'where' clauses expect a constant boolean evaluation")
@@ -935,7 +935,7 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 		}
 
 		// Must be a boolean
-		// C++ Reference: check_expr.cpp evaluate_where_clauses:7130-7133
+		// C++ Reference: check_expr.cpp evaluate_where_clauses:7148-7151
 		value_bool, is_bool := operand.value.(bool)
 		if !is_bool {
 			if print_err {
@@ -948,10 +948,10 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 		}
 
 		// Must evaluate to true
-		// C++ Reference: check_expr.cpp evaluate_where_clauses:7134-7180
+		// C++ Reference: check_expr.cpp evaluate_where_clauses:7152-7202
 		if !value_bool {
 			if print_err {
-				// C++ opens an ERROR_BLOCK here (check_expr.cpp populate_proc_parameter_list:7113) so the header, the
+				// C++ opens an ERROR_BLOCK here (check_expr.cpp evaluate_where_clauses:7154) so the header, the
 				// definition list and the caller-location line are flushed together. Without
 				// it the unblocked error_line output raced ahead of the error() -- which goes
 				// through the collector and is position-sorted -- so the continuation lines
@@ -960,17 +960,17 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 				defer end_error_block()
 
 				// Display error with clause expression
-				// C++ Reference: check_expr.cpp populate_proc_parameter_list:7115-7117
+				// C++ Reference: check_expr.cpp evaluate_where_clauses:7156-7158
 				clause_str := expr_to_string(clause)
 				defer delete(clause_str)
 				error(clause, "'where' clause evaluated to false:\n\t%s", clause_str)
 
 				// Display polymorphic definitions from scope
-				// C++ Reference: check_expr.cpp evaluate_where_clauses:7150-7182
+				// C++ Reference: check_expr.cpp evaluate_where_clauses:7160-7194
 				if scope != nil {
 					print_count := 0
 
-					// C++ (check_expr.cpp evaluate_where_clauses:7121) walks scope->elements in SLOT order.
+					// C++ (check_expr.cpp evaluate_where_clauses:7162) walks scope->elements in SLOT order.
 					//
 					// Iterating an Odin map directly made this block nondeterministic: ten runs
 					// of the SAME binary on the SAME input produced SIX different orderings.
@@ -1003,12 +1003,12 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 					ordered_slots := scope_map_slot_order(ordered[:], context.temp_allocator)
 
 					// Iterate through scope elements and display TypeName and Constant entities
-					// C++ Reference: check_expr.cpp evaluate_where_clauses:7121-7150
+					// C++ Reference: check_expr.cpp evaluate_where_clauses:7162-7192
 					for e in ordered_slots {
 						#partial switch e.kind {
 						case .Type_Name:
 							// Display type definitions: name :: type;
-							// C++ Reference: check_expr.cpp evaluate_where_clauses:7155-7162
+							// C++ Reference: check_expr.cpp evaluate_where_clauses:7165-7175
 							// Note: The C++ comment says to print header only on first entity,
 							// but then doesn't actually use that check (line 6752 is commented out)
 							// The header fires from THIS arm too now. It used to be commented out
@@ -1025,8 +1025,8 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 
 						case .Constant:
 							// Display constant definitions
-							// C++ Reference: check_expr.cpp evaluate_where_clauses:7164-7178
-							// C++ Reference: check_expr.cpp evaluate_where_clauses:7149.
+							// C++ Reference: check_expr.cpp evaluate_where_clauses:7176-7191
+							// C++ Reference: check_expr.cpp evaluate_where_clauses:7177.
 							//
 							// THE TWO LEADING SPACES ARE LOAD-BEARING, and they are the whole of
 							// the upstream fix. The old header began with "\n", which put a BLANK
@@ -1054,11 +1054,11 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 
 							if is_type_untyped(e.type) {
 								// Untyped constant: name :: value;
-								// C++ Reference: check_expr.cpp evaluate_where_clauses:7168-7169
+								// C++ Reference: check_expr.cpp evaluate_where_clauses:7180-7181
 								error_line("\t\t%s :: %s;\n", e.token.text, value_str)
 							} else {
 								// Typed constant: name : type : value;
-								// C++ Reference: check_expr.cpp evaluate_where_clauses:7170-7174
+								// C++ Reference: check_expr.cpp evaluate_where_clauses:7182-7186
 								type_str := type_to_string(e.type)
 								error_line("\t\t%s : %s : %s;\n", e.token.text, type_str, value_str)
 							}
@@ -1067,8 +1067,8 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 					}
 				}
 
-				// C++ check_expr.cpp evaluate_where_clauses:7153-7156. Unlike the two "expects a constant boolean
-				// evaluation" branches above (C++ 7105/7109), which DO emit a second
+				// C++ check_expr.cpp evaluate_where_clauses:7196-7199. Unlike the two "expects a constant boolean
+				// evaluation" branches above (C++ 7145/7149), which DO emit a second
 				// diagnostic, this branch writes a CONTINUATION line carrying the position
 				// itself: error_line("%s at caller location\n", ...). The port used error()
 				// here too, which prefixed "Error: " and incremented the error count, so a
@@ -1081,19 +1081,19 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 		}
 
 		// Style check: prefer comma over &&
-		// C++ Reference: check_expr.cpp evaluate_where_clauses:7184-7195
+		// C++ Reference: check_expr.cpp evaluate_where_clauses:7204-7215
 		if ast_file_vet_style(ctx.file) {
 			c := unparen_expr(clause)
 			// Check if it's a binary expression with Cmp_And (&&)
-			// C++ Reference: check_expr.cpp evaluate_where_clauses:7185-7195
+			// C++ Reference: check_expr.cpp evaluate_where_clauses:7206-7214
 			if binary, ok := c.derived.(^ast.Binary_Expr); ok {
 				if binary.op.kind == .Cmp_And {
 					// Error: Prefer comma over &&
-					// C++ Reference: check_expr.cpp evaluate_where_clauses:7187-7193
+					// C++ Reference: check_expr.cpp evaluate_where_clauses:7208
 					error(c, "Prefer to separate 'where' clauses with a comma rather than '&&'")
 
 					// Show suggestion with left and right parts
-					// C++ Reference: check_expr.cpp evaluate_where_clauses:7188-7191
+					// C++ Reference: check_expr.cpp evaluate_where_clauses:7209-7211
 					x := expr_to_string(binary.left)
 					defer delete(x)
 					y := expr_to_string(binary.right)
@@ -1292,8 +1292,13 @@ add_deps_from_child_to_parent :: proc(decl: ^Decl_Info) {
 	{
 		sync.rw_mutex_shared_lock(&decl.type_info_deps_mutex)
 		sync.rw_mutex_lock(&decl.parent.type_info_deps_mutex)
-		for type_dep in decl.type_info_deps {
-			decl.parent.type_info_deps[type_dep] = {}
+		for h, type_dep in decl.type_info_deps {
+			// C++ Reference: check_decl.cpp:2100-2101 `for (auto const &tt : decl->type_info_deps)
+			// type_set_add(&decl->parent->type_info_deps, tt)`. The pair carries its hash, so the
+			// parent is keyed identically -- no rehash, and the incumbent is not displaced.
+			if h not_in decl.parent.type_info_deps {
+				decl.parent.type_info_deps[h] = type_dep
+			}
 		}
 		sync.rw_mutex_unlock(&decl.parent.type_info_deps_mutex)
 		sync.rw_mutex_shared_unlock(&decl.type_info_deps_mutex)
@@ -1843,6 +1848,11 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 
 				// Create using variable for each struct field, in SLOT order. LEDGER #500.
 				//
+				// CITEMONO: this citation registers as an INVERSION and the inversion is CORRECT to ignore --
+				// it deliberately re-cites the SAME C++ block (2189-2207) that the `if t.kind == .Struct`
+				// above already cites, because this note explains that block's iteration order. A second
+				// reference to an already-cited range always reads as a backwards jump. Do not "fix" it.
+				//
 				// C++ Reference: check_decl.cpp check_proc_body:2189-2205 (the old citation said 2086-2095, which
 				// is dependency propagation between decl->deps and decl->parent->deps -- a drifted
 				// reference of the #134 family, found by grepping for alloc_entity_using_variable
@@ -1935,7 +1945,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 	}
 
 	// Evaluate where clauses
-	// C++ Reference: check_decl.cpp check_proc_body:2120-2124
+	// C++ Reference: check_decl.cpp check_proc_body:2227
 	where_clauses: []^ast.Expr = nil
 	if decl.proc_lit != nil {
 		where_clauses = decl.proc_lit.where_clauses
@@ -1943,49 +1953,49 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 	where_clause_ok := evaluate_where_clauses(ctx, nil, decl.scope, where_clauses, !decl.where_clauses_evaluated)
 	if !where_clause_ok {
 		// Where clauses failed, don't check body
-		// C++ Reference: check_decl.cpp check_proc_body:2121-2123
+		// C++ Reference: check_decl.cpp check_proc_body:2228-2230
 		return false
 	}
 	decl.where_clauses_evaluated = true
 
 	// Open procedure body scope
-	// C++ Reference: check_decl.cpp check_proc_body:2126
+	// C++ Reference: check_decl.cpp check_proc_body:2233
 	check_open_scope(ctx, body)
 	{
 		// Set scope's declaration info
-		// C++ Reference: check_decl.cpp check_proc_body:2128
+		// C++ Reference: check_decl.cpp check_proc_body:2235
 		ctx.scope.decl_info = decl
 
 		// Insert using variables into body scope (second pass, no error checking)
-		// C++ Reference: check_decl.cpp check_proc_body:2130-2135
+		// C++ Reference: check_decl.cpp check_proc_body:2237-2242
 		for puv in using_entities {
 			uvar := puv.uvar
 			prev := scope_insert(ctx.scope, uvar)
 			_ = prev // Ignore conflicts (already checked above)
-			// C++ Reference: check_decl.cpp check_proc_body:2133: "Don't err here"
+			// C++ Reference: check_decl.cpp check_proc_body:2241: "Don't err here"
 		}
 
 		// Sanity checks for procedure state
-		// C++ Reference: check_decl.cpp check_proc_body:2137-2142
+		// C++ Reference: check_decl.cpp check_proc_body:2244-2249
 		assert(decl.proc_checked_state != .Checked)
 		if decl.defer_use_checked {
 			assert(is_type_polymorphic(type, true))
 			// This should never happen in production
-			// C++ Reference: check_decl.cpp check_proc_body:2140
+			// C++ Reference: check_decl.cpp check_proc_body:2247
 			error(token, "Defer Use Checked: %s", decl.entity.token.text)
 			assert(!decl.defer_use_checked)
 		}
 
 		// Check all statements in the procedure body
-		// C++ Reference: check_decl.cpp check_proc_body:2144
+		// C++ Reference: check_decl.cpp check_proc_body:2251
 		check_stmt_list(ctx, body.stmts, {.Check_Scope_Decls})
 
 		// Mark defer use as checked
-		// C++ Reference: check_decl.cpp check_proc_body:2146
+		// C++ Reference: check_decl.cpp check_proc_body:2253
 		decl.defer_use_checked = true
 
 		// Validate all value declarations have entities
-		// C++ Reference: check_decl.cpp check_proc_body:2188-2198
+		// C++ Reference: check_decl.cpp check_proc_body:2255-2266
 		// NOTE: In Odin, entities are stored in ast_entity_map, not on AST nodes
 		for stmt in body.stmts {
 			if stmt.derived != nil {
@@ -1995,7 +2005,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 						if ident, is_ident := name.derived.(^ast.Ident); is_ident {
 							if !is_blank_ident(ident.name) {
 								// Get entity directly from AST node
-								// C++ Reference: check_decl.cpp check_proc_body:2193 (name->Ident.entity)
+								// C++ Reference: check_decl.cpp check_proc_body:2261 (name->Ident.entity)
 								entity := cast(^Entity)cast(rawptr)ident.entity
 								assert(entity != nil, "Value declaration identifier must have entity")
 							}
@@ -2006,45 +2016,45 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 		}
 
 		// Validate return statements for procedures with results
-		// C++ Reference: check_decl.cpp check_proc_body:2161-2169
+		// C++ Reference: check_decl.cpp check_proc_body:2268-2276
 		if proc_type.result_count > 0 {
 			if !check_is_terminating(ctx, &body.node, "") {
 				if token.kind == .Ident {
 					error(body.close, "Missing return statement at the end of the procedure '%s'", token.text)
 				} else {
 					// Anonymous procedure (lambda)
-					// C++ Reference: check_decl.cpp check_proc_body:2166-2167
+					// C++ Reference: check_decl.cpp check_proc_body:2273-2274
 					error(body.close, "Missing return statement at the end of the procedure")
 				}
 			}
 		} else if proc_type.diverging {
 			// Validate diverging procedures have diverging call
-			// C++ Reference: check_decl.cpp check_proc_body:2170-2179
+			// C++ Reference: check_decl.cpp check_proc_body:2277-2286
 			if !check_is_terminating(ctx, &body.node, "") {
 				if token.kind == .Ident {
 					error(body.close, "Missing diverging call at the end of the procedure '%s'", token.text)
 				} else {
 					// Anonymous procedure (lambda)
-					// C++ Reference: check_decl.cpp check_proc_body:2175-2176
+					// C++ Reference: check_decl.cpp check_proc_body:2282-2283
 					error(body.close, "Missing diverging call at the end of the procedure")
 				}
 			}
 		}
 	}
 	// Close procedure body scope
-	// C++ Reference: check_decl.cpp check_proc_body:2182
+	// C++ Reference: check_decl.cpp check_proc_body:2289
 	check_close_scope(ctx)
 
 	// Check for unused variables and shadowing
-	// C++ Reference: check_decl.cpp check_proc_body:2184
+	// C++ Reference: check_decl.cpp check_proc_body:2291
 	check_scope_usage(ctx.checker, ctx.scope, check_vet_flags(&ctx.checker.info, &body.node))
 
 	// Propagate dependencies from nested proc to parent
-	// C++ Reference: check_decl.cpp check_proc_body:2186
+	// C++ Reference: check_decl.cpp check_proc_body:2293
 	add_deps_from_child_to_parent(decl)
 
 	// Track variadic reuse optimization data
-	// C++ Reference: check_decl.cpp check_proc_body:2188-2195
+	// C++ Reference: check_decl.cpp check_proc_body:2295-2302
 	for vr in decl.variadic_reuses {
 		if vr.slice_type == nil do continue
 		assert(vr.slice_type.kind == .Slice, "variadic_reuse slice_type must be Slice")
@@ -2057,7 +2067,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 	}
 
 	// Success
-	// C++ Reference: check_decl.cpp check_proc_body:2197
+	// C++ Reference: check_decl.cpp check_proc_body:2304
 	return true
 }
 

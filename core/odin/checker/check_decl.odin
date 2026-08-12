@@ -291,7 +291,7 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		}
 	}
 
-	// C++ Reference: check_decl.cpp:1677-1691
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1747-1755
 	if e_var.is_foreign {
 		if init_expr != nil {
 			error(e.token, "A foreign variable declaration cannot have a default value")
@@ -304,6 +304,8 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 			error(e.token, "A foreign variable declaration can not be scoped to a module and must be declared in a 'foreign {{' (without a library) block")
 		}
 	}
+
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1756-1761
 	if len(ac.link_name) > 0 {
 		e_var.link_name = ac.link_name
 	}
@@ -311,7 +313,7 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		e_var.link_section = ac.link_section
 	}
 
-	// C++ Reference: check_decl.cpp check_global_variable_decl:1693-1716
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1763-1786
 	if e_var.is_foreign || e_var.is_export {
 		name := e.token.text
 		if len(e_var.link_name) > 0 {
@@ -334,12 +336,12 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		}
 	}
 
-	// C++ Reference: check_decl.cpp check_global_variable_decl:1718-1720
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1788-1790
 	if len(e_var.link_name) > 0 {
 		e.flags += {.Custom_Link_Name}
 	}
 
-	// C++ Reference: check_decl.cpp check_global_variable_decl:1722-1727
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1792-1797
 	if init_expr == nil {
 		if type_expr == nil {
 			set_entity_type(e, t_invalid)
@@ -347,12 +349,27 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		return
 	}
 
-	// C++ Reference: check_decl.cpp check_global_variable_decl:1729-1731
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1799-1800, then :1807.
+	//
+	// C++ has SIX MORE LINES between them that the port does not (check_decl.cpp:1801-1806):
+	//     if (check_vet_shadowing_assignment(ctx->checker, e, init_expr)) {
+	//         error(e->token, "Illegal declaration cycle of `%.*s`", LIT(e->token.string));
+	//         o.mode = Addressing_Invalid; o.type = t_invalid; e->type = t_invalid;
+	//     }
+	// DELIBERATELY NOT PORTED, measured: check_vet_shadowing_assignment matches exactly
+	// `x := x` and `x := <ident> if c else <ident>` where the ident resolves to `e` itself
+	// (checker.cpp:625-646 -- the predicate has only those two arms). On every shape that
+	// predicate accepts, the port's EARLIER dependency-walk detector
+	// (entity_helpers.odin:1469 = check_expr.cpp:1815) has already fired and already produced
+	// C++'s exact output, cascade included: probes p680a/e/g plus `x := y; y := x`,
+	// `x: [2]int = x`, `@(rodata) x: int = x` -- 8 shapes, all byte-identical to the oracle.
+	// Porting it would add a second diagnostic at an anchor that already has one. #266 is the
+	// standing rule about implementing branches no input reaches. LEDGER #680.
 	o := Operand{}
 	check_expr_with_type_hint(ctx, &o, init_expr, entity_type(e))
 	check_init_variable(ctx, e, &o, "variable declaration")
 
-	// C++ Reference: check_decl.cpp check_global_variable_decl:1732-1755
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1808-1831
 	if e_var.is_rodata && o.mode != .Constant {
 		// ERROR_BLOCK()
 		error(o.expr, "Variables declared with @(rodata) must have constant initialization")
@@ -368,7 +385,7 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 
 					elem_e := entity_of_node(ctx.info, elem)
 					tav := get_type_and_value(ctx, elem)
-					// NOTE: C++ check_decl.cpp check_global_variable_decl:1746 structure difference
+					// NOTE: C++ check_decl.cpp check_global_variable_decl:1822 structure difference
 					// C++:   if (tav.mode != Constant && e == nil && elem->kind != Ast_ProcLit)
 					// Odin:  if (tav.mode != .Constant && elem_e == nil) { if !is_proc_lit { ... } }
 					// Both are functionally equivalent - Odin nests the proc_lit check for clarity
@@ -387,7 +404,7 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		}
 	}
 
-	// C++ Reference: check_decl.cpp check_global_variable_decl:1757
+	// C++ Reference: check_decl.cpp check_global_variable_decl:1833
 	check_rtti_type_disallowed(ctx, e.token, entity_type(e), "A variable declaration is using a type, %s, which has been disallowed")
 }
 

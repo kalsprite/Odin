@@ -61,6 +61,15 @@ fi
 echo $$ > "$PARITY_LOCK"
 trap 'rm -rf "$TMP"; rm -f "$PARITY_LOCK"' EXIT
 
+# STARTUP REAP. The trap above frees this run's TMP on a normal exit -- but a trap cannot run when
+# the process is SIGKILLed, and these runs do get killed (five shells by hand on 2026-08-09 alone,
+# plus anything cut short by a wedged machine). Those TMPs leak by construction, and /tmp here is a
+# 94 GB tmpfs, so a leak is RAM. By 2026-08-09 that had reached 58.7 GB in 18,317 abandoned dirs and
+# wedged every shell on the box. A startup sweep is the only thing that bounds it; see the age and
+# signature guards in reap_scratch.sh for why this is safe beside a concurrent sibling.
+. .claude/tools/reap_scratch.sh
+reap_scratch
+
 
 # THE ORACLE MUST EXIST. On 2026-08-05 the ./odin binary vanished mid-tick (cause unknown).
 # A missing oracle does not error here -- `timeout 180 ./odin check ...` just fails, the captured
@@ -234,3 +243,29 @@ while read -r p; do
 done < "$LIST"
 compared=$((n-excluded))
 echo "PARITY-DONE packages=$n compared=$compared excluded=$excluded count_mismatches=$cnt_mismatch text_mismatches=$txt_mismatch attrib_mismatches=$att_mismatch"
+
+# ------------------------------------------------------------------------------------------------
+# EXIT GATE (#749). Until this was added, the script ended on the bare `echo` above and ALWAYS
+# EXITED 0: it printed its mismatch counts and told its caller NOTHING. Jon: "if its got an error
+# in the checker port it needs announced from tool." THE EXIT STATUS IS THE ANNOUNCEMENT; a count
+# in a summary line is not.
+#
+# WHY ONLY `text_mismatches` IS GATED -- the baseline is NOT clean, and forcing a zero-gate onto a
+# nonzero baseline builds a gate that fails every run, which gets ignored and then removed (#215).
+# Measured over three recorded sweeps (batch718b/batch720/batch740):
+#   text_mismatches  = 0, 0, 0   <- deterministic, 0 in every sweep since #331. THE INVARIANT.
+#   count_mismatches = 1, 1, 2   <- NOT even stable; core/rexcode/isa/x86/tools is a known open
+#                                   divergence and the column moves run to run.
+#   attrib_mismatches= 2, 2, 2   <- core/rexcode/isa/{ppc,rsp}/tools: ORACLE nondeterminism,
+#                                   proven by an oracle-vs-oracle control (#341). Not ours to fix.
+# count and attrib therefore stay REPORTED but UNGATED. When either is driven to 0 and held there,
+# tighten this gate -- do not gate them on the strength of one green run (#213).
+if [ "$compared" -eq 0 ]; then
+  echo "PARITY-ABORTED 0 of $n packages were compared -- the numbers above are NOT a measurement" >&2
+  exit 1
+fi
+if [ "$txt_mismatch" -ne 0 ]; then
+  echo "PARITY-FAILED $txt_mismatch package(s) produce DIFFERENT DIAGNOSTIC TEXT -- see the TEXT rows above" >&2
+  exit 1
+fi
+exit 0

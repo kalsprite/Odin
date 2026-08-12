@@ -10,7 +10,7 @@ a second comparator is how #509's phantom divergences got manufactured.
 
 usage: statefields.py <REF_BIN> <PORT_BIN> [PKGLIST]
 """
-import collections, os, subprocess, sys, tempfile
+import atexit, collections, os, shutil, subprocess, sys, tempfile
 
 REPO = "/home/kalsprite/dev/odin"
 sys.path.insert(0, os.path.join(REPO, ".claude", "tools"))
@@ -21,6 +21,7 @@ pkglist = sys.argv[3] if len(sys.argv) > 3 else os.path.join(REPO, ".claude/tool
 
 pkgs = [l.strip() for l in open(pkglist) if l.strip() and not l.startswith("#")]
 tmp = tempfile.mkdtemp()
+atexit.register(shutil.rmtree, tmp, ignore_errors=True)  # #649: leaked without this; /tmp is a tmpfs, so a leak is RAM
 by_field = collections.Counter()
 by_field_pkgs = collections.defaultdict(set)
 examples = {}

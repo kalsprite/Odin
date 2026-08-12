@@ -340,7 +340,22 @@ parse_file :: proc(p: ^Parser, file: ^ast.File) -> bool {
 	}
 	p.file.pkg_name = pkg_name.text
 
-	pd := ast.new(ast.Package_Decl, pkg_name.pos, end_pos(p.prev_tok))
+	// LEDGER #712: the node starts at the `package` KEYWORD, not at the package NAME.
+	//
+	// C++ has no per-node pos/end; it computes them on demand, and `ast_token` for an
+	// Ast_PackageDecl returns `node->PackageDecl.token` -- the `package` keyword (parser.cpp's
+	// ast_package_decl is constructed from that token). Every C++ diagnostic anchored on a package
+	// declaration therefore starts at column 1 and its caret spans `package <name>`.
+	//
+	// The port passed `pkg_name.pos`, so the node began at the NAME: `checker.cpp
+	// check_unique_package_names:7412`'s duplicate-package error came out at 1:9 with a three-column
+	// caret (`^~^` under `dup`) instead of 1:1 with `^~~~~~~~~~^` under `package dup`. Note the
+	// keyword was already stored one line below as `pd.token` -- it simply was not the node anchor.
+	// This is #197's shape exactly, and #197's fix was the same 1:9 -> 1:1 correction elsewhere.
+	//
+	// `end_pos(p.prev_tok)` is unchanged and already correct: prev_tok is the name, so the span
+	// still ends at the end of the name.
+	pd := ast.new(ast.Package_Decl, p.file.pkg_token.pos, end_pos(p.prev_tok))
 	pd.docs    = docs
 	pd.token   = p.file.pkg_token
 	pd.name    = pkg_name.text
@@ -2719,7 +2734,13 @@ parse_var_type :: proc(p: ^Parser, flags: ast.Field_Flags) -> ^ast.Expr {
 	if .Typeid_Token in flags && p.curr_tok.kind == .Typeid {
 		tok := expect_token(p, .Typeid)
 		specialization: ^ast.Expr
-		end := tok.pos
+		// `end` must be the END of the `typeid` token, not its start. The sibling construction
+		// site (parse_operand's `.Typeid` case, ~:4008) already passes `end_pos(tok)`; this one
+		// passed `tok.pos`, giving the node a ZERO-WIDTH span. Nothing read that end until
+		// #672 anchored "A type parameter may not have a default value" on the type expression,
+		// and the caret rendered EMPTY where the oracle prints `^~~~~^`. The two sites were
+		// simply inconsistent. LEDGER #672 (the #302 caret family).
+		end := end_pos(tok)
 		if allow_token(p, .Quo) {
 			specialization = parse_type(p)
 			end = specialization.end

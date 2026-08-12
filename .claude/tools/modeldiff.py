@@ -36,7 +36,7 @@ OUTPUT: one line per package, plus the excess entries on each side when they dif
 excess on BOTH sides usually means instantiation multiplicity (#468), not a layout defect -- check
 whether -no-threads shrinks it before treating it as one.
 """
-import collections, os, re, subprocess, sys, tempfile
+import atexit, collections, os, re, shutil, subprocess, sys, tempfile
 
 SUMMARY = False
 REPO = "/home/kalsprite/dev/odin"
@@ -55,6 +55,42 @@ def norm_kind(k): return k.replace("_", "").lower()
 # implementations render types through independent printers, so a cosmetic spelling difference
 # would swamp every other signal. It is still emitted because it groups instantiations within one
 # side, which is what separated "N duplicates" from "N distinct types" in #510.
+# `tidepn` (|decl.type_info_deps|, schema v3) is a GATE as of #701. It is NOT in STATE_IGNORED.
+#
+# It is the ONLY differential coverage of the ~51 add_type_info_type call sites and of the min-dep
+# consumer wired in #638. None of those emits a diagnostic, so no other gate in this tree can see
+# them: every defect it found was invisible to 323 green parity packages.
+#
+# PROMOTION HISTORY, kept because the first attempt was wrong and the reason matters:
+#   #692  PROMOTED on a floor of 0 measured over three runs -- but on only THREE PACKAGES
+#         (core/unicode, core/strings, core/mem), none of which imports core:reflect. The first
+#         full-corpus run came back 786 entities / 117 packages. DEMOTED in #695.
+#   #694  `#soa` types were never registered at all                        786/117 -> 435/53
+#   #697  the variadic `..any` path substituted a bare add_type_info_type for C++'s
+#         check_assignment, so the `any` TARGET type was never registered
+#         by any call site in the port                                     435/53  -> 23/17
+#   #700  check_comparison's two typeid arms register BOTH operand types in C++ and only ONE in
+#         the port, so every `typeid` compared against a type lost the
+#         `typeid` entry                                                   23/17   -> 1/1
+#   #701  the type-assertion `any` branch registered BEFORE assigning o.type, so it picked up the
+#         `any` source; C++ assigns first and both of its calls land on
+#         the asserted type                                                1/1     -> 0/0
+#
+# PROMOTED here on the evidence #692 did not have:
+#   - the FULL 323-package sweep reads 0, not a sample (#115)
+#   - measured TWICE, independently, both 0
+#   - a POSITIVE CONTROL: the pre-#701 binary still reports the
+#     `my_custom_flag_checker  tidepn: ref=1 port=2` row, so the gate is proven to detect the
+#     defect it just closed rather than being trivially green (#538/#623)
+#
+# If this ever goes red, the row names the entity and the direction. Escalate a COUNT to a SET
+# before theorising (#111): a temporary per-entity dep-NAME emit on both dumps identified #699's
+# two defects in one run. C++'s TypeSet element is `TypeInfoPair`, so the iteration variable is
+# `tt.type`, not `tt`.
+#
+# `type` STAYS IGNORED and is a different case entirely: the two implementations render types through
+# independent printers, so it is cosmetically divergent BY CONSTRUCTION rather than by an unmeasured
+# floor. No amount of measurement promotes it (#108).
 STATE_IGNORED = {"type"}
 
 def read_dump(path):
@@ -83,7 +119,19 @@ def read_dump(path):
             # The port renders the package as `name#id` (#464); C++ has no id column. Strip it so
             # the two are comparable -- the id earns its place WITHIN one side, not across.
             pkg = re.sub(r"#\d+$", "", fs[1])
-            key = (pkg, fs[2], norm_kind(fs[3]), fs[4], fs[5])
+            kv_pre = {}
+            for tok in fs[6:]:
+                if "=" in tok:
+                    _k, _v = tok.split("=", 1)
+                    kv_pre[_k] = _v
+            # #623. Key on the source POSITION, not the context-derived PKG. `pkg` comes from the
+            # CHECKER CONTEXT in both implementations (C++ src/checker.cpp:2259 `e->pkg = c->pkg`),
+            # so two entities that were declared in different files can land on the same key and
+            # register as a one-sided PRESENCE that is really a collision. That is what #560
+            # recorded as unresolvable; it is resolvable, just not in the checker. Position is
+            # unique per declaration, so the collision cannot form.
+            _pos = kv_pre.get("pos", "")
+            key = (_pos, fs[2], norm_kind(fs[3]), fs[4], fs[5])
             c[key] += 1
             kv = {}
             for tok in fs[6:]:
@@ -122,14 +170,19 @@ def split_state(fa, fb, ea, eb):
             # and therefore pairs ARBITRARILY. That is the same manufacture-a-difference the
             # docstring warns about, one case further along.
             #
-            # #560 is the worked example: key (_weierstrass, fe, Variable, 8, 8) carries TWO
-            # entities on each side -- `for fe in arg1` locals in identical bodies across four
-            # _fiat field packages. The four positions are IDENTICAL on both sides; only which
-            # entity pairs with which differs, and the zip reported that as a `pos` divergence.
-            # It is not one. Entity `pkg` is context-derived in BOTH implementations
-            # (C++ checker.cpp:2251 `e->pkg = c->pkg`, the only Entity pkg assignment in src/),
-            # so for a body reachable from two packages the attribution follows check order, and
-            # neither side is canonically right.
+            # #560 was the worked example, under the OLD pkg-based key: (_weierstrass, fe,
+            # Variable, 8, 8) carried TWO entities on each side -- `for fe in arg1` locals in
+            # identical bodies across four _fiat field packages. Entity `pkg` is context-derived
+            # in BOTH implementations (C++ checker.cpp:2251 `e->pkg = c->pkg`, the only Entity pkg
+            # assignment in src/), so for a body reachable from two packages the attribution
+            # follows check order and neither side is canonically right.
+            #
+            # #623 REMOVED THE CAUSE rather than tolerating it: the key is now the source POSITION,
+            # which is unique per declaration, so distinct entities can no longer share a key.
+            # Measured after the swap: unpairable 29 -> 0 across all 323 packages, spread 0 over
+            # 3 runs. This branch is therefore currently UNREACHED. It is kept because it is a
+            # correctness guard, not a gate -- if a future dump format made positions non-unique
+            # again, the alternative is silent arbitrary pairing. Do not read its 0 as a result.
             #
             # Counted, NOT dropped: `ma != mb` already told us these keys differ. Reporting them
             # separately keeps that visible while removing them from the number a gate reads.
@@ -225,7 +278,16 @@ def main():
     if len(args) < 3:
         sys.exit("usage: modeldiff.py [--summary] <REF_BIN> <PORT_BIN> <pkg> [pkg...]")
     ref, port, pkgs = args[0], args[1], args[2:]
+    # #649: THIS LINE WEDGED THE MACHINE. modelsweep.sh invokes this script ONCE PER PACKAGE
+    # (modelsweep.sh:139-142, a `while read -r pkg` loop over 323 packages), and the mkdtemp here
+    # used to have no cleanup at all -- so every full model sweep leaked 323 directories, each
+    # holding an ~8 MB p.txt/r.txt pair. /tmp here is a 94 GB TMPFS, i.e. RAM, so those bytes are
+    # taken from the machine: by 2026-08-09 it was 18,317 dirs and 58.7 GB, and every shell on the
+    # box started returning rc=1, `true` included.
+    # atexit rather than a `finally`: main() has several `sys.exit`/early-return paths, and a
+    # cleanup that only covers the fall-through path is the same bug with a smaller blast radius.
     tmp = tempfile.mkdtemp()
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)
     bad = 0
     layout_bad = 0
     state_total = 0
@@ -285,8 +347,15 @@ def main():
         #   presence   = keys one side has and the other lacks ENTIRELY.  STABLE, gateable.
         #   multiplicity = same key, different count.  #468, inherently noisy, report-only.
         # Splitting them is what lets the sweep gate on something that holds still.
-        pa = {k for k in ea if k not in b}
-        pb = {k for k in eb if k not in a}
+        # #623 HYBRID. Presence is computed over entities with a REAL source position only.
+        # Synthesised entities dump pos=<instantiation> -- they have no position, so pos-keying
+        # buckets ALL of them together and their #468 multiplicity differences surface as PRESENCE,
+        # which is precisely the noisy class presence exists to exclude. Measured: pos-keying alone
+        # left presence_entities=5, ALL FIVE `<instantiation>`. They are still counted as excess
+        # (na/nb), so they remain visible as MULTIPLICITY -- nothing is dropped, only reclassified.
+        _synth = lambda k: k[0].startswith("<")
+        pa = {k for k in ea if k not in b and not _synth(k)}
+        pb = {k for k in eb if k not in a and not _synth(k)}
         npres = len(pa) + len(pb)
         # STATE = per-field disagreement on entities both sides have in equal number. New in v2:
         # v1 compared four facts (name/kind/size/align) and could not express "same entity, wrong
@@ -296,8 +365,16 @@ def main():
         # Ordered most-specific first. LAYOUT outranks STATE because a size/align disagreement is
         # the higher-severity finding and #514's signature; STATE outranks MULTIPLICITY because
         # multiplicity is the known, accepted #468 residue and must not mask a real field defect.
+        # #622. PRESENCE HAD NO ARM HERE AT ALL. A package whose only divergence was presence fell
+        # through to `else` and was labelled MULTIPLICITY -- the bucket this file's own comment at
+        # the npres computation calls "inherently noisy, report-only" -- while presence is the one
+        # it calls "STABLE, gateable". The stable signal was being filed under the noisy label, so
+        # `grep PRESENCE` over a sweep found nothing and the 5 affected packages were unreachable.
+        # Ranked AFTER state deliberately: this promotes presence above the noise floor without
+        # reordering any severity that was already established (LAYOUT > STATE unchanged).
         if nl:                        status = "LAYOUT-DIFFER"
         elif ns:                      status = "STATE-DIFFER"
+        elif npres:                   status = "PRESENCE"
         elif na == nb == 0:           status = "MODEL-MATCH"
         else:                         status = "MULTIPLICITY"
         if nl or ns or na or nb: bad += 1
@@ -315,6 +392,19 @@ def main():
             unp = f"  unpairable={nunp}" if nunp else ""
             print(f"{p:34s} {status}  ref={sum(a.values()):5d} port={sum(b.values()):5d} "
                   f"layout={nl} state={ns} presence={npres} excess_ref={na} excess_port={nb}{extra}{unp}")
+        # #622. Name the presence divergences. Without this the count is unactionable: it says 10
+        # entities exist on one side only and gives no way to learn which.
+        # NOT gated on SUMMARY: modelsweep invokes this with --summary, and the LAYOUT detail lines
+        # below print unconditionally. Gating presence on `not SUMMARY` meant the names never reached
+        # the sweep -- the exact gap #622 exists to close. Caught by verifying the output instead of
+        # assuming the patch worked.
+        if npres:
+            for k in sorted(pa)[:12]:
+                print(f"     PRESENCE ref-only  {k}")
+            for k in sorted(pb)[:12]:
+                print(f"     PRESENCE port-only {k}")
+            if len(pa) > 12 or len(pb) > 12:
+                print(f"     PRESENCE ... truncated (ref-only={len(pa)} port-only={len(pb)})")
         for k, v in sorted(layout.items())[:8]:
             pkg, nm, kind, s_a, al_a, s_b, al_b = k
             print(f"     LAYOUT x{v} {pkg}.{nm} ({kind})  ref {s_a} {al_a}  port {s_b} {al_b}")

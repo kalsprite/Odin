@@ -490,7 +490,10 @@ def main():
             print("  %-22s%5d   (left alone, never guessed)" % (k, stats[k]))
     print("  already anchored    %5d   DRIFTED %d" % (stats["already-anchored"], stats["DRIFTED"]))
 
-    for f, ln, cite, got in drifted[:40]:
+    # #615: this was `drifted[:40]`, a SILENT CAP. After the master merge it printed 40 of 54 and the
+    # summary line said 54 -- so a reader who acted on the printed list would have "fixed" 40 and left 14
+    # unexamined while believing the set was complete. A gate must never show less than it counts.
+    for f, ln, cite, got in drifted:
         print("    DRIFT %-26s:%-5d %-46s now inside: %s" % (f, ln, cite, got))
     if mode == "--report":
         for f, ln, cite, why in unresolved[:25]:

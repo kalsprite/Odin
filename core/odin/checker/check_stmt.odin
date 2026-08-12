@@ -86,8 +86,6 @@ compound_assign_to_binary_op :: proc(kind: tokenizer.Token_Kind) -> tokenizer.To
 	}
 }
 
-// is_diverging_expr checks if an expression never returns (e.g., panic)
-// C++ Reference: check_stmt.cpp lines 0-24
 // immutable_hint_offset mirrors what show_error_on_line (src/error.cpp:283) RETURNS, without
 // printing anything: the error position's index within its leading-whitespace-trimmed source
 // line, or -1 when there is no line to align against. This port never renders the source echo
@@ -106,6 +104,10 @@ immutable_hint_offset :: proc(ctx: ^Checker_Context, pos: tokenizer.Pos) -> int 
 	return idx
 }
 
+// is_diverging_expr checks if an expression never returns (e.g., panic)
+// C++ Reference: check_stmt.cpp lines 0-24
+// (STRANDED above a different procedure until #734 -- another procedure was inserted between
+//  this doc comment and the definition it documents.)
 is_diverging_expr :: proc(ctx: ^Checker_Context, expr: ^ast.Expr) -> bool {
 	expr := unparen_expr(expr)
 
@@ -2207,7 +2209,21 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 			// so seen_cases stayed EMPTY and every enum switch reported all of its members
 			// as unhandled. Verified by instrumentation: `[CASE] mode=Value type=untyped bool`
 			// and `seen_cases_len=0`.
-			if !is_typeid_switch && y.mode != .Type {
+			// #652: this guard used to read `!is_typeid_switch && y.mode != .Type`. The
+			// `!is_typeid_switch` conjunct is INVENTED -- C++ (check_stmt.cpp:1303) is a plain
+			// if/else on the OPERAND'S MODE and nothing else:
+			//     if (y.mode == Addressing_Type) { ...type branch... }
+			//     else                           { convert_to_typed; compare; seen-map }
+			// so whenever the switch subject was a typeid, the port skipped convert_to_typed,
+			// check_comparison AND the seen-map write for EVERY case expression -- including ones
+			// that are not types at all. Measured under-rejection, reproduced 3/3:
+			//     f :: proc(tid: typeid) -> int { switch tid { case 5: return 1 }; return 0 }
+			// oracle: "Cannot convert '5' to 'typeid' from 'untyped integer', got 5"; port: silent.
+			// The SAME shape in a NON-typeid switch was caught byte-identically by both, which is
+			// what isolated the defect to this one conjunct rather than to the conversion machinery.
+			// `y.mode != .Type` and the `y.mode == .Type` block below are already mutually
+			// exclusive, so the two ifs now reproduce C++'s if/else exactly.
+			if y.mode != .Type {
 				convert_to_typed(ctx, &y, x.type)
 				if y.mode == .Invalid {
 					continue
@@ -2435,6 +2451,13 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 	x.mode = .Invalid
 	check_expr(ctx, &x, rhs)
 	check_assignment(ctx, &x, nil, "type switch expression")
+	// C++ Reference: check_stmt.cpp check_type_switch_stmt:1443 -- the type switch's SUBJECT type is
+	// registered for RTTI, immediately after check_assignment and BEFORE the Union/Any validation
+	// below. The port had the two surrounding statements and not this one, so every type switch
+	// registered one fewer type-info dependency than the reference. LEDGER #689; measured by the
+	// `tidepn` column (#687), which is the only instrument that can see a registration that emits
+	// nothing.
+	add_type_info_type(ctx, x.type)
 
 	// C++ lines 1409-1422: Validate type is Union or Any
 	Type_Switch_Kind :: enum {
@@ -2510,9 +2533,27 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 	}
 
 	// C++ lines 1457-1459: Track seen types for duplicate case type detection
-	// Maps type to the AST node where it was first seen
+	// KEYED BY CANONICAL TYPE HASH, NOT BY TYPE POINTER. C++ Reference: check_stmt.cpp
+	// check_type_switch_stmt:1571 -- `if (type_set_update(&seen, y.type))`. `seen` is a **TypeSet**,
+	// whose slot is chosen by type_hash_canonical_type (name_canonicalization.hpp:58-67), so two
+	// STRUCTURALLY IDENTICAL types built as separate Type objects collide into one entry and the
+	// duplicate IS reported.
+	//
+	// This was `map[^Type]^ast.Expr` -- pointer identity -- and therefore a LIVE UNDER-REJECTION:
+	//
+	//     switch v in x { case ^int: ; case ^int: }
+	//
+	// builds two distinct `^int` Type objects, so the port saw two different keys and accepted a
+	// program the reference rejects with "Duplicate type case '^int'". Same defect class as #691;
+	// the shape was ported and the EQUALITY was not. LEDGER #693.
+	//
+	// The VALUE carries the representative type, not the AST node: the diagnostic below uses
+	// `y.expr` and `case_clause.case_pos` and never reads what is stored here, but the union
+	// exhaustiveness check further down iterates these entries and needs the ^Type. That is
+	// precisely why C++'s set element is a PAIR (`TypeInfoPair {Type *type; u64 hash;}`) rather
+	// than a bare hash.
 	nil_seen: ^ast.Expr = nil
-	seen_types := make(map[^Type]^ast.Expr, context.temp_allocator)
+	seen_types := make(map[u64]^Type, context.temp_allocator)
 	defer delete(seen_types)
 
 	// Process each case clause
@@ -2604,17 +2645,25 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 			//     at" and points at the duplicate itself; that is an upstream oddity, but parity
 			//     means reproducing it. The port had implemented the intuitive meaning.
 			//   * C++ breaks out of the type-expression loop; the port continued it.
-			if _, found := seen_types[y.type]; found {
-				begin_error_block()
-				defer end_error_block()
-
+			if _, found := seen_types[type_hash_canonical_type(y.type)]; found {
+				// ONE error call with an EMBEDDED "\n\t", not error+error_line. C++ Reference:
+				// check_stmt.cpp check_type_switch_stmt:1574-1578 --
+				//
+				//     error(y.expr, "Duplicate type case '%s'\n"
+				//                   "\tprevious type case at %s", expr_str, ...);
+				//
+				// The distinction is not cosmetic: the whole two-line message is rendered BEFORE
+				// the source line and caret, whereas an `error_line` after `error_node` appends
+				// AFTER them. The port emitted the note below the caret block and the oracle emits
+				// it above. C++ also has no ERROR_BLOCK() at this site -- with a single error call
+				// there is nothing to group -- so the port's begin/end_error_block pair is gone too.
 				expr_str := expr_to_string(y.expr)
 				defer delete(expr_str)
-				error_node(type_expr, "Duplicate type case '%s'", expr_str)
-				error_line("\tprevious type case at %s", token_pos_to_string(case_clause.case_pos))
+				error_node(type_expr, "Duplicate type case '%s'\n\tprevious type case at %s",
+					expr_str, token_pos_to_string(case_clause.case_pos))
 				break
 			}
-			seen_types[y.type] = type_expr
+			seen_types[type_hash_canonical_type(y.type)] = y.type
 
 			// Use this type for the tag variable (if single case)
 			if len(case_clause.list) == 1 && !saw_nil {
@@ -2625,6 +2674,32 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 		// Multiple cases or nil means tag keeps original type
 		if len(case_clause.list) > 1 || saw_nil {
 			case_type = x.type
+		}
+
+		// C++ Reference: check_stmt.cpp check_type_switch_stmt:1593-1597. This is a SECOND
+		// registration, and the port had only the first: :1566 registers per case EXPRESSION
+		// (ported at the `switch_kind == .Any` arm inside the loop above), while THIS one runs once
+		// per case CLAUSE, after the list has been walked.
+		//
+		// It is not a duplicate of the in-loop call, because the VALUE differs whenever the clause
+		// does not name exactly one type. C++ nulls `case_type` for a multi-type or nil-bearing
+		// clause and then falls back to `type_deref(x.type)` (:1590-1592), so such a clause
+		// registers the SWITCH SUBJECT's dereferenced type -- which the in-loop call never
+		// registers. The port's `case_type` follows the same flow but keeps `x.type` rather than
+		// nil as its sentinel, so the fallback is spelled as the explicit condition below.
+		//
+		// The deref is deliberate and NOT applied to the single-type case: `case ^Foo:` registers
+		// `^Foo` in C++, and a blanket `type_deref` would wrongly reduce it to `Foo`.
+		//
+		// `!is_type_untyped` is C++'s guard at :1594. LEDGER #690.
+		if switch_kind == .Any {
+			reg_type := case_type
+			if len(case_clause.list) != 1 || saw_nil {
+				reg_type = type_deref(x.type)
+			}
+			if !is_type_untyped(reg_type) {
+				add_type_info_type(ctx, reg_type)
+			}
 		}
 
 		// Create scope with tag variable
@@ -2651,6 +2726,32 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 			error_node(lhs, "Tag variable '%s' conflicts with existing entity", lhs_ident.name)
 		}
 
+		// C++ Reference: check_stmt.cpp check_type_switch_stmt:1607-1609 -- THREE calls follow the
+		// insertion, and the port had only the insertion:
+		//
+		//     add_entity(ctx, ctx->scope, lhs, tag_var);
+		//     add_entity_use(ctx, lhs, tag_var);
+		//     add_implicit_entity(ctx, stmt, tag_var);
+		//
+		// Both of the missing two record where the per-clause binding LIVES, and without them the
+		// binding is discoverable only by scanning the clause body for uses of the name -- which a
+		// consumer then has to disambiguate by type, because a clause may shadow it:
+		//
+		//     case int:
+		//         t := "shadow"   // a different entity, a different type
+		//
+		// add_entity_use puts the entity on the `t` of `t in x`; add_implicit_entity puts it on the
+		// CLAUSE, which is the form a backend wants -- it must bind `t` BEFORE lowering the body.
+		// Reported from a backend (rexcode/mir) that had to use the body-scan workaround.
+		//
+		// `case_stmt` is the clause, matching C++: in that loop `stmt` is the CaseClause being
+		// visited, not the enclosing switch.
+		//
+		// The ORDINARY (non-type) switch has no counterpart -- add_implicit_entity occurs exactly
+		// once in all of check_stmt.cpp, here.
+		add_entity_use(ctx, lhs, tag_var)
+		add_implicit_entity(ctx, case_stmt, tag_var)
+
 		// Check case body
 		viral_flags |= check_stmt_list(ctx, case_clause.body, flags)
 		check_close_scope(ctx)
@@ -2669,7 +2770,7 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 
 		for variant in variants {
 			found := false
-			for seen_type, _ in seen_types {
+			for _, seen_type in seen_types {
 				if are_types_identical(variant, seen_type) {
 					found = true
 					break
@@ -4653,8 +4754,6 @@ is_ast_range :: proc(expr: ^ast.Expr) -> bool {
 	return false
 }
 
-// check_unroll_range_stmt validates #unroll for loops (compile-time loop unrolling)
-// C++ Reference: check_stmt.cpp lines 895-1113
 // error_var_decl_identifier reports a declaration name that is not an identifier.
 //
 // C++ Reference: check_stmt.cpp error_var_decl_identifier:896-913. C++ funnels THREE call sites through this one
@@ -4685,6 +4784,10 @@ error_var_decl_identifier :: proc(name: ^ast.Expr) {
 	}
 }
 
+// check_unroll_range_stmt validates #unroll for loops (compile-time loop unrolling)
+// C++ Reference: check_stmt.cpp lines 895-1113
+// (STRANDED above a different procedure until #734 -- another procedure was inserted between
+//  this doc comment and the definition it documents.)
 check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt_Flag) -> Viral_State_Flags {
 	viral_flags: Viral_State_Flags = {}
 	stmt := node.derived.(^ast.Inline_Range_Stmt)

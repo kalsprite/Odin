@@ -37,7 +37,7 @@ The same two traps as modeldiff apply and are handled here: the reference needs 
 explicitly (a scratchpad build cannot find core/, and the resulting error is CONSTANT so it hashes
 equal and reads as agreement -- #475), and the port must run -no-threads (#344).
 """
-import os, re, subprocess, sys, tempfile
+import atexit, os, re, shutil, subprocess, sys, tempfile
 
 REPO = "/home/kalsprite/dev/odin"
 
@@ -78,6 +78,7 @@ def main():
     ref, port = sys.argv[1], sys.argv[2]
     pkgs = sys.argv[3:] or DEFAULT_PKGS
     tmp = tempfile.mkdtemp()
+    atexit.register(shutil.rmtree, tmp, ignore_errors=True)  # #649: leaked without this; /tmp is a tmpfs, so a leak is RAM
     rk, pk, schema = set(), set(), set()
     measured = 0
 

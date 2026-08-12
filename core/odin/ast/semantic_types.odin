@@ -1285,7 +1285,18 @@ Decl_Info :: struct {
 	deps_mutex:              sync.RW_Mutex,
 	deps:                    map[^Entity]struct{},
 	type_info_deps_mutex:    sync.RW_Mutex,
-	type_info_deps:          map[^Type]struct{},
+	// KEYED BY CANONICAL TYPE HASH, NOT BY TYPE POINTER. C++ Reference: `TypeSet type_info_deps`
+	// (checker.hpp:242), whose element is `TypeInfoPair {Type *type; u64 hash;}`
+	// (name_canonicalization.hpp:58-61) and whose slot is chosen by `hash`, i.e. by
+	// type_hash_canonical_type -- so two STRUCTURALLY IDENTICAL types built as separate Type objects
+	// occupy ONE entry. A `map[^Type]struct{}` keys on pointer identity and keeps both, which is a
+	// silent over-count of every declaration's RTTI dependency set. Measured on
+	// base/runtime print_any_single: reference 40 entries, port 41, the extra being a second
+	// distinct `^Type_Info` (LEDGER #691).
+	//
+	// The value carries the representative Type, because the min-dep walk needs the type itself and
+	// C++ keeps it alongside the hash for the same reason.
+	type_info_deps:          map[u64]^Type,
 	labels:                  [dynamic]Block_Label,
 	variadic_reuses:         [dynamic]Variadic_Reuse_Data,  // C++ Reference: checker.hpp:247
 	variadic_reuse_max_bytes: i64,  // C++ Reference: checker.hpp:248 - max bytes for variadic stack allocation

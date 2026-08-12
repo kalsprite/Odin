@@ -15,7 +15,7 @@ Example:
 	b := identity(3.14)    // Instantiates identity_f64
 
 C++ Reference:
-- check_expr.cpp:369-659 (find_or_generate_polymorphic_procedure)
+- check_expr.cpp find_or_generate_polymorphic_procedure:375-661
 - check_expr.cpp:650-655 (check_polymorphic_procedure_assignment)
 - checker.cpp (polymorphic infrastructure)
 */

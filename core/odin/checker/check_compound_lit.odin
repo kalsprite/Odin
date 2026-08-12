@@ -1653,22 +1653,51 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			value := exact_value_compound(cast(^ast.Expr)node)
 			bt := core_type(type)
 			if basic, ok := bt.variant.(Type_Basic); ok {
-				#partial switch basic.kind {
-				case .Llvm_Bool, .Bool, .B8, .B16, .B32, .B64:
+				// C++ Reference: check_expr.cpp:11613-11634 -- an ORDERED CHAIN OF FLAG TESTS,
+				// not a kind list:
+				//
+				//     if      (bt->Basic.flags & BasicFlag_Boolean) value = exact_value_bool(false);
+				//     else if (bt->Basic.flags & BasicFlag_Integer) value = exact_value_i64(0);
+				//     ... Unsigned, Float, Complex, Quaternion, Pointer, String, Rune
+				//
+				// THE ORDER IS LOAD-BEARING AND IS REPRODUCED EXACTLY. Rune carries BasicFlag_Integer
+				// as well as BasicFlag_Rune, so C++'s Integer arm claims runes first and the trailing
+				// Rune arm is unreachable -- kept anyway, because it is C++'s shape and both arms
+				// produce the same value. Unsigned likewise sits behind Integer.
+				//
+				// This was a hand-enumerated `#partial switch basic.kind` -- the sixth member of the
+				// family behind #95, #117, #118, #627 and #628. It omitted string16 and cstring16,
+				// which carry BasicFlag_String in types.cpp:529-530 and in the port's own
+				// basic_flags_table.odin:85-86, so `string16{}` and `cstring16{}` kept the compound
+				// MARKER instead of folding to "". MEASURED at the model level, with `bool{}` and
+				// `int{}` as a firing positive control:
+				//     S16 :: string16{}    oracle value=""   port value=string16{}
+				//     C16 :: cstring16{}   oracle value=""   port value=cstring16{}
+				// A silent wrong VALUE, like #632 -- no diagnostic, so no text-comparing gate
+				// could see it.
+				//
+				// The flag form also covers every Untyped_* kind for free (they carry their typed
+				// counterpart's flag, basic_flags_table.odin:129-135). Whether an untyped type can
+				// reach here is NOT established and does not need to be: porting C++'s test rather
+				// than a derived kind list is what makes the question moot. LEDGER #634.
+				switch {
+				case .Boolean in basic.flags:
 					value = exact_value_bool(false)
-				case .I8, .U8, .I16, .U16, .I32, .U32, .I64, .U64, .I128, .U128, .Int, .Uint, .Uintptr, .I16le, .U16le, .I32le, .U32le, .I64le, .U64le, .I128le, .U128le, .I16be, .U16be, .I32be, .U32be, .I64be, .U64be, .I128be, .U128be:
+				case .Integer in basic.flags:
 					value = exact_value_i64(0)
-				case .F16, .F32, .F64, .F16le, .F32le, .F64le, .F16be, .F32be, .F64be:
+				case .Unsigned in basic.flags:
+					value = exact_value_i64(0)
+				case .Float in basic.flags:
 					value = exact_value_float(0)
-				case .Complex32, .Complex64, .Complex128:
+				case .Complex in basic.flags:
 					value = exact_value_complex(0, 0)
-				case .Quaternion64, .Quaternion128, .Quaternion256:
+				case .Quaternion in basic.flags:
 					value = exact_value_quaternion(0, 0, 0, 0)
-				case .Rawptr:
+				case .Pointer in basic.flags:
 					value = exact_value_pointer(0)
-				case .String, .Cstring:
+				case .String in basic.flags:
 					value = exact_value_string("")
-				case .Rune:
+				case .Rune in basic.flags:
 					value = exact_value_i64(0)
 				}
 			}

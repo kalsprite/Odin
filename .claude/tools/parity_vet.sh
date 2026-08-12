@@ -77,6 +77,27 @@ if [ -z "$LIST" ] || [ ! -r "$LIST" ]; then
   exit 2
 fi
 
+# HARNESS SELF-CHECK -- THIS IS WHERE #511 HAPPENED.
+# This sweep requires the VET harness (.claude/tools/triage_vet). Handed the PLAIN harness (triage_st)
+# it still runs to completion over all 323 packages and reports a plausible-looking summary -- but the
+# port side emits no vet diagnostics at all, so the numbers describe the ARGUMENT, not the checker.
+# #511 was filed as a defect on exactly that and had to be retracted; the same mistake recurred against
+# corpus_vet.sh (#621), which is why both now check. An unmeasured run must never be scoreable (#483).
+# The probe: $S/vetctl yields vet diagnostics under -vet on the oracle. Oracle lines > 0 and port
+# lines == 0 means this is not a vet harness. Cost is one small package, paid before a multi-minute sweep.
+_VETPROBE="/tmp/claude-1000/-home-kalsprite-dev-odin/5ae0f352-0d85-4f59-825d-514e4ce56a75/scratchpad/vetctl"
+if [ -d "$_VETPROBE" ]; then
+  _o=$(timeout 120 ./odin check "$_VETPROBE" -vet -no-entry-point 2>&1 | grep -cE "Error:|Warning:")
+  _v=$(timeout 120 "$PORT" "$_VETPROBE"                            2>&1 | grep -cE "Error:|Warning:")
+  if [ "$_o" -gt 0 ] && [ "$_v" -eq 0 ]; then
+    echo "PARITY-VET-ABORTED: '$PORT' produced NO diagnostics on the vetctl probe while the oracle produced $_o." >&2
+    echo "  This is the PLAIN harness, not the VET harness. Build and pass triage_vet:" >&2
+    echo "     ./odin build .claude/tools/triage_vet -out:<path> -o:minimal" >&2
+    echo "  Refusing to sweep -- see #511/#621. Not a regression; a wrong argument." >&2
+    exit 2
+  fi
+fi
+
 # CONCURRENCY GUARD (lockfile, not pgrep).
 # Running two full parities at once makes slow packages exceed their per-package timeout, and a
 # TIMEOUT is reported as EXCLUDED -- i.e. UNMEASURED. On 2026-08-03 a concurrent plain+vet run
@@ -95,9 +116,20 @@ fi
 echo $$ > "$PARITY_LOCK"
 trap 'rm -rf "$TMP"; rm -f "$PARITY_LOCK"' EXIT
 
+# STARTUP REAP -- see the identical block in parity.sh for the reasoning. A trap cannot run on a
+# SIGKILL, so the leak it leaves is unbounded without a sweep at startup.
+. .claude/tools/reap_scratch.sh
+reap_scratch
+
 
 # THE ORACLE MUST EXIST. On 2026-08-05 the ./odin binary vanished mid-tick (cause unknown).
-# A missing oracle does not error here -- `timeout 180 ./odin check ...` just fails, the captured
+# PER_PKG_TIMEOUT (default 180) overrides the per-package timeout, matching modelsweep.sh which
+# already had it. WHY IT MATTERS (#301): under external load a package can exceed the timeout and
+# be partitioned as EXCLUDED = UNMEASURED, which reads like a regression and is not one. Raising
+# the timeout is the honest response to a loaded machine; lowering the standard of evidence is not.
+# A run at loadavg 94 on 32 cores produced exactly one such exclusion and cost a full re-run.
+#
+# A missing oracle does not error here -- the timeout'd `./odin check ...` just fails, the captured
 # output is empty, and every package reads as "oracle=0". Against a port that reports normally
 # that manufactures a mismatch on every package; against a port that also reports nothing it
 # manufactures a CLEAN SWEEP. Both readings are fiction, and the second is the dangerous one.
@@ -119,8 +151,8 @@ while read -r p; do
   [ -z "$p" ] && continue
   n=$((n+1))
 
-  timeout 180 ./odin check "$p" -vet -no-entry-point > "$TMP/o.raw" 2>&1; orc=$?
-  timeout 180 "$PORT" "$p"                      > "$TMP/p.raw" 2>&1; prc=$?
+  timeout "${PER_PKG_TIMEOUT:-180}" ./odin check "$p" -vet -no-entry-point > "$TMP/o.raw" 2>&1; orc=$?
+  timeout "${PER_PKG_TIMEOUT:-180}" "$PORT" "$p"                      > "$TMP/p.raw" 2>&1; prc=$?
 
   if died "$orc" || died "$prc"; then
     excluded=$((excluded+1))
@@ -168,3 +200,18 @@ while read -r p; do
 done < "$LIST"
 compared=$((n-excluded))
 echo "PARITY-VET-DONE packages=$n compared=$compared excluded=$excluded count_mismatches=$cnt_mismatch text_mismatches=$txt_mismatch attrib_mismatches=$att_mismatch"
+
+# ------------------------------------------------------------------------------------------------
+# EXIT GATE (#749). Same defect and same reasoning as parity.sh -- this ended on a bare `echo` and
+# ALWAYS EXITED 0. Vet-mode baseline measured at batch740: count=1 text=0 attrib=2.
+# `text_mismatches` is the deterministic column and the only one gated; see parity.sh for the full
+# rationale and the per-column evidence (#215, #341).
+if [ "$compared" -eq 0 ]; then
+  echo "PARITY-VET-ABORTED 0 of $n packages were compared -- the numbers above are NOT a measurement" >&2
+  exit 1
+fi
+if [ "$txt_mismatch" -ne 0 ]; then
+  echo "PARITY-VET-FAILED $txt_mismatch package(s) produce DIFFERENT DIAGNOSTIC TEXT -- see the TEXT rows above" >&2
+  exit 1
+fi
+exit 0

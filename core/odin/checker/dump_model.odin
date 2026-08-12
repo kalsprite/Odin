@@ -78,11 +78,8 @@ import "core:odin/ast"
 DUMP_MODEL_SCHEMA :: "pkg,name,kind,size,align,state,flags,poly,value,cflags,fidx,fgidx,bitsize," +
 	"tls,link,linkpfx,linksfx,linksec,foreign,export,global,static,rodata,optmode,entrypoint," +
 	"memcpylike,anon,nosanaddr,nosanmem,instr,branchloc,objcimpl,objcclsmethod,objcsel,objcclass," +
-	"alias,mangled,group,builtin,deprecated,warning,type,pos"
+	"alias,mangled,group,builtin,deprecated,warning,tidepn,type,pos"
 
-// dump_model_sanitise makes a value safe for a TAB-separated line. Constant strings can contain
-// tabs and newlines; without this a single such constant would silently corrupt the column
-// structure for that line and the diff would blame the wrong field.
 // dump_model_norm lowercases and strips underscores. EVERY enum-valued column goes through it,
 // because the two implementations spell the same enum differently everywhere, not just in flags:
 // port `In_Progress` / `Favor_Size` against C++ `InProgress` / `FavorSize`. One rule, applied to
@@ -105,6 +102,11 @@ dump_model_norm :: proc(raw: string) -> string {
 }
 
 @(private="file")
+// dump_model_sanitise makes a value safe for a TAB-separated line. Constant strings can contain
+// tabs and newlines; without this a single such constant would silently corrupt the column
+// structure for that line and the diff would blame the wrong field.
+// (STRANDED above a different procedure until #734 -- another procedure was inserted between
+//  this doc comment and the definition it documents.)
 dump_model_sanitise :: proc(s: string) -> string {
 	needs := false
 	for i in 0..<len(s) {
@@ -283,6 +285,28 @@ dump_model_entity_line :: proc(sb: ^strings.Builder, e: ^ast.Entity, root: strin
 	dump_model_kv_str(sb, "deprecated", e.deprecated_message)
 	dump_model_kv_str(sb, "warning", e.warning_message)
 
+	// tidepn = |decl.type_info_deps|, the COUNT of type-info dependencies registered against this
+	// entity's declaration. C++ Reference: `DeclInfo::type_info_deps` (checker.hpp:242), written by
+	// add_type_info_dependency (checker.cpp:883-896) and drained by the min-dep walk.
+	//
+	// A COUNT rather than the type IDENTITIES, deliberately. The identities would have to be
+	// compared as type STRINGS, and `type=` two lines below is excluded from comparison for exactly
+	// that reason (modeldiff.py STATE_IGNORED) -- the two implementations render types through
+	// independent printers, so a spelling difference would swamp the signal. A count is
+	// printer-independent, and it is still sensitive to the thing that has no other instrument: a
+	// call site that registers a dependency on one side and not the other moves the number.
+	//
+	// This is the ONLY differential coverage of the 51 add_type_info_type call sites, and of the
+	// min-dep consumer wired in #638. It is NOT gated yet: modeldiff carries it in STATE_IGNORED
+	// until a --repeat floor is measured, because its inputs touch the machinery that makes
+	// #468/#469 ungateable, and a column whose floor is unknown must not silently become a gate.
+	if e.decl_info != nil {
+		sync.rw_mutex_shared_lock(&e.decl_info.type_info_deps_mutex)
+		n := len(e.decl_info.type_info_deps)
+		sync.rw_mutex_shared_unlock(&e.decl_info.type_info_deps_mutex)
+		dump_model_kv_int(sb, "tidepn", i64(n))
+	}
+
 	// type= is emitted for GROUPING within one side (it separates "N copies of one type" from "N
 	// distinct instantiations") but is NOT compared across implementations: the two printers are
 	// independent, so a cosmetic spelling difference would swamp the signal.
@@ -374,7 +398,7 @@ dump_model :: proc(c: ^Checker, path: string) -> bool {
 	// SCHEMA LINE. Both implementations emit this and modeldiff REFUSES to compare dumps whose
 	// schema lines disagree. This is the enforcement a shared binary struct would have given:
 	// a field silently dropped on one side becomes a loud refusal instead of a silent agreement.
-	fmt.sbprintf(&sb, "## schema v2 %s\n", DUMP_MODEL_SCHEMA)
+	fmt.sbprintf(&sb, "## schema v3 %s\n", DUMP_MODEL_SCHEMA)
 	fmt.sbprintf(&sb, "## insertion-order entities=%d\n", len(info.entities))
 	for e in info.entities {
 		strings.write_string(&sb, "ins\t")

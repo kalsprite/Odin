@@ -10,7 +10,7 @@ Reuses modeldiff's read_dump/split_state -- a second comparator is how #509's ph
 
 usage: flagsdiff.py <REF_BIN> <PORT_BIN> [PKGLIST]
 """
-import collections, os, subprocess, sys, tempfile
+import atexit, collections, os, shutil, subprocess, sys, tempfile
 
 REPO = "/home/kalsprite/dev/odin"
 sys.path.insert(0, os.path.join(REPO, ".claude", "tools"))
@@ -21,6 +21,8 @@ pkglist = sys.argv[3] if len(sys.argv) > 3 else os.path.join(REPO, ".claude/tool
 pkgs = [l.strip() for l in open(pkglist) if l.strip() and not l.startswith("#")]
 
 tmp = tempfile.mkdtemp()
+
+atexit.register(shutil.rmtree, tmp, ignore_errors=True)  # #649: leaked without this; /tmp is a tmpfs, so a leak is RAM
 ref_only_bits = collections.Counter()   # bit set by ref, not by port
 port_only_bits = collections.Counter()  # bit set by port, not by ref
 pattern = collections.Counter()         # (frozenset ref-only, frozenset port-only) -> count

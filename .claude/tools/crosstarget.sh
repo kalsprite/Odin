@@ -41,7 +41,7 @@
 
 set -o pipefail
 PORT="$1"
-ROOT="${2:-/tmp/claude-1000/-home-kalsprite-dev-odin/5ae0f352-0d85-4f59-825d-514e4ce56a75/scratchpad}"
+ROOT="${2:-/home/kalsprite/dev/odin/.claude/probes}"
 ODIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/odin"
 
 if [ -z "$PORT" ]; then echo "usage: crosstarget.sh <PORT_BIN> [PROBE_ROOT]" >&2; exit 2; fi

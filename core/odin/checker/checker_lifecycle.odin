@@ -244,6 +244,25 @@ init_checker :: proc(c: ^Checker, allocator := context.allocator) {
 	// This enables scope lookup for builtin type names
 	populate_builtin_package_scope(c, allocator)
 
+	// C++ Reference: checker.cpp init_universal:1462-1500 -- the LAST thing init_universal does,
+	// after the universe scope is complete, because each defined value is typed from its own
+	// exact-value kind against t_untyped_*.
+	//
+	// This had ZERO callers, so the config package scope was never populated and #config could
+	// never resolve an override through it (LEDGER #667; same shape as #637/#638's missing
+	// min-dep driver). It is INERT today for a second reason worth stating: nothing writes
+	// build_context.defined_values either, so the port has no `-define:` input at all -- that
+	// half belongs to #591. Wiring it here is what makes the scope path correct the moment an
+	// input exists.
+	//
+	// C++ calls exit_with_errors() on a double declaration; the port must not exit a host
+	// process (LEDGER #12), and the error is already collected, so the flag is dropped.
+	//
+	// NOT ADDRESSED: the loop walks a map, so with two or more colliding defines the order of
+	// insertion -- and hence scope slot order (#214) and which collision reports first -- is
+	// hash-dependent on both sides, but not by the SAME hash.
+	_ = populate_config_package_scope(&c.info)
+
 	// Initialize processing arrays
 	c.procs_to_check = make([dynamic]^Proc_Info, allocator)
 	c.nested_proc_lits = make([dynamic]^Decl_Info, allocator)
@@ -430,7 +449,7 @@ set_type_name_entity_type :: proc(entity: ^Entity, type: ^Type) {
 }
 
 // add_global_constant registers a constant under `name` in `scope`.
-// C++ Reference: checker.cpp:1012-1016 (add_global_constant)
+// C++ Reference: checker.cpp add_global_constant:1011-1015
 @(private = "file")
 add_global_constant :: proc(scope: ^Scope, name: string, type: ^Type, value: Exact_Value, alloc: mem.Allocator) {
 	if type == nil {
@@ -442,27 +461,18 @@ add_global_constant :: proc(scope: ^Scope, name: string, type: ^Type, value: Exa
 	scope_insert(scope, entity)
 }
 
-// C++ Reference: checker.cpp:1019-1021 (add_global_string_constant)
+// C++ Reference: checker.cpp add_global_string_constant:1018-1020
 @(private = "file")
 add_global_string_constant :: proc(scope: ^Scope, name: string, value: string, alloc: mem.Allocator) {
 	add_global_constant(scope, name, t_untyped_string, exact_value_string(value), alloc)
 }
 
-// C++ Reference: checker.cpp:1023-1025 (add_global_bool_constant)
+// C++ Reference: checker.cpp add_global_bool_constant:1022-1024
 @(private = "file")
 add_global_bool_constant :: proc(scope: ^Scope, name: string, value: bool, alloc: mem.Allocator) {
 	add_global_constant(scope, name, t_untyped_bool, exact_value_bool(value), alloc)
 }
 
-// add_global_enum_type synthesizes a named enum type whose members are `values`.
-//
-// C++ Reference: checker.cpp:1049-1091 (add_global_enum_type)
-//
-// The type-name entity is deliberately NOT inserted into the builtin scope: exactly as in
-// C++, these enum types are anonymous as far as checked code is concerned. Only the constants
-// derived from them (ODIN_OS, ODIN_ENDIAN, ...) are visible, and the enum's own scope exists
-// so that an implicit selector (`.Little`) has fields to resolve against. Callers that do want
-// the name visible (intrinsics.Atomic_Memory_Order) insert the returned entity themselves.
 @(private = "file")
 // add_global_type_name creates a named type entity and registers it in `scope`.
 // C++ Reference: checker.cpp `add_global_type_name`.
@@ -571,6 +581,17 @@ init_c_va_list_type :: proc(c: ^Checker, intrinsics_scope: ^Scope, alloc: mem.Al
 	c.t_c_va_list_ptr = alloc_type_pointer(c.t_c_va_list)
 }
 
+// add_global_enum_type synthesizes a named enum type whose members are `values`.
+//
+// C++ Reference: checker.cpp add_global_enum_type:1048-1082
+//
+// The type-name entity is deliberately NOT inserted into the builtin scope: exactly as in
+// C++, these enum types are anonymous as far as checked code is concerned. Only the constants
+// derived from them (ODIN_OS, ODIN_ENDIAN, ...) are visible, and the enum's own scope exists
+// so that an implicit selector (`.Little`) has fields to resolve against. Callers that do want
+// the name visible (intrinsics.Atomic_Memory_Order) insert the returned entity themselves.
+// (STRANDED above a different procedure until #734 -- another procedure was inserted between
+//  this doc comment and the definition it documents.)
 add_global_enum_type :: proc(
 	builtin_scope: ^Scope,
 	type_name: string,
@@ -616,7 +637,7 @@ add_global_enum_type :: proc(
 // add_global_enum_constant registers `name` as a constant of the enum whose members are
 // `fields`, picking the member whose value is `value`.
 //
-// C++ Reference: checker.cpp:1092-1102 (add_global_enum_constant)
+// C++ Reference: checker.cpp add_global_enum_constant:1083-1092
 //
 // DEVIATION: C++ calls GB_PANIC when no member matches. The port cannot: the port's own
 // target tables are a superset of the C++ ones (Target_Os_Kind still carries the retired

@@ -670,13 +670,18 @@ add_entity_and_decl_info :: proc(ctx: ^Checker_Context, identifier: ^ast.Node, e
 }
 
 // add_implicit_entity stores an implicit entity on a case clause
-// C++ Reference: checker.cpp:2078-2083
+//
+// C++ Reference: checker.cpp:2279-2284 (definition), called from check_stmt.cpp:1609 -- its only
+// call site in the whole compiler, inside the type-switch clause loop.
+//
+// The line numbers here used to read "checker.cpp:2078-2083" / "line 2080", which is
+// add_entity_flags_from_file and has nothing to do with this. Corrected by reading both.
 add_implicit_entity :: proc(ctx: ^Checker_Context, clause: ^ast.Node, e: ^Entity) {
 	assert(clause != nil && e != nil)
 
 	#partial switch c in clause.derived {
 	case ^ast.Case_Clause:
-		// C++ line 2080: clause->CaseClause.implicit_entity = e;
+		// C++ line 2283: clause->CaseClause.implicit_entity = e;
 		set_ast_entity(ctx.info, clause, e)
 
 	case:
@@ -771,12 +776,6 @@ add_package_dependency :: proc(ctx: ^Checker_Context, package_name: string, name
 	add_dependency(ctx.info, ctx.decl, entity)
 }
 
-// add_map_get_dependencies adds runtime dependencies for map read operations
-// C++ Reference: check_expr.cpp:321-328
-//
-// THE BRANCH IS NOT OPTIONAL. build_context.dynamic_map_calls is zero-initialised and set only by
-// the -dynamic-map-calls flag, so the DEFAULT build takes the `else` arm. The port used to
-// register __dynamic_map_get unconditionally -- the wrong arm for every ordinary build.
 // try_to_add_package_dependency is C++'s TOLERANT variant (checker.cpp try_to_add_package_dependency:969). The difference from
 // add_package_dependency is exactly one thing: a missing entity is a SILENT RETURN here and a
 // GB_ASSERT_MSG abort there. It also has no `required` parameter.
@@ -811,6 +810,14 @@ try_to_add_package_dependency :: proc(ctx: ^Checker_Context, package_name: strin
 	add_dependency(ctx.info, ctx.decl, entity)
 }
 
+// add_map_get_dependencies adds runtime dependencies for map read operations
+// C++ Reference: check_expr.cpp:321-328
+//
+// THE BRANCH IS NOT OPTIONAL. build_context.dynamic_map_calls is zero-initialised and set only by
+// the -dynamic-map-calls flag, so the DEFAULT build takes the `else` arm. The port used to
+// register __dynamic_map_get unconditionally -- the wrong arm for every ordinary build.
+// (STRANDED above a different procedure until #734 -- another procedure was inserted between
+//  this doc comment and the definition it documents.)
 add_map_get_dependencies :: proc(ctx: ^Checker_Context) {
 	// No decl guard: C++ has none here (check_expr.cpp add_map_get_dependencies:321), and add_package_dependency
 	// already handles a nil decl.
@@ -1614,7 +1621,7 @@ init_core_context :: proc(c: ^Checker) {
 }
 
 // init_core_map_type initializes the cached map-internal types from core:runtime
-// C++ Reference: checker.cpp:3604-3617 (init_core_map_type)
+// C++ Reference: checker.cpp init_core_map_type:3612-3624
 //
 // These globals back the `intrinsics.type_map_info` / `intrinsics.type_map_cell_info` builtins
 // and the map runtime layout. Nothing in the port initialised them, so they stayed nil after

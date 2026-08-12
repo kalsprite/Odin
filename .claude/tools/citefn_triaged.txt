@@ -286,3 +286,31 @@ checker_lifecycle.odin  populate_builtin_package_scope
 # those sites is a separate question; #607 read the init/fini arms and found them faithful, the rest
 # were read only closely enough to identify the counterpart construct.
 check_decl.odin  check_proc_decl
+
+# ---------------------------------------------------------------------------------------------
+# #624. check_entry_point -- 5 citations, ALL VERIFIED CORRECT BY CONTENT. A --suspect FALSE POSITIVE,
+# and a whole CLASS of them.
+#
+# Verified line for line against src/checker.cpp:
+#   7789-7811  the TIME_SECTION("check entry point") block          -> port's procedure body
+#   7790       the build_mode/no_entry_point/command_kind condition -> port's single if
+#   7791-7793  init_scope + the two GB_ASSERTs                      -> port's documented nil-return
+#   7794       scope_lookup_current(s, "main")                      -> same call
+#   7795-7807  the nullptr branch through the error()               -> same branch
+#
+# WHY --suspect FLAGS IT ANYWAY, and why that will never stop: the heuristic reports when the C++
+# function ENCLOSING a cited line has a different name than the port procedure doing the citing. Here
+# the C++ code is an INLINE BLOCK inside check_parsed_files -- it has no function of its own -- and the
+# port factored it into a named procedure. The enclosing name is therefore check_parsed_files forever,
+# and the citation is correct forever. Nothing to fix in either the port or the citation.
+#
+# THE CLASS: any port procedure that names a block C++ leaves inline will read as suspect permanently.
+# That makes the --suspect count an OVERESTIMATE of real work by an unknown amount, which matters
+# because the count has been quoted as a backlog figure. Do not read a --suspect entry as a defect
+# until its lines have been opened; several are structural artefacts like this one.
+#
+# NOT RE-AUDITED: the port's `sorted_files(...)` + `file.pkg_token` where C++ reads `pkg->files[0]` +
+# `f->tokens[0]`. Dispositioned earlier by #170 (C++ sorts files before this point, so files[0] IS the
+# sorted first) and #197 (the first token of a file is the `package` keyword, which is pkg_token).
+# Recorded here as relied-upon, not re-derived.
+check_files.odin  check_entry_point

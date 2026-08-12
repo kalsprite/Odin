@@ -1204,12 +1204,12 @@ exact_bit_set_all_set_mask :: proc(type: ^Type) -> Exact_Value {
 // Used in for-in loops and array literals with range indices
 // C++ Reference: check_expr.cpp:8578-8676
 check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x: ^Operand, y: ^Operand, inline_for_depth: ^Exact_Value, type_hint: ^Type = nil) -> bool {
-	// C++ Reference: check_expr.cpp check_call_parameter_mixture:8579-8581
+	// C++ Reference: check_expr.cpp check_call_parameter_mixture:8597-8599
 	if !is_ast_range(cast(^ast.Expr)node) {
 		return false
 	}
 
-	// C++ Reference: check_expr.cpp check_call_parameter_mixture:8583
+	// C++ Reference: check_expr.cpp check_call_parameter_mixture:8601
 	expr := cast(^ast.Expr)node
 	binary_expr, ok := expr.derived.(^ast.Binary_Expr)
 	if !ok {
@@ -1217,7 +1217,7 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 	}
 
 	// Check left and right operands
-	// C++ Reference: check_expr.cpp check_call_parameter_mixture:8585-8592
+	// C++ Reference: check_expr.cpp check_call_parameter_mixture:8603-8610
 	check_expr_with_type_hint(ctx, x, binary_expr.left, type_hint)
 	if x.mode == .Invalid {
 		return false

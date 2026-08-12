@@ -238,7 +238,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		result = check_builtin_quaternion(ctx, operand, call, type_hint)
 
 	case .Jmag, .Kmag:
-		result = check_builtin_jmag_kmag(ctx, operand, call, id)
+		result = check_builtin_jmag_kmag(ctx, operand, call, id, type_hint)
 
 	// Expansion/compression operations
 	case .Expand_Values:
@@ -3413,27 +3413,51 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 	if name == "config" {
 		// #config(name, default_value) - compile-time configuration
 		// C++ Reference: check_builtin.cpp:2130-2175
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2721-2724.
+		//
+		// Anchored on the WHOLE CALL, not on the closing paren, and the text carries no
+		// "name and default value" gloss. The anchor is not cosmetic: same-position
+		// diagnostics MERGE (LEDGER #578), so C++'s `X :: #config(FOO)` collapses this
+		// against the enclosing "Invalid declaration value" and prints ONE line. The port
+		// anchored on `close`, which un-merged it and printed TWO. LEDGER #667.
 		if len(call_expr.args) != 2 {
-			error(call_expr.close, "'#config' expects 2 arguments: name and default value, got %d", len(call_expr.args))
+			error(call, "'#config' expects 2 arguments, got %d", len(call_expr.args))
 			return false
 		}
 
-		// First argument must be an identifier (config name) - gets used as string
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2725-2729
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2725-2729.
+		//
+		// The message NAMES the node kind that was found (C++ `ast_strings[arg->kind]`), and
+		// is anchored on the call for the same merge reason as above. C++ tests
+		// `arg == nullptr || arg->kind != Ast_Ident` and then interpolates `arg->kind`
+		// regardless -- a null dereference on the first disjunct. It is unreachable from
+		// source (the parser never yields a nil argument), and ast_kind_string answers nil
+		// safely, so the port keeps C++'s condition without inheriting the crash.
 		config_name: string
-		if ident, is_ident := unparen_expr(call_expr.args[0]).derived.(^ast.Ident); is_ident {
-			config_name = ident.name
+		arg0 := unparen_expr(call_expr.args[0])
+		arg0_ident: ^ast.Ident
+		if arg0 != nil {
+			arg0_ident, _ = arg0.derived.(^ast.Ident)
+		}
+		if arg0_ident != nil {
+			config_name = arg0_ident.name
 		} else {
-			error(call_expr.args[0], "'#config' first argument must be an identifier (config name)")
+			error(call, "'#config' expects an identifier, got %s", ast_kind_string(arg0))
 			return false
 		}
 
 		// Second argument is the default value.
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2731-2738
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2731-2738.
+		//
+		// Anchored on C++'s `def_arg` -- the UNPARENTHESISED expression that was actually
+		// checked -- not on the raw argument. With `#config(FOO, (f()))` the paren makes
+		// those two different positions, and only the unparenthesised one merges with the
+		// diagnostic the inner expression raises for itself.
 		default_op: Operand
-		check_expr(ctx, &default_op, unparen_expr(call_expr.args[1]))
+		def_arg := unparen_expr(call_expr.args[1])
+		check_expr(ctx, &default_op, def_arg)
 		if default_op.mode != .Constant {
-			error(call_expr.args[1], "'#config' default value must be a constant")
+			error(def_arg, "'#config' default value must be a constant")
 			return false
 		}
 
@@ -3448,10 +3472,28 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		operand.mode = default_op.mode
 		operand.value = default_op.value
 
-		// An explicitly defined value overrides the default, carrying its own type.
-		if defined_value, found := build_context.defined_values[config_name]; found {
-			operand.mode = .Constant
-			operand.value = defined_value
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2748-2757.
+		//
+		// An explicitly defined value overrides the default. C++ resolves it through the
+		// CONFIG PACKAGE SCOPE -- the very entities populate_config_package_scope inserts --
+		// and NOT through the raw build_context.defined_values map the port was reading.
+		// Two consequences did not survive that shortcut. The override carries the ENTITY'S
+		// type: the port kept the default's, so `-define:FOO=true` behind `#config(FOO, 0)`
+		// left a bool value wearing an untyped-integer type. And a non-constant entity is an
+		// ERROR, not a silent skip -- the port had no equivalent of 2751 at all. LEDGER #667.
+		//
+		// The two branches are swapped relative to C++ (constant first) because Odin binds
+		// the payload in the positive arm; only one of them emits, so the order is inert.
+		if ctx.checker != nil && ctx.checker.info.config_package != nil && ctx.checker.info.config_package.scope != nil {
+			if found := scope_lookup_current(ctx.checker.info.config_package.scope, config_name); found != nil {
+				if constant, is_constant := found.variant.(Entity_Constant); is_constant {
+					operand.type = found.type
+					operand.mode = .Constant
+					operand.value = constant.value
+				} else {
+					error(arg0, "'#config' entity '%s' found but expected a constant", config_name)
+				}
+			}
 		}
 		return true
 	}
@@ -3460,7 +3502,12 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		// #defined(identifier) - checks if an identifier is defined
 		// C++ Reference: check_builtin.cpp related to defined checks
 		if len(call_expr.args) != 1 {
-			error(call_expr.close, "'#defined' expects 1 argument, got %d", len(call_expr.args))
+			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2688 anchors this
+			// on `call`, not on the closing paren. The text already matched; the ANCHOR did not,
+			// which moves the column and collapses the caret from a span to a single character
+			// (`#defined()` reported at 2:29 with `^` instead of 2:20 with `^~~~~~~~~^`).
+			// Same shape as #667's defect A. LEDGER #670.
+			error(call_expr, "'#defined' expects 1 argument, got %d", len(call_expr.args))
 			return false
 		}
 
@@ -3552,14 +3599,31 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 				sig := type_to_string(ctx.curr_proc_sig)
 				error_line("\tCalled within '%s' :: %s\n", ctx.proc_name, sig)
 			}
+			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2644 and :2647 both pass `call` -- the
+			// WHOLE call expression -- not the callee:
+			//
+			//     error(call, "Compile time assertion: %s", arg1);
+			//     error(call, "Compile time assertion: %s (%s)", arg1, arg2);
+			//
+			// The port passed `call_expr.expr`, which is the CALLEE (the `#assert` directive
+			// itself), so the caret spanned only `#assert` and never the argument. It was a
+			// CONSTANT `^~~~~~^` regardless of what was asserted:
+			//
+			//     #assert(false)    ref ^~~~~~~~~~~~~^   port ^~~~~~^
+			//     #assert(K)        ref ^~~~~~~~~^       port ^~~~~~^
+			//     #assert(1 == 2)   ref ^~~~~~~~~~~~~~^  port ^~~~~~^
+			//
+			// This is EXACTLY #574's defect -- that tick fixed all three errors in the `#panic`
+			// arm immediately below (see its note at the top of that arm) and MISSED this arm,
+			// in the same file, a few lines up. LEDGER #703.
 			arg1 := expr_to_string(call_expr.args[0])
 			defer delete(arg1)
 			if len(call_expr.args) == 1 {
-				error(call_expr.expr, "Compile time assertion: %s", arg1)
+				error(call_expr, "Compile time assertion: %s", arg1)
 			} else {
 				arg2 := expr_to_string(call_expr.args[1])
 				defer delete(arg2)
-				error(call_expr.expr, "Compile time assertion: %s (%s)", arg1, arg2)
+				error(call_expr, "Compile time assertion: %s (%s)", arg1, arg2)
 			}
 		}
 
@@ -3627,19 +3691,39 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 	if name == "load" {
 		// #load(path, [type]) - load file contents at compile time
 		// C++ Reference: check_builtin.cpp:1820-1880
+		// C++ Reference: check_builtin.cpp check_load_directive:2152-2160. C++ SPLITS the arity
+		// report by count: got-0 has no argument to point at, so it anchors on the closing paren,
+		// but any other count anchors on args[0]. The port used `close` for both, so `#load(a,b,c)`
+		// reported at the paren instead of the first argument. LEDGER #670.
 		if len(call_expr.args) < 1 || len(call_expr.args) > 2 {
-			error(call_expr.close, "'#load' expects 1 or 2 arguments, got %d", len(call_expr.args))
+			if len(call_expr.args) == 0 {
+				error(call_expr.close, "'#load' expects 1 or 2 arguments, got 0")
+			} else {
+				error(call_expr.args[0], "'#load' expects 1 or 2 arguments, got %d", len(call_expr.args))
+			}
 			return false
 		}
 
-		// First argument must be a constant string (file path)
+		// C++ Reference: check_builtin.cpp check_load_directive:2162-2176. TWO separate guards
+		// with two different messages, and the second NAMES THE TYPE. The port had fused them
+		// into one condition behind a single invented message ("first argument must be a constant
+		// string (file path)"), so `#load(1)` reported that instead of C++'s
+		// "'#load' expected a constant string, got untyped integer". LEDGER #670.
 		path_op: Operand
 		check_expr(ctx, &path_op, call_expr.args[0])
-		if path_op.mode != .Constant || !is_type_string(path_op.type) {
-			error(call_expr.args[0], "'#load' first argument must be a constant string (file path)")
+		if path_op.mode != .Constant {
+			error(call_expr.args[0], "'#load' expected a constant string argument")
+			return false
+		}
+		if !is_type_string(path_op.type) {
+			error(call_expr.args[0], "'#load' expected a constant string, got %s", type_to_string(path_op.type))
 			return false
 		}
 
+		// C++ asserts here instead (`GB_ASSERT(o.value.kind == ExactValue_String)`), so this
+		// diagnostic has no C++ counterpart -- the same shape as #669's third `#exists` guard, and
+		// kept for the same reason: it is the difference between a diagnostic and an abort, and
+		// #7268 may change which exact-value variant a string constant carries. Re-test with #669.
 		original_path, is_str := path_op.value.(string)
 		if !is_str {
 			error(call_expr.args[0], "'#load' expected a constant string for file path")
@@ -4220,89 +4304,228 @@ check_builtin_quaternion :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		}
 	}
 
-	// All arguments must be numeric (float or integer)
-	for i := 0; i < 4; i += 1 {
-		if !is_type_numeric(args[i].type) {
-			error(args[i].expr, "Expected numeric type for 'quaternion' argument %d, got %s", i + 1, type_to_string(args[i].type))
-			return false
-		}
-	}
+	// The tail below replaces a REIMPLEMENTATION of C++'s (check_builtin.cpp:3697-3768) that had
+	// FOUR divergences, measured against the oracle before the rewrite (8 of 10 probes DIFFER):
+	//   1. `operand.value = nil` behind "for now store as nil to indicate constant" -- it set
+	//      mode = .Constant and stored NOTHING, so every reader of the value got nil. That is why
+	//      `Q :: quaternion(w=1,x=0,y=7,z=0); R :: real(Q); #assert(R == 1)` reported "not a
+	//      constant boolean" while the oracle accepted it. Reported from a backend (rexcode/mir).
+	//   2. The result type was hardcoded t_quaternion128 ("Default to quaternion128"). C++ DERIVES
+	//      it from the first component, so f64 components must give quaternion256 and f16 must give
+	//      quaternion64 -- the port REJECTED both, an over-rejection of valid code.
+	//   3. Three diagnostics were absent entirely: mismatched component types, non-float
+	//      components, and endian-specific components. All three were silent under-rejections.
+	//   4. One invented message, "Expected numeric type for 'quaternion' argument %d, got %s",
+	//      which has no C++ counterpart.
+	// The port also consulted type_hint BEFORE deriving from the arguments, letting it PRE-EMPT the
+	// derivation; C++ derives first and lets the hint override afterwards. Different precedence.
 
-	// Determine result type based on type hint or argument types
-	result_type: ^Type = nil
-	if type_hint != nil && is_type_quaternion(type_hint) {
-		result_type = type_hint
-	} else {
-		// Default to quaternion128 (f32 components)
-		result_type = t_quaternion128
-	}
-
-	// Check if all arguments are constant
-	all_constant := true
-	for i := 0; i < 4; i += 1 {
-		if args[i].mode != .Constant {
-			all_constant = false
+	// C++ Reference: check_builtin.cpp:3684-3696, comment verbatim: "The first typed value found,
+	// if any exist, will dictate the type for all untyped values."
+	//
+	// THIS IS THE STEP THAT MAKES THE MIXED CASE WORK, and omitting it was a REGRESSION I shipped
+	// and the root suite caught: `quaternion(w=<an f64 variable>, x=0, y=0, z=0)` -- one typed
+	// component with untyped integer literals, which is the ordinary shape in real code and appears
+	// four times in this checker's own exact_value.odin -- reached the identity check as
+	// 'f64' vs 'untyped integer' and was rejected. The constant-promotion block below cannot cover
+	// it, because it only runs when ALL FOUR are constant and here one of them is a variable.
+	for i in 0 ..< 4 {
+		if is_type_typed(args[i].type) {
+			for j in 0 ..< 4 {
+				// convert_to_typed checks whether it is typed already.
+				convert_to_typed(ctx, &args[j], args[i].type)
+				if args[j].mode == .Invalid {
+					return false
+				}
+			}
 			break
 		}
 	}
 
-	operand.type = result_type
+	// C++ Reference: check_builtin.cpp:3697-3709. When ALL FOUR are constant, promote each value to
+	// a float and retype any numeric operand whose value is now a Float to untyped float. This is
+	// what lets `quaternion(w=1, x=0, y=7, z=0)` -- written with integer literals -- agree on a
+	// single component type at the identity check below.
+	all_constant := args[0].mode == .Constant && args[1].mode == .Constant &&
+	                args[2].mode == .Constant && args[3].mode == .Constant
 	if all_constant {
+		for i in 0 ..< 4 {
+			args[i].value = exact_value_to_float(args[i].value)
+		}
+		for i in 0 ..< 4 {
+			if _, is_float := args[i].value.(f64); is_float && is_type_numeric(args[i].type) {
+				args[i].type = t_untyped_float
+			}
+		}
+	}
+
+	// C++ Reference: check_builtin.cpp:3711-3723.
+	// NOTE THE ARGUMENT ORDER: the message names `w` FIRST, but the operand array is x,y,z,w -- so
+	// args[3] is w, matching C++'s xyzw[3]. Getting this backwards would name the wrong components.
+	if !(are_types_identical(args[0].type, args[1].type) &&
+	     are_types_identical(args[0].type, args[2].type) &&
+	     are_types_identical(args[0].type, args[3].type)) {
+		tx := type_to_string(args[0].type)
+		ty := type_to_string(args[1].type)
+		tz := type_to_string(args[2].type)
+		tw := type_to_string(args[3].type)
+		error_node(call, "Mismatched types to 'quaternion', 'w=%s' vs 'x=%s' vs 'y=%s' vs 'z=%s'", tw, tx, ty, tz)
+		return false
+	}
+
+	// C++ Reference: check_builtin.cpp:3725-3729
+	if !is_type_float(args[0].type) {
+		error_node(call, "Arguments have type '%s', expected a floating point", type_to_string(args[0].type))
+		return false
+	}
+
+	// C++ Reference: check_builtin.cpp:3730-3735. "are not allow" is C++'s wording verbatim, not a
+	// typo introduced here.
+	if is_type_endian_specific(args[0].type) {
+		error_node(call, "Arguments with a specified endian are not allow, expected a normal floating point, got '%s'", type_to_string(args[0].type))
+		return false
+	}
+
+	// C++ Reference: check_builtin.cpp:3737-3752 -- Value first, then the constant fold overrides it.
+	operand.mode = .Value
+	if all_constant {
+		r, _ := exact_value_to_float(args[3].value).(f64)
+		i, _ := exact_value_to_float(args[0].value).(f64)
+		j, _ := exact_value_to_float(args[1].value).(f64)
+		k, _ := exact_value_to_float(args[2].value).(f64)
+		operand.value = exact_value_quaternion(r, i, j, k)
 		operand.mode = .Constant
-		// Store as compound value - for now store as nil to indicate constant
-		operand.value = nil
-	} else {
-		operand.mode = .Value
+	}
+
+	// C++ Reference: check_builtin.cpp:3754-3761 -- the WIDTH comes from the components.
+	#partial switch core_type(args[0].type).variant.(Type_Basic).kind {
+	case .F16:
+		operand.type = t_quaternion64
+	case .F32:
+		operand.type = t_quaternion128
+	case .F64:
+		operand.type = t_quaternion256
+	case .Untyped_Float:
+		operand.type = t_untyped_quaternion
+	case:
+		panic("Invalid type")
+	}
+
+	// C++ Reference: check_builtin.cpp:3763-3765. This is the LEGITIMATE use of the type_hint tail:
+	// for a CONSTRUCTOR the hint resolves a genuine width ambiguity. The same tail on the ACCESSORS
+	// (real/imag, jmag/kmag) is upstream #646, where there is no ambiguity to resolve.
+	if type_hint != nil && check_is_castable_to(ctx, operand, type_hint) {
+		operand.type = type_hint
 	}
 
 	return true
 }
 
 // check_builtin_jmag_kmag handles jmag() and kmag() builtins
-// jmag(q) returns the j-component of a quaternion
-// kmag(q) returns the k-component of a quaternion
-// C++ Reference: check_builtin.cpp:2963-3010
-check_builtin_jmag_kmag :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id) -> bool {
-	if len(call.args) != 1 {
-		name := id == .Jmag ? "jmag" : "kmag"
-		error_node(call, "'%s' requires exactly 1 argument, got %d", name, len(call.args))
+// C++ Reference: check_builtin.cpp:3834-3888
+//
+// Signature: jmag(x: quaternion) -> float_type
+//            kmag(x: quaternion) -> float_type
+//
+// This is the exact sibling of check_builtin_real_imag above; C++'s two arms are the same code with
+// two differences (the gate accepts only quaternions, and the non-constant untyped branch has no
+// complex fallback). The port's version was a REIMPLEMENTATION with EIGHT divergences, all measured
+// against the oracle before the rewrite (7 of 16 probes DIFFER):
+//   1. It re-ran check_expr on call.args[0]. The prologue at :108-147 has ALREADY checked the first
+//      argument into `operand` for every non-type builtin, so this checked the argument TWICE.
+//   2. An arity check with an invented message; check_builtin_procedure validates arg_count at
+//      :46-59 and RETURNS, so it could never fire.
+//   3. No untyped handling at all -- neither C++'s constant clobber nor its convert_to_typed.
+//   4. Message text: "'%s' requires a quaternion type, got %s" for C++'s
+//      "Argument has type '%s', expected a quaternion type".
+//   5. NO CONSTANT FOLDING. C++ folds via exact_value_jmag/kmag; the port always set mode = .Value,
+//      so `jmag(Q)` on a TYPED constant quaternion became non-constant and every use of it in a
+//      constant context failed. That was a LIVE OVER-REJECTION of code the oracle accepts.
+//   6. It read base_type where C++ reads core_type.
+//   7. Its result-type switch had an invented `case: t_f32` default where C++ GB_PANICs, and no
+//      Untyped_Complex / Untyped_Quaternion arms.
+//   8. The type_hint tail was missing entirely (the parameter was not even threaded).
+//
+// KNOWN UPSTREAM DEFECT, REPRODUCED DELIBERATELY (#642): the untyped-constant branch sets
+// `t_untyped_complex`, and the very next gate demands a quaternion -- so jmag/kmag can NEVER succeed
+// on an untyped constant quaternion, which is exactly what the `3j` and `3k` literals produce.
+// `#assert(jmag(3j) == 3)` therefore fails on the stock oracle, 5/5, with "Argument has type
+// 'untyped complex', expected a quaternion type". It is a copy-paste from the real/imag arm above,
+// where the same clobber is harmless because that gate accepts complex; the `.Untyped_Quaternion`
+// arm in the result switch below is UNREACHABLE for the same reason, and is the strongest evidence
+// the author expected untyped quaternions to arrive here. Kept because the reference behaviour is
+// the contract; written up in COMPILER_ISSUES/ for Jon to file.
+check_builtin_jmag_kmag :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id, type_hint: ^Type) -> bool {
+	// x is already checked as operand
+	x := operand
+
+	if x.type == nil {
 		return false
 	}
 
-	check_expr(ctx, operand, call.args[0])
-	if operand.mode == .Invalid {
+	// C++ Reference: check_builtin.cpp:3844-3856
+	if is_type_untyped(x.type) {
+		if x.mode == .Constant {
+			if is_type_numeric(x.type) {
+				// #642: this is the upstream defect. C++ writes t_untyped_complex here, not
+				// t_untyped_quaternion, and the gate immediately below then rejects it.
+				x.type = t_untyped_complex
+			}
+		} else {
+			convert_to_typed(ctx, x, t_quaternion256)
+			if x.mode == .Invalid {
+				return false
+			}
+		}
+	}
+
+	// C++ Reference: check_builtin.cpp:3858-3862
+	if !is_type_quaternion(x.type) {
+		type_str := type_to_string(x.type)
+		error_node(call, "Argument has type '%s', expected a quaternion type", type_str)
 		return false
 	}
 
-	op_type := base_type(operand.type)
-	if !is_type_quaternion(op_type) {
-		name := id == .Jmag ? "jmag" : "kmag"
-		error_node(call, "'%s' requires a quaternion type, got %s", name, type_to_string(operand.type))
-		return false
+	// C++ Reference: check_builtin.cpp:3864-3871
+	if x.mode == .Constant {
+		#partial switch id {
+		case .Jmag:
+			x.value = exact_value_jmag(x.value)
+		case .Kmag:
+			x.value = exact_value_kmag(x.value)
+		}
+	} else {
+		x.mode = .Value
 	}
 
-	// Result is the float component type
-	quat := op_type.variant.(Type_Basic)
-	result_type: ^Type = nil
-	#partial switch quat.kind {
+	// C++ Reference: check_builtin.cpp:3873-3881
+	bt := core_type(x.type)
+	kind := bt.variant.(Type_Basic).kind
+
+	#partial switch kind {
 	case .Quaternion64:
-		result_type = t_f16
+		x.type = t_f16
 	case .Quaternion128:
-		result_type = t_f32
+		x.type = t_f32
 	case .Quaternion256:
-		result_type = t_f64
+		x.type = t_f64
+	case .Untyped_Complex:
+		x.type = t_untyped_float
+	case .Untyped_Quaternion:
+		// Unreachable while #642 stands -- see the note above. Kept because C++ has it.
+		x.type = t_untyped_float
 	case:
-		result_type = t_f32
+		panic("Invalid type")
 	}
 
-	operand.type = result_type
-	operand.mode = .Value
+	// C++ Reference: check_builtin.cpp:3883-3885
+	if type_hint != nil && check_is_castable_to(ctx, operand, type_hint) {
+		operand.type = type_hint
+	}
+
 	return true
 }
 
-// check_builtin_expand_values handles expand_values() builtin
-// expand_values(v) expands a struct/array into its individual values
-// C++ Reference: check_builtin.cpp:3850-3920
 // expand_values_tuple_type builds the tuple type that `expand_values(x)` / `**x` yields.
 //
 // C++ Reference: check_expr.cpp:3016-3033 (the Token_MulMul case) and check_builtin.cpp's
@@ -4347,6 +4570,11 @@ expand_values_tuple_type :: proc(ctx: ^Checker_Context, type: ^Type) -> (^Type, 
 	return alloc_type_tuple_from_field_types(ctx.checker, types[:]), true
 }
 
+// check_builtin_expand_values handles expand_values() builtin
+// expand_values(v) expands a struct/array into its individual values
+// C++ Reference: check_builtin.cpp:3850-3920
+// (STRANDED above a different procedure until #734 -- another procedure was inserted between
+//  this doc comment and the definition it documents.)
 check_builtin_expand_values :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	if len(call.args) != 1 {
 		error_node(call, "'expand_values' requires exactly 1 argument, got %d", len(call.args))
@@ -7767,39 +7995,51 @@ check_builtin_type_is_specialization_of :: proc(ctx: ^Checker_Context, operand: 
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp:7348-7378. The port had REIMPLEMENTED this whole arm:
+	// two invented message texts, and a hand-written "is bt1's polymorphic_parent identical to
+	// bt2" test for Struct and Union only, in place of C++'s check_type_specialization_to.
+	// The two messages were live and reproducible (#617); the specialization RESULT agreed on
+	// every probe I could build, so the rewrite below is verified on messages and unchanged on
+	// values -- it is not claimed to fix a value defect.
+
 	type1_op: Operand
 	check_expr_or_type(ctx, &type1_op, call.args[0])
 
 	if type1_op.mode != .Type {
-		error_node(call.args[0], "First argument to '%s' must be a type", builtin_name)
+		// C++ Reference: check_builtin.cpp:7350-7355.
+		error_node(call.args[0], "Expected a type for '%s'", builtin_name)
+		operand.mode = .Invalid
+		operand.type = t_invalid
 		return false
 	}
+	t := type1_op.type
 
-	type2_op: Operand
-	check_expr_or_type(ctx, &type2_op, call.args[1])
+	// C++ Reference: check_builtin.cpp:7359-7362. The specialization PATTERN is checked with
+	// in_polymorphic_specialization set, which is what lets `Foo($T)` be written here at all;
+	// the port checked it as an ordinary type and rejected the pattern form.
+	prev_ips := ctx.in_polymorphic_specialization
+	ctx.in_polymorphic_specialization = true
+	spec := check_type(ctx, call.args[1])
+	ctx.in_polymorphic_specialization = prev_ips
 
-	if type2_op.mode != .Type {
-		error_node(call.args[1], "Second argument to '%s' must be a type", builtin_name)
+	if spec == t_invalid {
+		// C++ Reference: check_builtin.cpp:7364-7369. This diagnostic did not exist.
+		error_node(call.args[1], "Invalid specialization type for '%s'", builtin_name)
+		operand.mode = .Invalid
+		operand.type = t_invalid
 		return false
-	}
-
-	// Check if type1 is a specialization of type2 (polymorphic parent relationship)
-	result := false
-	bt1 := base_type(type1_op.type)
-	bt2 := base_type(type2_op.type)
-	if struct_type, struct_ok := bt1.variant.(Type_Struct); struct_ok {
-		if struct_type.polymorphic_parent != nil {
-			result = are_types_identical(base_type(struct_type.polymorphic_parent), bt2)
-		}
-	} else if union_type, union_ok := bt1.variant.(Type_Union); union_ok {
-		if union_type.polymorphic_parent != nil {
-			result = are_types_identical(base_type(union_type.polymorphic_parent), bt2)
-		}
 	}
 
 	operand.mode = .Constant
 	operand.type = t_untyped_bool
-	operand.value = exact_value_bool(result)
+	// C++ Reference: check_builtin.cpp:7373-7376. A type is NOT a specialization of itself,
+	// and that short-circuit comes first -- check_type_specialization_to is only consulted for
+	// non-identical types.
+	is_specialization := false
+	if !are_types_identical(spec, t) {
+		is_specialization = check_type_specialization_to(ctx, spec, t, false, false)
+	}
+	operand.value = exact_value_bool(is_specialization)
 
 	return true
 }
@@ -7817,7 +8057,12 @@ check_builtin_type_is_superset_of :: proc(ctx: ^Checker_Context, operand: ^Opera
 	check_expr_or_type(ctx, &type1_op, call.args[0])
 
 	if type1_op.mode != .Type {
-		error_node(call.args[0], "First argument to '%s' must be a type", builtin_name)
+		// C++ Reference: check_builtin.cpp:7383-7388. Same invented text as #617's sibling,
+		// found by probing this one too rather than assuming the family was clean.
+		// C++ Reference: check_builtin.cpp:7986-7990. NOTE the text differs from the
+		// "Expected a type for '%s'" used by type_is_specialization_of / type_is_variant_of /
+		// type_merge -- this builtin has its own wording, and it applies to BOTH arguments.
+		error_node(call.args[0], "'%s' expects a type, got %s", builtin_name, expr_to_string(call.args[0]))
 		return false
 	}
 
@@ -7825,7 +8070,8 @@ check_builtin_type_is_superset_of :: proc(ctx: ^Checker_Context, operand: ^Opera
 	check_expr_or_type(ctx, &type2_op, call.args[1])
 
 	if type2_op.mode != .Type {
-		error_node(call.args[1], "Second argument to '%s' must be a type", builtin_name)
+		// C++ Reference: check_builtin.cpp:7993-7997.
+		error_node(call.args[1], "'%s' expects a type, got %s", builtin_name, expr_to_string(call.args[1]))
 		return false
 	}
 
@@ -7954,7 +8200,11 @@ check_builtin_type_is_variant_of :: proc(ctx: ^Checker_Context, operand: ^Operan
 	check_expr_or_type(ctx, &type1_op, call.args[0])
 
 	if type1_op.mode != .Type {
-		error_node(call.args[0], "First argument to '%s' must be a type", builtin_name)
+		// C++ Reference: check_builtin.cpp:7383-7388. Same invented text as #617's sibling,
+		// found by probing this one too rather than assuming the family was clean.
+		error_node(call.args[0], "Expected a type for '%s'", builtin_name)
+		operand.mode = .Invalid
+		operand.type = t_invalid
 		return false
 	}
 
@@ -7991,63 +8241,156 @@ check_builtin_type_is_variant_of :: proc(ctx: ^Checker_Context, operand: ^Operan
 }
 
 // type_integer_to_signed - convert integer type to signed equivalent
+// type_integer_to_signed - map an UNSIGNED integer type to its signed counterpart
+//
+// C++ Reference: check_builtin.cpp:6950-6995 (BuiltinProc_type_integer_to_signed)
+//
+// The mapping is C++'s ENUM ADJACENCY -- `&basic_types[bt->Basic.kind - 1]` -- not a written-out
+// table. Basic_Kind pairs every unsigned kind immediately after its signed partner (I8,U8, I16,U16,
+// ... I128,U128, Int,Uint, and the same for every endian variant), and core/odin/ast's Basic_Kind
+// reproduces that order member for member, so `Basic_Kind(int(kind) - 1)` IS the C++ expression.
+// #637's basic_type_singletons is what makes it expressible here.
+//
+// This replaced a hand-written kind switch in types.odin that diverged from C++ in four ways: it
+// returned the input UNCHANGED for an already-signed type (C++ rejects it), returned it unchanged
+// for every endian variant under a comment claiming "endian type globals may not exist" (they have
+// existed since #17), mapped Uintptr to int (C++ rejects uintptr explicitly, because uintptr's
+// predecessor in the enum is `uint`, not a signed type), and had no untyped or polymorphic gate.
+// Seventh member of the hand-enumeration family (#95, #117, #118, #627, #628, #634).
+//
+// The arity check the old body opened with is gone, not relocated: check_builtin_procedure validates
+// arg_count against builtin_proc_infos at :46-59 and RETURNS on mismatch, exactly as C++ does, so a
+// second check here could never fire and its message has no C++ counterpart.
 check_builtin_type_integer_to_signed :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "type_integer_to_signed"
-
-	if len(call.args) != 1 {
-		error_node(call, "'%s' expects 1 argument", builtin_name)
-		return false
-	}
 
 	type_op: Operand
 	check_expr_or_type(ctx, &type_op, call.args[0])
 
+	// C++ line 6951-6954
 	if type_op.mode != .Type {
-		error_node(call.args[0], "Argument to '%s' must be a type", builtin_name)
+		error_node(call.args[0], "Expected a type for '%s'", builtin_name)
 		return false
 	}
 
-	if !is_type_integer(type_op.type) {
-		error_node(call.args[0], "Argument to '%s' must be an integer type", builtin_name)
+	// C++ line 6956-6961
+	if is_type_polymorphic(type_op.type) {
+		// NOT deleted: type_to_string builds in context.temp_allocator, and for a basic type the
+		// result is a static name string. Freeing it aborts with 'free(): invalid pointer' --
+		// the same mistake as #142.
+		type_str := type_to_string(type_op.type)
+		error_node(call.args[0], "Expected a non-polymorphic type for '%s', got %s", builtin_name, type_str)
 		return false
 	}
 
-	// Get signed equivalent
-	signed_type := integer_to_signed(type_op.type)
+	bt := base_type(type_op.type)
+	basic, is_basic := bt.variant.(Type_Basic)
 
+	// C++ line 6966-6974: this direction requires the input to be UNSIGNED.
+	if !is_basic || .Unsigned not_in basic.flags || .Integer not_in basic.flags {
+		// NOT deleted: type_to_string builds in context.temp_allocator, and for a basic type the
+		// result is a static name string. Freeing it aborts with 'free(): invalid pointer' --
+		// the same mistake as #142.
+		type_str := type_to_string(type_op.type)
+		error_node(call.args[0], "Expected an unsigned integer type for '%s', got %s", builtin_name, type_str)
+		return false
+	}
+
+	// C++ line 6976-6981
+	if .Untyped in basic.flags {
+		// NOT deleted: type_to_string builds in context.temp_allocator, and for a basic type the
+		// result is a static name string. Freeing it aborts with 'free(): invalid pointer' --
+		// the same mistake as #142.
+		type_str := type_to_string(type_op.type)
+		error_node(call.args[0], "Expected a non-untyped integer type for '%s', got %s", builtin_name, type_str)
+		return false
+	}
+
+	// C++ line 6983-6988: uintptr is the one unsigned kind whose predecessor is not its signed
+	// partner (Int, Uint, Uintptr -- so kind-1 would be `uint`), and C++ rejects it by name rather
+	// than letting the adjacency produce a wrong answer. Note the argument order: C++ puts the TYPE
+	// first in this one message.
+	if basic.kind == .Uintptr {
+		// NOT deleted: type_to_string builds in context.temp_allocator, and for a basic type the
+		// result is a static name string. Freeing it aborts with 'free(): invalid pointer' --
+		// the same mistake as #142.
+		type_str := type_to_string(type_op.type)
+		error_node(call.args[0], "Type %s does not have a signed integer mapping for '%s'", type_str, builtin_name)
+		return false
+	}
+
+	// C++ line 6990: Type *u_type = &basic_types[bt->Basic.kind - 1];
 	operand.mode = .Type
-	operand.type = signed_type
+	operand.type = basic_type_singletons[Basic_Kind(int(basic.kind) - 1)]
 
 	return true
 }
 
-// type_integer_to_unsigned - convert integer type to unsigned equivalent
+// type_integer_to_unsigned - map a SIGNED integer type to its unsigned counterpart
+//
+// C++ Reference: check_builtin.cpp:6914-6949 (BuiltinProc_type_integer_to_unsigned)
+//
+// The mirror of check_builtin_type_integer_to_signed above; see that comment for why the mapping is
+// enum adjacency rather than a table, and for what the deleted hand-written switch got wrong. This
+// direction has no uintptr arm, because uintptr fails the "must be signed" gate before it matters.
+//
+// KNOWN UPSTREAM DEFECT, REPRODUCED DELIBERATELY: `rune` carries BasicFlag_Integer without
+// BasicFlag_Unsigned (types.cpp:506), so it PASSES C++'s signed-integer gate -- and the kind that
+// follows Rune in the enum is F16. `intrinsics.type_integer_to_unsigned(rune)` therefore yields
+// `f16` in the reference compiler; verified against the stock oracle 5/5 with
+// `#assert(U == f16)` and `#assert(size_of(U) == 2)` both passing. The adjacency reproduces that
+// here for free, which is the point: matching it costs nothing and inventing a `rune` special case
+// would be a semantics the reference does not have. Filed as #641 for Jon; if upstream adds a guard,
+// this follows it. The OLD hand-written switch happened to return `rune` unchanged, so the port was
+// accidentally diverging here -- accidentally, not by a decision anyone recorded.
 check_builtin_type_integer_to_unsigned :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "type_integer_to_unsigned"
-
-	if len(call.args) != 1 {
-		error_node(call, "'%s' expects 1 argument", builtin_name)
-		return false
-	}
 
 	type_op: Operand
 	check_expr_or_type(ctx, &type_op, call.args[0])
 
+	// C++ line 6915-6918
 	if type_op.mode != .Type {
-		error_node(call.args[0], "Argument to '%s' must be a type", builtin_name)
+		error_node(call.args[0], "Expected a type for '%s'", builtin_name)
 		return false
 	}
 
-	if !is_type_integer(type_op.type) {
-		error_node(call.args[0], "Argument to '%s' must be an integer type", builtin_name)
+	// C++ line 6920-6925
+	if is_type_polymorphic(type_op.type) {
+		// NOT deleted: type_to_string builds in context.temp_allocator, and for a basic type the
+		// result is a static name string. Freeing it aborts with 'free(): invalid pointer' --
+		// the same mistake as #142.
+		type_str := type_to_string(type_op.type)
+		error_node(call.args[0], "Expected a non-polymorphic type for '%s', got %s", builtin_name, type_str)
 		return false
 	}
 
-	// Get unsigned equivalent
-	unsigned_type := integer_to_unsigned(type_op.type)
+	bt := base_type(type_op.type)
+	basic, is_basic := bt.variant.(Type_Basic)
 
+	// C++ line 6930-6937: this direction requires the input to be SIGNED.
+	if !is_basic || .Unsigned in basic.flags || .Integer not_in basic.flags {
+		// NOT deleted: type_to_string builds in context.temp_allocator, and for a basic type the
+		// result is a static name string. Freeing it aborts with 'free(): invalid pointer' --
+		// the same mistake as #142.
+		type_str := type_to_string(type_op.type)
+		error_node(call.args[0], "Expected a signed integer type for '%s', got %s", builtin_name, type_str)
+		return false
+	}
+
+	// C++ line 6939-6944
+	if .Untyped in basic.flags {
+		// NOT deleted: type_to_string builds in context.temp_allocator, and for a basic type the
+		// result is a static name string. Freeing it aborts with 'free(): invalid pointer' --
+		// the same mistake as #142.
+		type_str := type_to_string(type_op.type)
+		error_node(call.args[0], "Expected a non-untyped integer type for '%s', got %s", builtin_name, type_str)
+		return false
+	}
+
+	// C++ line 6946: Type *u_type = &basic_types[bt->Basic.kind + 1];
 	operand.mode = .Type
-	operand.type = unsigned_type
+	operand.type = basic_type_singletons[Basic_Kind(int(basic.kind) + 1)]
 
 	return true
 }
@@ -8065,7 +8408,12 @@ check_builtin_type_merge :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 	check_expr_or_type(ctx, &type1_op, call.args[0])
 
 	if type1_op.mode != .Type {
-		error_node(call.args[0], "First argument to '%s' must be a type", builtin_name)
+		// C++ Reference: check_builtin.cpp:7383-7388. Same invented text as #617's sibling,
+		// found by probing this one too rather than assuming the family was clean.
+		// C++ Reference: check_builtin.cpp type_merge -- `error(x.expr, "Expected a type for
+		// '%.*s'")` then a bare `return false`. C++ does NOT set mode to Invalid here: it sets
+		// mode=Type / type=t_invalid at the TOP of the arm and leaves it that way on failure.
+		error_node(call.args[0], "Expected a type for '%s'", builtin_name)
 		return false
 	}
 
@@ -8073,7 +8421,8 @@ check_builtin_type_merge :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 	check_expr_or_type(ctx, &type2_op, call.args[1])
 
 	if type2_op.mode != .Type {
-		error_node(call.args[1], "Second argument to '%s' must be a type", builtin_name)
+		// C++ uses the SAME text for the second argument; the port had a different one.
+		error_node(call.args[1], "Expected a type for '%s'", builtin_name)
 		return false
 	}
 

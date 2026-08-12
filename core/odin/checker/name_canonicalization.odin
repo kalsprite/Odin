@@ -368,13 +368,22 @@ type_writer_make_hasher :: proc(w: ^Type_Writer, ctx: ^Typeid_Hash_Context) {
 // port computed disagreed with the reference's. Found by comparing computed
 // values against `typeid_of` in a running reference binary.
 //
-// NOT STANDARD SipHash, and it must not be "corrected". `rotate_left64` below
-// shifts right by a CONSTANT 62 rather than by `64 - s`, so it is not a rotate
-// at all. `core:crypto/siphash` therefore cannot be used here: standard
-// SipHash-2-4 of "int" under this key is 0xf8f180427c5584cc, where the reference
-// produces 0x967158c028419176. Reproducing the quirk is the requirement --
-// fixing it would change every typeid in the language and break compatibility
-// with every binary already built.
+// This is SipHash-2-4, and it is now the standard one -- but only since upstream
+// corrected `rotate_left64`, which had shifted right by a CONSTANT 62 rather than
+// by `64 - s` and so was not a rotate at all.
+//
+// That correction changed EVERY TYPEID IN THE LANGUAGE. Under the old expression
+// `int` hashed to 0x967158c028419176; it is now 0xf8f180427c5584cc, which is what
+// standard SipHash-2-4 of "int" under this key produces. This port reproduced the
+// defect faithfully and had to be updated in step.
+//
+// The failure mode when the two sides disagree is worth recording, because it was
+// observed rather than reasoned about: a typeid is emitted as a compile-time
+// IMMEDIATE, not a relocation, so nothing fails to link. Programs build and run,
+// assertions still trap correctly -- because a value is only ever compared with
+// another value from the same compiler -- and the only symptom is that the
+// RUNTIME's type table does not recognise the constant. The reported message
+// degrades from "Invalid type assertion from int to bool" to "from  to ".
 // ======================================================================================
 
 SIP_BLOCK_SIZE :: 8
@@ -409,21 +418,22 @@ typeid_hash_context_init :: proc(ctx: ^Typeid_Hash_Context) {
 	ctx.is_initialized = true
 }
 
-// rotate_left64 reproduces C++'s `rotate_left64` INCLUDING ITS DEFECT.
+// rotate_left64 matches C++'s `rotate_left64`.
 //
-// C++ Reference: name_canonicalization.cpp:283-287
+// C++ Reference: name_canonicalization.cpp:284-288
 //
 //	u64 s = k & (n-1);
-//	return (x<<s) | (x>>(n-2));
+//	return (x<<s) | (x>>(n-s));
 //
-// A rotate would shift right by `n - s`. This shifts by `n - 2` = 62, a
-// constant, so bits are lost and duplicated. It is wrong and it is load-bearing:
-// the typeid of every type in every Odin binary is defined by this expression.
+// This shifted right by a CONSTANT `n - 2` = 62 until upstream corrected it, so
+// it was a left shift with two stray bits rather than a rotation, and this port
+// reproduced the defect deliberately. The correction changed every typeid in the
+// language, so the port had to follow it -- see the note above `sip_compress`.
 @(private)
 rotate_left64 :: proc(x: u64, k: u64) -> u64 {
 	n :: u64(64)
 	s := k & (n - 1)
-	return (x << s) | (x >> (n - 2))
+	return (x << s) | (x >> (n - s))
 }
 
 // C++ Reference: name_canonicalization.cpp:289-305

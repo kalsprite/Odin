@@ -539,8 +539,31 @@ collect_package_for_target :: proc(path: string, kind: ast.Package_Kind = .Norma
 			}
 		}
 		if has_invalid {
+			// #650: this diagnostic must carry OFFSET 0, not the real offset, or it sorts to the
+			// wrong place. C++ builds its position like this (parser.cpp:6977-6979):
+			//     TokenPos err_pos = {0};
+			//     ParseFileError err = init_ast_file(file, fi.fullpath, &err_pos);
+			//     err_pos.file_id = file->id;
+			// and init_ast_file (parser.cpp:5731) writes ONLY two fields into it:
+			//     err_pos->line = token->pos.line; err_pos->column = token->pos.column;
+			// so `offset` keeps its `{0}` value while line/column are real. `file_id` is patched
+			// afterwards -- which is what shows the omission is accidental rather than intended.
+			//
+			// It matters because print_all_errors sorts with token_pos_cmp (tokenizer.cpp:210),
+			// which compares OFFSET FIRST. An offset of 0 therefore sorts this diagnostic ahead of
+			// every diagnostic that has a real one, regardless of its printed line/column.
+			// MEASURED: a file whose abort sits at column 25 (offset ~34) is emitted by the oracle
+			// BEFORE another file's error at column 6 (offset ~15) -- i.e. NOT in offset order --
+			// while that same file's SECOND error (2:27, real offset) sorts after it. The port
+			// passed a full position here, so it sorted by position and interleaved differently.
+			//
+			// This is bug-compatibility, deliberately: the reference's position is internally
+			// inconsistent (offset disagrees with line/column), but parity is the contract and the
+			// only observable is diagnostic ORDER.
+			abort_pos := owned_file_pos(invalid_pos)
+			abort_pos.offset = 0
 			syntax_error_pos(
-				owned_file_pos(invalid_pos),
+				abort_pos,
 				"Failed to parse file: %s; invalid token found in file",
 				filepath.base(fullpath),
 			)
@@ -836,9 +859,6 @@ load_package_with_dependencies :: proc(
 	return result, ok
 }
 
-// init_odin_root_from_env initializes ODIN_ROOT from environment if not set
-// Falls back to auto-detection from current working directory
-// Uses heap allocator to ensure the string persists across temp allocator resets
 // with_trailing_separator returns `path` guaranteed to end in a path separator, allocating a copy
 // only when one has to be added.
 //
@@ -865,6 +885,11 @@ with_trailing_separator :: proc(path: string, allocator: runtime.Allocator) -> s
 	return joined
 }
 
+// init_odin_root_from_env initializes ODIN_ROOT from environment if not set
+// Falls back to auto-detection from current working directory
+// Uses heap allocator to ensure the string persists across temp allocator resets
+// (STRANDED above a different procedure until #734 -- another procedure was inserted between
+//  this doc comment and the definition it documents.)
 init_odin_root_from_env :: proc() {
 	if len(build_context.ODIN_ROOT) == 0 {
 		// ALWAYS the heap. ODIN_ROOT is cached in a process-lifetime global, so its storage must

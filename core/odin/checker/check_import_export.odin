@@ -483,7 +483,7 @@ topological_sort_packages :: proc(graph: ^Import_Graph, allocator: runtime.Alloc
 	// Kahn's algorithm for topological sort with priority handling
 	for len(nodes) > 0 {
 		// Find node with minimum dependency count (C++ uses priority queue)
-		// C++ Reference: checker.cpp:139-153 (import_graph_node_cmp)
+		// C++ Reference: checker.cpp import_graph_node_cmp:140-154
 		// Priority: 1) dep_count ascending, 2) Global scopes first, 3) package ID for determinism
 		min_idx := 0
 		min_count := nodes[0].dep_count

@@ -1,0 +1,3 @@
+package main
+#assert(1 == 1)
+main :: proc() {}

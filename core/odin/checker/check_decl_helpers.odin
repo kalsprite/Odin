@@ -28,7 +28,7 @@ Unpack_Flag :: enum {
 }
 
 // entity_of_node extracts the entity from an AST node
-// C++ Reference: checker.cpp:1630-1664
+// C++ Reference: checker.cpp entity_of_node:1804-1839
 entity_of_node :: proc(info: ^Checker_Info, expr: ^ast.Node) -> ^Entity {
 	if expr == nil {
 		return nil
@@ -39,22 +39,32 @@ entity_of_node :: proc(info: ^Checker_Info, expr: ^ast.Node) -> ^Entity {
 		return nil
 	}
 
-	// C++ Reference: checker.cpp:1632-1661
+	// C++ Reference: checker.cpp entity_of_node:1806-1837
 	#partial switch node in expr_unparen.derived {
 	case ^ast.Ident:
-		// C++ Reference: checker.cpp:1634-1640
-		// In C++: return ident->entity
-		// In Odin: retrieve from ast_entity_map
-		e := get_ast_entity(info, expr)
-		if e != nil && .Overridden in e.flags {
-			// NOTE: C++ has a panic here for debugging, but we'll just return nil
-			// to match the defensive behavior
-			return nil
-		}
-		return e
+		// C++ Reference: checker.cpp entity_of_node:1808-1814
+		// In C++: `Entity *e = ident->entity;` then `return e`.
+		// In Odin: retrieve from ast_entity_map.
+		//
+		// #715: THE `Overridden` EARLY RETURN WAS A DEFECT, AND ITS COMMENT WAS WRONG TWICE.
+		// It read: "C++ has a panic here for debugging, but we'll just return nil to match the
+		// defensive behavior". C++ (checker.cpp:1810-1813) actually reads:
+		//     Entity *e = ident->entity;
+		//     if (e && e->flags & EntityFlag_Overridden) {
+		//         // GB_PANIC("use of an overriden entity: %.*s", LIT(e->token.string));
+		//     }
+		//     return e;
+		// The GB_PANIC is COMMENTED OUT. C++ enters the `if`, does nothing, and returns the entity
+		// REGARDLESS. So there was never a choice between "panic" and "defensively return nil" --
+		// the port invented a THIRD behaviour neither the live reference nor the disabled one has,
+		// and every caller then saw an absent entity where one exists. LEDGER #174: a commented-out
+		// panic is the reference DECLINING to enforce an invariant; the surrounding code is the
+		// behaviour.
+		return get_ast_entity(info, expr)
 
 	case ^ast.Selector_Expr:
-		// C++ Reference: checker.cpp:1642-1644
+		// C++ Reference: checker.cpp entity_of_node:1815-1818 -- C++ uses unselector_expr (a LOOP over
+		// nested SelectorExprs); the port strips one level here and re-enters, reaching the same node
 		s := unparen_expr(node.field)
 		if s != nil {
 			return entity_of_node(info, s)
@@ -62,19 +72,20 @@ entity_of_node :: proc(info: ^Checker_Info, expr: ^ast.Node) -> ^Entity {
 		return nil
 
 	case ^ast.Case_Clause:
-		// C++ Reference: checker.cpp:1645-1647
+		// C++ Reference: checker.cpp entity_of_node:1819-1821
 		// In C++: return cc->implicit_entity
 		// In Odin: retrieve from ast_entity_map
 		return get_ast_entity(info, expr)
 
 	case ^ast.Call_Expr:
-		// C++ Reference: checker.cpp:1649-1651
+		// C++ Reference: checker.cpp entity_of_node:1823-1825
 		// In C++: return ce->entity_procedure_of
 		// In Odin: retrieve from ast_entity_map
 		return get_ast_entity(info, expr)
 
 	case ^ast.Ternary_When_Expr:
-		// C++ Reference: checker.cpp:1653-1667
+		// C++ Reference: checker.cpp entity_of_node:1827-1836 -- C++ uses `goto retry` after selecting
+		// the branch; the port recurses, which re-runs the same unparen + switch
 		// Optimization: Constant when expressions can be evaluated at compile time
 		// to return the entity from the selected branch (x or y)
 
@@ -92,9 +103,9 @@ entity_of_node :: proc(info: ^Checker_Info, expr: ^ast.Node) -> ^Entity {
 			return nil
 		}
 
-		// Check if condition is a compile-time boolean constant (C++ line 1662)
+		// Check if condition is a compile-time boolean constant (C++ checker.cpp entity_of_node:1831)
 		if cond_bool, ok := tav.value.(bool); ok {
-			// Recursively find entity in the selected branch (C++ line 1665)
+			// Recursively find entity in the selected branch (C++ checker.cpp entity_of_node:1834)
 			selected_expr := node.y if !cond_bool else node.x
 			return entity_of_node(info, selected_expr)
 		}
@@ -553,7 +564,7 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			}
 
 			// Process attributes based on name
-			// C++ Reference: checker.cpp:3544-3850 (proc_decl_attribute)
+			// C++ Reference: checker.cpp proc_decl_attribute:3841-4291
 
 			// @(deprecated="message") - C++ line 3774-3786
 			if name == "deprecated" {
@@ -1848,7 +1859,33 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 	// C++ Reference: check_decl.cpp:449-517
 	assert(entity_type(e) == nil)
 
-	// C++ Reference: check_decl.cpp check_type_decl:592-609
+	// C++ Reference: check_decl.cpp check_type_decl:520-524
+	//
+	// ORDER DIFFERENCE, DISPOSITIONED INERT (#610). The port runs this attribute processing at the
+	// TOP of check_type_decl; C++ runs it at 520-524, i.e. AFTER it has built `named` and assigned
+	// `e->type = named` (465). Settled by ENUMERATION, not assumption:
+	//
+	//   The attribute handler CANNOT SEE THE DECLARATION ENTITY AT ALL. C++'s signature is
+	//     DECL_ATTRIBUTE_PROC(_name) bool _name(CheckerContext *c, Ast *elem, String name,
+	//                                           Ast *value, AttributeContext *ac)   [checker.hpp:179]
+	//   -- no entity parameter. type_decl_attribute (checker.cpp:4464-4558) only validates attribute
+	//   VALUES and fills `ac`; it references `ac->` 11 times and an entity twice, both at 4516-4522
+	//   where `e` is a LOCAL resolved from the attribute's own value (the objc_context_provider's
+	//   referenced procedure), never the declaration's entity.
+	//
+	//   Everything entity-dependent happens AFTER the call, reading `ac`: the objc_class name store
+	//   (528) and the zero-size check `type_size_of(e->type) > 0` (602). The port has both inside its
+	//   objc block, which runs later -- so nothing reads `e.type` before it is set.
+	//
+	// **NOT INVESTIGATED:** whether an attribute whose VALUE names the type being declared
+	// (e.g. a self-referential `@(objc_superclass=Self)`) resolves differently when the entity's type
+	// is still nil. Resolution goes through the SCOPE, where the entity exists either way, so this is
+	// unlikely -- but it is not measured, and it is the one edge this enumeration does not cover.
+	//
+	// CITATION CORRECTED (#610): cited 592-609, the objc_superclass / zero-size region. C++ processes
+	// type-decl attributes at `if (decl != nullptr) { AttributeContext ac = {};
+	// check_decl_attributes(ctx, decl->attributes, type_decl_attribute, &ac); ... }` = 520-524.
+	// This was the FIRST citation in the proc, so its too-high anchor inverted the four that follow (#52).
 	// Process type declaration attributes (raddbg_type_view, etc.)
 	// If ac is not provided, process attributes from the entity's decl_info
 	local_ac := Attribute_Context{}
@@ -1941,13 +1978,27 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 		}
 	}
 
-	// C++ Reference: check_decl.cpp check_type_decl:614-616
+	// C++ Reference: check_decl.cpp check_type_decl:618-621
+	//
+	// ORDER DIFFERENCE, DISPOSITIONED INERT (#610). The port emits this BEFORE the raddbg block
+	// below; C++ has raddbg (609-614) first and this (618-621) second. Inert for the same reason
+	// #666 dispositioned check_call_expr's Step 11: the two blocks share no state -- raddbg reads
+	// `effective_ac` and enqueues, this reads `ctx.decl.is_using` and `base` -- and **only ONE of
+	// them emits a diagnostic**, so no swap of the two can reorder any output. Contrast #664, where
+	// the moved block DID emit and the reorder cost a diagnostic.
+	//
+	// CITATION CORRECTED (#610): cited 614-616, which is the CLOSING BRACE of the raddbg block plus
+	// blank lines. C++'s `// using decl` / `if (decl->is_using) { error(init_expr, "'using' an enum
+	// declaration is not allowed...") }` is 618-621. Swapped with the raddbg citation below.
 	// 'using' an enum declaration is not allowed
 	if ctx.decl != nil && ctx.decl.is_using && is_type_enum(base) {
 		error(init_expr, "'using' an enum declaration is not allowed, prefer using implicit selector expressions e.g. '.A'")
 	}
 
-	// C++ Reference: check_decl.cpp check_type_decl:604-609
+	// C++ Reference: check_decl.cpp check_type_decl:609-614
+	// CITATION CORRECTED (#610): cited 604-609, which is the `@(objc_class) marked type must be of
+	// zero size` error and the objc_implement else-if. C++'s raddbg block is
+	// `if (ac.raddbg_type_view) { ... mpsc_enqueue(&ctx->info->raddbg_type_views_queue, ...) }` = 609-614.
 	// Handle raddbg_type_view attribute for RAD Debugger type visualizers
 	if effective_ac != nil && effective_ac.raddbg_type_view {
 		view := Raddbg_Type_View{
@@ -1957,7 +2008,10 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 		queue.mpsc_enqueue(&ctx.checker.info.raddbg_type_views_queue, view)
 	}
 
-	// C++ Reference: check_decl.cpp check_type_decl:517-610
+	// C++ Reference: check_decl.cpp check_type_decl:526-607
+	// CITATION CORRECTED (#610): cited 517-610; 517-518 are the CLOSING BRACES of the constant-decl
+	// block above, and 520-524 is the attribute processing already cited at the top of this proc.
+	// The objc block proper is `if (e->kind == Entity_TypeName && ac.objc_class != "") { ... }` = 526-607.
 	// Handle Objective-C class attributes for type declarations
 	if effective_ac != nil && len(effective_ac.objc_class) > 0 {
 		if type_name, ok := &e.variant.(Entity_Type_Name); ok {
@@ -2039,9 +2093,21 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 				// the LAST of C++'s four ordered checks, firing it where C++ fires the third.
 				type_name.objc_superclass = effective_ac.objc_superclass
 
-				super_set := make(map[^Type]bool)
+				// Keyed by canonical type hash, mirroring C++'s `TypeSet super_set` (check_decl.cpp
+				// check_type_decl:559) as #691 and #693 did. Nothing iterates this set -- it is pure
+				// membership -- but keying it the same way as its two siblings is the point: the
+				// #112 sweep exists because ONE of three canonical-hash containers had been modelled
+				// with pointer identity while the others were correct, and inconsistency between
+				// siblings is what makes that class hard to spot (#114).
+				//
+				// HONESTLY LABELLED: unlike #693 this is INERT on every input I can construct, and
+				// is a faithfulness change rather than a defect fix. The loop below rejects anything
+				// that is not `.Named` before testing membership, and a named type is created once
+				// per declaration, so pointer identity and canonical hash coincide for every value
+				// that can reach the set. LEDGER #695.
+				super_set := make(map[u64]^Type)
 				defer delete(super_set)
-				super_set[e.type] = true
+				super_set[type_hash_canonical_type(e.type)] = e.type
 
 				super := effective_ac.objc_superclass
 				for super != nil {
@@ -2052,11 +2118,11 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 					}
 					// C++ Reference: check_decl.cpp check_type_decl:571-574. C++'s type_set_update returns true
 					// when the type was ALREADY present -- that is the cycle.
-					if super in super_set {
+					if type_hash_canonical_type(super) in super_set {
 						error(e.token, "@(objc_superclass) Superclass hierarchy cycle encountered")
 						break
 					}
-					super_set[super] = true
+					super_set[type_hash_canonical_type(super)] = super
 
 					// C++ Reference: check_decl.cpp check_type_decl:576 calls check_single_global_entity here to
 					// force the superclass to resolve. OMITTED: C++ runs this block from
@@ -2110,7 +2176,7 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 
 // make_decl_info creates and initializes a new Decl_Info
 // C++ Reference: checker.cpp make_decl_info:183-187 (make_decl_info)
-//                checker.cpp:165-181 (init_decl_info)
+//                checker.cpp init_decl_info:166-181
 make_decl_info :: proc(scope: ^Scope, parent: ^Decl_Info = nil, allocator := context.allocator) -> ^Decl_Info {
 	// This helper creates a new Decl_Info with proper initialization.
 	// In C++, DeclInfo is allocated with gb_alloc_item which zero-initializes,
@@ -2136,7 +2202,7 @@ make_decl_info :: proc(scope: ^Scope, parent: ^Decl_Info = nil, allocator := con
 
 	// Initialize maps (C++ lines 175-176: ptr_set_init and type_set_init)
 	d.deps = make(map[^Entity]struct{})
-	d.type_info_deps = make(map[^Type]struct{})
+	d.type_info_deps = make(map[u64]^Type)
 
 	// Initialize dynamic arrays (C++ line 177)
 	d.labels = make([dynamic]Block_Label, allocator)

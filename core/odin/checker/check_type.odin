@@ -13,6 +13,7 @@ import "core:container/queue"
 import "core:math/big"
 import "core:odin/ast"
 import "core:odin/tokenizer"
+import "core:strings"
 import "core:sync"
 
 // check_type_internal is the main dispatcher for type checking
@@ -39,12 +40,11 @@ check_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^Type, n
 		case .Type:
 			type^ = o.type
 			// Check for non-specialized polymorphic types
-			// C++ Reference: check_type.cpp:3379-3386
+			// C++ Reference: check_type.cpp check_type_internal:3592-3602 (the Addressing_Type arm)
 			if !ctx.in_polymorphic_specialization {
 				t := base_type(o.type)
 				if t != nil && is_type_polymorphic_record_unspecialized(t) {
-					// C++ line 3382-3383: err_str = expr_to_string(e);
-					// error(e, "Invalid use of a non-specialized polymorphic type '%s'", err_str);
+					// C++ check_type_internal:3597-3598
 					err_str := expr_to_string(e)
 					defer delete(err_str)
 					error_node(e, "Invalid use of a non-specialized polymorphic type '%s'", err_str)
@@ -54,16 +54,20 @@ check_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^Type, n
 			return true
 
 		case .No_Value:
-			// C++ Reference: check_type.cpp:3390-3393
+			// C++ Reference: check_type.cpp check_type_internal:3605-3608
 			err_str := expr_to_string(o.expr)
 			defer delete(err_str)
 			error_node(o.expr, "'%s' used as a type", err_str)
 
 		case:
-			// C++ Reference: check_type.cpp:3395-3398
+			// C++ Reference: check_type.cpp check_type_internal:3610-3613.
+			// The text differs from the Selector_Expr arm below and that is NOT an accident on C++'s
+			// part: the Ident default says "used as a type when not a type", the Selector default says
+			// "is not a type". Two switches with the same SHAPE and different TEXT. The port had the
+			// selector's wording here, and the identical (wrong) citation on both hid it.
 			err_str := expr_to_string(o.expr)
 			defer delete(err_str)
-			error_node(o.expr, "'%s' is not a type", err_str)
+			error_node(o.expr, "'%s' used as a type when not a type", err_str)
 		}
 
 	case ^ast.Helper_Type:
@@ -71,7 +75,7 @@ check_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^Type, n
 		return check_type_internal(ctx, n.type, type, named_type)
 
 	case ^ast.Distinct_Type:
-		// C++ Reference: check_type.cpp:3407
+		// C++ Reference: check_type.cpp check_type_internal:3621-3624
 		error_node(n, "Invalid use of a distinct type")
 		// Treat as helper type to reduce cascading errors
 		return check_type_internal(ctx, n.type, type, named_type)
@@ -177,13 +181,14 @@ check_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^Type, n
 			return true
 
 		case .No_Value:
-			// C++ Reference: check_type.cpp:3390-3393
+			// C++ Reference: check_type.cpp check_type_internal:3693-3697 (Selector_Expr, NOT the Ident
+			// switch above -- the two are separate and their default arms use DIFFERENT text)
 			err_str := expr_to_string(o.expr)
 			defer delete(err_str)
 			error_node(o.expr, "'%s' used as a type", err_str)
 
 		case:
-			// C++ Reference: check_type.cpp:3395-3398
+			// C++ Reference: check_type.cpp check_type_internal:3698-3702
 			err_str := expr_to_string(o.expr)
 			defer delete(err_str)
 			error_node(o.expr, "'%s' is not a type", err_str)
@@ -192,7 +197,7 @@ check_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^Type, n
 	case ^ast.Paren_Expr:
 		// Parenthesized type
 		if n.expr == nil {
-			// C++ Reference: check_type.cpp (paren expr handling)
+			// C++ Reference: check_type.cpp check_type_internal:3706-3711
 			error_node(n, "Expected an expression or type within the parentheses")
 			type^ = t_invalid
 			return true
@@ -560,6 +565,28 @@ make_soa_struct_internal :: proc(ctx: ^Checker_Context, array_type_expr: ^ast.No
 	if is_polymorphic {
 		// Nothing to build, and nothing to queue.
 	} else if elem_fields_ready {
+		// C++ Reference: check_type.cpp make_soa_struct_internal:3433-3436.
+		//
+		//     if (is_complete) { add_type_info_type(ctx, soa_struct); wait_signal_set(&...); }
+		//     else             { mpsc_enqueue(...); thread_pool_add_task(complete_soa_type_worker); }
+		//
+		// `elem_fields_ready` is this port's spelling of C++'s `is_complete`, and C++ orders the
+		// registration BEFORE the wait-signal set -- so it belongs immediately before the call that
+		// builds the fields and signals.
+		//
+		// ONLY on this branch. The deferred branch does NOT register on either side: C++'s
+		// complete_soa_type (:3171) and complete_soa_type_worker (:3273) contain no
+		// add_type_info_type at all. Registering there too would be an over-registration, not a
+		// symmetry fix.
+		//
+		// This was the ONLY add_type_info_type call site in C++'s check_type.cpp, and the port had
+		// ZERO -- a per-file census disagreement recorded as a curiosity in #690 and left alone
+		// because no gate covered it. The gate built in #692 went red on its first full-corpus run
+		// and named exactly this: every `#soa` type went unregistered for RTTI, which is why the
+		// three `soa_zip`-based procedures in core/reflect (`struct_fields_zipped:677`,
+		// `enum_fields_zipped:914`, `bit_fields_zipped:1210`) read ref=5 port=4 in all 117 packages
+		// that import core:reflect. LEDGER #694.
+		add_type_info_type(ctx, t)
 		complete_soa_type(ctx.checker, t, false)
 	} else {
 		queue.mpsc_enqueue(&ctx.checker.soa_types_to_complete, t)
@@ -590,10 +617,10 @@ make_soa_struct_dynamic_array :: proc(ctx: ^Checker_Context, array_type_expr: ^a
 }
 
 // check_poly_type processes polymorphic type parameters ($T)
-// C++ Reference: check_type.cpp:3420-3464
+// C++ Reference: check_type.cpp check_type_internal PolyType arm:3635-3679
 check_poly_type :: proc(ctx: ^Checker_Context, pt: ^ast.Poly_Type, type: ^^Type, named_type: ^Type) -> bool {
 	// Get the identifier after the $
-	// C++ lines 3421-3426
+	// C++ check_type.cpp check_type_internal:3636-3641
 	ident_node := pt.type
 	ident, ok := ident_node.derived.(^ast.Ident)
 	if !ok {
@@ -606,7 +633,7 @@ check_poly_type :: proc(ctx: ^Checker_Context, pt: ^ast.Poly_Type, type: ^^Type,
 	specific: ^Type = nil
 
 	// Check for specialization constraint ($T/SomeType)
-	// C++ lines 3429-3436
+	// C++ check_type.cpp check_type_internal:3644-3651
 	if pt.specialization != nil {
 		// Create a temporary context with in_polymorphic_specialization flag
 		c := ctx^
@@ -615,20 +642,20 @@ check_poly_type :: proc(ctx: ^Checker_Context, pt: ^ast.Poly_Type, type: ^^Type,
 	}
 
 	// Create the generic type
-	// C++ line 3437
+	// C++ check_type.cpp check_type_internal:3652
 	t := make_type_generic(ctx.scope, name, specific)
 
 	// Validate and register the polymorphic type parameter
-	// C++ lines 3438-3463
+	// C++ check_type.cpp check_type_internal:3653-3675
 	if ctx.allow_polymorphic_types {
 		// Check for disallowed polymorphic return types
-		// C++ lines 3439-3441
+		// C++ check_type.cpp check_type_internal:3654-3656
 		if ctx.disallow_polymorphic_return_types {
 			error_node(ident_node, "Undeclared polymorphic parameter '%s' in return type", name)
 		}
 
 		// Determine which scope to add the entity to
-		// C++ lines 3442-3449
+		// C++ check_type.cpp check_type_internal:3657-3664
 		ps := ctx.polymorphic_scope
 		s := ctx.scope
 		entity_scope := s
@@ -638,7 +665,7 @@ check_poly_type :: proc(ctx: ^Checker_Context, pt: ^ast.Poly_Type, type: ^^Type,
 		}
 
 		// Create type name entity for the polymorphic parameter
-		// C++ lines 3450-3455
+		// C++ check_type.cpp check_type_internal:3665-3670
 		token := make_token_ident(name)
 		e := alloc_entity_type_name(entity_scope, token, t, .Resolved)
 		if gen, gen_ok := &t.variant.(Type_Generic); gen_ok {
@@ -655,7 +682,7 @@ check_poly_type :: proc(ctx: ^Checker_Context, pt: ^ast.Poly_Type, type: ^^Type,
 		add_entity(ctx, s, ident_node, e)
 	} else {
 		// Polymorphic types not allowed in this context
-		// C++ lines 3457-3460
+		// C++ check_type.cpp check_type_internal:3672-3675
 		error_node(ident_node, "Invalid use of a polymorphic parameter '$%s'", name)
 		type^ = t_invalid
 		return false
@@ -2138,8 +2165,97 @@ is_type_polymorphic :: proc(t: ^Type, or_specialized := false) -> bool {
 	return false
 }
 
+// set_polymorphic_record_instance_name composes the NAME of an instantiated polymorphic record
+// and writes it to BOTH the type and its entity's token.
+//
+// C++ Reference: check_expr.cpp check_polymorphic_record_type:8548-8583.
+//
+// `Foo(int)` is named `Foo($T=int)`, and `Buf(4, int)` is named `Buf($N=4, $T=int)`. This is a
+// STORED NAME, not a rendering: C++'s Type_Named printer arm (types.cpp:5542-5549) writes only
+// `Named.name`, and the `allow_polymorphic` mode of write_type_to_string that WOULD assemble the
+// parameter list is dead code upstream (type_to_string_polymorphic, types.cpp:5706, has zero
+// callers). So the whole difference lives here. Without this the port names every instantiation
+// just `Foo`, and `Foo(int)` / `Foo(string)` render identically in every diagnostic. #662.
+//
+// This must run AFTER check_struct_type/check_union_type return, because those call
+// add_polymorphic_record_entity, which builds the entity's token from the PRE-rename name
+// (check_type.odin:1887, C++ check_type.cpp:335). That is exactly why C++ writes the new name to
+// the entity's token as well as to Named.name -- the entity already exists by this point.
+//
+// NOTE(parity): C++ does NOT nil-check `tuple->variables[i]`, and neither does this. Adding a
+// guard would change the ", " separator's index accounting; if a nil ever appears here both
+// implementations fault, and that would be a defect in the tuple, not in this naming.
+set_polymorphic_record_instance_name :: proc(ctx: ^Checker_Context, named_type: ^Type, original_type: ^Type) {
+	if named_type == nil || original_type == nil {
+		return
+	}
+	bt := base_type(named_type)
+	if bt == nil {
+		return
+	}
+	// C++ check_expr.cpp:8548 -- only records are renamed.
+	#partial switch bt.kind {
+	case .Struct, .Union:
+	case:
+		return
+	}
+
+	// C++ check_expr.cpp:8549-8551
+	orig_named, orig_ok := original_type.variant.(Type_Named)
+	if !orig_ok || orig_named.type_name == nil {
+		return
+	}
+
+	// C++ check_expr.cpp:8553-8554
+	b := strings.builder_make(ctx.checker.allocator)
+	strings.write_string(&b, orig_named.type_name.token.text)
+	strings.write_byte(&b, '(')
+
+	// C++ check_expr.cpp:8556-8576
+	tuple := get_record_polymorphic_params(bt)
+	if tuple != nil {
+		for v, i in tuple.variables {
+			if i > 0 {
+				strings.write_string(&b, ", ")
+			}
+			strings.write_byte(&b, '$')
+			strings.write_string(&b, v.token.text)
+
+			#partial switch ev in v.variant {
+			case Entity_Type_Name:
+				// C++ check_expr.cpp:8565-8569
+				if v.type != nil && v.type.kind != .Generic {
+					strings.write_byte(&b, '=')
+					// C++ passes shorthand=false here; the port's type_to_string defaults to
+					// shorthand=true, so it must be passed explicitly.
+					strings.write_string(&b, type_to_string(v.type, false))
+				}
+			case Entity_Constant:
+				// C++ check_expr.cpp:8570-8575 -- `value.kind != ExactValue_Invalid`, which in
+				// the port is a nil union.
+				if ev.value != nil {
+					strings.write_byte(&b, '=')
+					strings.write_string(&b, exact_value_to_string(ev.value))
+				}
+			}
+		}
+	}
+	// C++ check_expr.cpp:8577
+	strings.write_byte(&b, ')')
+
+	// C++ check_expr.cpp:8579-8583 -- write BOTH.
+	new_name := strings.to_string(b)
+	new_named := &named_type.variant.(Type_Named)
+	new_named.name = new_name
+	if new_named.type_name != nil {
+		new_named.type_name.token.text = new_name
+	}
+}
+
 // get_record_polymorphic_params retrieves polymorphic parameters from struct/union types
-// C++ Reference: types.cpp:2313-2330
+// C++ Reference: types.cpp get_record_polymorphic_params:2458-2475
+// (STRANDED above a different procedure until #734 -- another procedure was inserted between
+//  this doc comment and the definition it documents.)
 get_record_polymorphic_params :: proc(t: ^Type) -> ^Type_Tuple {
 	if t == nil {
 		return nil
@@ -2403,6 +2519,10 @@ check_polymorphic_record_type :: proc(ctx: ^Checker_Context, original_type: ^Typ
 		}
 		check_struct_type(&inst_ctx, new_struct_type, struct_node, operands, new_named_type, original_type)
 
+		// C++ Reference: check_expr.cpp check_polymorphic_record_type:8547-8583 -- the rename runs
+		// after the record body is checked, for both the struct and union branches. #662.
+		set_polymorphic_record_instance_name(ctx, new_named_type, original_type)
+
 		return new_named_type
 
 	case .Union:
@@ -2454,6 +2574,10 @@ check_polymorphic_record_type :: proc(ctx: ^Checker_Context, original_type: ^Typ
 		check_open_scope(&inst_ctx, cloned_node)
 		check_union_type(&inst_ctx, new_union_type, union_node, operands, new_named_type, original_type)
 		check_close_scope(&inst_ctx)
+
+		// C++ Reference: check_expr.cpp check_polymorphic_record_type:8547-8583 -- same rename as
+		// the struct branch above; C++ has ONE block after the if/else, the port has two returns.
+		set_polymorphic_record_instance_name(ctx, new_named_type, original_type)
 
 		return new_named_type
 	}
@@ -3502,14 +3626,6 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 			continue
 		}
 
-		// Check for duplicate field names
-		// C++ lines 1057-1062
-		if field_name in bf.names {
-			// C++ Reference: check_type.cpp check_bit_field_type:1128.
-			error_node(ast_field.name, "'%s' is already declared in this bit_field", field_name)
-			continue
-		}
-
 		// Check field type
 		// C++ lines 1064-1085
 		field_type := check_type(ctx, ast_field.type)
@@ -3534,25 +3650,6 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 		} else if !(is_type_integer(field_type) || is_type_enum(field_type) || is_type_boolean(field_type)) {
 			type_str := type_to_string(field_type)
 			error_node(ast_field.type, "The type of a bit_field's field must be an integer, enum, or boolean, got %s", type_str)
-		}
-
-		// Validate field type endianness matches backing type endianness
-		// C++ Reference: check_type.cpp check_bit_field_type:1127-1167
-		if backing_endian != .Platform {
-			field_endian := Endianness.Platform
-			if basic, is_basic := base_type(field_type).variant.(Type_Basic); is_basic {
-				if .Endian_Little in basic.flags {
-					field_endian = .Little
-				} else if .Endian_Big in basic.flags {
-					field_endian = .Big
-				}
-			}
-			if field_endian != .Platform && field_endian != backing_endian {
-				backing_str := backing_endian == .Little ? "little" : "big"
-				field_str := field_endian == .Little ? "little" : "big"
-				error_node(ast_field.type, "bit_field field has %s endianness but backing type has %s endianness", field_str, backing_str)
-				continue
-			}
 		}
 
 		// Check bit size expression
@@ -3590,11 +3687,42 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 			error_node(ast_field.bit_size, "Wrap the expression in parentheses, e.g. (%s)", expr_str)
 		}
 
-		// C++ Reference: check_type.cpp check_bit_field_type:1122-1126.
+		// C++ Reference: check_type.cpp check_bit_field_type:1122-1126. C++ reports and FALLS
+		// THROUGH -- the `if` has no `continue`, so the field still reaches the redeclaration
+		// check below and, if the name is new, still gets an entity with a clamped width.
+		//
+		// The port `continue`d, so a field with a non-integer bit size was dropped entirely and
+		// its NAME was never registered. A later field reusing that name was then not seen as a
+		// duplicate, and the oracle's redeclaration error went missing:
+		//     B :: bit_field u32 { a: u8 | "x", a: u8 | 3 }
+		//     oracle: the non-integer bit size AND "'a' is already declared in this bit_field"
+		//     port:   the non-integer bit size only
+		// Probe p677f. LEDGER #677.
 		if !is_type_integer(bit_size_op.type) {
 			val_str := expr_to_string(ast_field.bit_size)
 			defer delete(val_str)
 			error_node(ast_field.bit_size, "Expected an integer constant value for the specified bit size, got %s", val_str)
+		}
+
+		// Check for duplicate field names -- HERE, after the type and bit-size validation.
+		//
+		// C++ Reference: check_type.cpp check_bit_field_type:1128-1130:
+		//     if (scope_lookup_current(ctx->scope, interned) != nullptr) {
+		//         error(f->name, "'%.*s' is already declared in this bit_field", LIT(name));
+		//     } else { ...clamps, alloc_entity_field, bit_sizes, total_bit_size... }
+		// So a duplicate skips ONLY the clamps and the entity -- everything above it has already
+		// run and already reported.
+		//
+		// The port ran this check FIRST, before `check_type` on the field, and `continue`d. Every
+		// diagnostic C++ produces for a duplicated field was therefore lost:
+		//     B :: bit_field u32 { a: u8 | 3, a: string | 4 }
+		//     oracle: redeclaration AND "The type of a bit_field's field must be <= 8 bytes, got 16"
+		//     port:   redeclaration only
+		// Probe p677a. The bit-size CLAMPS must stay below this point, not above it: probe p677b
+		// (`a: u8 | 99` on the duplicate) shows the oracle emits NO "cannot exceed 64 bits" for a
+		// duplicated field, because that check lives in C++'s `else`. LEDGER #677.
+		if field_name in bf.names {
+			error_node(ast_field.name, "'%s' is already declared in this bit_field", field_name)
 			continue
 		}
 
@@ -3658,15 +3786,71 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 		error_node(bft, "The total bit size of a bit_field's fields (%d) must fit into its backing type's (%s) bit size of %d", total_bits_used, backing_str, backing_bits)
 	}
 
+	// ENDIANNESS. C++ Reference: check_type.cpp check_bit_field_type:1190-1230.
+	//
+	// This runs AFTER the field loop, over the ENTITIES collected by it, and it has TWO
+	// diagnostics -- one comparing each field against the backing type, one comparing each field
+	// against the first field's kind. Both anchor at the field's TOKEN (its name).
+	//
+	// The port had a per-field block instead, with an INVENTED message ("bit_field field has %s
+	// endianness but backing type has %s endianness" appears nowhere in src/), no counterpart to
+	// C++'s second diagnostic, none of the guards, and a `continue` that suppressed the rest of
+	// the field's own checks. It also gated the whole thing on the backing type being explicitly
+	// endian-specific, so `bit_field u32 { a: u16le|5, b: u16be|5 }` -- which the oracle rejects
+	// twice -- produced NOTHING. Probes p678a/b/d. LEDGER #678.
+	//
+	// determine_endian_kind (C++ :1196-1211): booleans are Unknown ("it doesn't matter, and when
+	// it does, that api is absolutely stupid"), anything smaller than 2 bytes is Unknown, an
+	// endian-specific type is Little or Big, everything else is Native.
+	Endian_Kind :: enum u8 {
+		Unknown, // C++'s Endian_Unknown -- the ZERO enumerator, which its `if (field_kind)` tests
+		Native,
+		Little,
+		Big,
+	}
+	determine_endian_kind :: proc(t: ^Type) -> Endian_Kind {
+		if is_type_boolean(t) {
+			return .Unknown
+		}
+		if type_size_of(t) < 2 {
+			return .Unknown
+		}
+		if is_type_endian_specific(t) {
+			return is_type_endian_little(t) ? .Little : .Big
+		}
+		return .Native
+	}
+
+	backing_type_elem := core_array_type(backing_type)
+	backing_type_elem_size := i64(type_size_of(backing_type_elem))
+	backing_type_endian_kind := determine_endian_kind(backing_type_elem)
+	endian_kind := Endian_Kind.Unknown
+	for f in bf.fields {
+		field_kind := determine_endian_kind(entity_type(f))
+		field_size := i64(type_size_of(entity_type(f)))
+
+		// C++ tests `field_kind` for truthiness, and Endian_Unknown is the zero enumerator, so
+		// an Unknown field takes neither branch.
+		if field_kind != .Unknown && backing_type_endian_kind != field_kind && field_size > 1 && backing_type_elem_size > 1 {
+			error_token(f.token, "All 'bit_field' field types must match the same endian kind as the backing type, i.e. all native, all little, or all big")
+		}
+
+		if endian_kind == .Unknown {
+			endian_kind = field_kind
+		} else if field_kind != .Unknown && endian_kind != field_kind && field_size > 1 {
+			error_token(f.token, "All 'bit_field' field types must be of the same endian variety, i.e. all native, all little, or all big")
+		}
+	}
+
 	return true
 }
 
 // check_matrix_type_expr creates and validates a matrix type
-// C++ Reference: check_type.cpp:2870-2922 (~52 lines)
+// C++ Reference: check_type.cpp:3093-3160 (check_matrix_type, ~68 lines)
 check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type: ^^Type, named_type: ^Type) -> bool {
 	// C++ Reference: types.cpp:402-403 - MIN = 1, MAX = 64.
 	// NOTE: MAX applies to the TOTAL element count (row*column), not to each dimension.
-	// C++ check_type.cpp check_matrix_type:3108-3131 checks only a MINIMUM per dimension and then bounds
+	// C++ check_type.cpp check_matrix_type:3113-3136 checks only a MINIMUM per dimension and then bounds
 	// row_count*column_count by MAX. The port previously capped each dimension at 16 and
 	// the total at 16, rejecting valid types such as matrix[8, 8]T.
 	MATRIX_ELEMENT_COUNT_MIN :: 1
@@ -3679,7 +3863,7 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 
 	// NOTE: this publishes a still-ZEROED matrix type (elem=nil, row_count=0, column_count=0) to the
 	// caller before any validation has run, so every error path below MUST overwrite it with
-	// t_invalid. C++ avoids the problem structurally: check_type.cpp:3090-3156 validates everything
+	// t_invalid. C++ avoids the problem structurally: check_type.cpp:3093-3158 validates everything
 	// first and assigns exactly once at `type_assign:` via alloc_type_matrix with all fields known.
 	//
 	// Leaving a zeroed matrix in circulation caused a SIGSEGV in core/math/linalg: downstream,
@@ -3694,7 +3878,7 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	set_base_type(named_type, matrix_type)
 
 	// Check element type
-	// C++ lines 2872-2880
+	// C++ Reference: check_type.cpp check_matrix_type:3139 -- `Type *elem = check_type_expr(ctx, mt->elem, nullptr)`.
 	elem := check_type(ctx, mt.elem)
 	if elem == nil || elem == t_invalid {
 		error_node(mt.elem, "Invalid element type for matrix")
@@ -3704,41 +3888,9 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 		return false
 	}
 
-	// Validate the element type.
-	// C++ Reference: check_type.cpp check_matrix_type, the is_type_valid_for_matrix_elems block.
-	//
-	// C++ reports and CONTINUES here - it falls through to its `type_assign:` label and allocates the
-	// matrix regardless. The port used to publish t_invalid and bail, turning one bad element type
-	// into a cascade at every use of the matrix.
-	if !is_type_valid_for_matrix_elems(elem) {
-		// C++ keeps a narrow escape for `proc($T: typeid) -> matrix[2, 2]T`, where the element
-		// expression names a typeid-valued type alias. Its own comment marks this a HACK; it is
-		// reproduced rather than generalised, because widening it would accept element types C++
-		// rejects.
-		escaped := false
-		if elem == t_typeid {
-			e := entity_of_node(ctx.info, mt.elem)
-			if e != nil && e.kind == .Type_Name {
-				if tn, tn_ok := e.variant.(Entity_Type_Name); tn_ok && tn.is_type_alias {
-					escaped = true
-				}
-			}
-		}
-		if !escaped {
-			type_str := type_to_string(elem)
-			// C++ Reference: check_type.cpp check_matrix_type:3149 -- `error(column.expr, ...)`. C++ reports this
-			// at the COLUMN COUNT expression, not at the element type, which is surprising but
-			// is what the oracle does: for `matrix[2,2]string` it points at the second `2`
-			// (col 14), where the port pointed at `string` (col 16). Its sibling diagnostic
-			// "Matrix types are limited to a maximum of %d elements" uses column.expr too, and
-			// the port already matched C++ there (:3547) -- this site was the odd one out.
-			error_node(mt.column_count, "Matrix elements types are limited to integers, floats, and complex, got %s", type_str)
-		}
-	}
-
 	mat.elem = elem
 
-	// C++ Reference: check_type.cpp check_matrix_type:3095-3106. BOTH counts are computed first, through
+	// C++ Reference: check_type.cpp check_matrix_type:3099-3111. BOTH counts are computed first, through
 	// check_array_count, and only then are the generic tests and the range checks run.
 	//
 	// check_array_count OWNS every count diagnostic: "Array count must be a constant integer,
@@ -3763,7 +3915,7 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	generic_row: ^Type = nil
 	generic_column: ^Type = nil
 
-	// C++ Reference: check_type.cpp check_matrix_type:3101-3106 tests `mode == Addressing_Type && type->kind ==
+	// C++ Reference: check_type.cpp check_matrix_type:3105-3111 tests `mode == Addressing_Type && type->kind ==
 	// Type_Generic` DIRECTLY -- not through base_type and not through a broader
 	// is_type_polymorphic, which is what the port used and which accepts more than C++ does.
 	if row_op.mode == .Type && row_op.type != nil && row_op.type.kind == .Generic {
@@ -3773,7 +3925,7 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 		generic_column = col_op.type
 	}
 
-	// C++ Reference: check_type.cpp check_matrix_type:3108-3116 -- minimum only; the maximum is enforced on the
+	// C++ Reference: check_type.cpp check_matrix_type:3113-3120 -- minimum only; the maximum is enforced on the
 	// total below. C++ reports and CARRIES ON: it does not invalidate the type and does not skip
 	// the column check. Both branches print the SOURCE EXPRESSION via expr_to_string(row.expr),
 	// not the evaluated count -- identical for `matrix[0,2]f32` and WRONG for `matrix[ROWS,2]f32`,
@@ -3788,10 +3940,11 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 		}
 	}
 
-	// C++ Reference: check_type.cpp check_matrix_type:3118-3126, same two branches and the same expr_to_string.
-	// NOTE(parity): C++ (check_type.cpp check_matrix_type:3124) says "rows" in the COLUMN message -- a copy-paste
-	// slip upstream. The port had corrected it to "columns", which is a byte-for-byte divergence
-	// in text the comparator checks. Reproduced as-is and reported as task #189. Probe mxc2.
+	// C++ Reference: check_type.cpp check_matrix_type:3123-3130, same two branches and the same expr_to_string.
+	// NOTE(parity) -- RESOLVED, kept only as history. C++ once said "rows" in the COLUMN message
+	// (a copy-paste slip), the port reproduced it for parity, and it was reported as #189. Upstream
+	// FIXED it and the port followed: src/ now reads "expected %d+ columns" and so does the emit
+	// site below. Do NOT re-introduce "rows". Probe mxc2.
 	if generic_column == nil && column_count < MATRIX_ELEMENT_COUNT_MIN {
 		if mt.column_count == nil {
 			error_node(mt, "Invalid matrix column count, got nothing")
@@ -3799,7 +3952,7 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 			cc_str := expr_to_string(mt.column_count)
 			defer delete(cc_str)
 			// "columns", not "rows". The port faithfully reproduced C++'s copy-paste slip here
-			// (check_type.cpp check_matrix_type:3124 said "rows" in the COLUMN branch), which was correct parity at
+			// (check_type.cpp check_matrix_type:3128 said "rows" in the COLUMN branch), which was correct parity at
 			// the time and is now stale: the slip was reported as #189, fixed upstream, and merged.
 			// The reference now reads "expected %d+ columns". LEDGER #385.
 			error_node(mt.column_count, "Invalid matrix column count, expected %d+ columns, got %s", MATRIX_ELEMENT_COUNT_MIN, cc_str)
@@ -3810,31 +3963,68 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	mat.generic_row_count = generic_row
 	mat.column_count = column_count
 	mat.generic_column_count = generic_column
-	// C++ Reference: check_type.cpp check_matrix_type:3154 passes mt->is_row_major to alloc_type_matrix.
+	// C++ Reference: check_type.cpp check_matrix_type:3158 passes mt->is_row_major to alloc_type_matrix.
 	mat.is_row_major = mt.is_row_major
 
-	// C++ Reference: check_type.cpp:2887-2930
+	// C++ Reference: check_type.cpp check_matrix_type:3133-3136.
 	// Validate total element count (row * column)
 	// C++ check_type.cpp check_matrix_type:3128-3131 - the single maximum, applied to row*column.
 	if generic_row == nil && generic_column == nil {
 		total_elements := row_count * column_count
 		if total_elements > MATRIX_ELEMENT_COUNT_MAX {
-			// C++ Reference: check_type.cpp check_matrix_type:3129-3131 reports at `column.expr`, the COLUMN
-			// COUNT expression -- the same node the two "Invalid matrix column count" errors
-			// just above it use -- not at the matrix type as a whole. `matrix[9, 9]f32` puts
-			// the oracle at 3:16 (the second 9) where the port sat at 3:6 (the `matrix`
-			// keyword). Probe m88. LEDGER #372.
-			error_node(mt.column_count, "Matrix types are limited to a maximum of %d elements, got %d", MATRIX_ELEMENT_COUNT_MAX, total_elements)
-			// C++ REPORTS AND CONTINUES -- check_type.cpp check_matrix_type:3129-3132 is a bare `if { error(); }`
-			// with no bail, and the matrix type is built normally afterwards. The port's
-			// `type^ = t_invalid; set_base_type(...); return false` was invented, and it cost
-			// a second diagnostic: the caller then reported "'matrix[9, 9]f32' is not a type".
+			// C++ Reference: check_type.cpp check_matrix_type:3133-3136 --
+			//     error(node, "Matrix types are limited to a maximum of %d elements, got %lld", ...)
+			// The anchor is the MATRIX TYPE NODE, not the column-count expression. `matrix[9, 9]f32`
+			// puts the oracle at 2:6 (the `matrix` keyword); the port sat at 2:16 (the second 9).
 			//
-			// That cascade was INVISIBLE while the error above pointed at `mt`, because both
-			// landed on the same position and the same-position merge pass folded them into
-			// one. Moving the error to the column-count expression, where C++ puts it,
-			// separated the positions and exposed the bail. Two defects, one probe, and
-			// fixing the position was what made the second one observable. LEDGER #372.
+			// The comment that used to stand here asserted the opposite and cited it as settled --
+			// it was wrong against the C++ line it names, and nothing pinned it (there is no m88
+			// corpus member). Probes p676e/p676f. LEDGER #676, INSTRUMENT-MISREPORT #49.
+			error_node(&mt.node, "Matrix types are limited to a maximum of %d elements, got %d", MATRIX_ELEMENT_COUNT_MAX, total_elements)
+			// C++ REPORTS AND CONTINUES -- check_type.cpp check_matrix_type:3133-3136 is a bare
+			// `if { error(); }` with no bail, and the matrix type is built normally afterwards.
+			// The port's `type^ = t_invalid; set_base_type(...); return false` was invented, and it
+			// cost a second diagnostic: the caller then reported "'matrix[9, 9]f32' is not a type".
+			// LEDGER #372.
+		}
+	}
+
+	// Validate the element type -- AFTER the counts, where C++ does it.
+	//
+	// C++ Reference: check_type.cpp check_matrix_type:3139-3156. C++ resolves the element type at
+	// :3139 and runs is_type_valid_for_matrix_elems at :3141, AFTER all three count diagnostics
+	// (row minimum :3113, column minimum :3123, total maximum :3133). It reports and CONTINUES,
+	// falling through to `type_assign:` and allocating the matrix regardless.
+	//
+	// The port ran this block FIRST, before the counts. That is not cosmetic, because this error
+	// and the column-count errors share an anchor (`mt.column_count`), and print_all_errors MERGES
+	// diagnostics at the same position keeping the FIRST emitted (LEDGER #578). Running early made
+	// the element error win and SUPPRESSED the genuine count diagnostic:
+	//     matrix[0, 0]string   oracle: row count + COLUMN COUNT | port: row count + element type
+	//     matrix[x, x]string   oracle: two "Array count must be a constant integer"
+	//                          port:   one, plus the element error at the column position
+	// Probes p676a / p676d. LEDGER #676.
+	if !is_type_valid_for_matrix_elems(elem) {
+		// C++ keeps a narrow escape for `proc($T: typeid) -> matrix[2, 2]T`, where the element
+		// expression names a typeid-valued type alias. Its own comment marks this a HACK; it is
+		// reproduced rather than generalised, because widening it would accept element types C++
+		// rejects.
+		escaped := false
+		if elem == t_typeid {
+			e := entity_of_node(ctx.info, mt.elem)
+			if e != nil && e.kind == .Type_Name {
+				if tn, tn_ok := e.variant.(Entity_Type_Name); tn_ok && tn.is_type_alias {
+					escaped = true
+				}
+			}
+		}
+		if !escaped {
+			type_str := type_to_string(elem)
+			// C++ Reference: check_type.cpp check_matrix_type:3153 -- `error(column.expr, ...)`.
+			// C++ reports this at the COLUMN COUNT expression, not at the element type, which is
+			// surprising but is what the oracle does: for `matrix[2,2]string` it points at the
+			// second `2`, where the port once pointed at `string`.
+			error_node(mt.column_count, "Matrix elements types are limited to integers, floats, and complex, got %s", type_str)
 		}
 	}
 
@@ -3846,8 +4036,6 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	return true
 }
 
-// check_map_type_expr checks a `map[K]V` type expression
-// C++ Reference: check_type.cpp:3042-3086 (check_map_type)
 // check_fixed_capacity_dynamic_array_type checks a `[dynamic; N]T` type expression.
 // C++ Reference: check_type.cpp:3830-3852 (case_ast_node(dat, FixedCapacityDynamicArrayType, e))
 check_fixed_capacity_dynamic_array_type :: proc(
@@ -3890,6 +4078,12 @@ check_fixed_capacity_dynamic_array_type :: proc(
 	return true
 }
 
+// check_map_type_expr checks a `map[K]V` type expression
+// C++ Reference: check_type.cpp check_map_type:3046-3091
+// (This header was STRANDED 44 lines above its own procedure -- #730. The whole of
+//  check_fixed_capacity_dynamic_array_type had been inserted between the doc comment
+//  and the definition it documents, so a top-down reader met this text as if it
+//  described the FCDA procedure, and citefn.proc_by_line scoped its citation there too.)
 check_map_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Map_Type, type: ^^Type, named_type: ^Type) -> bool {
 	// C++ Reference: check_type.cpp check_map_type:3046-3057
 	if mt.key == nil {
@@ -4142,7 +4336,7 @@ check_procedure_type :: proc(ctx: ^Checker_Context, proc_type: ^Type, proc_type_
 	optional_ok := .Optional_Ok in proc_type_node.tags
 	if optional_ok {
 		if result_count != 2 {
-			// C++ Reference: check_type.cpp:2486
+			// C++ Reference: check_type.cpp check_procedure_type:2692
 			error(proc_type_node, "A procedure type with the #optional_ok tag requires 2 return values, got %d", result_count)
 		} else if results != nil && results.kind == .Tuple {
 			// Check that second return is boolean
@@ -4151,8 +4345,18 @@ check_procedure_type :: proc(ctx: ^Checker_Context, proc_type: ^Type, proc_type_
 				second := tuple.variables[1]
 				second_type := entity_type(second)
 				if !is_type_polymorphic(second_type) && !is_type_boolean(second_type) {
+					// NOTE: type_to_string's result is NOT deleted here, matching the other 37
+					// call sites in this file. Deleting one is what caused the crash retracted
+					// in #142 -- do not "fix" this as a leak without settling ownership first.
 					type_str := type_to_string(second_type)
-					error_node(proc_type_node, "Second return value of an #optional_ok procedure must be a boolean, got %s", type_str)
+					// C++ Reference: check_type.cpp check_procedure_type:2700. THE ANCHOR IS THE
+					// SECOND RETURN VALUE, not the procedure type: C++ raises this through
+					// `error(second->token, ...)`. The port used error_node(proc_type_node, ...),
+					// which reports the whole `proc(...) -> (T, U)` instead of the offending `U`.
+					// Contrast the #optional_allocator_error arm below, where C++ genuinely DOES
+					// anchor on proc_type_node (:2717) -- the two arms differ deliberately, so
+					// neither can be inferred from the other.
+					error(second.token, "Second return value of an #optional_ok procedure must be a boolean, got %s", type_str)
 				}
 			}
 		}
@@ -4161,13 +4365,13 @@ check_procedure_type :: proc(ctx: ^Checker_Context, proc_type: ^Type, proc_type_
 	// Check #optional_allocator_error attribute
 	if .Optional_Allocator_Error in proc_type_node.tags {
 		if optional_ok {
-			// C++ Reference: check_type.cpp:2499
+			// C++ Reference: check_type.cpp check_procedure_type:2706
 			error(proc_type_node, "A procedure type cannot have both an #optional_ok tag and #optional_allocator_error")
 		}
 		optional_ok = true
 
 		if result_count != 2 {
-			// C++ Reference: check_type.cpp:2503
+			// C++ Reference: check_type.cpp check_procedure_type:2710
 			error(proc_type_node, "A procedure type with the #optional_allocator_error tag requires 2 return values, got %d", result_count)
 		} else if results != nil && results.kind == .Tuple {
 			// Check that second return is runtime.Allocator_Error
@@ -4751,6 +4955,32 @@ check_get_params :: proc(
 		// Reference: check_type.cpp:424-435
 		param_value: Parameter_Value
 		if field.default_value != nil && !is_field_variadic {
+			// C++ Reference: check_type.cpp check_get_params:1972-1978. A `typeid` parameter may
+			// not carry a default, and C++ reports it INSTEAD of evaluating the default at all --
+			// the error and handle_parameter_value are the two arms of one if/else:
+			//
+			//     if (default_value != nullptr) {
+			//         if (type_expr != nullptr && type_expr->kind == Ast_TypeidType) {
+			//             error(type_expr, "A type parameter may not have a default value");
+			//         } else {
+			//             param_value = handle_parameter_value(...);
+			//         }
+			//     }
+			//
+			// The port had no such arm and called handle_parameter_value unconditionally, so
+			// `f :: proc($T: typeid = int)` checked SILENTLY -- an under-rejection of source the
+			// reference compiler rejects, and invisible to any check that reads only the port's
+			// own output (#71). Anchored on the TYPE expression, not the default. LEDGER #672.
+			//
+			// The nil guard mirrors C++'s first disjunct: this site also serves C++'s
+			// type_expr == nullptr path (:1919), where there is no type expression to test.
+			is_typeid_param := false
+			if field.type != nil {
+				_, is_typeid_param = field.type.derived.(^ast.Typeid_Type)
+			}
+			if is_typeid_param {
+				error(field.type, "A type parameter may not have a default value")
+			} else {
 			// Check the default value expression
 			// Reference: handle_parameter_value in C++ (lines 1657-1760)
 			// allow_caller_location = true for procedure parameters
@@ -4784,6 +5014,7 @@ check_get_params :: proc(
 				error(field.default_value, "Invalid parameter value")
 				param_value = Parameter_Value{} // Reset to invalid
 			}
+			}
 		}
 
 		// Validate parameter type
@@ -4801,6 +5032,37 @@ check_get_params :: proc(
 			}
 			param_type = t_invalid
 			local_success = false
+		}
+
+		// C++ Reference: check_type.cpp check_get_params:2001-2026. A POLYMORPHIC parameter type
+		// may not carry a runtime default. Constant/Nil/Invalid defaults are fine (they can be
+		// substituted per instantiation); Location/Expression/Value are not.
+		//
+		// THE BREAK-OUT IS LOAD-BEARING and easy to miss: a default whose expression resolves to a
+		// POLYMORPHIC PROCEDURE entity is ALLOWED, because its type is settled per call site. C++
+		// tests exactly that -- `entity_from_expr(param_value.ast_value)`, kind Entity_Procedure,
+		// `is_type_polymorphic(e->type)` -- and only then falls through to the error.
+		//
+		// The port had none of this, so `f :: proc(x: $T = F)` checked without the diagnostic:
+		// the oracle emits it plus the ambiguity error, the port emitted only the ambiguity one.
+		// Anchored on the PARAMETER (C++'s `params[i]`), not the default. LEDGER #673.
+		if is_type_polymorphic(param_type) {
+			#partial switch param_value.kind {
+			case .Invalid, .Constant, .Nil:
+				// Substitutable per instantiation -- C++ breaks with no diagnostic.
+			case .Location, .Expression, .Value:
+				allow_polymorphic_proc := false
+				if param_value.original_ast_expr != nil {
+					if e := entity_from_expr(ctx, param_value.original_ast_expr); e != nil {
+						if _, is_proc := e.variant.(Entity_Procedure); is_proc && is_type_polymorphic(e.type) {
+							allow_polymorphic_proc = true
+						}
+					}
+				}
+				if !allow_polymorphic_proc {
+					error(param, "A default value for a parameter must not be a polymorphic constant type, got %s", type_to_string(param_type))
+				}
+			}
 		}
 
 		// Check for 'using' parameter flag
@@ -4987,7 +5249,9 @@ check_get_params :: proc(
 						param_type = t_invalid
 					}
 
-					// Validate type is not polymorphic (C++ lines 1992-1997)
+					// Validate type is not polymorphic. C++ check_type.cpp check_get_params:2080-2085.
+					// LEDGER #707: read `(C++ lines 1992-1997)`, stale by ~88 lines against an older C++
+					// revision. 1992-1997 is inside the `handle_parameter_value` region, not this check.
 					if is_type_polymorphic(param_type) {
 						// C++ check_type.cpp check_get_params:2080-2081 names the TYPE, quoted. Computed before
 						// param_type is reset to t_invalid below, as C++ does.
@@ -4996,16 +5260,20 @@ check_get_params :: proc(
 						param_type = t_invalid
 					}
 
-					// Check type is not untyped (C++ lines 1999-2005)
+					// Check type is not untyped. C++ check_type.cpp check_get_params:2087-2092.
+					// LEDGER #707: read `(C++ lines 1999-2005)`, which is the `is_type_polymorphic`
+					// block ABOVE -- i.e. it named the wrong check, not merely the wrong lines.
 					if is_type_untyped(default_type(param_type)) {
-						// C++ check_type.cpp check_get_params:2087-2088 (and the identical site at 2222-2223)
+						// C++ check_type.cpp check_get_params:2087-2088 (and the identical site at 2226-2232)
 						// name the TYPE, quoted.
 						error(operand.expr, "Cannot determine type from the parameter, got '%s'", type_to_string(param_type))
 						local_success = false
 						param_type = t_invalid
 					}
 
-					// Validate specialization constraint (C++ lines 2008-2018)
+					// Validate specialization constraint. C++ check_type.cpp check_get_params:2094-2106
+					// (`modify_type` at 2094, the guard at 2096, block closes 2106).
+					// LEDGER #707: read `(C++ lines 2008-2018)`, stale by ~88 lines.
 					modify_type := !ctx.no_polymorphic_errors
 					if specialization != nil && !check_type_specialization_to(ctx, specialization, param_type, false, modify_type) {
 						if !ctx.no_polymorphic_errors {
@@ -5157,10 +5425,81 @@ check_get_params :: proc(
 						}
 					}
 
-					// Validate operand is not untyped after type determination (C++ lines 2125-2131)
+					// C++ Reference: check_type.cpp check_get_params:2197-2222.
+					//
+					// The call-site operand must be assignable to the (now-determined) parameter
+					// type or generation of this polymorphic procedure FAILS. `#no_broadcast`
+					// disables array programming for the test.
+					//
+					// Read the C++ before assuming this is a broad gate: `ok` is initialised
+					// TRUE and only the `#any_int` branch can falsify it, so for every other
+					// parameter the block is INERT -- a failed assignability test alone changes
+					// nothing. Only an `#any_int` parameter whose operand is neither assignable
+					// nor castable reaches `success = false`.
+					//
+					// The diagnostic beside it is behind `#if 0`, so this branch EMITS NOTHING;
+					// the flag is its entire effect and no message-based comparison of the two
+					// implementations can see it. What it DOES change is whether the procedure
+					// is instantiated at all -- and therefore whether its BODY is ever checked.
+					// Repro (probe p675a):
+					//     f :: proc(a: $T, #any_int n: int) -> T { bad := undeclared; return a }
+					//     f(1, "hi")
+					// The oracle reports only the argument conversion; the port additionally
+					// reported "Undeclared name" from a body C++ never checks.
+					//
+					// This block is only correct because the polymorphic operand array now has
+					// its DEFAULTED slots filled before instantiation (check_expr.odin, the
+					// pre-fill mirroring check_expr.cpp:6825-6857). Without that, an unsupplied
+					// `#any_int new_cap := -1` arrives with `operand.type == nil`, `ok` goes
+					// false, and `shrink(&arr)` loses its only viable candidate -- measured, and
+					// guarded by corpus member p674sh. LEDGER #80, #674, #675.
+					allow_array_programming := true
+					if ast.Field_Flag.No_Broadcast in field.flags {
+						allow_array_programming = false
+					}
+					if param_type != t_invalid && !check_is_assignable_to(ctx, &operand, param_type, allow_array_programming) {
+						// C++ names this `ok`; renamed here because `ok` at check_type.odin:4816
+						// is the enclosing `field, ok := param.derived.(^ast.Field)` and the
+						// project's own `-vet -strict-style` check rejects the shadow. #679.
+						any_int_ok := true
+						if ast.Field_Flag.Any_Int in field.flags {
+							if operand.type == nil {
+								any_int_ok = false
+							} else if (!is_type_integer(operand.type) && !is_type_enum(operand.type)) ||
+							          (!is_type_integer(param_type) && !is_type_enum(param_type)) {
+								any_int_ok = false
+							} else if !check_is_castable_to(ctx, &operand, param_type) {
+								any_int_ok = false
+							}
+						}
+						if !any_int_ok {
+							local_success = false
+						}
+					}
+
+					// Validate operand is not untyped after type determination.
+					// C++ Reference: check_type.cpp check_get_params:2226-2232. C++ has this block TWICE, verbatim:
+					// once at :2087-2092 and again at :2226-2232. THIS port block mirrors the
+					// SECOND copy -- it matches :2226-2232 statement for statement, including the
+					// `success = false` and `type = t_invalid` that follow the error. The other
+					// port copy (check_type.odin:5257) is the one that mirrors :2087-2092.
+					//
+					// LEDGER #705: this site cited `:2087-2088 (and the identical site at
+					// 2222-2223)`, i.e. it anchored on the copy it does NOT implement and gave the
+					// other one's location four lines out. Corrected to the copy actually mirrored.
+					// The bare `(C++ lines 2125-2131)` that stood above it was wrong too and is
+					// replaced by this anchored form.
+					//
+					// I predicted this would remove one citemono inversion, because :2226 falls
+					// after :2222 (the preceding citation) where :2087 fell before it. MEASURED:
+					// it did NOT -- the count stayed at 18. citemono flags against the RUNNING
+					// MAXIMUM, not the previous citation, and :2261 (port :5213) is already in
+					// that maximum, so :2226 is still "backwards". The correction is right on its
+					// own terms -- the citation now names the copy this code actually implements --
+					// but it buys nothing from the metric. Second time in two ticks that a real
+					// citation fix moved the count by zero (#704, #147).
 					if is_type_untyped(default_type(param_type)) {
-						// C++ check_type.cpp check_get_params:2087-2088 (and the identical site at 2222-2223)
-						// name the TYPE, quoted.
+						// The message names the TYPE, quoted.
 						error(operand.expr, "Cannot determine type from the parameter, got '%s'", type_to_string(param_type))
 						local_success = false
 						param_type = t_invalid
@@ -5194,16 +5533,26 @@ check_get_params :: proc(
 						const_ent.field_group_index = field_group_index
 					}
 				} else {
-					// Regular parameter (C++ lines 2199-2202)
-					// C++ Reference: check_type.cpp check_get_params:2319 —
+					// Regular parameter. C++ Reference: check_type.cpp check_get_params:2319-2333 -- the whole
+					// non-`using`, non-polymorphic branch: entity construction (:2319-2321),
+					// state/flags (:2322-2326), interned name (:2328-2329), then param_value /
+					// field_group_index / type_expr (:2331-2333).
+					// LEDGER #704: this block cited `2199-2202`, which is the `#no_broadcast` /
+					// check_is_assignable_to block in a DIFFERENT part of the function. Corrected.
+					// C++ Reference: check_type.cpp check_get_params:2324 —
 					//     param->flags |= EntityFlag_Used|EntityFlag_Param|EntityFlag_Value;
+					// (cited as :2319 before #704; :2319 is the `entities_to_use` slot fetch, and
+					// the quoted line is five lines below it.)
 					// EntityFlag_Value is set on EVERY parameter, unconditionally. It is
 					// what makes check_ident give a parameter `.Value` rather than
 					// `.Variable` mode (check_expr.cpp:2017-2020), which in turn is what
 					// routes an assignment to it into the parameter-immutability check.
 					param_entity = alloc_entity_param(scope, tokenizer.Token{text = param_name, pos = actual_name_node.pos}, param_type, is_using, true)
 
-					// Store default parameter value (C++ line 2200)
+					// Store default parameter value.
+					// C++ Reference: check_type.cpp check_get_params:2331 `param->Variable.param_value = param_value;`
+					// (cited as `C++ line 2200` before #704 -- that line is
+					// `allow_array_programming = false` in the #no_broadcast block, unrelated.)
 					if param_value.kind != .Invalid {
 						if var, ok4 := &param_entity.variant.(Entity_Variable); ok4 {
 							var.param_value = param_value
@@ -6025,14 +6374,16 @@ is_polymorphic_type_assignable :: proc(
 	poly_base := base_type(poly)
 	source_base := base_type(source)
 
-	// === Type_Basic === (C++ lines 1356-1358)
+	// === Type_Basic === (C++ check_expr.cpp is_polymorphic_type_assignable:1429-1431)
 	if poly_base.kind == .Basic {
 		if compound {
 			// Compound literals require identical types
 			return are_types_identical(poly, source)
 		}
 		// Check type compatibility, allowing untyped→typed conversions
-		// C++ Reference: check_type.cpp uses check_is_assignable_to for this case
+		// C++ Reference: check_expr.cpp is_polymorphic_type_assignable:1431 uses check_is_assignable_to
+		// here. (FILE CORRECTED: this said check_type.cpp. The PORT DOES NOT CALL IT -- see #719 item 1;
+		//  this comment states C++'s behaviour correctly while the code below diverges.)
 		if are_types_identical(poly, source) {
 			return true
 		}
@@ -6060,7 +6411,8 @@ is_polymorphic_type_assignable :: proc(
 		return false
 	}
 
-	// === Type_Named === (C++ check_expr.cpp is_polymorphic_type_assignable:1429-1436)
+	// === Type_Named === (C++ check_expr.cpp is_polymorphic_type_assignable:1433-1442)
+	// (WAS cited :1429-1436 -- anchored but WRONG BY CONTENT: 1429 is `case Type_Basic`.)
 	//
 	// C++ switches on `poly->kind`, NOT on base_type(poly)->kind. base_type of a Named type is
 	// never Named, so testing poly_base here made this arm UNREACHABLE and every `Box($T)`
@@ -6081,11 +6433,11 @@ is_polymorphic_type_assignable :: proc(
 		return are_types_identical(poly, source)
 	}
 
-	// === Type_Generic === (C++ lines 1370-1382)
+	// === Type_Generic === (C++ check_expr.cpp is_polymorphic_type_assignable:1443-1455)
 	if poly_base.kind == .Generic {
 		generic := poly_base.variant.(Type_Generic)
 
-		// C++ Reference: check_expr.cpp:1422-1427
+		// C++ Reference: check_expr.cpp is_polymorphic_type_assignable:1444-1449 (the Generic.specialized guard)
 		//
 		// TWO DIVERGENCES FIXED HERE:
 		//  1. This called is_polymorphic_type_assignable directly. C++ calls
@@ -6105,7 +6457,7 @@ is_polymorphic_type_assignable :: proc(
 		}
 
 		// If modify_type, bind $T to source type
-		// C++ Reference: check_expr.cpp:1377-1380
+		// C++ Reference: check_expr.cpp is_polymorphic_type_assignable:1450-1453 (the modify_type default_type+gb_memmove)
 		// C++ does: gb_memmove(poly, ds, gb_size_of(Type))
 		if modify_type {
 			// Get the default (typed) version of source
@@ -6124,7 +6476,7 @@ is_polymorphic_type_assignable :: proc(
 		return true
 	}
 
-	// === Type_Pointer === (C++ lines 1383-1397)
+	// === Type_Pointer === (C++ check_expr.cpp is_polymorphic_type_assignable:1456-1471)
 	if poly_base.kind == .Pointer && source_base.kind == .Pointer {
 		poly_ptr := poly_base.variant.(Type_Pointer)
 		source_ptr := source_base.variant.(Type_Pointer)
@@ -6132,7 +6484,7 @@ is_polymorphic_type_assignable :: proc(
 		return is_polymorphic_type_assignable(ctx, poly_ptr.elem, source_ptr.elem, true, modify_type)
 	}
 
-	// Handle MultiPointer → Pointer conversion (C++ lines 1388-1393)
+	// Handle MultiPointer → Pointer conversion (C++ check_expr.cpp is_polymorphic_type_assignable:1463-1469, the MultiPointer-source branch inside case Type_Pointer)
 	if poly_base.kind == .Pointer && source_base.kind == .Multi_Pointer {
 		poly_ptr := poly_base.variant.(Type_Pointer)
 		source_mp := source_base.variant.(Type_Multi_Pointer)
@@ -6140,7 +6492,7 @@ is_polymorphic_type_assignable :: proc(
 		return is_polymorphic_type_assignable(ctx, poly_ptr.elem, source_mp.elem, true, modify_type)
 	}
 
-	// === Type_MultiPointer === (C++ lines 1399-1413)
+	// === Type_MultiPointer === (C++ check_expr.cpp is_polymorphic_type_assignable:1472-1487)
 	if poly_base.kind == .Multi_Pointer && source_base.kind == .Multi_Pointer {
 		poly_mp := poly_base.variant.(Type_Multi_Pointer)
 		source_mp := source_base.variant.(Type_Multi_Pointer)
@@ -6154,13 +6506,14 @@ is_polymorphic_type_assignable :: proc(
 		return is_polymorphic_type_assignable(ctx, poly_mp.elem, source_ptr.elem, true, modify_type)
 	}
 
-	// === Type_Array === (C++ lines 1409-1418)
+	// === Type_Array === (C++ check_expr.cpp is_polymorphic_type_assignable:1498-1552)
 	if poly_base.kind == .Array && source_base.kind == .Array {
 		poly_arr := &poly_base.variant.(Type_Array)
 		source_arr := source_base.variant.(Type_Array)
 
 		// Handle generic count for arrays with polymorphic sizes
-		// C++ Reference: check_expr.cpp:1411-1414
+		// C++ Reference: check_expr.cpp is_polymorphic_type_assignable:1502-1509 (generic_count + polymorphic_assign_index
+		// + the modify_type write-back, inside case Type_Array)
 		if poly_arr.generic_count != nil {
 			if !polymorphic_assign_index(&poly_arr.generic_count, &poly_arr.count, source_arr.count, modify_type) {
 				return false
@@ -6176,7 +6529,7 @@ is_polymorphic_type_assignable :: proc(
 		return is_polymorphic_type_assignable(ctx, poly_arr.elem, source_arr.elem, compound, modify_type)
 	}
 
-	// Handle EnumeratedArray → Array conversion (C++ lines 1446-1455)
+	// Handle EnumeratedArray → Array conversion (C++ check_expr.cpp is_polymorphic_type_assignable:1514-1552, the EnumeratedArray-source branch inside case Type_Array)
 	if poly_base.kind == .Array && source_base.kind == .Enumerated_Array {
 		poly_arr := poly_base.variant.(Type_Array)
 		source_ea := source_base.variant.(Type_Enumerated_Array)
@@ -6190,7 +6543,7 @@ is_polymorphic_type_assignable :: proc(
 		return is_polymorphic_type_assignable(ctx, poly_arr.elem, source_ea.elem, compound, modify_type)
 	}
 
-	// === Type_EnumeratedArray === (C++ lines 1460-1481)
+	// === Type_EnumeratedArray === (C++ check_expr.cpp is_polymorphic_type_assignable:1553-1575)
 	if poly_base.kind == .Enumerated_Array && source_base.kind == .Enumerated_Array {
 		poly_ea := poly_base.variant.(Type_Enumerated_Array)
 		source_ea := source_base.variant.(Type_Enumerated_Array)
@@ -6204,21 +6557,21 @@ is_polymorphic_type_assignable :: proc(
 		return is_polymorphic_type_assignable(ctx, poly_ea.elem, source_ea.elem, compound, modify_type)
 	}
 
-	// === Type_Slice === (C++ lines 1488-1492)
+	// === Type_Slice === (C++ check_expr.cpp is_polymorphic_type_assignable:1601-1606)
 	if poly_base.kind == .Slice && source_base.kind == .Slice {
 		poly_slice := poly_base.variant.(Type_Slice)
 		source_slice := source_base.variant.(Type_Slice)
 		return is_polymorphic_type_assignable(ctx, poly_slice.elem, source_slice.elem, compound, modify_type)
 	}
 
-	// === Type_DynamicArray === (C++ lines 1483-1487)
+	// === Type_DynamicArray === (C++ check_expr.cpp is_polymorphic_type_assignable:1576-1581)
 	if poly_base.kind == .Dynamic_Array && source_base.kind == .Dynamic_Array {
 		poly_dyn := poly_base.variant.(Type_Dynamic_Array)
 		source_dyn := source_base.variant.(Type_Dynamic_Array)
 		return is_polymorphic_type_assignable(ctx, poly_dyn.elem, source_dyn.elem, compound, modify_type)
 	}
 
-	// === Type_FixedCapacityDynamicArray === (C++ check_expr.cpp is_polymorphic_type_assignable:1578-1595)
+	// === Type_FixedCapacityDynamicArray === (C++ check_expr.cpp is_polymorphic_type_assignable:1582-1600)
 	//
 	// `[dynamic; $N]$E` against a concrete `[dynamic; 8]int`: bind N to the source capacity, then
 	// require the capacities to agree before recursing on the element type. Mirrors the Array arm
@@ -6227,14 +6580,15 @@ is_polymorphic_type_assignable :: proc(
 		poly_fc := &poly_base.variant.(Type_Fixed_Capacity_Dynamic_Array)
 		source_fc := source_base.variant.(Type_Fixed_Capacity_Dynamic_Array)
 
-		// C++ Reference: check_expr.cpp is_polymorphic_type_assignable:1580-1589
+		// C++ Reference: check_expr.cpp is_polymorphic_type_assignable:1584-1594 (the generic_capacity block)
 		if poly_fc.generic_capacity != nil {
 			if !polymorphic_assign_index(&poly_fc.generic_capacity, &poly_fc.capacity, source_fc.capacity, modify_type) {
 				return false
 			}
 		}
 
-		// C++ Reference: check_expr.cpp is_polymorphic_type_assignable:1590. C++ returns false when the capacities disagree, so a
+		// C++ Reference: check_expr.cpp is_polymorphic_type_assignable:1595-1599 -- the `if (capacity == source->...capacity)`
+		// at :1595 falling through to `return false` at :1599. C++ returns false when the capacities disagree, so a
 		// concrete mismatch is simply not assignable.
 		if poly_fc.capacity != source_fc.capacity {
 			return false
@@ -6243,7 +6597,7 @@ is_polymorphic_type_assignable :: proc(
 		return is_polymorphic_type_assignable(ctx, poly_fc.elem, source_fc.elem, compound, modify_type)
 	}
 
-	// === Type_Map === (C++ lines 1623-1633)
+	// === Type_Map === (C++ check_expr.cpp is_polymorphic_type_assignable:1741-1754)
 	if poly_base.kind == .Map && source_base.kind == .Map {
 		poly_map := poly_base.variant.(Type_Map)
 		source_map := source_base.variant.(Type_Map)
@@ -6261,7 +6615,7 @@ is_polymorphic_type_assignable :: proc(
 
 	// NO Type_Struct / Type_Union ARM - deliberately.
 	//
-	// C++ Reference: check_expr.cpp:1421-1620 (is_polymorphic_type_assignable). Its switch on
+	// C++ Reference: check_expr.cpp is_polymorphic_type_assignable:1425-1805 (the function's real extent). Its switch on
 	// `poly->kind` has no Struct and no Union case; a record poly falls through to the final
 	// `return false`. Records are check_type_specialization_to's job, and that procedure calls
 	// THIS one as its fall-back tail (check_type.cpp:1626), passing base types so the callee can
@@ -6275,7 +6629,7 @@ is_polymorphic_type_assignable :: proc(
 	// `$T/Some_Struct` constraint resolved against a non-polymorphic struct - and took out
 	// core/crypto/legacy/md5 and the multi-threaded test runner.
 
-	// === Type_Proc === (C++ lines 1587-1622)
+	// === Type_Proc === (C++ check_expr.cpp is_polymorphic_type_assignable:1705-1740)
 	if poly_base.kind == .Proc && source_base.kind == .Proc {
 		poly_proc := poly_base.variant.(Type_Proc)
 		source_proc := source_base.variant.(Type_Proc)
@@ -6341,7 +6695,7 @@ is_polymorphic_type_assignable :: proc(
 		return true
 	}
 
-	// === Type_BitSet === (C++ lines 1497-1521)
+	// === Type_BitSet === (C++ check_expr.cpp is_polymorphic_type_assignable:1610-1640)
 	if poly_base.kind == .Bit_Set && source_base.kind == .Bit_Set {
 		poly_bs := poly_base.variant.(Type_Bit_Set)
 		source_bs := source_base.variant.(Type_Bit_Set)
@@ -6361,7 +6715,7 @@ is_polymorphic_type_assignable :: proc(
 		return true
 	}
 
-	// === Type_Matrix === (C++ lines 1630-1648)
+	// === Type_Matrix === (C++ check_expr.cpp is_polymorphic_type_assignable:1755-1784)
 	if poly_base.kind == .Matrix && source_base.kind == .Matrix {
 		poly_mat := &poly_base.variant.(Type_Matrix)
 		source_mat := source_base.variant.(Type_Matrix)
@@ -6396,7 +6750,7 @@ is_polymorphic_type_assignable :: proc(
 		return is_polymorphic_type_assignable(ctx, poly_mat.elem, source_mat.elem, compound, modify_type)
 	}
 
-	// === Type_SimdVector === (C++ lines 1651-1662)
+	// === Type_SimdVector === (C++ check_expr.cpp is_polymorphic_type_assignable:1785-1805)
 	if poly_base.kind == .Simd_Vector && source_base.kind == .Simd_Vector {
 		poly_sv := &poly_base.variant.(Type_Simd_Vector)
 		source_sv := source_base.variant.(Type_Simd_Vector)

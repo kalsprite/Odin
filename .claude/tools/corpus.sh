@@ -15,7 +15,7 @@
 
 set -o pipefail
 PORT="$1"
-ROOT="${2:-/tmp/claude-1000/-home-kalsprite-dev-odin/5ae0f352-0d85-4f59-825d-514e4ce56a75/scratchpad}"
+ROOT="${2:-/home/kalsprite/dev/odin/.claude/probes}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- Curated corpus: plain-mode probes, compared with `odin build` on both sides -------------
@@ -46,6 +46,92 @@ CORPUS=(
   # it dies on src/string.cpp(77) `lo <= hi && hi <= max`. A probe whose reference side aborts
   # cannot be a corpus member; the port's guarded behaviour there is a documented divergence.
   p571sl
+  # #664. @(entry_point_only). Three defects at one site; these two are the reachable, build-mode
+  # halves. Both need a real `main` (corpus members are compared with `odin build`), and having one
+  # is not incidental -- it makes `main` the genuine entry point, so the violating call from
+  # `caller` is exactly C++'s rule rather than an artefact of nothing being registered.
+  #   p664a  BOTH violations: attribute + a wrong-typed argument. This is the ordering probe --
+  #          the port used to early-return on the argument error and DROP the attribute diagnostic
+  #          entirely (1 vs the oracle's 2). It must stay 2-in-C++-order.
+  #   p664b  attribute only. Guards the message TEXT, which diverged in three places.
+  # NOT added: p664c (nested proc named `main`), the build-mode form of the ep4 probe for defect C.
+  # It FULL-DIFFERs for a HARNESS reason, not a port one -- the same trap `objchang` is excluded for.
+  # cmpfull.py runs the oracle as `odin build` (entry point ENABLED) while triage_st checks with
+  # no_entry_point=true, and BOTH compilers gate the whole `main` block on `!no_entry_point`
+  # (check_decl.cpp check_proc_decl:1529). Run the oracle as `odin check -no-entry-point` and the two
+  # sides agree at 0 diagnostics. I briefly filed this as a port defect (#665) and RETRACTED it the
+  # same session; see CHECKER_ISSUES/CHECKER-nested-main-skips-the-whole-entry-point-block.md.
+  # Defect C itself is covered by the -no-entry-point probes $S/n664/ep4 and ep5, which this
+  # build-mode corpus cannot express: under `odin build` a package-level `main` IS the entry point,
+  # so the probe would go vacuous.
+  p664a p664b
+  # #667. The `#config` arm. Three probes, because the defect was three divergences at one site
+  # and each probe pins a different one -- and all three ALSO pin the same underlying rule, that
+  # the ANCHOR decides whether a diagnostic merges (#578).
+  #   p667a  wrong arity  -> text was "'#config' expects 2 arguments: name and default value" and
+  #                         the anchor was `close`, not `call`. Pre-fix the port printed TWO lines
+  #                         (the un-merged enclosing "Invalid declaration value" plus its own) to
+  #                         the oracle's ONE. Fixing the anchor collapsed it with no other change.
+  #   p667b  non-identifier first argument -> C++ NAMES the node kind (ast_strings[arg->kind],
+  #                         here "basic literal"); the port's text said "first argument must be an
+  #                         identifier (config name)" and named nothing. Same anchor/merge story.
+  #   p667c  parenthesised non-constant default -> C++ anchors on `def_arg`, the UNPARENTHESISED
+  #                         expression it actually checked. The port anchored on the raw argument,
+  #                         one column earlier, so its "must be a constant" no longer merged with
+  #                         the diagnostic the inner call raises for itself -- three lines vs two.
+  # Not vacuous: lines=1/1/2. Each needs a `main` because this corpus compares with `odin build`.
+  p667a p667b p667c
+  # #668. check_basic_directive_expr -- the BARE-directive path (no call), which is a different
+  # function from check_builtin_procedure_directive and had never been read against C++.
+  #   p668loc  bare `#location`  -> C++ has its OWN long message AND returns a VALID operand
+  #                                (t_source_code_location/Value) so nothing cascades. The port
+  #                                had no arm: "Unknown directive: #location".
+  #   p668pan  bare `#panic`     -> NOT in C++'s must-be-a-call list, so C++ says "Unknown
+  #                                directive: #panic". The port had an invented arm saying
+  #                                "'#panic' must be used as a call". Guards the INVERSE
+  #                                direction from p668loc, which is why both are members.
+  #   p668col  bare `#column`    -> `#column` is not an Odin directive at all; C++ knows no such
+  #                                name. The port implemented it and folded it to an untyped
+  #                                integer, so it ACCEPTED source the oracle rejects -- the port
+  #                                emitted ZERO diagnostics. This is the under-rejection probe.
+  #   p668prc  `#procedure` at file scope -> text reworded AND C++ returns a typed empty string
+  #                                where the port invalidated the operand.
+  # All four lines=1, none vacuous. Controls that must NOT move: #file/#directory/#line (0 errors
+  # both sides) and #caller_location/#branch_location (1 each) -- checked by hand, not members,
+  # because a 0-diagnostic probe cannot fail this comparator usefully.
+  p668loc p668pan p668col p668prc
+  # #670. The rest of check_builtin_procedure_directive's arms, read end to end against C++.
+  # caller_expression / assert / panic / load_hash / hash came back CLEAN (text AND anchor);
+  # these four are the divergences that survived.
+  #   p670def   `#defined()`            -> arity error anchored on `close`, not `call` (col 29 vs
+  #                                        20, single caret vs span). Same shape as #667 defect A.
+  #   p670ld3   `#load("a","b","c")`    -> C++ SPLITS the arity report: got-0 anchors on the paren
+  #                                        (nothing to point at), any other count anchors on
+  #                                        args[0]. The port used `close` for both, so only the
+  #                                        >0 case diverged -- `#load()` alone would have PASSED.
+  #   p670ldnc  `#load(1)`              -> the port fused C++'s two guards into one condition
+  #                                        behind an invented message; C++ reports "expected a
+  #                                        constant string, got untyped integer", NAMING the type.
+  #   p670or    `#load(..) or_else g()` -> C++ MISSPELLS "conjuction" (check_expr.cpp:10079) and
+  #                                        the port had silently corrected it to "conjunction".
+  #                                        The typo is now reproduced deliberately; this probe
+  #                                        exists so nobody "fixes" the spelling again.
+  # lines=1/2/2/1, none vacuous.
+  p670def p670ld3 p670ldnc p670or
+  # #672. `f :: proc($T: typeid = int)` -- C++ check_get_params:1972-1978 reports "A type parameter
+  # may not have a default value" INSTEAD of evaluating the default (the two are arms of one
+  # if/else). The port had no such arm and checked this SILENTLY -- an under-rejection. Fixing it
+  # exposed a SECOND defect: the parser built Typeid_Type with `end := tok.pos` (the START) at
+  # parser.odin:2728 where its sibling site uses `end_pos(tok)`, so the caret rendered EMPTY.
+  # Nothing read that end until this diagnostic anchored on the type expression. Both fixed here.
+  p672tp
+  # #673. `f :: proc(x: $T = F)` -- a POLYMORPHIC parameter type may not carry a runtime default
+  # (C++ check_type.cpp:2001-2026). Constant/Nil/Invalid are fine; Location/Expression/Value are
+  # not -- EXCEPT when the default resolves to a polymorphic PROCEDURE entity, which C++ allows.
+  # The port had none of it. lines=2 (the poly error plus the ambiguity error the oracle also
+  # emits), so this probe pins BOTH that the new diagnostic fires and that it does not displace
+  # the existing one.
+  p673poly
   # #613. The call-site target-feature checks, which were a REDUCTION of one of C++'s two branches.
   # These are HOST-TARGET probes -- they fire on amd64 with no -target/-microarch, so they belong here
   # and NOT in crosstarget.sh. (#613 was expected to need cross-target probes like #611's; it does not.)
@@ -57,6 +143,133 @@ CORPUS=(
   #          so the probe matched while proving nothing about the rule under test.
   #   p613e  #force_inline non-superset, including the "\tSuggested Example:" continuation line.
   p613a p613b p613c p613d p613e
+  # #620. Type-vs-typeid comparison. The port's check_comparison arms (check_expr.odin:1789/1795) are a
+  # REDUCTION of C++ check_comparison:3206-3242: one of two add_type_info_type, no add_type_and_value,
+  # and no constant fold. No DIAGNOSTIC divergence is measured on any form I could reach -- these three
+  # are adopted to keep it that way, not because they currently differ.
+  #   ptid   `#assert(int == typeid_of(int))`. THE ARM'S REAL GUARD: instrumenting check_expr.odin:1789
+  #          and counting fires shows ptid FIRES IT TWICE (instrument positive-controlled, #558).
+  #          Both sides yield .Value for the SAME reason -- typeid_of is not a constant in Odin, so C++
+  #          takes its else-branch too. 2 diagnostics per side.
+  #   ptid2  `T :: typeid_of(int)` -- 0 fires (the declaration fails first and cascades). 4 per side.
+  #   ptid3  `f :: proc($T: typeid) { #assert(int == T) }` -- the constant-typeid form. CLEAN on both
+  #          sides (the fold happens), and it is a real guard despite being clean: if folding broke, the
+  #          port would emit "is not a constant boolean" exactly as in ptid. But note it does NOT reach
+  #          check_expr.odin:1789 at all (0 fires) -- it folds EARLIER via a path not yet identified,
+  #          so do NOT cite ptid3 as that arm's guard. I originally did, and it was wrong.
+  ptid ptid2 ptid3
+  # #624. check_type_internal has TWO structurally identical mode switches -- one for Ident, one for
+  # Selector_Expr -- and C++ gives their DEFAULT arms different text: the Ident arm says
+  # "'%s' used as a type when not a type", the Selector arm says "'%s' is not a type". The port used the
+  # selector wording in BOTH, and both sites carried the SAME (wrong) citation, which is what hid it:
+  # a reader checking either one against the cited C++ range saw a range that matched neither.
+  # nontype pins all three messages -- two ident forms (variable, constant) and one selector form.
+  nontype
+  # #625. check_procedure_type's #optional_ok boolean check anchored on the PROCEDURE TYPE where C++
+  # anchors on the SECOND RETURN VALUE (check_type.cpp:2700 `error(second->token, ...)`). Measured A/B
+  # on the same probe: pre-fix 4:7 / 7:7 (the `proc` keyword), post-fix 4:23 / 7:26 (the offending
+  # return), oracle 4:23 / 7:26. The sibling #optional_allocator_error arm genuinely DOES anchor on
+  # the procedure type in C++ (:2717), so the two arms differ deliberately and neither can be inferred
+  # from the other -- which is why the probe carries BOTH an unnamed and a NAMED second return.
+  optok
+  # #626. check_call_arguments_proc_group's named-argument loop (check_expr.cpp:7548-7577). The port did
+  # ONE of C++'s four steps and omitted the TYPE HINT, so a named argument needing a hint was rejected.
+  #   pgnamed   ACCEPT probe, 0 diagnostics both sides: `pg(1, c = .Green)` where every candidate takes
+  #             `c: Color`. Was "Cannot determine type for implicit selector expression '.Green'" -- a
+  #             live OVER-REJECTION of valid code. This is the probe that would catch a regression.
+  #   pgnamed2  the "Invalid parameter name 's.y'" arm (:7555-7559), REACHABLE and byte-identical at
+  #             13:12. Also pins that an UNMATCHED name (`nope = .Green`) still errors in BOTH -- no
+  #             hint is found, so the hint logic must not invent one.
+  #   pgnamed3  ORDERING guard: a positional arg after a named one is caught by the EARLIER
+  #             "Non-named parameter is not allowed to follow named parameter" check, in both
+  #             implementations. This is why C++'s :7550-7553 "Expected a 'field = value'" arm is
+  #             UNMEASURED -- ported for faithfulness, but no input reaches it (#313).
+  pgnamed pgnamed2 pgnamed3
+  # #627. is_type_load_safe was a hand-enumerated Basic_Kind list where C++ (types.cpp:3010) tests
+  # `flags & (BasicFlag_Boolean|BasicFlag_Numeric|BasicFlag_Rune)`, Numeric including QUATERNION.
+  # The list omitted every quaternion, every endian-specific int/float, and plain `.Rune`.
+  # loadsafe is an ACCEPT probe -- 0 diagnostics on both sides -- covering `#load` into
+  # []quaternion128, []rune and []u32le, plus []u32 as the control that was already accepted.
+  # A/B on the same probe: pre-fix binary 3 errors, post-fix 0, oracle 0.
+  # NOTE: this probe carries a data.bin that `#load` reads; do not prune it as an unused file.
+  loadsafe
+  # #628. is_type_nearly_simple_compare's Basic arm hand-enumerated 24 kinds where C++ tests
+  # `flags & (BasicFlag_SimpleCompare|BasicFlag_Numeric)` and then special-cases Basic_typeid.
+  # ACCEPT probe, 0 diagnostics both sides. A/B: pre-fix 9 errors, post-fix 0, oracle 0.
+  # It pins BOTH consumers of the predicate at once -- the `intrinsics.type_is_nearly_simple_compare`
+  # constant (via #assert) and the `struct #simple` field diagnostic -- so a regression in either
+  # surfaces here.
+  # THE bit_field ENTRIES ARE LOAD-BEARING AS A NEGATIVE CONTROL: they are the cases that passed
+  # BEFORE the fix, because core_type() unwraps Bit_Field to its backing integer in both
+  # implementations. They are what refuted my claimed second gap; keep them.
+  nearsimple
+  # #632. Imaginary literals folded to their REAL part: `3i` was stored as the f64 3, and the
+  # j/k suffixes were typed untyped COMPLEX rather than untyped quaternion. A silently WRONG
+  # VALUE, which is why parity, vet parity, modelsweep and this corpus were ALL green while it
+  # was live -- the only way to see it is to make the value itself decide an outcome.
+  #   imag  #assert(real(X) == 0) and #assert(imag(X) == 3) for `X :: 3i`. Deliberately phrased
+  #         as CONSTANT predicates so no renderer sits between the stored value and the verdict
+  #         (#558's lesson). A/B: pre-fix 2 errors, post-fix 0, oracle 0.
+  #   uq    the REJECT half -- converting an untyped quaternion (`3j`) toward complex128, f64
+  #         and int. A/B: pre-fix 0 diagnostics (a live UNDER-rejection), post-fix 3, oracle 3,
+  #         text-identical. The first line is a quaternion128 ACCEPT control that must keep
+  #         working, so the probe cannot be satisfied by simply rejecting more.
+  #   uqm   3-constant contrast (3j / 3i / 3) whose real value is in the model dump; carried
+  #         here as a cheap accept control that all three still check cleanly.
+  imag uq uqm
+  i2umap i2ureject
+  # #642. check_builtin_jmag_kmag was a REIMPLEMENTATION with eight divergences from
+  # check_builtin.cpp:3834-3888 -- see the note on the proc. The severe one was a MISSING CONSTANT
+  # FOLD: it always set mode = .Value, so jmag/kmag on a TYPED constant quaternion became
+  # non-constant and every constant-context use failed. That is a live OVER-REJECTION of code the
+  # oracle accepts, and no gate here could see it before these probes.
+  #   qmag     the ACCEPT half. The two typed-constant folds are what #642 closed; the six real/imag
+  #            assertions and the three result-WIDTH bindings (f64/f32/f16) are controls that
+  #            already passed, which is what proves the probe is not satisfied by rejecting more.
+  #   qmagrej  the REJECT half, including UPSTREAM #642 itself: jmag(3j) and kmag(3k) can NEVER
+  #            succeed, because C++ clobbers an untyped constant to t_untyped_complex and then
+  #            demands a quaternion. The port reproduces that deliberately.
+  # NO QUATERNION `==` ANYWHERE: `#assert(q == 0)` ABORTS the oracle (#635). Every assertion here
+  # compares the FLOAT result of jmag/kmag/real/imag, which is measurable on both sides.
+  qmag qmagrej
+  # #648 (= #643 + #647, one arm). check_builtin_quaternion's tail was a REIMPLEMENTATION with four
+  # divergences from check_builtin.cpp:3697-3768, measured 8 of 10 probes DIFFER before the rewrite:
+  # (a) it set mode = .Constant and then stored `operand.value = nil` behind a "for now" comment, so
+  # NOTHING was folded -- reported from a backend; (b) the result type was hardcoded quaternion128,
+  # so f64 and f16 components were REJECTED where the oracle accepts them; (c) three diagnostics were
+  # absent (mismatched components, non-float, endian-specific); (d) one invented message.
+  #   quat     the ACCEPT half -- the four component folds, the untyped-float promotion from INTEGER
+  #            literals, and the three width derivations (f16/f32/f64 -> quaternion64/128/256). The
+  #            f32 line is the control: it passed before the fix too.
+  #   quatrej  the REJECT half -- exactly the three missing diagnostics.
+  # NO QUATERNION `==` (#635 aborts the oracle): every assertion compares the FLOAT result of
+  # real/imag/jmag/kmag, which is measurable on both sides.
+  quat quatrej
+  # #634. The SIXTH hand-enumeration (after #95, #117, #118, #627, #628): the zero value for an
+  # empty compound literal of a constant type. C++ check_expr.cpp:11613-11634 is an ordered chain
+  # of FLAG tests; the port listed kinds by hand and omitted string16/cstring16, which carry
+  # BasicFlag_String in types.cpp:529-530 AND in the port's own basic_flags_table.odin:85-86.
+  # A/B: pre-fix 2 errors (the two string16 assertions), post-fix 0, oracle 0.
+  # THE TWELVE OTHER ASSERTIONS ARE LOAD-BEARING CONTROLS -- bool/int/f32/complex/rune/string/
+  # cstring all passed BEFORE the fix, which is what proves the probe exercises the arm rather
+  # than being satisfied by the port simply rejecting more.
+  # DELIBERATELY NO QUATERNION COMPARISON: `#assert(quaternion128{} == 0)` ABORTS the oracle
+  # (GB_PANIC exact_value.cpp:1092, 5/5 -- no ExactValue_Quaternion arm in compare_exact_values).
+  # That is upstream #635 and lives in $S/qcrash; a probe that crashes the oracle is UNMEASURABLE.
+  emptycl
+  # #640. type_integer_to_signed / type_integer_to_unsigned were REIMPLEMENTATIONS: two
+  # hand-written Basic_Kind tables in types.odin (the SEVENTH hand-enumeration, after #95, #117,
+  # #118, #627, #628, #634) behind two invented messages. C++ maps by ENUM ADJACENCY,
+  # basic_types[kind +/- 1] (check_builtin.cpp:6946/:6990), after gating on kind, SIGNEDNESS
+  # DIRECTION, untypedness and polymorphism -- four gates the port had none of.
+  #   i2umap    the ACCEPT half. Seven of the eight assertions are controls that already passed;
+  #             the eighth is `rune -> f16`, which is an UPSTREAM quirk the adjacency reproduces
+  #             for free (rune carries BasicFlag_Integer without BasicFlag_Unsigned, types.cpp:506,
+  #             so it passes the signed gate and its enum successor is F16). Verified against the
+  #             stock oracle 5/5. The endian pairs are here because the deleted table returned
+  #             them UNCHANGED under a stale "endian type globals may not exist" comment.
+  #   i2ureject the REJECT half -- all four gates plus the non-type arm. A/B: every one of these
+  #             lines DIFFERED from the oracle before the fix and matches after.
   # #584. check_index: three divergences in one probe -- the 'Cannot index a constant' message
   # and its Suggestion, and an INVENTED `if !index_ok { .Invalid; return }` bail that suppressed
   # the assignment diagnostic on the following line (oracle 3 diagnostics, port 2).
@@ -362,11 +575,307 @@ CORPUS=(
   #   n7_inldir3   "Unknown directive: #x" -- anchored at the DIRECTIVE, not the call
   #   n7_inlscope  two #loads, one inlined -- the second load's caret
   n7_inlctl n7_inldir3 n7_inlscope
+  # #633 recon: the `0h` hexadecimal-float bit-pattern literal had NO corpus coverage at all, in a
+  # tree where core/math/math_erf.odin alone contains 113 of them. It is currently CORRECT -- and
+  # correct by a route that surprised me, so it is worth pinning: the live path delegates to
+  # core:strconv, which is Odin-literal-aware (strconv.odin:1101) and decodes the bit pattern.
+  # The DEAD faithful port (exact_value_float_from_string) would get it WRONG, because it passes the
+  # `0h` prefix into parse_u64_of_base where C++'s u64_from_string strips it. So the day #633 wires
+  # the faithful path in, these two members are what turns that mistake red instead of shipping it.
+  #   hexf   ACCEPT control -- f16/f32/f64 widths, underscores, must stay silent on both sides
+  #   hexf2  the value-revealing REJECT -- int(0h3fb999999999999a) forces the checker to PRINT the
+  #          decoded value (0.1), so a wrong decode cannot pass as a matching error message
+  hexf hexf2
+  # #633: the DRIFT gate. C++ has ONE function (exact_value_from_token, parser.cpp:815) that both
+  # computes a literal's value AND raises the syntax error when it comes back Invalid. The port
+  # cannot have that, because the diagnostic must be raised by the PARSER and the value is computed
+  # in the CHECKER, and core/odin/parser does not (and must not) import core/odin/checker. So the
+  # rule is written twice -- literal_value_is_valid in the parser, and the converter in the checker
+  # -- and nothing structural keeps them in step. This member is what notices if they drift.
+  # NOT A MEMBER YET -- see the EXCLUDED entry for `litdrift` below. The battery does its job (it
+  # found something), but what it found is an ORDERING divergence, not literal drift, and a
+  # FULL-DIFFER member would leave this gate permanently red.
+  #
+  # #652: a typeid switch skipped C++'s entire non-type case branch (convert_to_typed +
+  # check_comparison + seen-map), because the port's guard carried an invented `!is_typeid_switch`
+  # conjunct that C++ (check_stmt.cpp:1303) does not have.
+  #   dupcase  the REPRO -- `switch tid { case 5: }`. Oracle rejects, port was SILENT. This is the
+  #            member that would have caught it, and nothing in the corpus did.
+  #   dupctl   the CONTROL -- the same shape in a NON-typeid switch, which both compilers always
+  #            caught. It is what proved the defect was the one conjunct and not the conversion
+  #            machinery, so it belongs here to keep that isolation honest.
+  #   dupty2   #298's shape (duplicate TYPE cases + a polymorphic type as a case) which had NO
+  #            corpus coverage at all -- I went looking for a `dupty` member while gating #652 and
+  #            there was none, so the type-case branch and add_type_switch_case were ungated. It is
+  #            byte-identical across oracle / pre-#652 / post-#652, which is the measurement that
+  #            showed #652 left that branch alone; pinning it makes that permanent.
+  dupcase dupctl dupty2
+  # #650: C++ gives the "Failed to parse file: %s; invalid token found in file" abort a position
+  # whose line/column are real but whose OFFSET is never written -- parser.cpp:6977 zero-inits the
+  # TokenPos and init_ast_file (parser.cpp:5731) fills in only line and column, while file_id is
+  # patched afterwards and offset never is. token_pos_cmp (tokenizer.cpp:210) compares OFFSET
+  # FIRST, so that one diagnostic sorts ahead of every diagnostic in every file. The port passed a
+  # complete position, sorted it correctly, and therefore diverged. The fix is deliberate
+  # bug-compatibility -- the reference's position is internally inconsistent, but parity is the
+  # contract and the only observable is diagnostic ORDER. The port's token_pos_cmp is FAITHFUL and
+  # must NOT be "fixed"; the defect was in how the position was CONSTRUCTED.
+  #   offprobe  p1 holds the abort at a HIGH offset (col 25), p2 an ordinary error at a LOW offset
+  #             (col 6) in a file that sorts later by path. Oracle order is p1-abort, p2,
+  #             p1(2:27); pre-#650 the port gave p2, p1-abort, p1(2:27). Verified as a FIRING gate:
+  #             FULL-MATCH on the fixed binary, FULL-DIFFER on $S/tst_pre650.
+  #             p1's second literal error carries a trailing `// tail` comment ON PURPOSE. Without
+  #             it that error lands at end-of-line, where C++ renders "( empty line )" instead of
+  #             the source line and omits the caret (#639, filed upstream, not fixed) -- which made
+  #             the probe FULL-DIFFER for a reason having nothing to do with the ordering under
+  #             test. Do not remove the comment.
+  offprobe
+  # #617/#655. The intrinsics type-query builtins had INVENTED diagnostic texts. Found by
+  # reading type_is_specialization_of against check_builtin.cpp:7348 and then PROBING the
+  # siblings rather than assuming the family was clean -- which is what turned one defect into
+  # five. All six probes were FULL-DIFFER on $S/tst_pre617 and are FULL-MATCH now.
+  #   tsp1/tsp2  type_is_specialization_of, args 1 and 0. The whole arm was a reimplementation:
+  #              a hand-written polymorphic_parent identity test for Struct/Union only, in place
+  #              of check_type_specialization_to, with no in_polymorphic_specialization around
+  #              the pattern argument and no "Invalid specialization type" diagnostic. Rewritten
+  #              from C++. The VALUE agreed on every probe I could build, so this is verified on
+  #              messages and unchanged on values -- not claimed as a value fix.
+  #   tvo1       type_is_variant_of, same invented first-argument text.
+  #   tss1/tss2  type_is_superset_of, BOTH arguments. Its C++ arm (check_builtin.cpp:7979) uses
+  #              a DIFFERENT wording -- "'%s' expects a type, got %s" -- which I initially got
+  #              wrong by pattern-replacing the shared invented text across the file. The blanket
+  #              edit hit three procs when I had verified one; these two probes are what caught
+  #              it. Members so the distinction stays pinned.
+  #   tm1        type_merge. Message was right after the sweep but the mode assignment was not:
+  #              C++ sets mode=Type/type=t_invalid at the top of the arm and returns bare, so
+  #              adding mode=.Invalid on the error path was a divergence I introduced.
+  tsp1 tsp2 tvo1 tss1 tss2 tm1
+  # #657. The "Did you mean?" TIE-BREAK ORDER. scope_map_slot_order simulates C++'s ScopeMap, and
+  # the hash, the 75% max-load rule and the Robin Hood probe were all already faithful -- what was
+  # missing ran BEFORE the insert loop: C++ RESERVES package and file scopes (checker.cpp:240/261),
+  # so their maps start at next_pow2(2N) and never pass through the 16 -> 32 -> 64 doublings the
+  # simulation assumed. Different capacity => different `hash & mask` => different slots.
+  # These four are SIZE-GRADED on purpose; that grading is what localised the bug, because the
+  # boundary between matching and differing IS the arithmetic:
+  #   ordsm2  6 names  -> 2*6=12 does NOT exceed the inline cap, so C++ stays at 16 and the port
+  #                       was ALREADY correct. THE CONTROL: it was FULL-MATCH before the fix and
+  #                       must stay so. A fix that "works" by changing small scopes is wrong.
+  #   ordmid  11 names -> next_pow2(22)=32. Still BELOW the growth threshold of 12, which is what
+  #                       ruled out the rehash path and forced reading the reserve call.
+  #   ordbig  40 names -> next_pow2(80)=128 vs the simulated 16->32->64. Pins the displayed
+  #                       TOP-TEN MEMBERSHIP, not just its order (port showed name40 for oracle's
+  #                       name06), so this one guards a user-visible set, not a cosmetic sort.
+  #   cvt3    core:simd, ~100 names -- the ORIGINAL #653 repro, previously EXCLUDED. It is the only
+  #                       one of the four with real nesting, so it is what proves calc_decl_count
+  #                       (which counts NAMES and takes max() across a `when`) rather than
+  #                       len(file.decls) is the right count. Promoted from EXCLUDED to member.
+  # All four A/B'd against $S/tst_pre657: ordsm2 MATCH->MATCH, the other three DIFFER->MATCH.
+  ordsm2 ordmid ordbig cvt3
+  # #662. An instantiated polymorphic record printed WITHOUT its argument list: the oracle prints
+  # `Foo($T=int)`, the port printed `Foo`. The string is not assembled by the printer -- it IS the
+  # instantiated type's NAME, composed at instantiation by check_expr.cpp:8548-8583 and written to
+  # BOTH Named.name and the type_name entity's token. The port had no equivalent, so every
+  # diagnostic naming such a type lost its arguments and `Foo(int)`/`Foo(string)` printed alike.
+  #   sp7  `Buf(4, int)` and `Foo(int)` surfaced through a type-mismatch message. Chosen over the
+  #        original repro sp5 for two reasons. (a) COVERAGE: sp5 has only a typeid parameter, so it
+  #        exercises neither the Entity_Constant arm (`$N=4`) nor the ", " separator -- a fix that
+  #        handled types and nothing else would have passed sp5 outright (#25/#39). sp7 pins all
+  #        three. (b) DETERMINISM: sp5 is where-clause-based and so carries the #660 render flake,
+  #        which changes lines around the one under test; sp7 has no where clause and is stable.
+  # A/B on the pre-#662 binary: `of type 'Buf'` / `of type 'Foo'`; post-fix and oracle both
+  # `of type 'Buf($N=4, $T=int)'` / `of type 'Foo($T=int)'`.
+  sp7
+
+  # #674. The polymorphic-call argument surface. The defect this pins is INVISIBLE to every
+  # message-based method: check_call_arguments_internal skipped `Entity_Constant` parameters
+  # outright, on a comment claiming they are "resolved during instantiation". C++ special-cases
+  # only `Entity_TypeName` there; a `$N: int` parameter is scored like any other, so
+  #   p674f  `f :: proc($N: int) -> int` called as `f("hi")` -- oracle rejects, port ACCEPTED.
+  # The other five are controls that must NOT move, chosen to cover each neighbouring branch of
+  # the same loop, because the fix also removed an early `return` on instantiation failure
+  # (C++ records err and falls through):
+  #   p674a  `f :: proc(a: $T, b: T)` / `f(1, "hi")`  -- T bound from an earlier parameter
+  #   p674d  `#no_broadcast` on a polymorphic parameter (the allow_array_programming branch)
+  #   p674g  `f :: proc($N: f32)` / `f(3)`            -- VALID; over-rejection control (#81)
+  #   p674h  `f :: proc(a: $T, b: ^T)` / `f(1, &f32)` -- pointer specialization
+  #   p674i  `#any_int n: int` on a polymorphic proc  -- the #any_int escape branch
+  #   p674j  the PROC-GROUP form of p674f -- that path routes through
+  #          score_type_name_argument and never had the invented skip, so it is the control
+  #          proving the defect was the direct path's alone (#534's "check both copies").
+  #   p674k  `f :: proc($T: typeid, x: int)` / `f(1)` -- POSITIVE CONTROL for the new
+  #          Type_Name arm. The oracle emits TWO diagnostics here; the second, "Expected a
+  #          type for the argument 'T'", is emitted by the replacement arm and by nothing
+  #          else on the direct path, so this member goes red if that arm is ever re-skipped.
+  #   p674gf1 `f :: proc(a: []$T, b: int)` / `f(1, "no")` and
+  #   p674gf2 `f :: proc(a: ^$T, b: int)`  / `f(y, "no")` -- instantiation CANNOT succeed here,
+  #          and the oracle still reports the SECOND argument. These pin the fall-through: the
+  #          port used to return the moment generation failed, so every remaining argument went
+  #          unchecked. Both DIFFERED with only the Entity_Constant fix in place.
+  #   p674sh `shrink(&arr)` / `shrink(&arr, 2)` / `shrink(&m)` -- REGRESSION GUARD. Porting C++'s
+  #          check_get_params assignability block (check_type.cpp:2197-2222) made this over-reject
+  #          `No procedures or ambiguous call for procedure group 'shrink'`, because the port's
+  #          operand array still holds a ZEROED slot for an unsupplied defaulted parameter where
+  #          C++ has already filled it. That block is deliberately NOT ported; this member is what
+  #          catches a retry that repeats the mistake.
+  p674a p674d p674f p674g p674h p674i p674j p674k p674gf1 p674gf2 p674sh
+
+  # #675. C++'s check_get_params assignability gate (check_type.cpp:2197-2222), which #674 had to
+  # back out. It emits NOTHING -- its whole effect is `success = false` -- so the observable is
+  # not a message but WHETHER THE PROCEDURE IS INSTANTIATED, and therefore whether its BODY is
+  # ever checked. All three probes put an undeclared name in the body to make that visible:
+  #   p675a  `f :: proc(a: $T, #any_int n: int)` / `f(1, "hi")` -- generation must FAIL, so the
+  #          body error must NOT appear. The port used to print it; the oracle never does.
+  #   p675b  same body, parameter WITHOUT `#any_int` -- generation must SUCCEED and the body
+  #          error must appear on both sides. Proves the gate is confined to the `#any_int`
+  #          branch (`bool ok = true` upstream) and has not become a broad rejection.
+  #   p675d  `#any_int` given an ENUM operand -- castable, so generation must SUCCEED. Proves
+  #          the check_is_castable_to escape is wired.
+  p675a p675b p675d
+
+  # #676. check_matrix_type_expr: an ORDER defect and an ANCHOR defect, both found from one
+  # monotonicity group (8 inversions / 11 citations) whose "after" values clustered on two
+  # anchors -- #63's signature for a small number of misplaced blocks, not scattered noise.
+  #   p676a  `matrix[0, 0]string`      -- the port ran the element-type check FIRST, and since it
+  #          and the column-count error share `mt.column_count`, the same-position merge (#578)
+  #          kept the element error and DROPPED the genuine column-count one. Oracle: row + column
+  #          count. Port before: row count + element type.
+  #   p676d  `matrix[x, x]string` with a non-constant x -- same swap on "Array count must be a
+  #          constant integer": oracle emits it TWICE (row and column), the port emitted it once.
+  #   p676b  `matrix[100000, 100000]string` -- both defects at once. The port's max-elements error
+  #          was anchored at the column count, colliding with the element error, so ONLY the
+  #          element error survived; the oracle prints both.
+  #   p676e  `matrix[9, 9]f32`  and
+  #   p676f  `matrix[100000, 100000]f32` -- the ANCHOR alone, no merge involved. C++
+  #          check_type.cpp:3135 is `error(node, ...)`: the whole matrix type (2:6), not the column
+  #          count. The comment that used to sit at this site asserted the opposite.
+  #   p676c  `matrix[0, 3]string` -- CONTROL: only the row count is bad, so no anchor collision and
+  #          both sides always agreed. It must stay FULL-MATCH through any re-ordering here.
+  p676a p676b p676c p676d p676e p676f
+
+  # #677. check_bit_field_type_expr: TWO under-reporting defects, both `continue`s the port has and
+  # C++ does not. Found from a 7/12 citemono group whose seven inversions all shared ONE "after
+  # 1128" -- #63's single-anchor signature, and the anchor was the duplicate-name check sitting at
+  # the TOP of the loop where C++ has it at :1128, after the type and bit-size validation.
+  #   p677a  `a: u8|3, a: string|4` -- duplicate AND a bad type. Oracle: redeclaration AND "must be
+  #          <= 8 bytes, got 16". Port before: redeclaration only, because the early check skipped
+  #          check_type entirely.
+  #   p677f  `a: u8|"x", a: u8|3` -- the non-integer bit-size arm `continue`d, so the FIRST field's
+  #          name was never registered and the second `a` was not seen as a duplicate. Oracle emits
+  #          both diagnostics; the port emitted one. C++:1122-1126 has no continue.
+  #   p677b  `a: u8|3, a: u8|99` -- CONTROL for the direction of the move. The bit-size CLAMPS live
+  #          inside C++'s `else` at :1130, so a DUPLICATED field must NOT get "cannot exceed 64
+  #          bits". Both sides emit the redeclaration alone; this member fails if the clamps are
+  #          ever hoisted above the duplicate check.
+  #   p677g  `a: u8|x, a: u8|3` with a non-constant x -- CONTROL: that arm already set the operand
+  #          invalid and carried on, matching C++, and must keep doing so.
+  #   p677c  two distinct valid fields -- CONTROL, no diagnostics either side.
+  #   p677d  plain duplicate, nothing else wrong -- CONTROL, one diagnostic either side.
+  #   p677e  `a: u8|"x"` alone -- CONTROL for the non-integer arm with no duplicate following.
+  p677a p677b p677c p677d p677e p677f p677g
+
+  # #678. The bit_field ENDIANNESS check was a REIMPLEMENTATION, found by reading #677's residual:
+  # the block cited check_type.cpp:1127-1167 (the redeclaration/clamps/entity region) while C++'s
+  # endianness pass is at :1190-1230, AFTER the field loop, over the collected entities.
+  #   p678a  `bit_field u32le { a: u16be|5 }` -- the port's message was INVENTED ("bit_field field
+  #          has big endianness but backing type has little endianness"; that text is nowhere in
+  #          src/) and anchored at the field TYPE. C++: "All 'bit_field' field types must match the
+  #          same endian kind as the backing type, ..." at the field NAME.
+  #   p678b  `bit_field u32 { a: u16le|5, b: u16be|5 }` -- UNDER-REJECTION. The port gated the whole
+  #          check on the backing type being explicitly endian-specific, so a NATIVE backing type
+  #          disabled it. C++'s determine_endian_kind returns Endian_Native for a plain u32 and
+  #          mismatches against it: oracle two errors, port NONE.
+  #   p678d  `bit_field u32le { a: u16be|5, b: u16be|99 }` -- the port's `continue` after its error
+  #          also suppressed the bit-size clamp diagnostic the oracle emits.
+  #   p678c  `bool` + `u8` fields under an `le` backing -- CONTROL. determine_endian_kind returns
+  #          Unknown for booleans and for anything smaller than 2 bytes, so neither comparison
+  #          fires; a fix that drops those guards turns this red.
+  #   p678e  all-`le` fields under an `le` backing -- CONTROL, no diagnostics either side.
+  p678a p678b p678c p678d p678e
+
+  # #680. `check_global_variable_decl` -- the group was 6/8 with all six sharing one anchor, and the
+  # anchor turned out to be the ONE CORRECT citation among eight stale ones. No reordering, no
+  # defect: the port's structure matches C++ exactly and only the line numbers had drifted (+70
+  # before the init expression, +76 after). Correcting them took the group to ZERO.
+  # These three pin the "Illegal declaration cycle" path, which is what the DELIBERATELY-NOT-PORTED
+  # check_decl.cpp:1801-1806 block would otherwise duplicate. That block's predicate
+  # (checker.cpp:625-646) accepts exactly `x := x` and `x := i if c else i`; on every such shape the
+  # port's earlier dependency-walk detector already produces C++'s exact output. If someone ports
+  # the block anyway, these members catch the second diagnostic.
+  #   p680a  `x := x`                          -- the bare-ident arm of the predicate
+  #   p680e  `x: int = x`                      -- same, with an explicit type so e->type is preset
+  #   p680g  `x: string = x if true else x`    -- the ternary arm, both branches
+  p680a p680e p680g
+  # #693. Duplicate type case, where the two case expressions build DISTINCT but structurally
+  # identical Type objects (`case ^int:` twice). C++ tracks seen case types in a TypeSet, which slots
+  # by type_hash_canonical_type, so it reports the duplicate; the port's set was keyed by type
+  # POINTER and silently ACCEPTED the program -- a live under-rejection invisible to any check that
+  # reads only the port's own output (#71), and not present in any of the 323 parity packages.
+  # Needs a `main` because corpus members are compared with `odin build`.
+  dupptr
+  # #698. Indexing a CONSTANT SLICE with a CONSTANT index -- `A :: []int{10,20,30,40}` then `A[3]`.
+  # A live OVER-REJECTION: the port answered "Cannot index a constant 'A'" plus a suggestion about
+  # variable indices that did not apply, where C++ resolves the element. check_index_value's
+  # `max_count >= 0` arm had no else, so a constant index against a type with no STATIC length fell
+  # through to the `value^ = -1` sentinel that C++ reserves for non-constant indices, and the
+  # caller's faithful `index < 0` guard then fired. The member carries a constant ARRAY and a
+  # constant STRING alongside the slice precisely because those two were NEVER affected -- both
+  # have a static length and take the `max_count >= 0` arm -- so they are the #25 control that must
+  # not change. Reported by mirc; no parity package indexes a constant slice.
+  cidxslice
+  # #703. FAILING `#assert` -- the caret. C++ anchors both "Compile time assertion" errors on the
+  # CALL (`error(call, ...)`, check_builtin.cpp:2644/:2647); the port anchored on `call_expr.expr`,
+  # the CALLEE, so the caret spanned only `#assert` and was a CONSTANT `^~~~~~^` no matter what was
+  # asserted. This is #574's defect exactly: that tick fixed all three errors in the `#panic` arm
+  # and missed the `#assert` arm a few lines above it in the same file. The member carries FOUR
+  # argument shapes (literal, constant ident, binary expr, unary expr) because the port's caret was
+  # identical across all of them while the oracle's width tracks the argument -- one shape would
+  # have shown the bug but would not have shown that the width is argument-DEPENDENT.
+  # No prior member exercised a FAILING #assert, which is how 300 green members missed it.
+  asrt
+  # #712. DUPLICATE PACKAGE NAME. `check_unique_package_names` was a REIMPLEMENTATION, not a port:
+  # invented message text, no `error_line` block, no "found at previous location" line, and it
+  # anchored on a `tokenizer.Token` where C++ anchors on the `pkg_decl` NODE -- so the caret was a
+  # single `^` instead of `^~~~~~~~~~^` under `package dup`. The anchor was ONE root cause for TWO
+  # symptoms (1:9 vs 1:1 AND the caret width), fixed by one argument in parser.odin:343 (#163).
+  # The member is two subpackages both named `dup` imported by a third, which is the ONLY shape that
+  # takes the emitting branch.
+  # WHY THIS WAS INVISIBLE FOR 300 MEMBERS AND 323 PARITY PACKAGES: every one of them has unique
+  # package names, so the branch was never taken. An invented diagnostic on an unexercised path is
+  # invisible to a comparator that only ever sees the path NOT taken -- #71's shape from the other
+  # side. It was found by READING C++, not by any sweep, which is exactly why it belongs here now.
+  # Determinism measured 8/8 identical before adoption (#115).
+  n712
+  # #743/#746: intrinsics.type_is_specialization_of had ZERO coverage of any kind. Its only
+  # occurrence tree-wide is its DECLARATION (base/intrinsics/intrinsics.odin) -- no call site in
+  # core/ or base/, so no package check, no parity sweep and no corpus member has ever exercised
+  # it. The port's arm was rewritten from C++ under #617 and the write-up said, honestly, that it
+  # was "verified on messages and unchanged on values"; that was as far as inspection could reach.
+  # These four are the first actual measurement, and the reason a regression here would now be
+  # caught instead of shipping (#186: zero call sites means no gate COULD have covered it).
+  #   tsof_val    BOTH value directions as #assert -- Foo(int) IS a specialization of Foo, Bar(int)
+  #               and int are NOT. Deliberately NOT where-clause-based: the `where` form carries the
+  #               #660 definitions-block render flake (same reason sp5 is excluded), which a
+  #               fixed-expectation comparator scores as a difference unrelated to the rule.
+  #               PROVEN to have content: flipping one assertion makes BOTH sides reject with a
+  #               byte-identical message (#177) -- a silent probe is worthless without that.
+  #   tsof_e1     non-type first argument -> "Expected a type for ..." (C++ check_builtin.cpp:7350-7355)
+  #   tsof_e2     undeclared specialization type -> the resolve failure (C++ :7364-7369)
+  tsof_val tsof_e1 tsof_e2
+  # #748: PROMOTED FROM THE EXCLUSION LIST. Its note read "the oracle emits a <nopos> Note
+  # continuation block the port does not ... they are genuinely absent" -- true when written, during
+  # #196's SCRATCH phase. #196 then landed ("all five signature-Note branches + variadic suggestion
+  # ported") and the exclusion was never retired: the log entry outlived the state it described
+  # (#208). Re-derived from source -- BOTH sides now emit the full block, verbatim:
+  #   Note: The input parameter types differ between the procedure signature types
+  #         Expected: $V / Got: $T, $U
+  # 6/6 stable FULL-MATCH, and the WHY is established, not just the agreement (#146). It gates the
+  # signature-Note branches, which nothing else in the corpus does.
+  p_ppp
 )
 
 # --- Deliberate exclusions, each with the reason it is not a corpus member --------------------
 # name                reason
 EXCLUDED=(
+  'litdrift|#639 ONLY, as of 2026-08-10. Built during #633: 16 one-literal files probing the parser/checker literal rule. Two divergences were tangled here and both are now resolved. (1) The ORDERING divergence -- the oracle put the hard tokenizer aborts ahead of the per-literal errors -- was #650, FIXED, and is now gated by the `offprobe` member above; litdrift is no longer the repro for it. (2) What remains is entirely #639, an UPSTREAM rendering bug filed and not fixed: f13 (`L13 :: 0h123`) and f14 (`L14 :: 0h1234567`) put their diagnostic at end-of-line, where C++ prints "( empty line )" in place of the source line and omits the caret, while the port prints the real line and caret. Every MESSAGE, KIND and POSITION agrees on both sides -- verified 2026-08-10; the only difference cmpfull can see is that unpaired `<cont>` line, which survives normalisation precisely because C++ emits no caret under it. NOTHING in the port is wrong here, so this stays excluded rather than being made bug-compatible: unlike #650, the observable is decoration and not semantics. Re-check when #639 lands upstream; the probe dirs are kept because they are the repro.'
   # All five re-probed 2026-08-04 (LEDGER #378). probe.sh reports MATCH for four of them; cmpfull.py
   # reports FULL-DIFFER for the same four. cmpfull is right and probe.sh is the looser instrument --
   # see the ledger. Reasons below are what the FULL comparison actually shows, not what probe.sh says.
@@ -379,11 +888,11 @@ EXCLUDED=(
   # NOT measured. Cosmetic in effect, but it is command execution from a data string, and
   # this block exists precisely to stay legible. Keep single quotes for any note with ` or $.
   'objchang|#277 scratch. Message text and position divergences FIXED in #378. The residual is a HARNESS MISMATCH, not a port defect (#379): cmpfull.py runs the oracle as `odin build`, triage_st sets command_kind={.Check}, and C++ suppresses "only works on darwin" under Command_check/Command_doc (check_builtin.cpp:284). Oracle as `odin check` emits 0 of them, same as the port. Excluded until the comparators agree on which command they emulate.'
-  "p_ppp|#196 scratch: the oracle emits a <nopos> Note continuation block the port does not. #155 records that the older comparator could not even SEE continuation lines; cmpfull can, and they are genuinely absent."
   "shadowparam|vet-mode probe -- a member of the VET corpus (corpus_vet.sh), which now exists and runs it; TEXT-MATCH as of #384. Excluded HERE only because this harness is the plain one."
   "shadowvar|vet-mode probe -- a member of the VET corpus (corpus_vet.sh), which now exists and runs it; TEXT-MATCH as of #384. Excluded HERE only because this harness is the plain one."
   "vetctl|vet-mode probe -- a member of the VET corpus (corpus_vet.sh), which now exists and runs it; TEXT-MATCH as of #384. Excluded HERE only because this harness is the plain one."
   "vetmap|vet-mode probe -- a member of the VET corpus (corpus_vet.sh), which now exists and runs it; TEXT-MATCH as of #384. Excluded HERE only because this harness is the plain one."
+  'sp5|#662: the ORIGINAL repro, superseded as a corpus member by sp7 -- kept on disk because it is what found the defect. Two reasons it is not the gate. (a) It is where-clause-based, so it carries the #660 render flake: continuation lines in its definitions block duplicate nondeterministically, which a fixed-expectation comparator scores as a difference unrelated to the rule under test. (b) Its only polymorphic parameter is a typeid, so it never reaches the Entity_Constant arm or the ", " separator -- it would have PASSED a fix that handled types alone (#25/#39). sp7 pins all three arms and has no where clause. Both sides agree here (5/5 `S :: Foo($T=int);`) as of 2026-08-10; this is an instrument exclusion, not an unresolved divergence.'
   "objcctx|#285 UPSTREAM: the ORACLE segfaults on this 6/6 (zero-param @(objc_context_provider)). Port is correct; kept on disk as the repro"
   "vt_nopkg2|#307: the ORACLE is nondeterministic on the 'Suggestion: Add package ...' line -- it emitted it in 3/20 runs here (C++ parser.cpp:6863 calls this a race itself). Port is deterministic and matches the 17/20 majority; a fixed-expectation comparator cannot score it"
   "vt_nopkg3|#307: as vt_nopkg2, from the other side -- oracle emits the Suggestion in 19/20 runs, port always does, so it matches the majority but differs on the odd run"
@@ -411,7 +920,13 @@ done
 # read-$?-through-a-construct mistake that gave a wrong answer twice today through pipelines.
 python3 "$HERE/cmpfull.py" "$PORT" "${dirs[@]}"
 cmp_rc=$?
-if [ $cmp_rc -ne 0 ]; then
+# LEDGER #747: exit 4 means the comparator RAN and found divergences -- a real measurement that
+# FAILED. Anything else non-zero means it did not run properly, which is the #380 case where the
+# numbers are not a measurement at all. Collapsing the two would relabel every genuine port defect
+# as a broken tool.
+if [ $cmp_rc -eq 4 ]; then
+  corpus_failed=1
+elif [ $cmp_rc -ne 0 ]; then
   echo "CORPUS-ABORTED comparator failed (exit $cmp_rc) -- NOTHING below is a measurement" >&2
   exit 1
 fi
@@ -419,3 +934,19 @@ fi
 echo "--- exclusions (UNMEASURED, not clean) ---"
 for e in "${EXCLUDED[@]}"; do printf "  %-14s %s\n" "${e%%|*}" "${e#*|}"; done
 echo "CORPUS-DONE members=${#CORPUS[@]} missing=$missing excluded=${#EXCLUDED[@]}"
+if [ "${corpus_failed:-0}" -eq 1 ]; then
+  echo "CORPUS-FAILED port and oracle DIVERGE on at least one probe -- see the FULL-DIFFER rows above" >&2
+  exit 1
+fi
+
+# LEDGER #745 (Jon: "if its got an error in the checker port it needs announced from tool").
+# A probe that is not on disk is NOT a pass. Until now `missing` was counted, printed inside the
+# summary above, and then ignored -- so a run that located 4 of 302 members printed `members=302`
+# and exited 0. That is the #380 failure one level up: the guard was added for the COMPARATOR
+# dying, and left open for the INPUTS going missing. #155/#26: a green from an instrument that had
+# nothing to measure is not evidence.
+if [ "$missing" -gt 0 ]; then
+  echo "CORPUS-ABORTED $missing of ${#CORPUS[@]} probe directories are MISSING from $ROOT -- the numbers above are NOT a measurement" >&2
+  exit 1
+fi
+

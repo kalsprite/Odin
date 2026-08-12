@@ -228,6 +228,21 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// flood of false "declared but not used" on top of an already-truncated report.
 	check_all_scope_usages(c)
 
+	// C++ Reference: check_parsed_files, TIME_SECTION("add basic type information") --
+	// checker.cpp:7728-7745, immediately after "check all scope usages" and before "check for
+	// type cycles". This is that position: the comment above already named this phase as the
+	// marker for where check_all_scope_usages belongs, but the phase itself was never written.
+	//
+	// The port's type-info roster was therefore only what the min-dep walk REACHED, a strict
+	// subset of C++'s. Inert for diagnostics -- nothing in the checker reads the roster -- but
+	// it is checker output consumed by a BACKEND, so the subset is a real parity gap rather
+	// than a cosmetic one. LEDGER #637.
+	add_basic_type_information(c)
+
+	// C++ line 7745: the merge immediately follows the loop, because add_type_info_type
+	// enqueues rather than writing the array directly.
+	check_merge_queues_into_arrays(c)
+
 	// Check deferred procedures (procedures with defer statements)
 	// C++ line 7373: check_deferred_procedures(c)
 	check_deferred_procedures(c)
@@ -268,10 +283,11 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 
 	check_update_dependency_tree_for_procedures(c)
 
-	// C++ runs generate_minimum_dependency_set(c, entry_point) HERE (checker.cpp:3110). The port
-	// does not implement that pass at all, so `min_dep_count` is never raised above zero and the
-	// loop inside check_unchecked_bodies finds nothing to do. Wired anyway: this is the correct
-	// position, and it costs nothing while empty.
+	// C++ runs generate_minimum_dependency_set(c, entry_point) HERE (checker.cpp:3110), and the
+	// port now does too -- the walk landed in LEDGER #638 stage 2. Until then this position was
+	// documented but empty, so `min_dep_count` never rose above zero and the loop inside
+	// check_unchecked_bodies found nothing to do.
+	generate_minimum_dependency_set_internal(c, c.info.entry_point)
 	//
 	// SCOPE (task #272, decided by enumerating every reader of min_dep_count in C++):
 	//   llvm_backend*.cpp x5, main.cpp:3408          -> CODEGEN, out of scope for a checker
@@ -292,13 +308,26 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// memory_compare_zero / memory_equal / memory_compare / __init_context / _cleanup_runtime
 	// were referenced anywhere. LEDGER #547-B.
 	//
-	// SCOPE, and why this does not reopen #272. C++'s force_add_dependency_entity does TWO
-	// things: `e->flags |= EntityFlag_Used` and `add_dependency_to_set(c, e)`. #272 scoped the
-	// dependency SET out of a checker on evidence -- every min_dep_count reader is codegen, a
-	// race backstop, or the RTTI table, and none emits a diagnostic. That still holds and the
-	// set is still not built here. What #272 could not have weighed is the FLAG: the dump-model
-	// comparison did not exist then, and `used` is entity state the model compares directly.
-	// So the flag half is ported and the set half deliberately is not.
+	// SCOPE. C++'s force_add_dependency_entity does TWO things: `e->flags |= EntityFlag_Used`
+	// and `add_dependency_to_set(c, e)`. BOTH ARE NOW DONE -- this routes through the port's
+	// force_add_dependency_entity (scope.odin:805), which performs both.
+	//
+	// IT DID NOT USED TO. #272 scoped the dependency SET out on evidence: every min_dep_count
+	// reader is codegen, a race backstop, or the RTTI table, and none emits a diagnostic. That
+	// reasoning was sound FOR DIAGNOSTICS and is why only the flag half was ported (the flag is
+	// entity state the model dump compares directly, which #272 could not have weighed because
+	// the dump did not exist yet).
+	//
+	// WHAT CHANGED IS THE CONSUMER, NOT THE EVIDENCE. "Every reader is codegen" is an argument
+	// for building the set once a BACKEND exists, not against it -- the set is the checker's
+	// output to codegen, and a backend asking for an entity the set never received gets nothing.
+	// So the set half is now built too. #272 stays correct about diagnostics and stops being a
+	// reason to skip this. LEDGER #638 stage 1.
+	//
+	// This also activates add_dependency_to_set, which had ZERO callers and had therefore never
+	// executed. Its recursion terminates on the `min_dep_count > 1` early return (scope.odin:844),
+	// checked before switching it on rather than after -- unexercised recursive code is how #23
+	// happened.
 	//
 	// VERIFIED before being written: force-adding just memory_compare_zero and memset over four
 	// packages took the `used` divergence 70 -> 65 and dropped both entities out of the residual,
@@ -338,7 +367,10 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	check_for_inline_cycles(c)
 
 	// Validate unique package names
-	check_unique_package_names(c)
+	// C++ Reference: check_parsed_files, `bool package_names_are_unique = check_unique_package_names(c);`
+	// -- checker.cpp check_parsed_files:7824. The result is carried to the type-info collision
+	// check at the tail of this driver, exactly as C++ carries its local (#711).
+	package_names_are_unique := check_unique_package_names(c)
 
 	// Check entry point
 	// C++ Reference: checker.cpp:7441-7463
@@ -377,6 +409,32 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// of the driver, which is the position below. This is the sole consumer of
 	// global_untyped_queue; without it no global untyped expression ever gets a TAV entry.
 	resolve_global_untyped_expressions(c)
+
+	// Build the final type-info table: sort the minimum-dependency type set by canonical hash,
+	// fill the open-addressed lookup array, and detect hash collisions.
+	//
+	// C++ Reference: check_parsed_files, TIME_SECTION("initialize and check for collisions in
+	// type info array") -- checker.cpp check_parsed_files:7851-7902. C++ runs this block
+	// immediately after TIME_SECTION("add untyped expression values") (:7842-7849), which is
+	// `resolve_global_untyped_expressions` above, and immediately before TIME_SECTION("sort init
+	// and fini procedures") (:7905). That is the position here.
+	//
+	// LEDGER #711: this phase existed as a well-formed named procedure in type_info.odin and had
+	// ZERO CALLERS. Same shape as #637/#638 -- C++ runs the work INLINE inside its big driver, the
+	// port hoisted it into a tidy procedure, and the call was never written (#158).
+	//
+	// EXPLICITLY UNMEASURED, like #709: the only reader of what this populates is
+	// `type_info_index` / `type_info_index_pair`, and those have ZERO CALLERS in this port -- in
+	// C++ their only real caller is `lb_type_info_index` in the LLVM backend
+	// (llvm_backend_type.cpp:8, llvm_backend.cpp:3299), which is out of scope here. So wiring it
+	// makes the port's phase sequence faithful and populates the table C++ populates; no gate in
+	// this repository can observe the table itself (#155/#156).
+	//
+	// What IS observable is the collision panic, which is why `package_names_are_unique` is
+	// threaded down: C++ suppresses the panic when a duplicate package declaration was already
+	// reported (:7882). Reachability of the panic is NOT established in either implementation --
+	// it needs two distinct types whose canonical hashes collide (#169/#174 discipline).
+	finalize_minimum_dependency_type_info(c, package_names_are_unique)
 
 	// =========================================================================
 	// Return Result
@@ -795,45 +853,106 @@ check_instrumentation_calls :: proc(c: ^Checker) {
 	}
 }
 
-// check_unique_package_names validates that no two packages share the same name.
-// If multiple packages have the same name but different paths, this is an error
-// because it would cause ambiguous imports.
+// package_first_pkg_decl returns C++'s `pkg->files[0]->pkg_decl`
+// (checker.cpp check_unique_package_names:7403-7404).
 //
-// C++ Reference: checker.cpp (package name uniqueness validation)
-check_unique_package_names :: proc(c: ^Checker) {
-	// Build a map of package name -> first package path seen
-	// When we find a duplicate, report an error
-	seen: map[string]^ast.Package
-	defer delete(seen)
+// C++ indexes `files[0]` directly. The port goes through `sorted_files` so the choice is
+// order-stable; that selects the SAME element, because C++'s `pkg->files` is already sorted by the
+// time this phase runs (LEDGER #170 dispositioned every raw `pkg.files` iteration by sort TIMING).
+package_first_pkg_decl :: proc(pkg: ^ast.Package) -> ^ast.Package_Decl {
+	for file in sorted_files(pkg.files) {
+		if file != nil {
+			return file.pkg_decl
+		}
+	}
+	return nil
+}
+
+// check_unique_package_names validates that no two packages share the same name.
+//
+// C++ Reference: checker.cpp check_unique_package_names:7380-7434.
+//
+// The return value is C++'s `bool ok` (declared :7382, returned :7433): false once a genuine
+// duplicate has been reported. C++ captures it at check_parsed_files:7824 as
+// `package_names_are_unique` and uses it at :7882 to SUPPRESS the type-info hash-collision panic
+// (LEDGER #711).
+//
+// LEDGER #712: this was a REIMPLEMENTATION, not a port, and it diverged from C++ in four MEASURED
+// ways -- all reproduced against the oracle with probe `n712` (two subpackages both `package dup`,
+// imported by a third):
+//   1. invented message text `Duplicate package name '%s' found in '%s' and '%s'`;
+//   2. the caret: it reported on a `tokenizer.Token`, which is ONE position (`^`), where C++ reports
+//      on the `pkg_decl` AST NODE, which carries a span (`^~~~~~~~~~^`). ONE root cause, TWO
+//      symptoms -- fixing the anchor fixes the caret for free (#574's shape);
+//   3. the three-line explanatory `error_line` block was absent entirely;
+//   4. the `<pos> found at previous location` line was absent entirely.
+// It also compared `existing.fullpath != pkg.fullpath` where C++ compares `curr == prev` NODE
+// IDENTITY and calls equality "a false positive", and it opened no error block.
+//
+// NONE of that was visible to any gate here: every package in the 323-package corpus has a unique
+// name, so the emitting branch is never taken. An invented diagnostic on an unexercised path is
+// invisible to a comparator that only ever sees the path not taken (#71's shape from the other
+// side) -- which is why this was found by reading C++, not by a sweep.
+//
+// KNOWN REMAINING GAP, deliberate and scoped: C++ :7418-7428 adds a case-folded-directory note for
+// upstream issue 5080, but it sits inside `#if defined(GB_SYSTEM_WINDOWS)` -- a HOST compile-time
+// guard, compiled out on this machine. It is NOT one of the four measurable divergences and cannot
+// be gated locally (LEDGER #161). It is omitted rather than written blind: carrying it would need a
+// `strings` import that is unused on every non-Windows host, which breaks the `-vet` gate. Port it
+// with `when ODIN_OS == .Windows` if this checker is ever built on a Windows host.
+check_unique_package_names :: proc(c: ^Checker) -> (ok: bool) {
+	ok = true
+
+	// C++ :7385-7387 -- `StringMap<AstPackage *> pkgs`, keyed by package NAME.
+	pkgs: map[string]^ast.Package
+	defer delete(pkgs)
 
 	for pkg in sorted_packages(&c.info) {
-		if pkg == nil || pkg.name == "" {
+		if pkg == nil {
+			continue
+		}
+		// C++ :7390-7392 -- its own comment is "Sanity check". Note this is a FILE-COUNT guard.
+		// The port previously skipped on `pkg.name == ""` instead, which C++ does not do.
+		if len(pkg.files) == 0 {
 			continue
 		}
 
-		if existing := seen[pkg.name]; existing != nil {
-			// Found duplicate package name with different path
-			if existing.fullpath != pkg.fullpath {
-				// Get a token for the error from the package
-				token: tokenizer.Token
-				for file in sorted_files(pkg.files) {
-					if file != nil {
-						token = file.pkg_token
-						break
-					}
-				}
-				error(
-					token,
-					"Duplicate package name '%s' found in '%s' and '%s'",
-					pkg.name,
-					existing.fullpath,
-					pkg.fullpath,
-				)
-			}
-		} else {
-			seen[pkg.name] = pkg
+		name := pkg.name
+		found, exists := pkgs[name]
+		if !exists {
+			// C++ :7397-7400 -- first sighting of this name, record and move on.
+			pkgs[name] = pkg
+			continue
 		}
+
+		curr := package_first_pkg_decl(pkg)
+		prev := package_first_pkg_decl(found)
+
+		// C++ :7405-7409 -- "NOTE(bill): A false positive was found, ignore it". NODE IDENTITY, not
+		// a path comparison. This `continue` does NOT clear `ok`.
+		if curr == prev {
+			continue
+		}
+
+		ok = false
+
+		// C++ :7411 / :7430 -- begin_error_block() ... end_error_block() around the whole report.
+		begin_error_block()
+		defer end_error_block()
+
+		// C++ :7412 -- anchored on `curr`, the pkg_decl NODE, which is what draws the span caret.
+		error_node(curr, "Duplicate declaration of 'package %s'", name)
+		// C++ :7413-7415 -- ONE error_line call carrying all three lines.
+		error_line(
+			"\tA package name must be unique\n" +
+			"\tThere is no relation between a package name and the directory that contains it, so they can be completely different\n" +
+			"\tA package name is required for link name prefixing to have a consistent ABI\n",
+		)
+		// C++ :7416.
+		error_line("%s found at previous location\n", token_pos_to_string(ast_token(prev).pos))
 	}
+
+	return ok
 }
 // force_add_runtime_used marks the runtime entities C++ force-adds to the minimum dependency set.
 //
@@ -855,16 +974,18 @@ force_add_runtime_used :: proc(c: ^Checker) {
 		return
 	}
 
-	add :: proc(scope: ^Scope, names: []string) {
+	// Routed through force_add_dependency_entity (scope.odin:805) rather than setting the flag
+	// inline, so this does BOTH halves of C++'s helper -- `e->flags |= EntityFlag_Used` AND
+	// `add_dependency_to_set(c, e)`. See the note at the call site for why the set half was
+	// deliberately omitted before and what changed. LEDGER #638.
+	add :: proc(c: ^Checker, scope: ^Scope, names: []string) {
 		for name in names {
-			if e := scope_lookup(scope, name); e != nil {
-				e.flags += {.Used}
-			}
+			force_add_dependency_entity(c, scope, name)
 		}
 	}
 
 	// Always required. NOTE cstring_to_string is commented out in C++ and is omitted here too.
-	add(scope, {
+	add(c, scope, {
 		// Odin types
 		"Source_Code_Location", "Context", "Allocator", "Logger",
 		// Odin internal procedures
@@ -876,27 +997,27 @@ force_add_runtime_used :: proc(c: ^Checker) {
 	})
 
 	if build_context.no_crt {
-		add(scope, {"memcpy", "memmove"})
+		add(c, scope, {"memcpy", "memmove"})
 	}
 	if build_context.metrics.arch == .Arm32 {
-		add(scope, {"aeabi_d2h"})
+		add(c, scope, {"aeabi_d2h"})
 	}
 	if is_arch_wasm() {
 		// The extended-data-type entries above these are commented out in C++; only the three
 		// WASM-specific ones are live.
-		add(scope, {"__ashlti3", "__multi3", "__lshrti3"})
+		add(c, scope, {"__ashlti3", "__multi3", "__lshrti3"})
 	}
 	if !build_context.no_rtti {
-		add(scope, {"Type_Info", "type_table", "__type_info_of"})
+		add(c, scope, {"Type_Info", "type_table", "__type_info_of"})
 	}
 	if !build_context.no_entry_point {
-		add(scope, {"args__"})
+		add(c, scope, {"args__"})
 	}
 	if build_context.no_crt && !is_arch_wasm() {
-		add(scope, {"_tls_index", "_fltused"})
+		add(c, scope, {"_tls_index", "_fltused"})
 	}
 	if !build_context.no_bounds_check {
-		add(scope, {
+		add(c, scope, {
 			"bounds_check_error", "matrix_bounds_check_error",
 			"slice_expr_error_hi", "slice_expr_error_lo_hi",
 			"multi_pointer_slice_expr_error",

@@ -1056,7 +1056,7 @@ Checker_Info :: struct {
 	// AST node to scope mapping - EXTERNAL MAP REQUIRED
 	// NOTE: For statement and type nodes (Block_Stmt, If_Stmt, Proc_Type, etc.)
 	// C++ stores scopes directly on nodes, but we need external map until type unification
-	// C++ Reference: checker.cpp:295-315 (add_scope), 317-339 (scope_of_node)
+	// C++ Reference: checker.cpp add_scope:296-316, 317-339 (scope_of_node)
 	// See scope.odin:430-463 for usage
 	ast_scope_map:                                map[rawptr]^Scope,
 	ast_scope_map_mutex:                          sync.RW_Mutex,

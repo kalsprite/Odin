@@ -148,6 +148,25 @@ def main():
     for k in sorted(tally):
         print("%s=%d" % (k, tally[k]))
 
+    # LEDGER #747 (Jon: "if its got an error in the checker port it needs announced from tool").
+    # Until now this function ended here, so Python exited 0 no matter what the tally said -- a run
+    # reporting FULL-DIFFER=2 was indistinguishable, to any caller, from a clean one. A divergence
+    # between port and oracle is the most direct form of "an error in the checker port" there is,
+    # and the EXIT STATUS is the only part of this output a caller actually reads.
+    #
+    # The code is 4, deliberately NOT 1 or 2:
+    #   1  is what Python itself exits on an uncaught exception -- i.e. the comparator CRASHED
+    #   2  is the usage error above
+    #   4  divergences found: the comparator RAN and the run is a real measurement, and it FAILED
+    # corpus.sh depends on that distinction; collapsing them would make every divergence read as
+    # "comparator failed -- NOTHING below is a measurement", which is the opposite of the truth.
+    bad = sum(v for k, v in tally.items() if k != "FULL-MATCH")
+    if bad:
+        detail = ", ".join("%s=%d" % (k, tally[k]) for k in sorted(tally) if k != "FULL-MATCH")
+        print("CMPFULL-DIVERGENCE %d of %d probes are not FULL-MATCH (%s)"
+              % (bad, sum(tally.values()), detail), file=sys.stderr)
+        sys.exit(4)
+
 
 if __name__ == "__main__":
     main()

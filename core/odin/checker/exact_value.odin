@@ -1699,6 +1699,60 @@ u64_digit_value :: proc(r: u8) -> u64 {
 	return 16
 }
 
+// u64_from_string is a direct port of C++'s u64_from_string (src/common.cpp:201-234). It had no
+// port equivalent at all; it is the ONLY caller-visible gap left in the literal-conversion family
+// (u64_digit_value above was added when the two hand-rolled copies were collapsed).
+//
+// C++ calls it from exactly one place -- exact_value_float_from_string's `0h` hexadecimal-float
+// branch (exact_value.cpp:343) -- and the two properties that matter there are both easy to lose:
+//
+//  1. IT STRIPS THE TWO-CHARACTER PREFIX. `0h3C00` must be parsed as `3C00`. The port's `0h` branch
+//     used `strconv.parse_u64_of_base(str, 16)` on the string WITH its prefix; that helper has no
+//     prefix concept, so it consumes '0', stops at 'h' with input left over, and reports ok=false.
+//     Every `0h` literal would have become an INVALID exact value -- and there are 113 in
+//     core/math/math_erf.odin alone. #633.
+//  2. IT CANNOT FAIL. C++ BREAKS out of the digit loop on the first character that is not a digit
+//     in the base and returns what it accumulated so far; there is no success flag. A port that
+//     returns ok=false where C++ returns a value turns a silent partial parse into a rejection.
+//
+// Underscores are skipped, matching C++ line 226-228.
+@(private = "file")
+u64_from_string :: proc(str: string) -> u64 {
+	base := u64(10)
+	has_prefix := false
+	if len(str) > 2 && str[0] == '0' {
+		switch str[1] {
+		case 'b': base = 2;  has_prefix = true
+		case 'o': base = 8;  has_prefix = true
+		case 'd': base = 10; has_prefix = true
+		case 'z': base = 12; has_prefix = true
+		case 'x': base = 16; has_prefix = true
+		case 'h': base = 16; has_prefix = true
+		}
+	}
+
+	text := str
+	if has_prefix {
+		text = text[2:]
+	}
+
+	result := u64(0)
+	for i := 0; i < len(text); i += 1 {
+		r := text[i]
+		if r == '_' {
+			continue
+		}
+		v := u64_digit_value(r)
+		if v >= base {
+			// C++ line 231: BREAK, not fail. What was accumulated is the answer.
+			break
+		}
+		result *= base
+		result += v
+	}
+	return result
+}
+
 // big_int_from_string is a direct port of big_int_from_string (src/big_int.cpp:186-292).
 //
 // The port previously hand-rolled this in two places (parse_exact_value_from_token's integer
@@ -1886,24 +1940,20 @@ exact_value_integer_from_string :: proc(str: string) -> Exact_Value {
 }
 
 // float_from_string parses a string to f64
-// C++ Reference: exact_value.cpp:203-321
-// The C++ version has complex handling for underscores and exponents
-// We delegate to Odin's strconv which handles the parsing correctly
+// C++ Reference: exact_value.cpp:214-253. Both length branches of the C++ function do the same
+// thing -- they differ only in whether the scratch buffer is a stack array or a temporary
+// allocation -- so one loop covers both.
 float_from_string :: proc(str: string) -> (f64, bool) {
-	// C++ line 204-243: Handle strings of various lengths
-	// The C++ code removes underscores and normalizes 'E' to 'e'
-	// Then calls strtod
-
-	// Build a cleaned version of the string
+	// C++ line 218-223: drop digit separators and lower-case the exponent marker BEFORE parsing.
 	buf := make([dynamic]u8, 0, len(str), context.temp_allocator)
 
 	for i := 0; i < len(str); i += 1 {
 		c := str[i]
-		// C++ line 209-210: Skip underscores
+		// C++ line 220-221: Skip underscores
 		if c == '_' {
 			continue
 		}
-		// C++ line 212: Convert 'E' to 'e'
+		// C++ line 222: Convert 'E' to 'e'
 		if c == 'E' {
 			append(&buf, 'e')
 		} else {
@@ -1913,9 +1963,18 @@ float_from_string :: proc(str: string) -> (f64, bool) {
 
 	cleaned := string(buf[:])
 
-	// C++ line 218-220: Parse using strtod equivalent
-	value, ok := strconv.parse_f64(cleaned)
-	return value, ok
+	// C++ line 227-230: `strtod` then `*end_ptr == '\0'`. The success criterion is that the WHOLE
+	// string was CONSUMED -- not that the result is finite. strtod returns HUGE_VAL for an
+	// overflowing literal and still reports success, so `1.0e309` is a valid f64 constant holding
+	// +Inf.
+	//
+	// This used to call strconv.parse_f64, under a comment claiming strconv "handles the parsing
+	// correctly". It does not handle it the same way: parse_f64 folds overflow into ok=false, so
+	// every literal past the f64 range came back INVALID instead of infinite. That is the exact
+	// divergence #368 found and fixed in check_expr's inline copy of this function; the copy was
+	// corrected and the original left standing. LEDGER #632.
+	value, nr, _ := strconv.parse_f64_prefix(cleaned)
+	return value, nr == len(cleaned)
 }
 
 // f16_to_f32 converts IEEE 754 half-precision (16-bit) float to f32
@@ -1966,11 +2025,21 @@ exact_value_float_from_string :: proc(str: string) -> Exact_Value {
 			}
 		}
 
-		// C++ line 332: Parse as u64
-		u, ok := strconv.parse_u64_of_base(str, 16)
-		if !ok {
-			return nil
-		}
+		// C++ line 343: `u64 u = u64_from_string(string);`
+		//
+		// This used to be `strconv.parse_u64_of_base(str, 16)` with the `0h` PREFIX still attached,
+		// and a `if !ok { return nil }` on top. Both halves were wrong against C++ (#633):
+		//   * parse_u64_of_base has no prefix concept -- it consumes '0', stops at 'h' with input
+		//     remaining, and reports ok=false. So this branch returned an INVALID exact value for
+		//     EVERY `0h` literal, and the `!ok` bail turned that into a silent nil.
+		//   * C++'s u64_from_string cannot fail at all: it breaks out of its digit loop and returns
+		//     what it accumulated, so there is no success flag to propagate.
+		// The function is currently DEAD (zero callers -- the live path is check_expr.odin's
+		// parse_exact_value_from_token, which reaches `0h` through core:strconv instead), so this
+		// edit changes no observable behaviour today. It is made because a dead FAITHFUL port whose
+		// body is wrong is worse than either a correct one or none: the day anything calls it, it
+		// breaks all 113 `0h` constants in core/math/math_erf.odin alone.
+		u := u64_from_string(str)
 
 		// C++ line 333-346: Convert based on digit count
 		if digit_count == 4 {

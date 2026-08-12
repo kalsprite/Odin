@@ -106,8 +106,8 @@ vals = collections.defaultdict(list)
 for l in rows:
     for k, v in re.findall(r"(\w+)=(\d+)", l):
         vals[k].append(int(v))
-GATED = ["layout_packages","layout_entities","state_packages","state_entities","schema_mismatch"]
-UNGATED = ["unpairable","multiplicity_packages","model_match_packages","presence_packages","presence_entities"]
+GATED = ["layout_packages","layout_entities","state_packages","state_entities","schema_mismatch","presence_packages","presence_entities"]
+UNGATED = ["unpairable","multiplicity_packages","model_match_packages"]
 print("=== GATED (must be deterministic) ===")
 bad = []
 for k in GATED:
@@ -130,10 +130,11 @@ fi
 
 npkgs=$(grep -cvE '^[[:space:]]*(#|$)' "$PKGLIST")
 total=0; compared=0; excluded=0; layout_pkgs=0; multi_pkgs=0; match_pkgs=0; layout_entities=0
-presence_pkgs=0; presence_entities=0; state_pkgs=0; state_entities=0; schema_bad=0; unpairable=0
+presence_pkgs=0; presence_entities=0; presence_status_pkgs=0; presence_names=""; state_pkgs=0; state_entities=0; schema_bad=0; unpairable=0
 excluded_names=""; layout_names=""
 detail=$(mktemp)
 statedetail=$(mktemp)
+presencedetail=$(mktemp)   # #622
 
 while read -r pkg; do
     case "$pkg" in ""|\#*) continue;; esac
@@ -166,12 +167,19 @@ while read -r pkg; do
                        printf '%s\n' "$out" | grep -E '^PKG |LAYOUT x' >> "$detail" ;;
         STATE-DIFFER)  printf '%s\n' "$out" | grep -E '^PKG |STATE x' >> "$statedetail" ;;
         # #549: `status` is modeldiff's HIGHEST-SEVERITY label, not a set of facts -- it is
-        # chosen by an elif chain (modeldiff.py:297-302, LAYOUT > PRESENCE > STATE > the rest).
+        # chosen by an elif chain. **THIS COMMENT USED TO SAY "LAYOUT > PRESENCE > STATE > the rest"
+        # AND WAS WRONG ABOUT ITS OWN DEPENDENCY**: modeldiff had NO PRESENCE ARM AT ALL, so every
+        # presence-only package fell through to `else` and was labelled MULTIPLICITY -- the noisy
+        # bucket -- while presence is the stable, gateable one. #622 added the arm; the real order
+        # is now LAYOUT > STATE > PRESENCE > MULTIPLICITY.
         # So these two counters partition packages BY TOP FINDING: a package that has multiplicity
         # AND a state divergence is counted as STATE-DIFFER and appears in NEITHER of these.
         # They are exact only while state_packages and layout_packages are 0 -- which the #553
         # gate now enforces, so today the partition IS exact. If the gate ever goes red, treat
         # these two as undercounts until it is green again.
+        PRESENCE)      presence_status_pkgs=$((presence_status_pkgs+1))
+                       presence_names="$presence_names $pkg"
+                       printf '%s\n' "$out" | grep -E '^PKG |PRESENCE ' >> "$presencedetail" ;;
         MULTIPLICITY)  multi_pkgs=$((multi_pkgs+1)) ;;
         MODEL-MATCH)   match_pkgs=$((match_pkgs+1)) ;;
     esac
@@ -185,10 +193,26 @@ fi
 [ -n "$excluded_names" ] && { echo "EXCLUDED (unmeasured, not agreement):$excluded_names"; echo; }
 if [ -s "$statedetail" ]; then
     echo "=== STATE DISAGREEMENTS (same entity, differing field) ==="
-    head -60 "$statedetail"
+    # #117: this was `head -60`, a SILENT truncation. The LAYOUT and PRESENCE blocks below both
+    # `cat` their detail files uncapped; only STATE was capped, for no recorded reason. A cap that
+    # does not say it truncated is how "I read the output" becomes a confidently wrong
+    # generalisation -- so the cap is raised AND, per #200, any suppression must report what it
+    # withheld. A reader who sees no WITHHELD line now knows they saw everything.
+    _st_lines=$(wc -l < "$statedetail")
+    head -400 "$statedetail"
+    [ "$_st_lines" -gt 400 ] && echo "    ... WITHHELD $((_st_lines - 400)) further STATE lines of $_st_lines total (raise the head -400 cap to see them)"
     echo
 fi
-rm -f "$detail" "$statedetail"
+# #622. Presence is the ONE column measured to hold still run-to-run (5 pkgs / 10 entities across
+# three sweeps of an identical binary, while multiplicity/model_match/unpairable all drifted). It was
+# counted and then discarded, so the entities were unreachable. Name them.
+if [ -s "$presencedetail" ]; then
+    echo "=== PRESENCE DIVERGENCES (entity exists on ONE side only -- stable, gateable) ==="
+    cat "$presencedetail"
+    echo
+fi
+[ -n "$presence_names" ] && { echo "PRESENCE PACKAGES:$presence_names"; echo; }
+rm -f "$detail" "$statedetail" "$presencedetail"
 
 # layout_packages is the number that decides pass/fail. multiplicity_packages is reported, not
 # judged: it is #468, a difference in which polymorphic instantiations exist, and it is expected to
@@ -226,11 +250,21 @@ rm -f "$detail" "$statedetail"
 # keys carrying EXACTLY ONE entity on each side. Where a key carries several -- a generic
 # declaration plus its instantiations, or same-named locals in identical bodies -- there is no
 # honest pairing, and modeldiff now counts those as `unpairable` instead of zipping sorted lists
-# and reporting the arbitrary pairing as a field difference. #560 is the worked example: two `fe`
+# and reporting the arbitrary pairing as a field difference. #560 was the worked example: two `fe`
 # for-loop locals per side under one key, IDENTICAL positions, reported as a `pos` divergence
 # purely by sort-order pairing. Entity `pkg` is context-derived in BOTH implementations
 # (C++ checker.cpp:2251), so for a body reachable from two packages neither side is canonically
 # right and there is no rule to port.
+#
+# #623 SUPERSEDES THAT: the key is now the source POSITION, not the context-derived pkg, so the
+# collision cannot form in the first place. `unpairable` went 29 -> 0 corpus-wide, spread 0 over
+# 3 runs. #560's conclusion -- "no rule to port" -- was correct about the CHECKER and wrong as a
+# stopping point: there was nothing to port because the fault was in the comparator's key.
+#
+# PRESENCE IS NOW GATED (#623), alongside layout and state. It could not be gated before because
+# key collisions manufactured one-sided entities, and because presence over pos-keyed synthesised
+# entities (pos=<instantiation>, which is not a position) re-imports the #468 multiplicity noise;
+# modeldiff excludes those from presence and still counts them as excess. Measured 0..0 over 3 runs.
 #
 # `unpairable` is REPORTED, never judged -- it is the honest name for "these keys differ but blame
 # is not attributable". It is not a pass: it is the uncovered axis, and #468 is where it lives.
@@ -240,4 +274,23 @@ echo "MODELSWEEP-DONE packages=$total compared=$compared excluded=$excluded" \
      "presence_packages=$presence_pkgs presence_entities=$presence_entities" \
      "multiplicity_packages=$multi_pkgs model_match_packages=$match_pkgs" \
      "unpairable=$unpairable"
-[ "$layout_pkgs" -eq 0 ] && [ "$state_entities" -eq 0 ]
+# `schema_mismatch` ADDED to the gate in #749. It was COMPUTED and REPORTED but never judged, with
+# no stated rationale -- unlike `unpairable` and `multiplicity`, whose exclusions are argued above.
+# A schema mismatch means the two dumps are not COMPARABLE, so every other column that run is
+# meaningless: it is exactly the "read the SCHEMA before trusting a green" rule (#173) left
+# unenforced in the tool that rule came from. Baseline schema_mismatch=0 over three recorded sweeps
+# (batch718b/batch720/batch740), so this tightens the gate without moving the floor.
+#
+# `compared -gt 0` ADDED in #749, and this one was found the hard way: while building a POSITIVE
+# CONTROL for the schema column I fed modelsweep a binary that produces no usable dump. Every one
+# of the 323 packages fell into EXCLUDED (unmeasured), every gated column was therefore trivially
+# zero, and THE GATE PASSED -- "MODELSWEEP-DONE packages=323 compared=0 excluded=323 ... RC=0".
+# That is #745's defect (a gate that measures nothing and reports success) inside a tool this very
+# audit had already classified as "gated". A zero that nothing was compared to is not a zero.
+# THE CONTROL FOUND A DIFFERENT AND WORSE BUG THAN THE ONE IT WAS BUILT TO TEST (#39).
+if [ "$compared" -eq 0 ]; then
+  echo "MODELSWEEP-ABORTED 0 of $total packages were compared ($excluded excluded/unmeasured)" \
+       "-- every column above is zero because NOTHING WAS MEASURED" >&2
+  exit 1
+fi
+[ "$layout_pkgs" -eq 0 ] && [ "$state_entities" -eq 0 ] && [ "$presence_entities" -eq 0 ] && [ "$schema_bad" -eq 0 ]
