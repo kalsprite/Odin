@@ -437,7 +437,9 @@ namespace lbAbi386 {
 				if (sz == 0) {
 					args[i] = lb_arg_type_ignore(t);
 				} else {
-					args[i] = lb_arg_type_indirect(t, nullptr);
+					// Aggregates are pushed onto the stack by value, not passed as a pointer
+					// to a caller-owned copy. This is the rule for both i386 targets.
+					args[i] = lb_arg_type_indirect_byval(c, t);
 				}
 			} else {
 				args[i] = non_struct(c, t, false);
@@ -450,12 +452,21 @@ namespace lbAbi386 {
 		if (!return_is_defined) {
 			return lb_arg_type_direct(LLVMVoidTypeInContext(c));
 		} else if (lb_is_type_kind(return_type, LLVMStructTypeKind) || lb_is_type_kind(return_type, LLVMArrayTypeKind)) {
+			// Only some i386 targets return a small aggregate in EDX:EAX. The Intel386 System V
+			// psABI returns every structure and union through the hidden pointer, with no size
+			// threshold; Windows and the BSDs return one of eight bytes or fewer in registers.
+			bool small_in_registers = build_context.metrics.os == TargetOs_windows ||
+			                          build_context.metrics.os == TargetOs_freebsd ||
+			                          build_context.metrics.os == TargetOs_openbsd;
+
 			i64 sz = lb_sizeof(return_type);
-			switch (sz) {
-			case 1: return lb_arg_type_direct(return_type, LLVMIntTypeInContext(c,  8), nullptr, nullptr);
-			case 2: return lb_arg_type_direct(return_type, LLVMIntTypeInContext(c, 16), nullptr, nullptr);
-			case 4: return lb_arg_type_direct(return_type, LLVMIntTypeInContext(c, 32), nullptr, nullptr);
-			case 8: return lb_arg_type_direct(return_type, LLVMIntTypeInContext(c, 64), nullptr, nullptr);
+			if (small_in_registers) {
+				switch (sz) {
+				case 1: return lb_arg_type_direct(return_type, LLVMIntTypeInContext(c,  8), nullptr, nullptr);
+				case 2: return lb_arg_type_direct(return_type, LLVMIntTypeInContext(c, 16), nullptr, nullptr);
+				case 4: return lb_arg_type_direct(return_type, LLVMIntTypeInContext(c, 32), nullptr, nullptr);
+				case 8: return lb_arg_type_direct(return_type, LLVMIntTypeInContext(c, 64), nullptr, nullptr);
+				}
 			}
 
 			LB_ABI_MODIFY_RETURN_IF_TUPLE_MACRO();
@@ -1738,6 +1749,13 @@ namespace lbAbiRiscv64 {
 		}
 	}
 
+	// The psABI's rule is "one floating-point real and one integer (or bitfield)", and a pointer
+	// is not an integer. `is_register` admits pointers and keeps that meaning for its other
+	// callers, so the floating-point arms need their own predicate.
+	gb_internal bool is_int_member(LLVMTypeRef type) {
+		return LLVMGetTypeKind(type) == LLVMIntegerTypeKind && lb_sizeof(type) > 0;
+	}
+
 	gb_internal lbArgType compute_arg_type(lbModule *m, LLVMTypeRef type, int *gprs_left, int *fprs_left, Type *odin_type) {
 		LLVMContextRef c = m->ctx;
 
@@ -1764,49 +1782,60 @@ namespace lbAbiRiscv64 {
 		// Flatten down the type so it is easier to check all the ABI conditions.
 		// Note that we also need to remove all implicit padding fields Odin adds so we keep ABI
 		// compatibility for struct declarations.
-		if (kind == LLVMStructTypeKind && size <= gb_max(2*xlen, 2*flen)) {
+		// The flattened form is for the floating-point rules, which are about the MEMBERS; the
+		// integer fallback below is about the OBJECT, so `size` stays the size of the original.
+		// The rules are stated over the members alone, so the aggregate's size does not gate
+		// them: over-alignment grows a struct without changing any member type.
+		LLVMTypeRef  fp_type = type;
+		LLVMTypeKind fp_kind = kind;
+		i64          fp_size = size;
+		if (kind == LLVMStructTypeKind) {
 			Array<LLVMTypeRef> fields = array_make<LLVMTypeRef>(temporary_allocator(), 0, LLVMCountStructElementTypes(type));
 			flatten(m, &fields, type, false);
 
 			if (fields.count == 1) {
-				type = fields[0];
+				fp_type = fields[0];
 			} else {
-				type = LLVMStructTypeInContext(c, fields.data, cast(unsigned)fields.count, false);
+				fp_type = LLVMStructTypeInContext(c, fields.data, cast(unsigned)fields.count, false);
 			}
 
-			kind = LLVMGetTypeKind(type);
-			size = lb_sizeof(type);
-			GB_ASSERT_MSG(size == lb_sizeof(orig_type), "flattened: %s of size %d, original: %s of size %d", LLVMPrintTypeToString(type), size, LLVMPrintTypeToString(orig_type), lb_sizeof(orig_type));
+			fp_kind = LLVMGetTypeKind(fp_type);
+			fp_size = lb_sizeof(fp_type);
 		}
 
-		if (is_float(type) && size <= flen && *fprs_left >= 1) {
+		if (is_float(fp_type) && fp_size <= flen && *fprs_left >= 1) {
 			*fprs_left -= 1;
+			if (fp_type != orig_type) {
+				// A struct that flattened to a single float has to be coerced to that float;
+				// handing back the original sends an over-aligned one to integer registers.
+				return lb_arg_type_direct(orig_type, fp_type, nullptr, nullptr);
+			}
 			return non_struct(c, orig_type);
 		}
 
-		if (kind == LLVMStructTypeKind && size <= 2*flen) {
-			unsigned elem_count = LLVMCountStructElementTypes(type);
+		if (fp_kind == LLVMStructTypeKind && fp_size <= 2*flen) {
+			unsigned elem_count = LLVMCountStructElementTypes(fp_type);
 			if (elem_count == 2) {
-				LLVMTypeRef ty1 = LLVMStructGetTypeAtIndex(type, 0);
+				LLVMTypeRef ty1 = LLVMStructGetTypeAtIndex(fp_type, 0);
 				i64 ty1s = lb_sizeof(ty1);
-				LLVMTypeRef ty2 = LLVMStructGetTypeAtIndex(type, 1);
+				LLVMTypeRef ty2 = LLVMStructGetTypeAtIndex(fp_type, 1);
 				i64 ty2s = lb_sizeof(ty2);
 
 				if (is_float(ty1) && is_float(ty2) && ty1s <= flen && ty2s <= flen && *fprs_left >= 2) {
 					*fprs_left -= 2;
-					return lb_arg_type_direct(orig_type, type, nullptr, nullptr);
+					return lb_arg_type_direct(orig_type, fp_type, nullptr, nullptr);
 				}
 
-				if (is_float(ty1) && is_register(ty2) && ty1s <= flen && ty2s <= xlen && *fprs_left >= 1 && *gprs_left >= 1) {
+				if (is_float(ty1) && is_int_member(ty2) && ty1s <= flen && ty2s <= xlen && *fprs_left >= 1 && *gprs_left >= 1) {
 					*fprs_left -= 1;
 					*gprs_left -= 1;
-					return lb_arg_type_direct(orig_type, type, nullptr, nullptr);
+					return lb_arg_type_direct(orig_type, fp_type, nullptr, nullptr);
 				}
 
-				if (is_register(ty1) && is_float(ty2) && ty1s <= xlen && ty2s <= flen && *gprs_left >= 1 && *fprs_left >= 1) {
+				if (is_int_member(ty1) && is_float(ty2) && ty1s <= xlen && ty2s <= flen && *gprs_left >= 1 && *fprs_left >= 1) {
 					*fprs_left -= 1;
 					*gprs_left -= 1;
-					return lb_arg_type_direct(orig_type, type, nullptr, nullptr);
+					return lb_arg_type_direct(orig_type, fp_type, nullptr, nullptr);
 				}
 			}
 		}

@@ -2306,7 +2306,15 @@ gb_internal bool check_representable_as_constant(CheckerContext *c, ExactValue i
 		if (in_value.kind == ExactValue_String16) {
 			return is_type_string16(type) || is_type_cstring16(type);
 		}
-		return in_value.kind == ExactValue_String;
+		if (in_value.kind != ExactValue_String) {
+			return false;
+		}
+		// NOTE: a UTF-8 constant has to be re-expressed in UTF-16, otherwise its length and
+		// indices stay those of the UTF-8 encoding
+		if (is_type_string16(type) || is_type_cstring16(type)) {
+			if (out_value) *out_value = exact_value_string16(string_to_string16(permanent_allocator(), in_value.value_string));
+		}
+		return true;
 	} else if (is_type_integer(type) || is_type_rune(type)) {
 		ExactValue v = exact_value_to_integer(in_value);
 		if (v.kind != ExactValue_Integer) {
@@ -2996,8 +3004,13 @@ gb_internal void check_unary_expr(CheckerContext *c, Operand *o, Token op, Ast *
 			if (ast_node_expect(index_expr, Ast_IndexExpr)) {
 				ast_node(ie, IndexExpr, index_expr);
 				Type *soa_type = type_deref(type_of_expr(ie->expr));
-				GB_ASSERT(is_type_soa_struct(soa_type));
-				o->type = alloc_type_soa_pointer(soa_type);
+				if (is_type_soa_struct(soa_type)) {
+					o->type = alloc_type_soa_pointer(soa_type);
+				} else {
+					// &soa[i][j]
+					GB_ASSERT_MSG(is_type_array(soa_type), "%s", type_to_string(soa_type));
+					o->type = alloc_type_pointer(o->type);
+				}
 			} else {
 				o->type = alloc_type_pointer(o->type);
 			}
@@ -4005,14 +4018,15 @@ gb_internal void check_cast(CheckerContext *c, Operand *x, Type *type, bool forb
 		Type *dst = core_type(type);
 
 		if (is_type_string(src) && is_type_string(dst)) {
-			bool src_utf16 = is_type_string16(src) || is_type_cstring16(src);
 			bool dst_utf16 = is_type_string16(dst) || is_type_cstring16(dst);
 
-			if (!src_utf16 && dst_utf16) {
+			// NOTE: keyed off the value's encoding rather than the source type; it may have been re-expressed 
+			// when it was checked against the target type
+			if (dst_utf16 && x->value.kind == ExactValue_String) {
 				x->value = exact_value_string16(string_to_string16(permanent_allocator(), x->value.value_string));
 			}
 
-			if (src_utf16 && !dst_utf16) {
+			if (!dst_utf16 && x->value.kind == ExactValue_String16) {
 				x->value = exact_value_string(string16_to_string(permanent_allocator(), x->value.value_string16));
 			}
 		}
@@ -9158,7 +9172,11 @@ gb_internal bool check_set_index_data(Operand *o, Type *t, bool indirection, i64
 		if (indirection) {
 			o->mode = Addressing_Variable;
 		} else if (o->mode != Addressing_Variable &&
+		           o->mode != Addressing_SoaVariable &&
 		           o->mode != Addressing_Constant) {
+			// NOTE: an #soa element of array type keeps SoaVariable, so soa[i][j] stays an
+			// lvalue. Its components are one per lane rather than contiguous, but a single
+			// component still has a real address, the same one soa[i].y denotes.
 			o->mode = Addressing_Value;
 		}
 		o->type = t->Array.elem;
@@ -12106,6 +12124,16 @@ gb_internal ExprKind check_slice_expr(CheckerContext *c, Operand *o, Ast *node, 
 	case Type_Array:
 		valid = true;
 		max_count = t->Array.count;
+		if (is_type_soa_pointer(o->type)) {
+			// #soa element pointer; the pointed element is scattered like soa[i] itself,
+			// so it can't be sliced through the ptr (nor directly -> soa[i][:] is also rejected below)
+			gbString str = expr_to_string(node);
+			error(node, "Cannot slice '%s' through an #soa pointer, element is not contiguous in memory", str);
+			gb_string_free(str);
+			o->mode = Addressing_Invalid;
+			o->expr = node;
+			return kind;
+		}
 		if (o->mode != Addressing_Variable && !is_type_pointer(o->type)) {
 			gbString str = expr_to_string(node);
 			error(node, "Cannot slice array '%s', value is not addressable", str);
@@ -12218,12 +12246,14 @@ gb_internal ExprKind check_slice_expr(CheckerContext *c, Operand *o, Ast *node, 
 		indices[i] = index;
 	}
 
+	bool invalid_indices = false;
 	for (isize i = 0; i < gb_count_of(indices); i++) {
 		i64 a = indices[i];
 		for (isize j = i+1; j < gb_count_of(indices); j++) {
 			i64 b = indices[j];
 			if (a > b && b >= 0) {
 				error(se->close, "Invalid slice indices: [%td > %td]", a, b);
+				invalid_indices = true;
 			}
 		}
 	}
@@ -12249,7 +12279,7 @@ gb_internal ExprKind check_slice_expr(CheckerContext *c, Operand *o, Ast *node, 
 
 	o->mode = Addressing_Value;
 
-	if (is_type_string(t) && max_count >= 0) {
+	if (is_type_string(t) && max_count >= 0 && !invalid_indices) {
 		bool all_constant = true;
 		for (isize i = 0; i < gb_count_of(nodes); i++) {
 			if (nodes[i] != nullptr) {
