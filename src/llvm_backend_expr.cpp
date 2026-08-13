@@ -2538,15 +2538,17 @@ gb_internal lbValue lb_emit_conv(lbProcedure *p, lbValue value, Type *t) {
 			TEMPORARY_ALLOCATOR_GUARD();
 
 			auto args = array_make<lbValue>(temporary_allocator(), 1);
-			args[0] = value;
-			char const *call = "fixunsdfdi";
+			args[0] = lb_emit_conv(p, value, t_f64);
+			char const *call = "fixdfti";
 			if (is_type_unsigned(dst)) {
 				call = "fixunsdfti";
 			}
 			lbValue res_i128 = lb_emit_runtime_call(p, call, args);
 			return lb_emit_conv(p, res_i128, t);
 		}
-		i64 sz = type_size_of(src);
+		// the intermediate int must be at least as wide as the dest,
+		// otherwise e.g. f32 -> u64 truncates through a 32-bit fptoui
+		i64 sz = gb_max(type_size_of(src), type_size_of(dst));
 
 		lbValue res = {};
 		res.type = t;
