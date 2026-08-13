@@ -17,6 +17,7 @@ import "core:odin/ast"
 import "core:odin/tokenizer"
 import "core:strconv"
 import "core:strings"
+import "core:unicode/utf16"
 import "core:unicode/utf8"
 
 // ======================================================================================
@@ -1679,6 +1680,27 @@ exact_value_string16 :: proc(s: Exact_Value_String16) -> Exact_Value {
 	return s
 }
 
+// string_to_string16 re-expresses a UTF-8 string constant as UTF-16 CODE UNITS.
+// C++ Reference: string.cpp string_to_string16, called from
+// check_expr.cpp check_representable_as_constant and check_cast.
+//
+// WHY THIS EXISTS (#636/#7268): a `string16` constant that kept its UTF-8 bytes reports the
+// UTF-8 byte count from `len()` and indexes by byte, so compile-time `len` disagreed with the
+// runtime value. Upstream fixed it by converting at the point the constant is checked against
+// its target type. Before this, the port had NO converter at all -- check_expr.odin's
+// array-comparison arm worked around the absence by counting units inline rather than encoding.
+string_to_string16 :: proc(s: string) -> Exact_Value_String16 {
+	if len(s) == 0 {
+		return Exact_Value_String16{text = nil, len = 0}
+	}
+	// A UTF-16 encoding is never longer in CODE UNITS than the UTF-8 encoding is in BYTES:
+	// a 1-byte rune takes 1 unit, 2- and 3-byte runes take 1, and a 4-byte rune takes 2.
+	// So len(s) is always a safe upper bound and one allocation suffices.
+	buf := make([^]u16, len(s))
+	n := utf16.encode_string(buf[:len(s)], s)
+	return Exact_Value_String16{text = buf, len = n}
+}
+
 // ======================================================================================
 // STRING PARSING FUNCTIONS
 // C++ Reference: exact_value.cpp:190-394
@@ -2057,13 +2079,34 @@ exact_value_float_from_string :: proc(str: string) -> Exact_Value {
 			f := transmute(f64)u
 			return f
 		} else {
-			// C++ line 344-346: Invalid digit count
-			panic(fmt.tprintf("Invalid hexadecimal float, expected 4, 8 or 16 digits, got %d", digit_count))
+			// #764: THE PORT PANICKED HERE AND C++ DELIBERATELY DOES NOT.
+			// C++'s GB_PANIC is COMMENTED OUT (exact_value.cpp:355-358), with the note that a bad
+			// digit count should have been caught by the tokenizer, and it falls through to the
+			// same f64 bit_cast the 16-digit arm uses. The port turned that commented-out panic
+			// into a LIVE one -- reading the C++ text without reading which half of it executes.
+			// A panic is the worst possible divergence for this port specifically: it takes down
+			// the HOST process (#12), which is the exact failure mode the whole library is
+			// supposed to avoid. Dead until #764 gave this procedure its first live caller.
+			return transmute(f64)u
 		}
 	}
 
-	// C++ line 349-352: If no '.' or 'e', treat as integer
-	if !strings.contains(str, ".") && !strings.contains(str, "e") && !strings.contains(str, "E") {
+	// #764: THE RULE WAS WRONG, and it was wrong in a way only a live caller could reveal.
+	// C++ (exact_value.cpp:363) tests `!contains('.') && !contains('-')`. The port tested
+	// '.' and 'e'/'E' -- a plausible-looking "does this look like a float?" test that is NOT
+	// the rule C++ applies. The two disagree on any input with an exponent and no '.' or '-':
+	//     `1e10`  C++ -> INTEGER 10000000000   port -> FLOAT 10000000000.0
+	// Confirmed against the oracle by A/B the moment #591 Stage B made this procedure live
+	// (`-define:MY=1e10` behind `#config(MY, 0)`: oracle says `untyped integer`, port said
+	// `untyped float`). This is why C++ can note at parser.cpp:837 that a FLOAT TOKEN may
+	// legitimately carry an INTEGER value -- a fact the port's own comments at
+	// check_expr.odin:754/1151 already record, while this procedure contradicted it.
+	//
+	// The '-' half is not arbitrary either: it routes a signed operand to float_from_string
+	// rather than to the integer parser. Both halves are ported verbatim rather than
+	// paraphrased, since paraphrasing them is precisely how the original went wrong.
+	if !strings.contains(str, ".") && !strings.contains(str, "-") {
+		// C++: "NOTE(bill): treat as integer"
 		return exact_value_integer_from_string(str)
 	}
 

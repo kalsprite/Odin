@@ -1417,6 +1417,20 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 		doc_entity.attributes = doc_write_attributes(w, e.decl_info.attributes)
 	}
 
+	// C++ Reference: docs_writer.cpp odin_doc_add_entity, Entity_Constant arm --
+	//     if (init_expr == nullptr) { init_expr = e->Constant.init_expr; }
+	// added by upstream PR #7289 (merge b9bbcd33b). #755.
+	//
+	// ENUM MEMBERS have NO Decl_Info -- check_enum_type builds their entities by hand and never
+	// sets one -- so the block above never runs for them and `init_string` stayed empty for every
+	// enum value. This is the declare/write/read trio of #103/#348: the field on Entity_Constant,
+	// the write in check_enum_type, and this read. Two of the three are useless without the third.
+	if doc_entity.init_string == {} {
+		if c, is_const := e.variant.(Entity_Constant); is_const && c.init_expr != nil {
+			doc_entity.init_string = doc_write_init_string(w, c.init_expr)
+		}
+	}
+
 	// Update the written item
 	dst := doc_get_item(w, &w.entities, entity_index)
 	if dst != nil {

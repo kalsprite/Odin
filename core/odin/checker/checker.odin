@@ -661,7 +661,6 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Simd_Sub = {name = "simd_sub", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Mul = {name = "simd_mul", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Div = {name = "simd_div", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
-	.Simd_Rem = {name = "simd_rem", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Shl = {name = "simd_shl", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Shr = {name = "simd_shr", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Simd_Shl_Masked = {name = "simd_shl_masked", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},

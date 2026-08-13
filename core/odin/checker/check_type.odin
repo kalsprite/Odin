@@ -553,13 +553,26 @@ make_soa_struct_internal :: proc(ctx: ^Checker_Context, array_type_expr: ^ast.No
 	// counter alone would call an empty struct complete. Requiring fields to actually be there
 	// means an unresolved element defers exactly as it did before.
 	//
-	// Array elements stay on the queue: C++ spreads them into x/y/z/w fields inline here, which
-	// the port's complete_soa_type has no arm for (it asserts the element is a struct). That gap
-	// is pre-existing and out of scope for this change.
+	// #754 CLOSED THE ARRAY GAP. This used to read "Array elements stay on the queue: C++ spreads
+	// them into x/y/z/w fields inline here, which the port's complete_soa_type has no arm for (it
+	// asserts the element is a struct). That gap is pre-existing and out of scope for this change."
+	// complete_soa_type now HAS that arm, so array elements are handled -- and they must be marked
+	// ready HERE too, not merely tolerated there. An ARRAY element has no source struct whose
+	// fields could still be resolving, so it is ready the moment it exists.
+	//
+	// This half is load-bearing on its own: routing an array element down the ENQUEUE branch would
+	// complete it correctly but SKIP `add_type_info_type`, because C++ registers only on the
+	// is_complete branch (:3433) and its array path always takes that branch. That is exactly the
+	// missed-RTTI defect #690 recorded as a curiosity and #692's gate caught -- reintroducing it
+	// for array elements only would have been invisible to every diagnostic-text gate.
 	elem_fields_ready := false
-	if !is_polymorphic && (is_type_struct(bt) || is_type_raw_union(bt)) {
-		old_ts := &bt.variant.(Type_Struct)
-		elem_fields_ready = len(old_ts.fields) > 0 && sync.atomic_load(&old_ts.fields_wait_signal.counter) == 0
+	if !is_polymorphic {
+		if is_type_struct(bt) || is_type_raw_union(bt) {
+			old_ts := &bt.variant.(Type_Struct)
+			elem_fields_ready = len(old_ts.fields) > 0 && sync.atomic_load(&old_ts.fields_wait_signal.counter) == 0
+		} else if is_type_array(bt) {
+			elem_fields_ready = true
+		}
 	}
 
 	if is_polymorphic {
@@ -3215,6 +3228,10 @@ check_enum_type :: proc(ctx: ^Checker_Context, enum_type: ^Type, named_type: ^Ty
 			flags   = entity_flags,
 			docs    = docs,
 			comment = comment,
+			// C++ Reference: check_type.cpp check_enum_type `e->Constant.init_expr = init;`,
+			// added by upstream PR #7289 (merge b9bbcd33b). `init_node` is this port's spelling
+			// of C++'s `init` -- the Field_Value's value expression, nil for a bare member. #755.
+			init_expr = init_node,
 		}
 
 		// Check for duplicate names and add to scope
@@ -6870,23 +6887,73 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 	elem := ts.soa_elem
 	old_struct := base_type(elem)
 
-	// C++ line 2982: Verify element is a struct
-	assert(old_struct.kind == .Struct, "SOA element must be struct type")
+	// #754: an #soa of an ARRAY element (`#soa[4][3]f32`) is legal -- make_soa_struct_internal
+	// validates it (:459-474, "expected a struct or array of length 4 or below"), and the oracle
+	// accepts it. C++ never reaches ITS identical assert because make_soa_struct_internal:3333
+	// spreads array elements into x/y/z/w fields INLINE and never queues them. The port had no
+	// such branch, so an array element passed validation, fell through to the struct path, and
+	// hit the assert below -- aborting the whole checker (SIGILL) on code the reference compiles
+	// cleanly. The gap was noted at :556 as "pre-existing and out of scope"; what that note did
+	// not record is that the cost is a hard crash, not a degraded result.
+	//
+	// `src_field_count` is the number of fields to copy FROM A SOURCE STRUCT, and is 0 for an
+	// array element because this branch has already populated ts.fields itself. `field_count`
+	// stays the real field count either way, because the extra-field block below indexes from it.
+	// C++ Reference: check_type.cpp make_soa_struct_internal:3333-3360.
+	src_field_count := 0
+	old_ts: ^Type_Struct = nil
 
-	// C++ lines 2984-2988: Wait for source struct fields to be ready
-	old_ts := &old_struct.variant.(Type_Struct)
-	if wait_to_finish {
-		// Wait for struct fields to be resolved
-		sync.wait_group_wait(&old_ts.fields_wait_signal)
+	if old_array, is_array_elem := &old_struct.variant.(Type_Array); is_array_elem {
+		field_count = int(old_array.count)
+		ts.fields = make([dynamic]^Entity, field_count + int(extra_field_count))
+		ts.tags = make([dynamic]string, field_count + int(extra_field_count))
+
+		// C++ names them from a fixed 4-entry table, which is exactly why the validation rule
+		// above caps an array element at length 4.
+		params_xyzw := [4]string{"x", "y", "z", "w"}
+		for i in 0 ..< field_count {
+			field_type: ^Type = nil
+			if ts.soa_kind == .Fixed {
+				assert(soa_count >= 0)
+				field_type = alloc_type_array(old_array.elem, soa_count)
+			} else {
+				field_type = alloc_type_multi_pointer(old_array.elem)
+			}
+
+			new_field := alloc_entity_field(scope, make_token_ident(params_xyzw[i]), field_type, false, i32(i))
+			ts.fields[i] = new_field
+			name := new_field.token.text
+			if !is_blank_ident(name) {
+				existing := scope_insert(scope, new_field)
+				if existing != nil {
+					redeclaration_error(name, new_field, existing)
+				}
+			}
+			new_field.flags += {.Used}
+			if ts.soa_kind != .Fixed {
+				new_field.flags += {.Soa_Ptr_Field}
+			}
+		}
+	} else {
+		// C++ line 2982: Verify element is a struct
+		assert(old_struct.kind == .Struct, "SOA element must be struct type")
+
+		// C++ lines 2984-2988: Wait for source struct fields to be ready
+		old_ts = &old_struct.variant.(Type_Struct)
+		if wait_to_finish {
+			// Wait for struct fields to be resolved
+			sync.wait_group_wait(&old_ts.fields_wait_signal)
+		}
+		// Note: If not wait_to_finish, we assume fields are already resolved (callee responsibility)
+
+		// C++ line 2990: Get field count
+		field_count = len(old_ts.fields)
+		src_field_count = field_count
+
+		// C++ lines 2992-2993: Allocate field arrays
+		ts.fields = make([dynamic]^Entity, field_count + int(extra_field_count))
+		ts.tags = make([dynamic]string, field_count + int(extra_field_count))
 	}
-	// Note: If not wait_to_finish, we assume fields are already resolved (callee responsibility)
-
-	// C++ line 2990: Get field count
-	field_count = len(old_ts.fields)
-
-	// C++ lines 2992-2993: Allocate field arrays
-	ts.fields = make([dynamic]^Entity, field_count + int(extra_field_count))
-	ts.tags = make([dynamic]string, field_count + int(extra_field_count))
 
 	// C++ lines 2996-3004: Helper to add entity to scope
 	add_entity_to_scope :: proc(scope: ^Scope, entity: ^Entity) {
@@ -6899,8 +6966,10 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 		}
 	}
 
-	// C++ lines 3007-3029: Transform fields from source struct
-	for i in 0 ..< field_count {
+	// C++ lines 3007-3029: Transform fields from source struct.
+	// #754: bounded by `src_field_count`, which is 0 for an ARRAY element -- that branch built
+	// ts.fields itself above and has no source struct to copy from (old_ts is nil there).
+	for i in 0 ..< src_field_count {
 		old_field := old_ts.fields[i]
 
 		// C++ line 3009: Only process variable entities (actual fields)

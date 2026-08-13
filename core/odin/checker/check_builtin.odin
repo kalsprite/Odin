@@ -432,7 +432,13 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	// C++ Reference: check_builtin.cpp:720-1612
 
 	// SIMD binary numeric operations
-	case .Simd_Add, .Simd_Sub, .Simd_Mul, .Simd_Div, .Simd_Min, .Simd_Max, .Simd_Rem, .Simd_Pairwise_Add, .Simd_Pairwise_Sub:
+	// NOTE: `simd_rem` was REMOVED here to follow upstream (merge b9bbcd33b, PR #7269). It had been
+	// declared in the builtin table with no dispatch arm in C++, so calling it PANICKED the
+	// reference compiler outright: `check_builtin.cpp(1989): Panic: Unhandled simd intrinsic:
+	// simd_rem` (measured, rc=132 SIGILL, on the pre-merge oracle). Upstream fixed it by deleting
+	// the declaration rather than implementing it. docs/CHECK_BUILTIN_SIMD_VERIFICATION.md had
+	// already flagged the same thing -- that note was correct and is now settled.
+	case .Simd_Add, .Simd_Sub, .Simd_Mul, .Simd_Div, .Simd_Min, .Simd_Max, .Simd_Pairwise_Add, .Simd_Pairwise_Sub:
 		result = check_builtin_simd_binary_numeric(ctx, operand, call, id)
 
 	// SIMD integer binary operations (saturating, bitwise)

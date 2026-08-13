@@ -1,0 +1,353 @@
+# doclist.txt -- the package list for doccmp.sh (#227/#760).
+#
+# WHY THIS IS NOT JUST pkglist.txt. doccmp compares the port's checker STATE against the oracle's
+# `odin doc` output, so it can only measure packages the ORACLE can document. Running it over all
+# 323 packages in pkglist.txt gives 300 STATE-MATCH and 22 non-results, and the 22 are NOT a signal
+# about the port -- they are packages where there is nothing to compare, or where `odin doc` itself
+# fails on this target. Feeding them in makes the gate permanently red and therefore useless (#215:
+# a gate that always fails gets deleted).
+#
+# THE 22 SPLIT INTO TWO KINDS, and #760 made doccmp report them differently because they ARE
+# different. Measured, not assumed -- `odin doc <pkg>; echo $?` on each:
+#
+#   A. rc=0, nothing exported (7). The oracle ran fine and documented no declarations.
+#      core/odin                  a doc.odin-only aggregator package -- one file, no declarations
+#      core/rexcode               same shape
+#      core/simd/arm              `package simd_arm`, all contents #+build-gated away on amd64
+#      core/sys/kqueue            platform-gated, nothing survives on linux
+#      core/sys/wasm/wasi         platform-gated
+#      vendor/windows/GameInput   platform-gated
+#      vendor/windows/XAudio2     platform-gated
+#
+#   B. rc!=0, THE ORACLE FAILED (15). `odin doc` emitted errors and documented nothing. These are
+#      not port results in either direction; the reference could not check them here.
+#      core/sys/darwin            3 errors: `Undeclared name: system` / `RUsage` -- darwin-only
+#                                 names, not declared when checked on linux/amd64
+#      core/sys/freebsd           31 errors, same class
+#      core/path                  1 error
+#      core/odin/format           1 error
+#      core/odin/printer          1 error
+#      core/rexcode/isa/arm32/tools      \
+#      core/rexcode/isa/arm64/tools       |
+#      core/rexcode/isa/mips/tools        |
+#      core/rexcode/isa/mos6502/tools     |  each is a DIRECTORY OF STANDALONE `package main`
+#      core/rexcode/isa/mos65816/tools    |  GENERATOR PROGRAMS, so every one of them fails with
+#      core/rexcode/isa/ppc/tools         |  `Redeclaration of 'main' in this scope`. That is
+#      core/rexcode/isa/ppc_vle/tools     |  correct behaviour from the oracle on a directory that
+#      core/rexcode/isa/riscv/tools       |  is not a single coherent package.
+#      core/rexcode/isa/rsp/tools         |
+#      core/rexcode/isa/x86/tools        /
+#
+# NOTE the two `tools` packages that are NOT excluded -- core/crypto/_edwards25519/tools and
+# core/crypto/_weierstrass/tools BOTH document cleanly and are MEASURED. Until #760, doccmp printed
+# only the BASENAME, so all twelve `tools` packages produced the identical label `tools` and this
+# 10-vs-2 split was invisible. That is why the exclusions here are full paths.
+#
+# base/runtime is DELIBERATELY KEPT: `odin doc base/runtime` emits nothing (rc=0), and doccmp has a
+# named DOC-EMPTY-EXPECTED arm for exactly that one package. It is a measured, explained result.
+#
+# REGENERATE by re-running doccmp over pkglist.txt and re-partitioning by `odin doc` rc. An entry
+# that starts documenting cleanly should be PROMOTED back (#748: exclusions decay in both
+# directions), and the way to notice is that this file names each exclusion's reason so a stale one
+# can be checked.
+base/runtime
+base/sanitizer
+core/bufio
+core/bytes
+core/c
+core/c/libc
+core/c/libc/tests
+core/compress
+core/compress/gzip
+core/compress/shoco
+core/compress/zlib
+core/container/avl
+core/container/bit_array
+core/container/handle_map
+core/container/intrusive/list
+core/container/lru
+core/container/pool
+core/container/priority_queue
+core/container/queue
+core/container/rbtree
+core/container/small_array
+core/container/topological_sort
+core/container/xar
+core/crypto
+core/crypto/aead
+core/crypto/aegis
+core/crypto/_aes
+core/crypto/aes
+core/crypto/_aes/ct64
+core/crypto/_aes/hw
+core/crypto/argon2id
+core/crypto/_bigint
+core/crypto/_blake2
+core/crypto/blake2b
+core/crypto/blake2s
+core/crypto/_chacha20
+core/crypto/chacha20
+core/crypto/chacha20poly1305
+core/crypto/_chacha20/ref
+core/crypto/_chacha20/simd128
+core/crypto/_chacha20/simd256
+core/crypto/deoxysii
+core/crypto/ecdh
+core/crypto/ecdsa
+core/crypto/ed25519
+core/crypto/_edwards25519
+core/crypto/_edwards25519/tools
+core/crypto/_fiat
+core/crypto/_fiat/field_curve25519
+core/crypto/_fiat/field_curve448
+core/crypto/_fiat/field_p256r1
+core/crypto/_fiat/field_p384r1
+core/crypto/_fiat/field_poly1305
+core/crypto/_fiat/field_scalar25519
+core/crypto/_fiat/field_scalarp256r1
+core/crypto/_fiat/field_scalarp384r1
+core/crypto/hash
+core/crypto/hkdf
+core/crypto/hmac
+core/crypto/kmac
+core/crypto/legacy/keccak
+core/crypto/legacy/md5
+core/crypto/legacy/sha1
+core/crypto/_mldsa
+core/crypto/mldsa
+core/crypto/_mlkem
+core/crypto/mlkem
+core/crypto/noise
+core/crypto/pbkdf2
+core/crypto/poly1305
+core/crypto/ristretto255
+core/crypto/rsa
+core/crypto/sha2
+core/crypto/_sha3
+core/crypto/sha3
+core/crypto/shake
+core/crypto/siphash
+core/crypto/sm3
+core/crypto/_subtle
+core/crypto/tuplehash
+core/crypto/turboshake
+core/crypto/_weierstrass
+core/crypto/_weierstrass/tools
+core/crypto/x25519
+core/crypto/x448
+core/crypto/x509
+core/debug/pe
+core/debug/trace
+core/dynlib
+core/encoding/asn1
+core/encoding/base32
+core/encoding/base64
+core/encoding/cbor
+core/encoding/csv
+core/encoding/endian
+core/encoding/entity
+core/encoding/entity/example
+core/encoding/hex
+core/encoding/hxa
+core/encoding/ini
+core/encoding/json
+core/encoding/pem
+core/encoding/uuid
+core/encoding/uuid/legacy
+core/encoding/varint
+core/encoding/xml
+core/encoding/xml/example
+core/flags
+core/flags/example
+core/fmt
+core/hash
+core/hash/xxhash
+core/image
+core/image/bmp
+core/image/jpeg
+core/image/netpbm
+core/image/png
+core/image/qoi
+core/image/tga
+core/io
+core/log
+core/math
+core/math/big
+core/math/bits
+core/math/cmplx
+core/math/ease
+core/math/fixed
+core/math/linalg
+core/math/linalg/glsl
+core/math/linalg/hlsl
+core/math/noise
+core/math/rand
+core/mem
+core/mem/tlsf
+core/mem/virtual
+core/nbio
+core/net
+core/odin/ast
+core/odin/checker
+core/odin/checker/docs
+core/odin/checker/tests
+core/odin/checker/tests/spec_advanced
+core/odin/checker/tests/spec_builtins
+core/odin/checker/tests/spec_conversions
+core/odin/checker/tests/spec_directives
+core/odin/checker/tests/spec_errors
+core/odin/checker/tests/spec_indexing
+core/odin/checker/tests/spec_operators
+core/odin/checker/tests/spec_runtime
+core/odin/checker/tests/spec_semantics
+core/odin/checker/tests/spec_types
+core/odin/doc-format
+core/odin/parser
+core/odin/tokenizer
+core/os
+core/os/old
+core/path/filepath
+core/path/slashpath
+core/prof/spall
+core/reflect
+core/relative
+core/rexcode/ir
+core/rexcode/ir/spirv
+core/rexcode/ir/spirv/tablegen
+core/rexcode/ir/spirv/tests
+core/rexcode/ir/wasm
+core/rexcode/isa
+core/rexcode/isa/arm32
+core/rexcode/isa/arm32/tablegen
+core/rexcode/isa/arm32/tablegen/generated
+core/rexcode/isa/arm32/tests
+core/rexcode/isa/arm64
+core/rexcode/isa/arm64/tablegen
+core/rexcode/isa/arm64/tablegen/generated
+core/rexcode/isa/arm64/tests
+core/rexcode/isa/mips
+core/rexcode/isa/mips/tablegen
+core/rexcode/isa/mips/tablegen/generated
+core/rexcode/isa/mips/tests
+core/rexcode/isa/mos6502
+core/rexcode/isa/mos6502/tablegen
+core/rexcode/isa/mos6502/tablegen/generated
+core/rexcode/isa/mos6502/tests
+core/rexcode/isa/mos65816
+core/rexcode/isa/mos65816/tablegen
+core/rexcode/isa/mos65816/tablegen/generated
+core/rexcode/isa/mos65816/tests
+core/rexcode/isa/ppc
+core/rexcode/isa/ppc/tablegen
+core/rexcode/isa/ppc/tablegen/generated
+core/rexcode/isa/ppc/tests
+core/rexcode/isa/ppc_vle
+core/rexcode/isa/ppc_vle/tablegen
+core/rexcode/isa/ppc_vle/tablegen/generated
+core/rexcode/isa/ppc_vle/tests
+core/rexcode/isa/riscv
+core/rexcode/isa/riscv/tablegen
+core/rexcode/isa/riscv/tablegen/generated
+core/rexcode/isa/riscv/tests
+core/rexcode/isa/rsp
+core/rexcode/isa/rsp/tablegen
+core/rexcode/isa/rsp/tablegen/generated
+core/rexcode/isa/rsp/tests
+core/rexcode/isa/x86
+core/rexcode/isa/x86/tablegen
+core/rexcode/isa/x86/tablegen/generated
+core/rexcode/isa/x86/tests
+core/simd
+core/simd/x86
+core/slice
+core/slice/heap
+core/sort
+core/strconv
+core/strconv/decimal
+core/strings
+core/sync
+core/sync/chan
+core/sys/darwin/CoreFoundation
+core/sys/darwin/CoreGraphics
+core/sys/darwin/Foundation
+core/sys/darwin/Security
+core/sys/info
+core/sys/linux
+core/sys/linux/uring
+core/sys/llvm
+core/sys/orca
+core/sys/posix
+core/sys/unix
+core/sys/valgrind
+core/sys/wasm/js
+core/sys/windows
+core/terminal
+core/terminal/ansi
+core/testing
+core/text/edit
+core/text/i18n
+core/text/match
+core/text/regex
+core/text/regex/common
+core/text/regex/compiler
+core/text/regex/optimizer
+core/text/regex/parser
+core/text/regex/tokenizer
+core/text/regex/virtual_machine
+core/text/scanner
+core/text/table
+core/thread
+core/time
+core/time/datetime
+core/time/timezone
+core/unicode
+core/unicode/tools
+core/unicode/tools/ucd
+core/unicode/utf16
+core/unicode/utf8
+core/unicode/utf8/utf8string
+vendor/box3d
+vendor/commonmark
+vendor/compress/lz4
+vendor/curl
+vendor/darwin/CoreVideo
+vendor/darwin/Metal
+vendor/darwin/MetalKit
+vendor/darwin/QuartzCore
+vendor/directx/d3d11
+vendor/directx/d3d12
+vendor/directx/d3d_common
+vendor/directx/d3d_compiler
+vendor/directx/dxc
+vendor/directx/dxgi
+vendor/egl
+vendor/ENet
+vendor/ggpo
+vendor/glfw
+vendor/glfw/bindings
+vendor/kb_text_shape
+vendor/lua/5.1
+vendor/lua/5.2
+vendor/lua/5.3
+vendor/lua/5.4
+vendor/microui
+vendor/OpenEXRCore
+vendor/OpenGL
+vendor/portmidi
+vendor/raylib
+vendor/raylib/rlgl
+vendor/sdl2
+vendor/sdl2/image
+vendor/sdl2/mixer
+vendor/sdl2/net
+vendor/sdl2/ttf
+vendor/sdl3
+vendor/sdl3/image
+vendor/sdl3/mixer
+vendor/sdl3/ttf
+vendor/stb/easy_font
+vendor/vulkan
+vendor/wasm/WebGL
+vendor/windows/wasapi
+vendor/x11/xlib
+vendor/zlib

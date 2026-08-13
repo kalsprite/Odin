@@ -10887,3 +10887,3125 @@ ZERO COUNT MAY MEAN "THE PATTERN NEVER ARRIVED", NOT "THE STRING IS ABSENT".** C
 with a quote-free substring (`grep -n 'head -60'`) or with `sed -n '<line>p'`, and prefer the Edit
 tool for the change itself. This is #26 ("an empty output is not a pass") pointed at my own tooling
 rather than at a gate.
+
+---
+
+## #751 MERGE CATCH-UP (b9bbcd33b, `Merge branch 'master' into checker`)
+
+**ORACLE REBUILT FIRST.** `./odin` was from 08-09 12:26; the merge is 08-11 17:26 -- **two days stale,
+so every comparison would have measured the OLD compiler** (#57, and Jon flagged it too). Rebuilt via
+`./build_odin.sh release` -> `dev-2026-08:b9bbcd33b`. **The pre-merge binary is PRESERVED at
+`$S/odin_pre_merge`** (md5 b2777f91): keeping it turns "what did the merge change?" from an inference
+off the diff into a measurable old-vs-new A/B, and it immediately paid for itself (see below).
+
+**SCOPE.** 12 files changed in `src/`, but 6 are `llvm_*` (backend, outside the port). The semantic
+surface is 6 files / 58 lines: `check_expr.cpp` 44, `check_stmt.cpp` 7, `check_type.cpp` 1,
+`checker_builtin_procs.hpp` -2, `docs_writer.cpp` 3, `entity.cpp` 1.
+
+### WORKLIST -- 4 groups
+
+**1. `simd_rem` REMOVED upstream. [DONE, VERIFIED]** -- see below.
+
+**2. #7268 IS IN THIS MERGE -- string16 constants now hold UTF-16. [OPEN]**
+`check_representable_as_constant` re-expresses a UTF-8 constant as UTF-16 through `out_value` when
+the target is `string16`/`cstring16`; `check_cast` was retuned to key off **the VALUE's encoding**
+(`x->value.kind`) rather than the source type, precisely because the value may already have been
+re-expressed. The two are ONE change and must be ported together.
+**THIS UNBLOCKS #636, #583/#411, #669, #670** -- re-run `$S/m582/a`, `$S/m582/b`, `$S/s16len`,
+`$S/n669/ex_*` against the NEW oracle before porting anything (#209).
+
+**3. An `#soa`-element-addressing CLUSTER, 4 sites, all one behaviour. [OPEN]**
+`check_unary_expr` (`&soa[i][j]`: hard `GB_ASSERT` -> branch, i.e. a CRASH FIX) | `check_set_index_data`
+(+`Addressing_SoaVariable`, so `soa[i][j]` stays an lvalue) | `check_slice_expr` (NEW error:
+"Cannot slice '%s' through an #soa pointer, element is not contiguous in memory") |
+`check_stmt.cpp check_range_stmt` (+`Addressing_SoaVariable` in the `Type_Array` arm). This is #618's
+family; port them as a set, not one at a time.
+
+**4. `invalid_indices` in `check_slice_expr` = #582's fix. [OPEN]**
+Invalid slice indices now suppress the constant-string folding. **This is exactly what #583 was
+waiting on.**
+
+**5. Enum `init_expr` for the doc format (PR #7289), a 3-site trio. [OPEN]**
+`entity.cpp` declares `Ast *init_expr` on `Entity.Constant`; `check_type.cpp check_enum_type` WRITES
+it; `docs_writer.cpp` READS it. **Declare/write/read is the #103/#348 shape -- port all three or the
+doc output silently diverges**, and `docflag.sh`/`doccmp.sh` are the gates that would catch it.
+
+### ITEM 1 DONE: `simd_rem` -- and the old oracle CRASHED on it
+
+Three-way A/B, measured, not read off the diff:
+```
+OLD oracle  ->  src/check_builtin.cpp(1989): Panic: Unhandled simd intrinsic: simd_rem
+                "This is a compiler error. Please report this."   rc=132 SIGILL, core dumped
+NEW oracle  ->  main.odin(6:7) Error: 'simd_rem' is not declared by 'intrinsics'   rc=1
+PORT (tst7) ->  errors=0  -- ACCEPTED it silently
+```
+**`simd_rem` was declared in the C++ builtin table with NO dispatch arm, so calling it PANICKED the
+reference compiler.** Upstream (PR #7269) fixed that by DELETING the declaration rather than
+implementing it. The port had implemented it, so the port never crashed -- it just accepted a name
+the oracle no longer has: **a real under-rejection**.
+
+**`docs/CHECK_BUILTIN_SIMD_VERIFICATION.md` had already flagged this** -- *"simd_rem does NOT appear
+in the C++ implementation's switch statement"*, *"Verify that simd_rem is intentional"*. **That note
+was correct all along and is now settled by upstream.** #206's rule (read what the callers/docs
+document before filing) worked in reverse here: the doc was right and the code was wrong.
+
+Removed at 3 sites -- and note one is in **a DIFFERENT PACKAGE**:
+`core/odin/ast/semantic_types.odin` (the enum member) | `core/odin/checker/checker.odin` (table entry)
+| `core/odin/checker/check_builtin.odin` (dispatch case, now carrying the rationale).
+Backups `$S/pre751_{semantic_types,checker,check_builtin}.odin`, all md5-verified.
+**GATED: `core/odin/ast` rc=0, `core/odin/checker` rc=0, `core/odin/parser` rc=0** -- ast had to be
+added to the #97 pair because the enum lives there.
+**VERIFIED BEHAVIOURALLY:** rebuilt port (`$S/tst8`) now emits
+`main.odin(6:7) Error: 'simd_rem' is not declared by 'intrinsics'` -- byte-identical anchor and text
+to the new oracle.
+
+**LESSON (#221): AFTER A MERGE, REBUILD THE ORACLE BEFORE MEASURING ANYTHING -- AND KEEP THE OLD
+BINARY.** A stale oracle silently answers every question about the OLD compiler. Preserving the
+pre-merge binary made the old-vs-new A/B possible, which is the only reason the `simd_rem` PANIC was
+observed at all; the diff alone showed a deletion and would have read as cosmetic.
+**LESSON (#222): A BUILTIN DECLARED WITHOUT A DISPATCH ARM IS A LATENT COMPILER PANIC, NOT DEAD
+WEIGHT** -- and the port "fixing" it by implementing the arm diverged from the reference instead of
+matching it. When the reference has a hole, the faithful move is to ask which way upstream will
+close it, not to fill it in silently.
+
+### #751 ITEM 2 DONE: #636 ported -- and it CLOSED #583 as a side effect
+
+**BOTH defects were REPRODUCED against the NEW oracle first (#209), not assumed from the notes:**
+```
+probe     ORACLE(new)                    PORT(before)
+s16len    clean, len(S)==5 holds         "Compile time assertion: len(S) == 5" FAILS  -> #636 live
+m582/b    clean                          "Cannot slice constant value 'S'"           -> #583 live
+m582/a    1 error (Invalid slice ...)    1 error, same text                          -> already matched
+```
+
+**THE PORT HAD NO UTF-8 -> UTF-16 CONVERTER AT ALL.** `check_expr.odin`'s array-comparison arm had
+been working around its absence by counting units inline (`units += 1 if r < 0x1_0000 else 2`)
+rather than encoding -- a reduction that happened to give the right COUNT for that one comparison
+and could not give the right VALUE anywhere else.
+
+Added `string_to_string16` in `exact_value.odin` (next to `exact_value_string16`), on
+`core:unicode/utf16`'s `encode_string` -- the checker already imported the `utf8` sibling.
+`len(s)` bytes is a sound one-shot buffer bound: a 1-byte rune costs 1 unit, 2- and 3-byte runes
+cost 1, and a 4-byte rune costs 2, so units <= bytes always.
+
+Wired into `check_representable_as_constant`'s string arm: a UTF-8 constant assigned to
+`string16`/`cstring16` is now re-expressed through `out_value`. **Kept ADDITIVE** -- the pre-existing
+plain-string `out_value^ = s` write is left alone, so the non-UTF-16 path cannot regress. (C++ does
+not write out_value there; the port's write is inert since it stores the value already in
+`in_value`, and is noted rather than "corrected" blind.)
+
+**#583 CLOSED BY THE SAME EDIT -- it was never a second defect.** With the constant properly held as
+`Exact_Value_String16`, `m582/b` is clean: the slice bail was firing on a value whose ENCODING was
+wrong, not on the slice logic. **The task list carried #583 and #636 as two items; they are one root
+cause.** #583's separate "port the invalid_indices suppression" work may still be needed for the
+double-error case -- `m582/a` matches at 1 error today, so that path is NOT currently exercised and
+remains UNVERIFIED rather than done.
+
+**GATES:** checker #97 rc=0. **CORPUS: FULL-MATCH=306, missing=0, excluded=13, RC=0** -- no
+regression, and #749's new exit gate is what certifies it.
+Backups `$S/pre636_{exact_value,check_expr}.odin`, md5-verified. Port binary `$S/tst9`.
+
+**STILL OPEN from the merge:** the `#soa` addressing cluster (4 sites), `invalid_indices` proper,
+and the enum `init_expr` doc trio. `check_cast`'s retune is the PAIRED half of this change and is
+NOT yet done -- C++ now keys the conversion off `x->value.kind` rather than the source type
+precisely because the value may already have been re-expressed here. **Until that lands, a cast
+from a re-expressed constant could double-convert; no probe currently exercises it, which is
+exactly why it must not be left to inference (#185).**
+
+**LESSON (#223): A WORKAROUND THAT PRODUCES THE RIGHT NUMBER CAN HIDE A MISSING CAPABILITY.** The
+port's inline unit-count made one comparison correct and left the codebase with no way to actually
+encode UTF-16, so every other site silently kept UTF-8. Ask of any hand-rolled counter: is this
+computing a property of a conversion we never implemented?
+
+### #753: check_cast's paired half -- NO REACHABLE DIVERGENCE, and 3 probes added to the corpus
+
+**I did NOT port C++'s `check_cast` conversion block, and the reason is measured, not assumed.**
+
+First, a probe that ANSWERED THE WRONG QUESTION (#39). `T8 :: string(S16)` was rejected by BOTH
+compilers at 3 errors -- `string16 -> string` is not a legal cast at all, so it never reached the
+conversion block. **A probe that both sides reject equally proves nothing about the code under
+test.** Enumerating which constant string casts the oracle actually permits:
+```
+string -> cstring 0 | cstring -> string 0 | string16 -> cstring16 0
+cstring16 -> string16 0 | string -> string16 0 | string16 -> string 2 ERRORS
+```
+So the ONLY reachable direction for a constant is `string -> string16` -- exactly the branch my #636
+change touches. C++'s reverse branch (`!dst_utf16 && value.kind == String16`) has **no reachable
+constant path I could construct**, because the cast that would produce it is rejected outright.
+
+Then the A/B that settles it, on `s16cast` (`V: string : "héllo"; W :: string16(V); #assert(len(W)==5)`):
+```
+PORT pre-#636 (tst8)   1 error -- "Compile time assertion: len(W) == 5"
+PORT post-#636 (tst9)  0 errors
+ORACLE                 0 errors
+```
+**#636's `check_representable_as_constant` change fixed the cast path too**, because the port routes
+a cast's constant through that predicate. C++ needs a separate block in `check_cast` because ITS
+control flow differs; the port does not. **Porting the block anyway would be adding code for a path
+the port reaches another way -- the #170 trap in reverse.**
+**STATED AS A LIMIT, NOT A PROOF (#184/#185):** this is "no reachable divergence found across the
+six cast directions the oracle permits", NOT "verified equivalent". If a future construct makes the
+String16 -> non-utf16 direction reachable, the block becomes necessary.
+
+**3 PROBES PROMOTED TO THE CORPUS (306 -> 309):** `s16len`, `s16cast`, `s16slice`.
+**POSITIVE CONTROL, exactly #25's requirement:**
+```
+current port  (tst9)  FULL-MATCH=309                    RC=0
+pre-#636 port (tst8)  FULL-MATCH=306  FULL-DIFFER=3     RC=1  CORPUS-FAILED
+```
+All three go RED on the build that predates the fix and GREEN after -- they discriminate, so they
+are real gate members rather than decoration. **And the red path exercised the whole chain built
+earlier today: `CMPFULL-DIVERGENCE` -> cmpfull exit 4 -> `CORPUS-FAILED` -> RC=1.** #747/#749 are
+what turn this into an automatic verdict instead of a number I have to read.
+Backup `$S/pre753_corpus.sh`.
+
+**LESSON (#224): "C++ HAS A BLOCK THE PORT LACKS" IS A HYPOTHESIS ABOUT REACHABILITY, NOT A GAP.**
+Establish which inputs can reach it FIRST -- here five of the six cast directions were irrelevant and
+the sixth was already covered by a different procedure. The port is a different program that must
+agree on OBSERVABLE behaviour, not a transliteration that must contain the same statements.
+
+### #754 OPEN, HIGH VALUE: `#soa` of an ARRAY element CRASHES the port on valid code
+
+**REPRO (`$S/n754`), 4 lines:**
+```odin
+package n754
+main :: proc() { soa: #soa[4][3]f32; x := soa[0][1]; p := &soa[0][1]; _, _ = x, p }
+```
+```
+ORACLE  0 errors, clean
+PORT    core/odin/checker/check_type.odin(6874:2)
+        runtime assertion: SOA element must be struct type      rc=132 SIGILL, core dumped
+```
+
+**THE GAP IS ALREADY DOCUMENTED -- THE CONSEQUENCE IS NOT.** `check_type.odin:556-558` says:
+> *"Array elements stay on the queue: C++ spreads them into x/y/z/w fields inline here, which the
+> port's complete_soa_type has no arm for (it asserts the element is a struct). That gap is
+> pre-existing and out of scope for this change."*
+
+That note is accurate and I did not discover the gap -- I measured what it COSTS. **"Out of scope"
+reads like a graceful limitation; it is a hard abort of the whole checker on code the reference
+compiler accepts.** #150 exactly: a documented deviation is a HYPOTHESIS, so probe it.
+
+**AND MY OWN COUNT NEARLY HID IT.** The first comparison printed `port errors=0  oracle errors=0`
+-- because **a crash emits no `Error:` lines**, so a count-only diff reads as AGREEMENT. Only the
+rc=132 and the assertion text on stderr showed otherwise. This is why `corpus.sh` partitions
+`PORT-CRASHED` as its own verdict instead of counting diagnostics (#275's rule, re-earned).
+
+**WHY IT HAPPENS.** The port's `make_soa_struct_internal` VALIDATES array elements correctly
+(`check_type.odin:459-474` accepts struct / raw_union / array, and carries C++'s exact message
+*"Invalid type for an #soa array, expected a struct or array of length 4 or below"*), so the element
+passes the gate -- and then falls into the STRUCT field-building path, which defers to
+`complete_soa_type`, which asserts. **C++ never reaches its identical assert because
+`make_soa_struct_internal:3333` has an `else if (is_type_array(elem))` branch that builds the fields
+INLINE and never queues.** The port has no such branch.
+
+**WHAT TO PORT** -- `src/check_type.cpp make_soa_struct_internal:3333-3360+`:
+ * `field_count = old_array->Array.count`
+ * fields named from `params_xyzw = {"x","y","z","w"}` (hence the `count <= 4` validation rule)
+ * field type is `[count]elem` for `StructSoa_Fixed`, `[^]elem` otherwise
+ * sets `is_complete` so it is NEVER enqueued for `complete_soa_type`
+**The `count <= 4` rule is testable and should get its own probe: `#soa[4][5]f32` must be REJECTED
+with the message above, while `#soa[4][3]f32` is accepted.**
+
+**NOT ATTEMPTED THIS TURN, DELIBERATELY.** It is a ~40-line type-construction port touching field
+entity creation and the complete/enqueue decision, and #117/#746 both came from rushing a
+substantial change at the end of a long session. Probe kept at `$S/n754`; it is NOT yet a corpus
+member because a PORT-CRASHED member would make every future corpus run red until this lands --
+**add it in the same change as the fix, not before.**
+
+**LESSON (#225): "PRE-EXISTING AND OUT OF SCOPE" IS A CLAIM ABOUT PRIORITY, NOT ABOUT SEVERITY.**
+The note was written by someone who knew the gap and correctly deferred it; nobody had measured
+whether deferring it meant "slightly wrong output" or "aborts the compiler". Those need different
+queue positions. **When scoping something out, record what it COSTS, not just that it exists.**
+
+### #754 DONE: the `#soa`-of-array cluster -- FOUR sites, peeled one crash at a time
+
+`#soa[4][3]f32` with `soa[0][1]` and `&soa[0][1]` is valid Odin the oracle compiles silently. The
+port ABORTED (SIGILL). Fixing it took four edits, and **each one exposed the next** -- the probe
+never passed until all four were in, and no amount of reading would have ordered them correctly.
+
+**1. `complete_soa_type` -- array arm (the crash).** C++ never reaches its identical
+`GB_ASSERT(old_struct->kind == Type_Struct)` because `make_soa_struct_internal:3333` spreads array
+elements into x/y/z/w fields INLINE. Ported as a branch on the element kind, sharing the existing
+extra-field/signal tail rather than duplicating it. `src_field_count` (0 for arrays) bounds the
+struct-copy loop so the shared code needed no re-indentation.
+
+**2. `make_soa_struct_internal` -- `elem_fields_ready` for arrays.** LOAD-BEARING ON ITS OWN and easy
+to miss: routing arrays down the ENQUEUE branch completes them correctly but SKIPS
+`add_type_info_type`, because C++ registers only on the is_complete branch and its array path always
+takes it. **That is #690/#694's missed-RTTI defect, and reintroducing it for array elements only
+would have been invisible to every diagnostic-text gate.**
+
+**3. `check_set_index_data` -- preserve `Soa_Variable`.** Upstream's `check_expr.cpp:9172-9175`. An
+#soa element of array type keeps `Soa_Variable`, so `soa[i][j]` stays an lvalue. Without it the mode
+collapsed to Value and `&soa[i][j]` was rejected.
+
+**4. `check_unary_expr` -- assert -> branch.** This one IS the merge's own crash fix: upstream turned
+`GB_ASSERT(is_type_soa_struct(soa_type))` into a branch, and the port carried the identical PRE-merge
+assert. `&soa[i][j]` addresses one component of the array element, so a plain pointer, not an #soa
+pointer.
+
+**PLUS A FIFTH DEFECT, FOUND ONLY BECAUSE THE CRASH WAS GONE.** Probing for C++'s new
+"Cannot slice through an #soa pointer" error, `soa[0][:]` gave:
+```
+ORACLE  Cannot slice array 'soa[0][:]', value is not addressable
+PORT    Cannot slice array 'soa[0]',    value is not addressable
+```
+The port interpolated `operand.expr`; C++ interpolates `node`, the whole slice expression. **The
+CARET was already identical**, which is why no anchor-based check ever caught it -- only the string
+differed. **This divergence was UNREACHABLE while the crash existed**: the type construction aborted
+before the slice path ran. Layered defects hide each other, and the outer one has to be fixed before
+the inner one can even be measured.
+
+**STATED LIMITS.** C++'s NEW error ("Cannot slice '%s' through an #soa pointer, element is not
+contiguous in memory") is **still UNREACHED** -- every input I built took an earlier rejection.
+`n754c` (slice through an `#soa ^`) matches at 1 error but via `Cannot slice 'p' of type
+'#soa ^#soa[4]S'` on BOTH sides, i.e. a different path with the same outcome (#192). The two
+remaining cluster sites -- `check_range_stmt`'s `Addressing_SoaVariable` and that new slice error --
+**needed no port change on any input I could construct**, which is "no reachable divergence found",
+not "verified".
+
+**GATES.** checker/ast/parser #97 all rc=0. **CORPUS 309 -> 311, RC=0**, with the control:
+```
+current port  (tst13)  FULL-MATCH=311                    RC=0
+pre-#754 port (tst9)   FULL-MATCH=309  PORT-CRASHED=2    RC=1  CORPUS-FAILED
+```
+**Both new members partition as PORT-CRASHED, not FULL-DIFFER** -- the verdict category #275 exists
+for exactly this, since a crash emits no diagnostics and a count-only diff reads it as agreement.
+That is the trap my own first comparison fell into (`port errors=0 oracle errors=0` on a core dump).
+Backups `$S/pre754_check_type.odin`, `$S/pre754_corpus.sh`; port binary `$S/tst13`.
+
+**LESSON (#226): FIXING A CRASH IS A MEASUREMENT INSTRUMENT, NOT JUST A FIX.** Every defect
+downstream of an abort is unobservable until the abort is gone. Budget for "the fix will reveal more
+work" rather than treating the follow-on findings as scope creep -- here one crash concealed three
+further divergences, and the last was a message-text bug with a correct caret that no positional
+check could ever have flagged.
+
+### #755 DONE (the enum `init_expr` trio) -- AND #756 OPEN: docflag is RED, cause UNATTRIBUTED
+
+**#755, the trio.** Measured before touching anything, and the FIRST measurement was of the wrong
+surface (#39 again): `odin doc`'s TEXT output is **IDENTICAL pre- and post-merge**
+(`E :: enum int {A = BASE, B = BASE + 5, C = 1 << 3}` from both oracles), so PR #7289 does not
+change that. It changes the BINARY doc format's `init_string`.
+
+Established by STRUCTURE, not inference:
+* `Entity_Constant` had no `init_expr` field.
+* `check_enum_type` never sets `decl_info` -- **0 occurrences in the whole procedure**, so enum
+  member entities always have `decl_info == nil`.
+* `docs_writer.odin:1413` only writes `init_string` inside `if e.decl_info != nil`.
+=> **`init_string` was never emitted for ANY enum value.** C++'s new
+`if (init_expr == nullptr) init_expr = e->Constant.init_expr;` is exactly the fallback for this.
+
+Ported all three: the field (`core/odin/ast/semantic_types.odin`), the write in `check_enum_type`
+(`init_expr = init_node`, the port's spelling of C++'s `init`), and the read in `docs_writer`.
+**This is #103/#348's declare/write/read shape -- two of the three are useless without the third.**
+GATES: ast/checker/parser #97 all rc=0. **CORPUS 311/311, RC=0.**
+**STATED LIMIT:** the doc-FORMAT output is **UNVERIFIED** -- no instrument compares binary doc format
+between port and oracle (`doccmp.sh` compares checker STATE, `odin doc` compares text). The change is
+structurally necessary and C++-faithful, but its OUTPUT has not been diffed against the oracle.
+
+### #756 OPEN: `docflag.sh` reports DETERMINISM FAIL on core/strings, 4/4, NOT caused by #755
+
+```
+docflag.sh <post-#755 doc bin>   DETERMINISM: FAIL (core/strings differs between runs)  rc=1
+docflag.sh <PRE-#755 doc bin>    DETERMINISM: FAIL (core/strings differs between runs)  rc=1
+```
+**The pre-change binary fails identically, so #755 is EXONERATED** -- and I ran that control
+specifically because #358 is the case where I assumed "pre-existing" and was wrong, having caused it
+myself. Do not skip this control.
+
+**BUT THE CAUSE IS UNATTRIBUTED AND THIS CONTRADICTS A CLOSED TASK.** #484 closed this as
+"NOT REPRODUCED: 0/350 runs, all dumps byte-identical". It now reproduces 4/4.
+Narrowing so far:
+* NOT #755 (pre-change control above).
+* Implausibly #754: **`core/strings` contains no `#soa` at all**, so the SoA cluster cannot reach it.
+* **`docflag.sh` is NOT part of `batch_gates`**, so it had not been run once today before now --
+  there is no green baseline from earlier in the session to bisect against.
+Candidates remaining: the merge itself, an earlier change today, or #484's closure having been
+environment- or load-dependent all along (today's loadavg peaked at 36).
+
+**THE MERGE CATCH-UP IS NOT "DONE" WHILE THIS IS RED.** Every other gate is green -- #97 x3, corpus
+311/311 RC=0, batch749 BATCH-RC=0 -- but a red gate with an unknown cause is exactly what #749 spent
+the day making impossible to ignore, and it would be incoherent to now wave one through.
+
+**LESSON (#227): A GATE THAT IS NOT IN THE BATCH GETS NO BASELINE, SO ITS FAILURES CANNOT BE
+BISECTED.** `docflag.sh` and `doccmp.sh` are real gates that `batch_gates2.sh` does not run; the cost
+is not just late detection but LOST ATTRIBUTION -- had it run at the start of the session I could say
+which change broke it in one comparison. **Add them to the batch, or accept that their failures will
+always arrive un-bisectable.**
+
+### #756 SOLVED: docflag's "DETERMINISM: FAIL" is NOT a determinism failure -- the dump is never written
+
+**THE MESSAGE NAMES THE WRONG CAUSE.** `docflag.sh:108-115` does:
+```
+"$PORT" core/strings -dump-doc:"$TMP/d1.txt" >/dev/null 2>&1
+"$PORT" core/strings -dump-doc:"$TMP/d2.txt" >/dev/null 2>&1
+if cmp -s "$TMP/d1.txt" "$TMP/d2.txt"; then OK else "DETERMINISM: FAIL (... differs between runs)"
+```
+`triage_doc` **does not write a file for `-dump-doc:`** -- it prints its entity listing to stdout
+(discarded by `>/dev/null`) and ends with `### ABS-FAILED`, exit 0. So both paths are ABSENT, and
+**`cmp -s` on two missing files returns rc=2**, which is non-zero, which takes the FAIL branch.
+The gate has been reporting "the output varied" for "there was no output".
+
+**THIS IS #745/#749's DEFECT CLASS AGAIN -- IN A GATE MY OWN #749 AUDIT CLASSIFIED AS CORRECTLY
+GATED.** #749 checked whether `docflag.sh` gates its exit status (it does: `exit $fail`) and moved on.
+It never asked what the comparison evaluates to when the inputs do not exist -- **exactly #216, the
+lesson I wrote earlier today**, applied to a comparison instead of a counter.
+
+**AND IT FOOLED ME TWICE IN THIS INVESTIGATION.**
+1. **Stale files.** My first "manual runs are byte-identical, 1908 lines, 0 diff" was comparing
+   `$S/d1.txt` and `$S/d2.txt` dated **2026-08-06** -- five-day-old leftovers, and a MODEL dump
+   (`## schema v2 pkg,name,kind,...`), not a doc dump at all. **The command I ran wrote nothing; I
+   measured two unrelated stale files and reported the result as evidence of determinism.** Had I
+   `rm`'d first, or checked `ls -la`, the absence would have been immediate.
+2. **The 20-pair loop then said "20/20 DIFFER"**, which looked like a 100% flake and was really
+   20 comparisons of two files that were never created -- visible only because the `cp` in the
+   failure branch printed `cannot stat`.
+
+**SO #484's CLOSURE IS NOT CONTRADICTED.** "0/350 runs byte-identical" was measured when the dump
+was actually being produced. Nothing here shows the doc writer is nondeterministic; it shows the
+DUMP PATH is broken or the flag is wrong. **My #755 write-up's framing of this as a possible
+determinism regression was wrong and is corrected here** -- and the exoneration of #755 still holds,
+for a better reason than I gave: the check cannot fail *because of* any checker change, since it
+never reaches the checker's output at all.
+
+**REAL RESIDUAL, still open:** why does `triage_doc -dump-doc:PATH` write nothing? Either the flag
+name drifted from what the harness parses, or `### ABS-FAILED` aborts before the write. That is the
+actual bug behind the red gate, and it is a HARNESS defect, not a port defect.
+
+**FIXES REQUIRED (not yet applied):**
+1. `docflag.sh` must ABORT, not FAIL, when either dump is missing -- `[ -s d1 ] && [ -s d2 ]` before
+   `cmp`, with a distinct message. A missing file is `DOCFLAG-ABORTED`, a differing file is FAIL.
+2. Find and fix why the dump is not written.
+3. **Add `docflag.sh` and `doccmp.sh` to `batch_gates2.sh`** (#227) so this has a daily baseline.
+
+**LESSON (#228): `cmp`/`diff` ON A MISSING FILE REPORTS "DIFFERENT", NOT "MISSING".** Every
+comparison-based check needs an existence assertion before the comparison, or it will one day
+announce a difference that is really an absence -- and the message will send whoever reads it after
+the wrong bug. I lost this exchange to that twice over: once to the gate's wording, once to stale
+files that made the absence look like agreement.
+**LESSON (#229): DELETE THE OUTPUT FILE BEFORE THE RUN THAT IS SUPPOSED TO CREATE IT.** A stale
+artefact from a previous session is indistinguishable from a fresh one, and `wc -l` on it looks
+exactly like a successful measurement.
+
+### #757 DONE: docflag's determinism check repaired -- it was calling a flag that does not exist
+
+**ROOT CAUSE, worse than "the write is broken": `triage_doc` HAS NO `-dump-doc` FLAG.** Its usage is
+`triage_doc <package-path>...` (main.odin:44) and it prints the dump to **STDOUT**. So
+`"$PORT" core/strings -dump-doc:"$TMP/d1.txt" >/dev/null 2>&1` passed `-dump-doc:/tmp/...` as a
+**SECOND PACKAGE PATH** -- which is what produced `### ABS-FAILED`, triage_doc's own
+"could not make the path absolute" -- and redirected the real dump into `/dev/null`.
+**Both files were therefore never created, and `cmp -s` on two missing files returns 2.**
+
+**THIS CHECK HAS NEVER ONCE WORKED.** It is not a regression: it has reported
+"DETERMINISM: FAIL (differs between runs)" for "there was no output" on every run it has ever had.
+It survived because `docflag.sh` is not in the batch (#227), so nobody ran it.
+
+FIXED: capture stdout (`> "$TMP/d1.txt"`), and **assert existence before comparing** --
+```
+if [ ! -s d1 ] || [ ! -s d2 ]; then "DETERMINISM: ABORTED (produced no dump -- NOT a determinism result)"
+elif cmp -s d1 d2;              then OK
+else                                 FAIL
+```
+**VERIFIED: `DETERMINISM: OK (core/strings byte-identical across 2 runs)`.** Backup
+`$S/pre757_docflag.sh`.
+
+**AND THE REPAIR UNMASKED A SEPARATE, PRE-EXISTING FAILURE** -- check (2) reports 16 doc flags
+`unreachable and unexplained` (`Bit_Field_Field`, `Builtin_Pkg_*`, `Export`, `Foreign`, the seven
+`Param_*`, `Private`, `Type_Alias`, `Var_Thread_Local`). **A/B: the list is IDENTICAL on the
+pre-#755 and post-#755 binaries**, so it is untouched by today's work. The gate's own wording states
+the fork correctly -- *"either the bit stopped firing, or it is newly unexercised and needs a
+reason"* -- and that is #480's question re-opened, now genuinely visible because the gate runs. Left
+OPEN and attributed rather than folded into today's merge work.
+
+**SO #756 IS FULLY RESOLVED AND #484 STANDS.** There was never a determinism regression; the doc
+writer is byte-identical across runs, as #484 measured. The red gate was a broken harness, and my
+"4/4 failures contradict #484" framing was wrong -- corrected here.
+
+**LESSON (#230): AN INVOCATION THAT PASSES AN UNRECOGNISED FLAG DOES NOT ERROR -- IT REINTERPRETS.**
+`-dump-doc:/tmp/x` became a package path, and the tool dutifully tried to check it. Every harness
+that builds a command line should be verified against the tool's ACTUAL argument parser once, by
+reading it; a flag that "looks right" and produces plausible output is the most durable kind of
+false instrument. This one outlived the gate it was written for.
+
+### #758 DONE: the merge's LAST item -- `invalid_indices` was an UNDER-REJECTION two diagnostics deep
+
+The merge (`b9bbcd33b`) added `bool invalid_indices` to `check_slice_expr`
+(`src/check_expr.cpp`:12249/12256/12282). The port had NO equivalent, and the task was carried as
+UNVERIFIED rather than done, because `$S/m582/a` matched at 1 error and so never exercised the path.
+
+**MY EARLIER FRAMING WAS TOO NARROW, AND PROBING FIRST IS WHY THIS WAS CAUGHT.** I had recorded the
+port's pre-existing `indices[0] <= indices[1]` guard as a DELIBERATE DIVERGENCE, taken to avoid
+reproducing an upstream crash (`src/string.cpp(77): Assertion Failure: lo <= hi && hi <= max`). That
+reasoning was right about the crash and wrong about the SCOPE. C++'s flag suppresses the ENTIRE
+constant-folding block; the port's guard suppressed only the substring extraction INSIDE it. So the
+port still ran `operand.mode = .Constant` and `operand.type = t`, and an inverted slice of a constant
+string came out of check_slice_expr looking like a perfectly good compile-time constant.
+
+**THE DIVERGENCE IS REACHABLE, and only where CONSTNESS IS DEMANDED** -- which is why every probe in
+the corpus missed it. `x := S[3:1]` inside a proc body agrees at 1 error on both sides, because
+nothing there asks whether the operand is constant. Measured, oracle `b9bbcd33b` vs port `tst14`:
+
+| probe | source | oracle | port (pre-#758) |
+|---|---|---|---|
+| c1 | `S :: "hello"; T :: S[3:1]` | **2** errors | **1** |
+| c2 | `x := S[3:1]` in a body | 1 | 1 (agrees) |
+| c3 | c1 + `U :: len(T)` | **3** errors | **1** |
+| c4 | `fmt.println(S[4:2])` | 1 | 1 (agrees) |
+
+The dropped diagnostics are `'S[3:1]' is not a compile-time known constant` and, in c3, the CASCADE
+`Invalid declaration value 'len(T)'` -- one missing flag suppressing two reports, the second of them
+on a different declaration entirely.
+
+**FIX:** `invalid_indices` added at the C++ site and ANDed into the folding condition. The ad-hoc
+`indices[0] <= indices[1]` guard was DELETED rather than left as dead defence: with the flag in
+place, an index can only be negative or past-the-end via paths where `check_index_value` returns
+false, which leaves `indices[i]` at `max_count`. Post-fix, all four probes are byte-identical to the
+oracle (c1 2 errors, c3 3 errors, both in the oracle's order).
+
+**CORPUS 311 -> 313**: `slcinv` (c1) and `slcinv2` (c3) added, both A/B-proven RED on `tst15`'s
+predecessor. c2/c4 are not added -- they agreed before AND after, so they discriminate nothing.
+
+**LESSON (#209, again): A WORKAROUND'S SCOPE IS PART OF ITS CLAIM.** The comment said "the extraction
+is skipped when the range is inverted" and that was literally true; what it did not say -- and what
+nobody would check without re-deriving from source -- is that C++ skips FOUR MORE STATEMENTS at the
+same point. A divergence documented by its MOTIVE reads as settled. Only one documented by its exact
+EXTENT can be compared against upstream when upstream moves.
+
+**MERGE STATUS: `b9bbcd33b` IS FULLY APPLIED.** simd_rem, #636, #583, #753, #754, #755 and now #758.
+
+**#758 FOLLOW-UP, FIRST CORPUS RUN CAUGHT TWO THINGS -- ONE MINE, ONE ENVIRONMENTAL.**
+
+1. **MY PROBES WERE WRONG, AND THE MANUAL A/B COULD NOT SEE IT.** `slcinv`/`slcinv2` reported
+   FULL-DIFFER on a single line: the oracle also emits `main.odin(1:1) Error: Undefined entry point
+   procedure 'main'`. Every substantive diagnostic matched, in order. The cause is HARNESS SHAPE --
+   I verified the fix with `odin check <dir> -no-entry-point`, but `corpus.sh` compares under
+   `odin build` on both sides, where a package with no `main` is itself an error. Added
+   `main :: proc() {}` to both. **The probe must be written for the harness that will run it**; the
+   probes I copied the shape from (`s16slice`) all had a main, and I did not notice.
+2. **`objcnamed` reported ORACLE-CRASHED, reason `oracle timeout` (180 s).** NOT a regression and
+   NOT caused by anything here: re-measured 30/30 `rc=1`, each completing instantly, with the exact
+   command cmpfull issues (`odin build <probe> -out:/dev/null`). This is the #301 family (load /
+   spontaneous hang), and it is recorded rather than dismissed because the objc surface has a real
+   hang history (#299). If it recurs at a measurable rate it becomes its own task; one occurrence
+   in one sweep is not a rate.
+
+**BOTH FINDINGS ARGUE THE SAME WAY AS #275/#369: A COMPARISON THAT DID NOT RUN IS NOT A MATCH.**
+cmpfull's ORACLE-CRASHED verdict is what kept the timeout from being scored as agreement.
+
+### #759: THE 16 "UNREACHABLE DOC FLAGS" WERE MY WRONG BINARY -- AND #757's ROOT CAUSE WAS WRONG
+
+**CORRECTION, AND IT REVERSES A FIX I LANDED ONE TICK AGO.** #757 concluded that docflag.sh's
+determinism check passed `-dump-doc:` to a tool with no such flag, and I "repaired" it by capturing
+stdout instead. **`-dump-doc:` IS a real flag** -- `triage_st/main.odin:102`. It does not exist on
+`triage_doc`, and `triage_doc` is the binary I happened to be running the gate with. So:
+
+* Reading `triage_doc/main.odin` explained the symptom PERFECTLY (`usage: triage_doc
+  <package-path>...`, dump to stdout, no flags in its `ENTITY <Kind> <Name>` output) -- and was the
+  wrong file. A wrong invocation and a wrong source reading AGREED, which is why it survived.
+* My "fix" made the determinism check compare `triage_st`'s DIAGNOSTIC stdout, not its doc dump. It
+  passed, which is worse than failing: a check on the wrong stream that reports OK. **REVERTED.**
+  The existence-assertion #757 added is KEPT -- that part was a real improvement and is why the
+  reverted line now aborts instead of reporting a difference.
+* The **16 "unreachable and unexplained" doc flags are GONE, and were never real.** With the
+  correct binary every one is observed:
+  `Bit_Field_Field Builtin_Pkg_Builtin Builtin_Pkg_Intrinsics Export Foreign Param_Any_Int
+   Param_By_Ptr Param_Const Param_C_Vararg Param_Ellipsis Param_No_Alias Param_No_Broadcast
+   Param_Using Private Type_Alias Var_Thread_Local`
+  Absent: exactly `Param_Auto_Cast` and `Var_Static`, both on the justified list. **#480 is NOT
+  re-opened; my note saying it was is withdrawn.** DOCFLAG-DONE, RC=0, probe 4/4 including the
+  negative control.
+
+**THE REPAIR IS A CONTRACT GUARD, NOT A COMMENT.** docflag.sh now runs one dump FIRST and aborts
+`DOCFLAG-ABORTED ... NOTHING WAS MEASURED` (rc=2) if the binary produces none. Proven both ways:
+`tdoc14` -> rc=2 abort, `tst15` -> rc=0 all checks passed.
+
+**THIS IS THE SECOND TIME A GATE WAS FED THE WRONG BINARY** -- #621 was `parity_vet.sh` with the
+plain harness, twice (#511). Both times the tool ran, printed a plausible shape, and reported
+something false. **A gate that accepts any executable is not gated on its INPUT.** Every instrument
+taking a binary should assert the capability it depends on before measuring; docflag and parity_vet
+now do, and that is the check to add next time rather than the comment.
+
+**AND THE DEEPER ONE (#209 again): A CONFIRMING EXPLANATION IS NOT A VERIFIED ONE.** I had a
+symptom, opened a file that accounted for it exactly, and stopped. The question I skipped costs one
+grep -- *which binary actually implements this flag?* -- and it is the difference between #757 and
+#759. The tell was available and ignored: #757 asserted "the check has never once worked", yet the
+gate was built in #480 and was green then. **A claim that a check never worked must explain how it
+was ever green.**
+
+**GATE STATE after #758 + #759 (binaries `$S/tst15` + `$S/tvet15`, oracle `dev-2026-08:b9bbcd33b`):**
+```
+#97               rc=0 for ast, checker AND parser
+corpus.sh         FULL-MATCH=313 missing=0 excluded=13   RC=0     (311 -> 313, #758's two probes)
+PARITY-RC=0       compared=323 excluded=0 count=1 text=0 attrib=2   <- baseline exactly
+PARITY-VET-RC=0   compared=323 excluded=0 count=1 text=0 attrib=2   <- baseline exactly
+MODELSWEEP-RC=0   compared=323 layout=0/0 state=0/0 presence=0/0 schema=0 unpairable=0
+                  multiplicity_packages=14 (=#468, ungated by design) model_match=309
+ROOT-SUITE-RC=0   Finished 146 tests. All tests were successful.
+BATCH-RC=0 all four stages green
+docflag.sh        DOCFLAG-DONE all checks passed RC=0; wrong-binary control ABORTS rc=2
+```
+`loadavg` peaked at **88** during the vet sweep (I ran docflag concurrently) -- #301 territory, and
+the sweeps stayed clean through it, but that is luck rather than headroom. Run docflag BEFORE or
+AFTER the batch, not alongside it.
+
+### #227 DONE (docflag + doccmp in the batch) -- and #760: doccmp had THREE reporting defects
+
+**#227 was one line of wiring in principle. It took three instrument fixes first, because doccmp
+could not be put in a batch in the state it was in.** All three are the same species -- the tool
+produced numbers that could not be acted on -- and all three were invisible until it was run at
+corpus scale for the first time.
+
+**#760 DEFECT 1: THE PER-PACKAGE ROW PRINTED A BASENAME.** `name=$(basename "$p")`. The 323-package
+list contains **twelve** packages whose basename is `tools`, so twelve rows printed the identical
+label and nothing said which was which. This was not cosmetic: ten of the twelve were failing and
+**two were passing**, and that 10-vs-2 split was unrecoverable from the output. Full path now, column
+widened to 46 (longest path is 44).
+
+**#760 DEFECT 2: `odin doc`'s ORDINARY EXIT STATUS WAS NEVER CHECKED.** Only signals and timeouts
+were (`died()`). So a package where the REFERENCE ITSELF FAILED fell through to the `nd == 0` branch
+and printed `DOC-EMPTY  (nothing to compare)` -- which reads as a property of the PACKAGE when it is
+a property of the RUN. Measured across pkglist, the 22 `DOC-EMPTY` rows were really:
+ * **7 genuine** (rc=0, nothing exported): core/odin, core/rexcode, core/simd/arm, core/sys/kqueue,
+   core/sys/wasm/wasi, vendor/windows/GameInput, vendor/windows/XAudio2.
+ * **15 ORACLE FAILURES** (rc=1): core/sys/darwin (3 errors, `Undeclared name: system`/`RUsage` --
+   darwin names undeclared when checked on linux/amd64), core/sys/freebsd (**31 errors**), core/path,
+   core/odin/format, core/odin/printer, and the ten `core/rexcode/isa/*/tools`, each of which is a
+   DIRECTORY OF STANDALONE `package main` GENERATORS and so fails `Redeclaration of 'main'`.
+New verdict `DOC-FAILED rc=N errors=N (oracle could not document this -- NOT a measurement)`.
+**Same family as #275 and #759: a comparison whose REFERENCE side failed is not a measurement.**
+
+**#760 DEFECT 3: NO SUMMARY LINE AT ALL.** Every row on a clean run is `STATE-MATCH`, and
+batch_gates' `_keep` filter drops rows it does not recognise -- so a fully green doccmp stage inside
+the batch would have printed **nothing whatsoever**, indistinguishable from a stage that never ran
+(#26/#10). Added `DOCCMP-DONE packages=N match=N differ=N empty=N empty_expected=N doc_failed=N
+died=N no_state=N` plus a `DOCCMP-ABORTED` coverage gate (exit 2) when nothing was compared.
+Controls: 3 clean packages -> rc=0 with the summary; `core/sys/darwin core/odin` -> rc=2 ABORTED.
+
+**NEW INPUT `.claude/tools/doclist.txt`** -- 301 packages, pkglist minus the 22, **every exclusion
+named with its reason** (corpus.sh's model, #332/#748). `base/runtime` is deliberately KEPT because
+doccmp has a named `DOC-EMPTY-EXPECTED` arm for it: a measured, explained result rather than an
+omission. Result: **DOCCMP-RC=0, packages=301, match=300, empty_expected=1, everything else 0.**
+
+**BATCH v4** (`$S/batch_gates_v4.sh`, copied from batch_gates2.sh which holds v3 -- never edit a
+batch in place). Six stages: DOCFLAG, DOCCMP, PARITY, PARITY_VET, MODELSWEEP, ROOT. It now takes a
+**THIRD binary**: `<PORT:triage_st> <VET:triage_vet> <DOC:triage_doc>`, because docflag needs
+triage_st and doccmp needs triage_doc -- precisely the distinction #759 got wrong. Both tools now
+refuse the wrong binary rather than mis-measuring. The two doc stages run FIRST (cheap: ~1 s and
+~2 min, against ~7 min for the root suite alone) and SEQUENTIALLY -- #759 ran docflag alongside the
+vet sweep and drove loadavg to 88, which is #301 territory.
+
+**LESSON: A GATE THAT HAS NEVER RUN AT SCALE HAS NEVER BEEN TESTED.** doccmp was built in #253,
+rebuilt in #520, and called green at 29-30 packages every time. Every one of these three defects
+needed ~300 packages to become visible -- the basename collision needs twelve same-named packages,
+the rc gap needs a package the oracle cannot document, and the missing summary needs a caller that
+filters. **Scale is not just more coverage; it is a different test of the instrument.**
+
+**#227 VERIFIED IN THE BATCH: `BATCH-RC=0 all six stages green`** (binaries tst15/tvet15/tdoc14):
+```
+DOCFLAG-RC=0      DOCFLAG-DONE: all checks passed
+DOCCMP-RC=0       packages=301 match=300 differ=0 empty=0 empty_expected=1 doc_failed=0 died=0 no_state=0
+PARITY-RC=0       compared=323 excluded=0 count=1 text=0 attrib=2      <- baseline exactly
+PARITY-VET-RC=0   compared=323 excluded=0 count=1 text=0 attrib=2      <- baseline exactly
+MODELSWEEP-RC=0   compared=323 layout 0/0 state 0/0 presence 0/0 schema 0 unpairable 0
+                  multiplicity_packages=15 model_match=308
+ROOT-SUITE-RC=0   Finished 146 tests in 6m36s. All tests were successful.
+BATCH-RC=0 all six stages green
+```
+**`multiplicity_packages` moved 14 -> 15 between the two runs of this tick.** That column is #468
+(polymorphic instantiation identity varying by winning call site) and is UNGATED BY DESIGN; the
+movement is the known nondeterminism, not a regression, and is recorded here so the next reader does
+not treat 14 as a baseline. Every GATED column is 0 in both runs.
+
+### #761 DONE: #750's remainder -- and one of the three needed DELETION, not a gate
+
+#750 filed three instruments as "group A, still to assess", with the implied disposition "add a
+gate". Assessing them first (#209) changed the answer for two of the three.
+
+**1. `swdiff.py` -- COVERAGE ABORT ADDED, AND DELIBERATELY NOTHING ELSE.** Gated on `STABLE == 0`
+only. It must NOT be gated on its difference counts: it is HISTORY-anchored (#269), so after an
+intentional fix a nonzero `diagnostic-text differences` is THE POINT. parity.sh is the
+reference-anchored gate; run both. What it could not say was that it had compared NOTHING -- every
+package is partitioned out if capped or crashed on either side, so a fully-partitioned run prints
+`error-count differences: 0 / diagnostic-text differences: 0`, identical to a clean run. To its
+credit it already PRINTED `STABLE=0`; only the exit status could not say so.
+**CONTROLS, all three:** two empty sweeps -> `SWDIFF-ABORTED ... NOTHING WAS COMPARED` rc=2 (was
+rc=0) | identical real pair -> STABLE=198, 0 differences, **rc=0** | genuinely DIFFERENT real pair
+-> **22 error-count + 28 text differences reported, rc=0**. That last one is the load-bearing
+control: it proves the difference counts do not gate.
+
+**2. `sweep_det.sh` -- AN INPUT CONTRACT, NOT A VERDICT GATE.** It is a PRODUCER; its output is
+judged downstream by swdiff/flakecmp, so gating it on divergence would be wrong. But it had NO
+input validation, and its failure mode is actively misleading: a missing or non-executable BIN makes
+every `timeout 120 "$BIN" "$p"` return 127, so the sweep becomes **323 `### CRASH` lines** -- which
+downstream reads as "the port crashes on everything", a catastrophic-looking regression, when the
+cause is a mistyped path. Now refuses up front (`SWEEP-ABORTED ... NOTHING WAS SWEPT`, rc=2) for a
+bad binary, a missing OUT, an unwritable OUT, or an empty pkglist. **CONTROLS:** nonexistent binary
+-> rc=2 and NO output file written | no args -> rc=2 | binary but no OUT -> rc=2 | real run ->
+rc=0. Also made self-describing: `SWEEP-DONE packages=323 timeouts=0 crashes=0`, so a reader of an
+old sweep can see how much of it was usable without grepping for markers. Verified the suffix is
+safe: `flakecmp.py:34` matches with `startswith('SWEEP-DONE')` and then `continue`s, and swdiff's
+regexes never match the line at all.
+
+**3. `excluded_cmp.sh` -- SUPERSEDED. DELETED, NOT GATED.** `parity.sh`'s own header (#269) says it
+"Replaces the ad-hoc excluded_cmp.sh", and parity.sh strictly dominates: same `<PORT> <LIST>`
+interface, but it compares error counts **AND sorted diagnostic text**, has an argument guard, and
+partitions crashes. **excluded_cmp still carried the exact defect parity.sh was rebuilt to fix** --
+LEDGER #275, quoted in parity.sh's header: piping each compiler into `grep -c "Error:"` without
+looking at exit status, so a run killed by the #141 crash reports a legitimate-looking
+`oracle=N port=0`. It also had a dead `orc=$?` capturing the status of `grep`, not of `odin`.
+**Gating it would have meant maintaining a second, worse, oracle comparator.** Deleted; backup at
+`$S/pre761_excluded_cmp.sh` (md5 cc6580f6c52c0bbe3778167c76ae1737). `.claude/tools` is now 19 .sh.
+
+**LESSON: "UNGATED" AND "SHOULD BE GATED" ARE DIFFERENT CLAIMS, AND #750 CONFLATED THEM.** The
+audit correctly listed three tools that never announce failure. Only ONE of them wanted a verdict
+gate; one wanted an input contract, because it is a producer and cannot have a verdict; and one
+wanted deleting, because a better instrument had replaced it and the survivor was strictly worse.
+**Before adding a gate to a tool, ask what the tool IS -- and whether anything should still run it.**
+
+### #762 = #591 STAGE A DONE: the `-target-features:` INPUT -- and I SHIPPED A REGRESSION, CAUGHT BY crosstarget
+
+**THE PREMISE, RE-DERIVED FROM SOURCE, IS SHARPER THAN FILED.** #591 is not vague "build context as
+input": it is TWO NAMED MISSING INPUTS, both with LIVE readers.
+ * **`-target-features:`** -- C++ has TWO writers of `build_context.target_features_set`
+   (main.cpp:4199-4207 seeds from the microarch; main.cpp:4222-4281 merges the flag). The port had
+   NEITHER as an input: `enabled_target_features()` recomputed `microarch_default_features(...)` at
+   each of its **5 live call sites** (check_builtin.odin:6986/7067/7612, check_expr.odin:11435 --
+   the wasm atomics gates #611, `intrinsics.has_target_feature` #543, and the target-feature
+   attributes #613). A user feature list had nowhere to land. **STAGE A, done here.**
+ * **`-define:NAME=VALUE`** -- `defined_values` is declared and READ (populate_config_package_scope,
+   wired in #667) but has **zero writers**, so `#config(NAME, default)` overrides are unreachable.
+   **STAGE B, deliberately NOT done this tick**: it is a different input with different semantics
+   (parsing a value into an Exact_Value), and bundling them would make the gate result unattributable.
+
+**WHAT LANDED.** `target_features_string` (input) + `target_features_set` (resolved) +
+`resolve_target_features()`, a line-for-line port of C++'s two writers IN C++'S ORDER: seed from the
+microarch, then per comma-separated item strip the sign to VALIDATE, re-attach defaulting to `+`,
+REMOVE the opposite-signed entry, add. Behaviour verified case by case against the C++ text:
+`aes`->`+aes`; `-sse2` removes the seeded entry and disables; `+sse2,-sse2`->disabled;
+`-sse2,+sse2`->enabled (last wins); `aes,,avx` DROPS `avx` (C++ `break`s on an empty item, not
+`continue`s); `bogusfeature` -> INVALID. Unknown features are FATAL in C++; here they are RETURNED,
+because a checker library must not exit its host process (#12).
+
+**THE REGRESSION, AND IT IS MINE.** I resolved at the end of `init_build_context` and cached it.
+That looked like C++'s placement and is not: C++ seeds at **main.cpp:4199, AFTER all flag parsing**,
+whereas `-microarch:` is applied to build_context AFTER `init_build_context` returns. So the cache
+was computed from the DEFAULT microarch and never updated, and all three
+`-microarch:bleeding-edge` probes regressed -- the port claimed `atomics` unavailable on a target
+that has it. **A/B: tst15 (pre) 6/6 MATCH rc=0; tst16 (mine) 3 MATCH / 3 DIFFER rc=1.** Fixed by
+keying the cache on its INPUTS (resolved microarch + input string) so a later change invalidates it,
+rather than trusting placement. tst17: **6/6 MATCH rc=0.**
+
+**THE CORPUS COULD NOT SEE IT: tst16 scored 313/313 FULL-MATCH RC=0 WITH THE BUG IN.** Every corpus
+probe is host-target, where the microarch never changes, so the stale cache and the recomputation
+agree exactly. **This is precisely what crosstarget.sh was built for (#614), and it is the first
+time it has caught a live defect rather than confirming one.** A cache is only wrong when its key
+varies, and the 313-probe corpus holds that key constant by construction.
+
+**AND crosstarget WAS MEASURING NOTHING.** Its default `PROBE_ROOT` is `.claude/probes`, but all 8
+`mp61*` probes existed ONLY in the scratchpad -- so the default invocation reported
+`members=6 match=0 differ=0 unmeasured=6` and rc=1. The tool was honest (it has a coverage abort and
+it fired); the INPUT was missing. **Copied into `.claude/probes/`**, which also puts them inside the
+cherry-pick set as Jon requires. Default invocation now reports `match=6 unmeasured=0 rc=0`.
+**This is the ELEVENTH stale premise: my own #744 note claiming crosstarget was fine.**
+
+**LESSON: A CACHE IS A CLAIM ABOUT WHEN ITS INPUTS STOP CHANGING.** I had C++'s line numbers, ported
+the computation faithfully, and still got it wrong -- because I copied the CODE and not the
+POSITION IN THE PIPELINE. #758's lesson generalises: the placement of a computation is part of its
+semantics, and "after init_build_context" is not the same claim as "after all flags are parsed".
+
+**#762 SIGNED OFF -- full gate set green on `tst17`/`tvet17`/`tdoc17`:**
+```
+#97               rc=0 for ast, checker AND parser
+corpus.sh         FULL-MATCH=313 missing=0 excluded=13   RC=0
+crosstarget.sh    members=6 match=6 differ=0 unmeasured=0 excluded=2   RC=0  (default root, #762)
+DOCFLAG-RC=0      all checks passed
+DOCCMP-RC=0       packages=301 match=300 empty_expected=1, everything else 0
+PARITY-RC=0       compared=323 excluded=0 count=1 text=0 attrib=2   <- baseline EXACTLY
+PARITY-VET-RC=0   compared=323 excluded=0 count=1 text=0 attrib=2   <- baseline EXACTLY
+MODELSWEEP-RC=0   compared=323, all GATED columns 0, unpairable=0
+ROOT-SUITE-RC=0   Finished 146 tests in 6m17s. All tests were successful.
+BATCH-RC=0 all six stages green
+```
+**`multiplicity_packages` has now been measured at 14, 15 and 19 across three runs of ONE TICK's
+work.** It is #468 and UNGATED BY DESIGN. Three samples is enough to stop anyone reading any single
+value as a baseline; `model_match_packages` moves with it (309/308/304) for the same reason. Every
+GATED column has been 0 in all three.
+
+### #763: #591 STAGE B CONTRACT CAPTURED -- and it CORRECTS my #742 recommendation to Jon
+
+**NOT IMPLEMENTED THIS TICK, DELIBERATELY.** Stage A (#762) already landed one substantial change to
+`build_settings.odin` this tick and needed a regression fix mid-flight; starting a second
+source-level feature after that would make the next gate result unattributable between them. What
+IS done is the expensive part -- the C++ contract, read and pinned -- so the implementation is
+mechanical next tick and nobody re-derives it.
+
+**C++ `-define:NAME=VALUE`, main.cpp:1156-1205, SIX ORDERED VALIDATIONS.** Order matters because
+each `break`s out, so only the FIRST failing one is reported:
+1. no `=` in the string -> `Expected 'name=value', got '%s'`. **NOTE: it interpolates `param`, the
+   whole flag argument, NOT the post-`=` remainder** -- easy to get subtly wrong.
+2. name empty OR value empty -> the SAME message.
+3. `!string_is_valid_identifier(name)` -> `Defined constant name '%s' must be a valid identifier`.
+4. `name == "_"` -> `Defined constant name cannot be an underscore` (no interpolation).
+5. already present in `defined_values` -> `Defined constant '%s' already exists`.
+6. value unparseable -> `Invalid define constant value: '%s'. Define constants must be a valid Odin
+   literal.`
+All six set `bad_flags = true`; a checker LIBRARY must report rather than exit (#12), as in Stage A.
+
+**THE VALUE PARSER, `build_param_to_exact_value` (main.cpp:561-613), in order:**
+ * empty -> invalid (unreachable from -define, step 2 already rejected it);
+ * case-INSENSITIVE `t`/`true` -> bool true, `f`/`false` -> bool false;
+ * first byte `-`, `+` or a digit -> `build_param_looks_like_float(param)` decides float vs integer,
+   via **`exact_value_float_from_string`** / `exact_value_integer_from_string`; returns only if the
+   parse succeeded, otherwise FALLS THROUGH;
+ * otherwise a string, and if it both starts with `'` and is >1 char with matching `'` at each end,
+   the quotes are STRIPPED -- the documented way to force `true` or `123` to be a string.
+
+**>>> THIS CORRECTS #742, WHICH IS SITTING WITH JON AWAITING A DECISION. <<<**
+I recommended **DELETE BOTH** `exact_value_from_basic_literal` and `exact_value_float_from_string`.
+**`exact_value_float_from_string` HAS A LEGITIMATE FUTURE CALLER: it is exactly what C++ calls at
+main.cpp:587 to parse a `-define` float**, and Stage B needs that parser. Deleting it would mean
+writing it again a tick later.
+**The #742 MEASUREMENT still stands** -- the dead copy diverges on `1e10` (C++'s
+`exact_value.cpp:363` tests `!contains('.') && !contains('-')`, the dead copy tests `'.'` and
+`'e'/'E'`, so `1e10` gives Float where the oracle gives Integer) -- **but the DISPOSITION changes
+from "delete both" to "delete `exact_value_from_basic_literal`; FIX `exact_value_float_from_string`
+to C++'s rule and USE it for Stage B."** Jon's answer is still needed, and the question he is
+answering has changed, so this correction must reach him before he decides.
+**LESSON (#209, and it caught my own escalation): "this procedure is dead" is a claim about the
+CURRENT call graph. A task that adds a caller retires it. Check the QUEUE, not just the tree.**
+
+---
+
+## #764 -- #591 STAGE B LANDED: the `-define:` input, plus TWO defects in the procedure it made live
+
+**STATUS: DONE.** `#591` is now COMPLETE (Stage A = `-target-features:` in #762, Stage B = `-define:`
+here). Three procedures added to `build_settings.odin`, two defects fixed in `exact_value.odin`.
+
+### What was missing
+
+`build_context.defined_values` was DECLARED (`build_settings.odin:515`) and READ
+(`populate_config_package_scope`, wired into `init_checker` in #667) but had **ZERO WRITERS**. So the
+whole `#config(NAME, default)` override path was correct and *unreachable*: every `#config` in the
+tree silently took its default and no input could say otherwise. Stage B is the missing writer.
+
+Ported from `main.cpp`:
+ * `build_param_looks_like_float`  (main.cpp:542-559)
+ * `build_param_to_exact_value`    (main.cpp:561-613)
+ * `add_defined_value`             (main.cpp:1156-1205, the six ordered validations)
+
+Errors are **RETURNED** (`Define_Error`), never printed and never fatal. C++ sets `bad_flags = true`
+and `main()` exits; a checker library must not exit its host process (#12), and only the caller knows
+whether a bad define should be fatal. Same contract Stage A used.
+
+**ORDERING CONTRACT, worth stating because it is invisible from the signature:** `add_defined_value`
+must be called BEFORE `init_checker`, because `populate_config_package_scope` runs inside it. A define
+added afterwards is silently ignored -- it never reaches a scope. Verified end-to-end both ways.
+
+### VERIFIED AGAINST THE ORACLE, 19/19 (`$S/tab764`, a driver that accepts `-define:`)
+
+Probe is `X :: #config(MY, 0)` + `b: bool = X`, so the diagnostic reports the override's TYPE and
+VALUE and any divergence in either is visible:
+
+```
+true T FaLsE   -> bool          42 -7 0x1e 1_000 0b101 0o17 -> untyped integer
+1.5 .5 1e-5    -> untyped float    hello 'true' 1abc       -> untyped string
+```
+Two of these are the ones a paraphrase gets wrong, and BOTH are confirmed by the oracle:
+ * **`0x1e` -> INTEGER 30**, not float. `build_param_looks_like_float`'s middle test returns false on
+   a leading `0` followed by a NON-digit, BEFORE the trailing `e`/`E` scan can see the `e`.
+ * **`1abc` -> the STRING "1abc"**, not an error. The numeric arm FALLS THROUGH to the string arm on
+   a failed parse rather than erroring.
+The five validation messages are byte-identical to the oracle's. (They read DIFFER in the raw A/B only
+because the ORACLE EXITS on a bad flag while the port continues checking -- that is #12, by design.)
+
+### THE REAL FIND: `exact_value_float_from_string` HAD TWO DEFECTS, INVISIBLE UNTIL IT HAD A CALLER
+
+#763 predicted this ("FIX it and USE it for Stage B") and the very first A/B proved it. It was DEAD
+(`exact_value_from_basic_literal`, its only other caller, still has zero callers), and a dead
+procedure's body is never wrong in a way anything can measure.
+
+1. **THE RULE WAS WRONG.** C++ (`exact_value.cpp:363`) tests `!contains('.') && !contains('-')`. The
+   port tested `'.'` and `'e'`/`'E'` -- a plausible-looking "does this look like a float?" paraphrase
+   that is not the rule. They disagree on any exponent with no `.` or `-`:
+   `-define:MY=1e10` -> oracle `untyped integer 10000000000`, port `untyped float`. **CAUGHT BY A/B.**
+   This is why C++ can note at `parser.cpp:837` that a FLOAT TOKEN may carry an INTEGER value -- a fact
+   the port's own comments at `check_expr.odin:754/1151` already recorded while this procedure
+   contradicted them.
+2. **THE `0h` FALLBACK PANICKED.** C++'s `GB_PANIC` there is COMMENTED OUT (`exact_value.cpp:355-358`)
+   and it falls through to an f64 `bit_cast`. The port turned a commented-out panic into a LIVE one --
+   reading the C++ text without reading which half of it executes. For this port a panic is the worst
+   possible divergence: it takes down the HOST process, the exact failure mode #12 exists to prevent.
+
+**LESSON: A DEAD PROCEDURE IS AN UNTESTED PROCEDURE, AND PORTING IT IS NOT THE SAME AS PROVING IT.**
+Both defects sat in a body annotated with C++ line numbers. The citation was right; the code was not.
+Nothing could have found this except giving it a caller and comparing against the oracle.
+
+### CORRECTION TO #742, NOW SETTLED BY EVIDENCE RATHER THAN OPINION
+
+#742's recommendation to Jon was "DELETE BOTH". #763 downgraded that to "delete
+`exact_value_from_basic_literal`; FIX `exact_value_float_from_string`". That is now MEASURED:
+`exact_value_float_from_string` is LIVE, CORRECT and oracle-verified -- **KEEP IT**.
+`exact_value_from_basic_literal` still has zero callers -- **STILL JON'S CALL.**
+
+### THE crosstarget "REGRESSION" WAS MY BUILD, NOT MY CODE (13th stale premise)
+
+crosstarget went 6/6 -> 0/6 and I nearly attributed it to the checker. A/B first (tst17 6/6, tst18
+0/6) said "you caused it"; the diff said `-target:js_wasm32` was being treated as a PACKAGE PATH.
+
+**Root cause: I rebuilt the gate binaries from `$S/triage_st`, an Aug-5 FOSSIL. The real harness
+sources live in the repo at `.claude/tools/triage_{st,vet,doc}/`.** The fossil has no `-target:` case,
+so the flag fell through to the path list -- `files=30` (wasm set) became `files=28` (linux set) and
+two `###` headers appeared instead of one. `strings tst17 | grep -x -- '-target:'` = 1, tst18 = 0:
+the binary itself said which source it came from.
+
+The three fossils are now renamed **`$S/STALE-DO-NOT-BUILD-triage_*`** so the mistake cannot recur.
+**BUILD GATE BINARIES FROM `.claude/tools/triage_*`, NEVER FROM `$S`.**
+
+Same family as #759 (wrong binary) and #762's crosstarget probes (missing input): three times now the
+INSTRUMENT's inputs were wrong and the checker was innocent. The discipline that saved it each time is
+the same -- **A/B against the previous binary BEFORE believing a regression.**
+
+### GATE STATE (binaries `$S/tst18` / `$S/tvet18` / `$S/tdoc18`, built from `.claude/tools/`)
+```
+#97               rc=0 for ast, checker AND parser (twice: after Stage B, after the exact_value fix)
+corpus.sh         FULL-MATCH=313 missing=0 excluded=13   RC=0
+crosstarget.sh    members=6 match=6 differ=0 unmeasured=0 excluded=2   RC=0
+-define A/B       19/19 MATCH vs the oracle
+```
+
+### NOT DONE, AND NAMED: STAGE B HAS NO PERMANENT GATE
+
+Every other landed feature has one; this one does not. corpus.sh and parity.sh pass package paths
+only, so **nothing in the batch passes `-define:` at all** -- if `build_param_to_exact_value` or
+`exact_value_float_from_string` regresses tomorrow, no gate here goes red. The A/B driver
+(`$S/n764ab`, 19 cases) exists and already found a real defect, but it is a scratchpad one-off.
+
+**FOR JON:** crosstarget.sh is exactly this shape for Stage A. Should Stage B get the analogous
+`define.sh`? I did NOT build it unilaterally because of #178 (do not build another instrument), and
+because a 45th tool is a standing-cost decision, not a mid-tick one. **ASK.**
+
+---
+
+## #765 -- #594 DESIGN, derived from source. NOT IMPLEMENTED (the batch was mid-parity, #301)
+
+Read `parity.sh` end to end. The task is "per-package scratch FIRST, then bounded fan-out", and the
+source says exactly why that ordering is mandatory rather than tidy.
+
+### BLOCKER 1: the scratch is SHARED AND FIXED-NAME
+
+One `TMP=$(mktemp -d)` for the whole run, and every package writes the SAME SIX PATHS:
+`$TMP/o.raw`, `$TMP/p.raw`, `$TMP/o`, `$TMP/p`, `$TMP/om`, `$TMP/pm`. Two workers in flight would
+interleave writes and compare one package's oracle output against another's port output. The failure
+is SILENT and reads as a TEXT mismatch -- the one column that IS gated. **Per-package scratch is not
+a refactor for cleanliness; without it the parallel version reports fiction.**
+
+### BLOCKER 2: the counters are shell variables in the loop body
+
+`cnt_mismatch / txt_mismatch / att_mismatch / n / excluded` are incremented inline. Any `&`-based
+fan-out puts the loop body in a SUBSHELL and every increment is lost at the join -- the script would
+print `PARITY-DONE ... count=0 text=0 attrib=0` and `exit 0`. **That is a green gate that measured
+nothing: #380/#385's failure mode, which this script already has TWO guards against (the LIST guard
+and the `compared -eq 0` abort). Neither would fire here, because `n` and `excluded` are BOTH lost,
+so `compared` computes as 0-0 = 0 ... which DOES trip the abort. Verify that; it may be the accident
+that saves it. Do not rely on an accident -- emit per-package result files and aggregate after.**
+
+### BLOCKER 3: output ORDER is currently list order
+
+Findings print as encountered, so two sweeps are line-comparable. Interleaved parallel output breaks
+that, and comparing sweep-to-sweep is how every regression this tick was caught. **Buffer per-package
+output to a file, then cat in LIST order at the join.**
+
+### BLOCKER 4: the timeout MUST scale, and the script already says so
+
+`PARITY_TIMEOUT` defaults to 180s, and the file's own concurrency-guard comment records the measured
+precedent: a concurrent plain+vet run excluded `core/rexcode/isa/mips/tablegen/generated` on a
+TIMEOUT that completes in ~1s alone. **A spurious timeout is reported EXCLUDED, i.e. UNMEASURED, and
+`compared` silently drops (#275).** So the acceptance test is not "same findings" but **`excluded=0`
+AND identical findings**, at whatever fan-out is chosen. Scale the timeout with the width, and keep
+the lockfile guard (it keys on `$$`, which still works for the parent).
+
+### PLAN, in the order the loop prompt already fixed
+
+1. **Per-package scratch only, NO parallelism.** `$TMP/pkg-$n/` per iteration. Run the full sweep and
+   require the finding lines to be **BYTE-IDENTICAL** to the current run, `excluded=0`. This is the
+   #290 discipline: an instrument change that alters what is counted is never adopted without that
+   diff. It is also the step that can be verified with no concurrency risk at all.
+2. **Then bounded fan-out**, width from `nproc` but CAPPED (the machine has 32 cores and #301 was
+   loadavg 88). Aggregate from per-package result files; emit output in list order.
+3. **Acceptance: byte-identical findings AND `excluded=0`, twice.** Once is not evidence (#213).
+4. `parity_vet.sh` and `cmpfull.py` afterwards, same shape, one at a time.
+
+**DO NOT do step 2 without step 1 passing.** A parallel sweep that shares scratch produces wrong TEXT
+rows, and TEXT is the gated column -- it would look like a checker regression, and by #764's own
+lesson I would spend the tick A/B-ing the checker for a defect that is in the harness.
+
+### #765 STEP 1 EDITED (verification pending -- the batch held the machine, #301)
+
+`parity.sh` now allocates `D="$TMP/pkg$n"` per package; all six paths moved to `$D`.
+Backup `$S/pre765_parity.sh` md5 `8f386c18cd1e7736930b919196dce66a`. `bash -n` clean.
+
+**A NEAR-MISS WORTH RECORDING.** My first pass moved five of the SIX sites. The one I missed was
+`diff "$TMP/o" "$TMP/p" | head -6` -- the line that prints the EVIDENCE under every COUNT/ATTRIB/TEXT
+row. It lives inside the mismatch branch, so it does not execute on a clean sweep at all: a green run
+would have "passed" while every future finding printed its detail against a path that no longer
+exists. **The gate would have kept working and its evidence would have silently gone empty.** Caught
+by grepping for remaining `$TMP/` rather than by reading the diff -- the diff LOOKED complete because
+the five edits I made were the five I had planned.
+**Verify a mechanical rename by SEARCHING FOR SURVIVORS, not by re-reading the edits.**
+
+**ACCEPTANCE, sharpened (the naive version would fail for the wrong reason, #215).** The current
+baseline (`$S/base594_parity.txt`) has THREE finding rows and ALL THREE are the known-noise family:
+`ATTRIB .../ppc/tools`, `ATTRIB .../rsp/tools`, `COUNT .../x86/tools`. parity.sh's own comments
+record these as ORACLE nondeterminism (#341/#582), measured at a ~17% event rate. So demanding
+BYTE-IDENTICAL findings would build a gate that goes red on a coin flip. What must hold:
+```
+packages=323 compared=323 excluded=0     <- coverage, exact
+text_mismatches=0                        <- the deterministic, GATED column
+no package name outside {ppc,rsp,x86}/tools appears in any finding row
+```
+
+### #765 SIBLINGS PRE-DERIVED (read-only, while the root suite held the machine)
+
+`parity_vet.sh` has the SAME six shared paths (`o.raw p.raw o p om pm`) at lines 154-198 -- **including
+the same `diff "$TMP/o" "$TMP/p" | head -6` at :198 that I nearly missed in parity.sh.** So the
+sibling edit is mechanical AND the trap is known in advance rather than rediscovered.
+One incidental difference, NOT my task and not a defect: parity_vet.sh uses plain `timeout` where
+parity.sh uses `run_guarded`, so it has no #301 hang-state capture.
+
+`cmpfull.py` shows NO `mkdtemp` / `TemporaryDirectory` / temp path at all. It may hold each probe's
+output in memory and already be fan-out-safe. **That is a HYPOTHESIS from a grep, not a finding --
+verify by reading it before touching it (#209).**
+
+### #765: cmpfull.py HYPOTHESIS -> FINDING (read, not grepped)
+
+`run()` (cmpfull.py:97) is `subprocess.run(cmd, capture_output=True, text=True, timeout=...)` and
+`compare()` (:106) holds both compilers' output in LOCAL VARIABLES. **There is no scratch file
+anywhere in the tool**, so the #765 blocker-1 shape (shared fixed-name paths) DOES NOT APPLY to it.
+Blockers 2 and 3 also do not apply: Python, not a shell subshell, so counters survive, and results
+can be collected in list order trivially.
+
+**ONE CAVEAT, STATED RATHER THAN ASSUMED:** `compare()` invokes the oracle as
+`[ODIN, "build", probe, "-out:/dev/null"]` -- a FIXED path shared by every probe. Writes to
+`/dev/null` are discarded so the OUTPUT cannot collide, but whether `odin build` also creates sibling
+intermediates next to `-out:` is NOT verified. **Check that before fanning cmpfull out**, since a
+shared intermediate is exactly the silent cross-contamination blocker 1 describes.
+
+So the #594 work is smaller than the task title implies: **two shell tools need the scratch fix;
+cmpfull.py needs only the `-out:` question answered and then the fan-out.**
+
+### #764 SIGNED OFF: `BATCH-RC=0 all six stages green`
+
+`$S/batch764.txt`, binaries `tst18`/`tvet18`/`tdoc18` built from `.claude/tools/triage_*`:
+```
+DOCFLAG-RC=0
+DOCCMP-RC=0      packages=301 match=300 empty_expected=1, all else 0
+PARITY-RC=0      packages=323 compared=323 excluded=0 count=1 text=0 attrib=2   <- baseline EXACTLY
+PARITY-VET-RC=0  packages=323 compared=323 excluded=0 count=1 text=0 attrib=2   <- baseline EXACTLY
+MODELSWEEP-RC=0  compared=323 excluded=0, ALL GATED COLUMNS 0, unpairable=0, model_match=307
+                 multiplicity_packages=16 (UNGATED #468; 14/15/16/19 seen -- varies by design)
+ROOT-SUITE-RC=0  Finished 146 tests in 7m36s. All tests were successful.
+BATCH-RC=0 all six stages green
+```
+Plus, outside the batch: `#97 rc=0 x3`, `corpus 313/313 RC=0`, `crosstarget 6/6 RC=0`,
+`-define A/B 19/19 vs the oracle`.
+
+**So #591 (both stages) and the two `exact_value_float_from_string` defects are FULLY GATED.**
+
+**ONE PROCESS NOTE (#207, cost me a beat):** `pgrep -f batch_gates_v4.sh` reported RUNNING after the
+script had printed `=== BATCH-GATES-DONE ===`, because it matches MY OWN pgrep command line. Before
+starting anything under #301, check for REAL work -- `pgrep -x odin`, the harness binaries by name,
+and loadavg -- not for the script name. Loadavg 5.69 falling (1min < 5min < 15min) is the honest
+signal that the machine is free.
+
+### #765 STEP 1 VERIFIED on parity.sh, and APPLIED to parity_vet.sh
+
+**parity.sh result (`$S/n765_parity.txt`), against the SHARPENED acceptance test -- ALL CLAUSES PASS:**
+```
+packages=323 compared=323 excluded=0        <- coverage exact
+text_mismatches=0                           <- the gated, deterministic column
+rows: ATTRIB ppc/tools, ATTRIB rsp/tools, COUNT x86/tools  <- ONLY the known-noise family
+PARITY-EXIT-RC=0
+```
+**AND THE OUTPUT PROVES THE NEAR-MISS FIX.** The ATTRIB rows now print their EVIDENCE diffs --
+`dump_verify_input.odin(31:1)` vs `verify_against_llvm.odin(28:1)` -- which is exactly the
+`diff "$D/o" "$D/p"` line I nearly left pointing at a path that no longer exists. Confirmed by
+OUTPUT, not by inspection. Had I shipped the five-of-six version, every future finding would have
+printed with empty evidence and the sweep would still have read GREEN.
+
+**parity_vet.sh: same edit applied** (backup `$S/pre765_parity_vet.sh` md5
+2d8e47262ca59587a36127605d778268). 10 lines now use `$D/`; the only surviving `$TMP` references are
+the `mktemp -d`, the two traps, and the `D="$TMP/pkg$n"` assignment itself.
+
+**THE SURVIVOR GREP EARNED ITS KEEP A SECOND TIME, IN THE SAME TICK.** I scripted the replacements
+this time instead of hand-editing, and the two `sed ... "$TMP/o" > "$TMP/om"` lines did NOT match my
+patterns -- the script reported `NOT FOUND` for them, but had I not also grepped I would have taken
+`bash -n OK` as sufficient. **`bash -n` VALIDATES SYNTAX, NOT REFERENTS: a script that reads a file
+which no longer exists is syntactically perfect.** Two for two; the rule stands.
+
+### #765 STEP 1 COMPLETE ON BOTH SHELL TOOLS -> #766 STEP 2 (bounded fan-out) WRITTEN, VERIFYING
+
+`parity_vet.sh` verification passed every clause, same as parity.sh:
+`323/323 excluded=0`, `text_mismatches=0`, only ATTRIB ppc/tools + ATTRIB rsp/tools +
+COUNT x86/tools, `PARITYVET-EXIT-RC=0`, evidence diffs printing.
+
+## #766 -- #594 STEP 2: bounded fan-out in parity.sh (backup `$S/pre766_parity.sh`)
+
+`PARITY_JOBS` (default **6**, not 32: the machine has 32 cores, #301 was loadavg 88, and the PORT is
+ITSELF a threaded checker, so W workers do not consume W cores).
+
+The three derived blockers, each addressed rather than hoped around:
+ * **Counters** are no longer shell vars in the loop body. Each worker writes a one-word VERDICT FILE
+   (`OK|COUNT|ATTRIB|TEXT|DIED <tag>`); the parent tallies after the join. Under `&` the body is a
+   SUBSHELL and every increment would have been lost -> `PARITY-DONE ... 0 0 0` + exit 0, a green gate
+   that measured nothing.
+ * **Output order** is restored explicitly: workers write rows to a per-package file, the parent cats
+   them IN LIST ORDER. Sweep-to-sweep line comparison is the technique that caught every regression
+   in this batch; interleaved output would have destroyed it.
+ * **The timeout.** I did NOT just multiply it by the width. This script's own comment records a
+   concurrent run excluding `.../mips/tablegen/generated` on a TIMEOUT that finishes in ~1s alone --
+   the exact failure fan-out could mass-produce, and a spurious timeout reads EXCLUDED = UNMEASURED
+   (#275). Multiplying the timeout would just trade that for an 18-minute wait on a REAL deadlock
+   (#25/#41/#141 are live here).
+   **INSTEAD: A DEATH UNDER CONCURRENCY IS NOT ADMISSIBLE EVIDENCE.** Any package whose oracle or
+   port run dies during the parallel pass goes on a RETRY LIST and is re-run SEQUENTIALLY, ALONE, at
+   the normal timeout. Only a SECOND death is EXCLUDED. Contention and a genuine hang are separated
+   BY MEASUREMENT, and `excluded=0` stays a meaningful acceptance criterion instead of becoming noise.
+   A `RETRY-SUMMARY retried=/rescued=/still_dead=` line prints whenever it fires, so the cost is
+   visible rather than hidden.
+ * **A MISSING verdict is EXCLUDED, not a pass.** If a worker is killed or hits an unhandled path it
+   writes nothing; the join counts that as unmeasured and names it `NO-VERDICT`. Otherwise the
+   fan-out could silently shrink `compared` -- #275 all over again, one level up.
+
+**MEASUREMENT CAVEAT, STATED NOT HIDDEN:** at launch `loadavg` read 31.99 (1-min) while `pgrep -x
+odin` showed idle -- the average was still decaying from the parity_vet sweep that had just finished.
+So this first timing is not a clean speedup number. Whether `RETRY-SUMMARY` appears tells me whether
+contention actually bit; if it did, re-time on a quiet machine before quoting any figure.
+
+### #766 VERIFIED 2/2 -- and verified UNDER LOAD, which is the harder test
+
+```
+run 1  PARITY-DONE packages=323 compared=323 excluded=0 count=1 text=0 attrib=2  RC=0  ELAPSED=40s
+run 2  PARITY-DONE packages=323 compared=323 excluded=0 count=1 text=0 attrib=2  RC=0  ELAPSED=41s
+findings both runs: ppc/tools, rsp/tools, x86/tools -- ONLY the known-noise family
+NO `RETRY-SUMMARY` LINE IN EITHER RUN -> not one package died under fan-out.
+```
+
+**THE EXTERNAL LOAD IS NOT MINE, AND I CHECKED WHAT IT WAS INSTEAD OF ASSUMING.** loadavg went
+31.99 -> 32.57 -> 61.43 while `pgrep -x odin` reported idle. `ps --sort=-pcpu` named it:
+`odin-snapshot` at 550/300/150% plus a `clang++`, driven by
+`python3 lib/grade.py grade /tmp/tmp.XLiYY5t86G/arrayprog --binary /tmp/tmp.XLiYY5t86G/odin-snapshot --jobs 8`.
+A grading harness in /tmp with its OWN snapshot binary -- nothing to do with this repo.
+
+**THE QUESTION THAT ACTUALLY MATTERED was not the timing but whether the ORACLE was being rebuilt
+under the gates.** `./odin` mtime is **17:28:59, unchanged** (and `build_odin.sh` is untouched
+source, not a running build). So both runs compared against the same oracle and are VALID.
+**A loaded machine invalidates a TIMING; a mutating oracle would have invalidated the MEASUREMENT.
+Check the second one first.**
+
+**CONSEQUENCE, and it is a good one:** the fan-out survived exactly the #301 condition that
+historically manufactured spurious exclusions -- a concurrent run once excluded
+`.../mips/tablegen/generated` on a TIMEOUT it clears in ~1s alone. Two runs at width 6, under
+loadavg 32-61, produced `excluded=0` and never once needed the retry pass. That is stronger evidence
+than a quiet-machine run would have been.
+
+**WHAT I AM NOT CLAIMING: A SPEEDUP NUMBER.** There is no sequential baseline measured under
+comparable conditions, so 40s is a datum, not a ratio. My in-flight guess that the sequential sweep
+took "5-11 minutes" was bad arithmetic (most of the 323 packages are tiny; the sweep is dominated by
+a handful of large ones plus process startup). **Measure `$S/pre766_parity.sh` on a quiet machine
+before quoting any figure**, and do not let the impressive-looking 40s become a stale premise.
+
+**OPERATIONAL NOTE:** `PARITY_JOBS` is overridable. If the batch ever has to run alongside a
+workload like this one, drop it to 2-3 rather than reverting -- the correctness argument does not
+depend on the width.
+
+### #767 -- fan-out applied to parity_vet.sh (EDIT ONLY; verification DEFERRED, #301)
+
+Backup `$S/pre767_parity_vet.sh`. Same structure as #766, adapted to this script's plain
+`timeout "${PER_PKG_TIMEOUT:-180}"` invocation (it has no `run_guarded`). `bash -n` clean.
+**Survivor grep clean:** the only `$TMP` references left are the `mktemp -d`, the two traps, the
+`D="$TMP/pkg$n"` assignment, and the `pkg$n` reads in the retry/join loops.
+The `#511/#621` vet-harness self-check sits ABOVE the replaced region and is untouched -- it must
+keep refusing the plain harness before any sweep.
+
+**NOT VERIFIED YET, AND DELIBERATELY SO.** The machine is still carrying Jon's grading run:
+loadavg 52.42, four `odin-snapshot` processes at 400-600%. Starting a multi-minute sweep into that
+is the precise mistake #301 records, and any `excluded` count it produced would be uninterpretable.
+The EDIT costs nothing to make now; the MEASUREMENT is worthless until the box is quiet.
+**Oracle re-checked and still untouched: `./odin` mtime 17:28:59.**
+
+Pending when quiet, in order: (a) `$S/pre766_parity.sh` timed, for the honest sequential ratio;
+(b) parity_vet fan-out verified TWICE (#213), acceptance as always
+`323/323 excluded=0`, `text=0`, no package outside {ppc,rsp,x86}/tools.
+
+### #767 VERIFIED 2/2 -- #594 STEP 2 IS COMPLETE ON BOTH SHELL TOOLS
+
+```
+parity_vet run1: packages=323 compared=323 excluded=0 count=1 text=0 attrib=2  RC=0  ELAPSED=26s
+parity_vet run2: packages=323 compared=323 excluded=0 count=1 text=0 attrib=2  RC=0  ELAPSED=29s
+findings both runs: ONLY ppc/tools, rsp/tools, x86/tools   |   no RETRY-SUMMARY in either run
+```
+Measured on a genuinely quiet box this time: loadavg 4.08 (1min) < 21.82 (5min) < 22.51 (15min),
+`odin-snapshot` gone, oracle mtime still 17:28:59.
+
+**#594 STATUS: parity.sh DONE+VERIFIED (#766, 2/2), parity_vet.sh DONE+VERIFIED (#767, 2/2),
+cmpfull.py STRUCTURALLY EXEMPT with one open `-out:/dev/null` question.** The task as originally
+titled ("parallelise all three") is therefore effectively closed, with the third item closed by
+READING rather than by editing -- which is the better outcome.
+
+**SEQUENTIAL BASELINE IN FLIGHT (`$S/n768_seq.txt`), AND ITS CAVEAT STATED UP FRONT:** launched
+`$S/pre766_parity.sh` timed, but loadavg read **37.30** at launch -- elevated by MY OWN two
+parity_vet sweeps that had just finished, not by anyone else. The run spans minutes while a 1-minute
+average decays, so the inflation should be small, but **the resulting ratio is an ESTIMATE, not a
+clean measurement.** Say so when quoting it. If it matters, re-run after a genuine idle gap.
+
+### #768 -- THE HONEST #594 RATIO: ~5x, and BOTH SIDES WERE MEASURED UNDER LOAD
+
+```
+sequential ($S/pre766_parity.sh, the verified step-1 version):  ELAPSED=201s  RC=0
+                                   packages=323 compared=323 excluded=0 count=1 text=0 attrib=2
+fan-out    (parity.sh, PARITY_JOBS=6):                          ELAPSED=40s / 41s
+parity_vet (fan-out):                                           ELAPSED=26s / 29s
+```
+**~5x at width 6** -- near-linear with overhead, which is the plausible shape. The finding set was
+identical in every run: ppc/tools, rsp/tools, x86/tools, nothing else, `text_mismatches=0` throughout.
+
+**NEITHER SIDE IS A CLEAN-ROOM NUMBER, AND I AM SAYING SO RATHER THAN QUOTING 5x BARE.** The fan-out
+runs were taken at loadavg 32-61 (Jon's grading harness); the sequential run at loadavg ~31-41, with
+a long-running `oracle` process at ~1 core and `odin-snapshot` returning mid-run. Because BOTH sides
+carried comparable external load, the RATIO is defensible even though neither ABSOLUTE figure is.
+**If a precise number is ever needed, re-measure both on a genuinely idle box.** Do not let "5x"
+harden into a stale premise (#208) -- it is an estimate with a stated confound.
+
+**#594 CLOSED:** parity.sh (#766) and parity_vet.sh (#767) both fan out and are both VERIFIED 2/2;
+cmpfull.py is structurally exempt. Four fan-out sweeps, zero `RETRY-SUMMARY` lines -- the
+sequential-retry safety net has never had to fire, which is the outcome I wanted but could not assume.
+
+## #769 -- #610 OPENED, AND THE FIRST TWO THINGS I LEARNED BOTH CHANGE THE TASK
+
+**SCOPING QUESTION SETTLED FIRST (it needed to be).** `citemono.py` is citation-derived, and #739
+CLOSED the citation project -- so is #610 dead too? **No.** Read the tool's own header: it does NOT
+check that line numbers stay synced (that is what Jon killed). It checks whether a citation points at
+the RIGHT LINES INSIDE the right function -- i.e. whether the comment's CLAIM about what C++ does
+there is TRUE. That route has already produced four real findings (#606 six-of-six wrong in
+check_builtin_procedure, #607 seven-of-seven in the min-dep set, #608/#609 fifteen-of-44 in
+check_proc_decl). **#610 is a READING QUEUE FOR REIMPLEMENTATIONS, which is exactly what #739 left
+open. It is not the numbering chore #571 closed.**
+
+**RE-DERIVED FROM SOURCE (#209), and the headline number is contaminated by design:**
+```
+groups_with_inversions=66   total_inversions=266   (the note said 265 -- one drifted)
+  SWITCH-DISPATCH groups=24  inversions=109   <- UNRELIABLE BY THE TOOL'S OWN STATEMENT (#611:
+                                                 23 of 31 "inversions" were artifacts, all 6
+                                                 spot-checked by content were correct)
+  LINEAR          groups=42  inversions=157   <- the only part worth reading
+```
+So the actionable pool is 157, not 266 -- and several of the worst LINEAR groups are already marked
+DISPOSITIONED (check_builtin_procedure_directive 18, check_type_decl 18, check_matrix_type_expr 11,
+check_basic_directive_expr 6, check_call_arguments_internal 5).
+
+**THE WORST LINEAR GROUP IS `check_get_params` (21/29) -- WHICH I AM UNDER STANDING INSTRUCTION TO
+LEAVE ALONE (cluster A, contains #706).** Worst-first would have walked straight into it.
+
+**FIRST REAL TARGET INVESTIGATED AND CLOSED AS A FALSE POSITIVE, BY CONTENT.**
+`check_expr.odin check_call_arguments_basic -> check_expr.cpp check_call_arguments_internal`,
+18 inversions of 23 citations (78%) -- the highest untriaged, undispositioned ratio in the file.
+Spot-checked port `:12006`, which cites `check_call_arguments_internal:6706-6723`:
+C++ :6723 is `} else if (positional_operand_count > pt->param_count) {` -- **the too-many-arguments
+test, exactly what the comment claims is there.** The citation is CORRECT.
+And the port's comment at that very site already explains the inversion:
+> "This mirrors the port's own too-many diagnostic below (the `positional_count > param_count` arm),
+> **hoisted to run BEFORE instantiation rather than after it.**"
+A deliberate, documented hoist. The tail of the group confirms it: from port :12450 onward the cited
+C++ lines run 6882 -> 6887 -> 6892 -> 6900 -> 6905 -> 6909 -> 6934, PERFECTLY ASCENDING -- a faithful
+linear walk. The inversions come from the hoisted block citing 6962/7018/7024 earlier.
+
+**NEXT ACTION (small, and the tool asks for it explicitly): add this group to
+`citemono_dispositioned.txt`** so it stops consuming the top of every future worst-first list. The
+header's instruction is to disposition per group -- at the site for one-offs, in that file for a
+whole-group explanation. This is a whole-group explanation.
+**LESSON, and it is the tool's own: A HIGH INVERSION COUNT IS A QUESTION, NOT A FINDING.** Two of the
+top five were already answered; the top one is off-limits; the first I investigated was correct all
+along and said so in its own comment.
+
+### #769 CONTINUED -- I CANNOT DISPOSITION THE GROUP: THREE CITATIONS ARE CONTENT-WRONG
+
+I went to add `check_call_arguments_basic | check_call_arguments_internal` to
+citemono_dispositioned.txt and **stopped, because the file's header says an entry is a CLAIM that the
+inversions were investigated and are NOT defects -- and on wider reading three of them are wrong.**
+(The existing entries there are thorough, read-end-to-end dispositions. One spot-check does not meet
+that bar, and I nearly submitted one.)
+
+**FIRST, a name collision worth recording:** the file already has
+`check_call_arguments_internal | check_call_arguments_internal` -- that is the **check_proc_group.odin**
+copy (5/11), a DIFFERENT port procedure sharing the same C++ function. Mine is
+`check_call_arguments_basic` in check_expr.odin (18/23). The key is `<odin_proc> | <cpp_function>`, so
+they do not collide -- but they are easy to confuse, and that entry INDEPENDENTLY CORROBORATES my
+`:6706-6723` spot-check ("the anchor for that code is :6706-6723, which is correct").
+
+**THE DECISIVE FACT, from grep rather than inference:**
+```
+check_expr.cpp:6896   auto eval_param_and_score = [](...)     <- the lambda is DEFINED here
+check_expr.cpp:7020       eval_param_and_score(c, o, e->type, err, false, e, show_error)   <- NON-variadic
+check_expr.cpp:7059       eval_param_and_score(c, o, t,       err, true,  var_entity, ...) <- VARIADIC
+```
+Against that:
+ * **port :12221 cites :6879** for "same lambda ... check_assignment on failure". **:6879 PRECEDES the
+   lambda's own definition at :6896** -- it cannot contain a call inside it. What is actually at
+   :6877-6890 is the MISSING-PARAMETER diagnostic chain ("Parameter '%s' ... must be explicitly
+   provided", "Type parameter '%s' is missing").
+ * **port :12227 cites :6884** for the success path -- same problem, same chain
+   (`} else if (e->kind == Entity_Constant ...)`).
+ * **port :12204 cites :7018** and QUOTES `eval_param_and_score(c, o, t, err, true, var_entity, ...)`
+   -- but that call is at **:7059**. :7020 is the `false`/`e->type` one, a different call site.
+
+**THE PORT'S BEHAVIOUR IS NOT IN QUESTION.** It calls `check_assignment` on BOTH branches, which is
+what the comments say C++ does, and the real defects at this site were already found and fixed by
+#697 (the invented `is_variadic_any` branch that skipped check_assignment, so `any` was never
+RTTI-registered) and #194. **This is the #606/#607 class exactly: citations that are SELF-CONSISTENT
+-- they resolve inside the right function, so citefn --check passes -- while pointing at code that
+cannot support the claim.** That is precisely the gap citemono exists to find.
+
+**SCOPE QUESTION FOR JON, NOT MINE TO DECIDE (#739).** Correcting three line numbers is renumbering,
+which is what #739 closed. But these are not DRIFT -- they point at semantically unrelated code, and a
+reader following :6879 reads the missing-parameter chain and concludes something false. The sibling
+disposition shows a previous tick DID correct this function's numbers wholesale (`6879 -> 6903`,
+`6940 -> 6962 x3`, `6684-6700 -> 6706-6723`) **in the check_proc_group copy only -- check_expr's copy
+never got them.** So the correction exists, was applied once, and this second copy was missed.
+**RECOMMENDATION: fix these three in check_expr.odin as a #606-class correction (a false CLAIM, not a
+stale NUMBER), and leave the rest of #739 closed. ASK BEFORE DOING IT.**
+Group stays UNDISPOSITIONED until then -- an entry now would assert something I have disproved.
+
+## #771 -- check_polymorphic_record_type (4/8): 3 of 4 inversions are a TWO-ARM ARTIFACT; the real
+## finding is SIX citations with a uniform +90 DRIFT, and a live ASSERT-vs-SILENT-FALLBACK question
+
+`check_type.odin check_polymorphic_record_type -> check_expr.cpp check_polymorphic_record_type`.
+
+**THE INVERSIONS ARE MOSTLY NOT THE SIGNAL.** The port has a `.Struct` arm and a `.Union` arm, each
+citing its own C++ region. The struct arm's LAST citation is the later range 8547-8583; crossing into
+the union arm then reads as going backwards, which manufactures 3 of the 4 inversions (:2548, :2566,
+:2577). That is the parallel-arm case citemono's own header says it cannot handle -- the same class
+as #611's 23-of-31. Only :2517 (8438-8441 after 8446) is a genuine in-arm inversion.
+
+**WHAT READING ACTUALLY FOUND -- the tool flagged 4 inversions but SIX citations are stale.** :2517
+QUOTES C++ verbatim (`CheckerContext ctx = *c;` / `ctx.scope = polymorphic_record_parent_scope(...)`)
+while citing 8438-8441, which is the missing-parameter default fill (`missing_count += 1;`). Grepping
+the quoted text for its real home gives a uniform ~+90 shift across the whole group:
+
+| port  | cites     | ACTUALLY at | delta |
+|-------|-----------|-------------|-------|
+| :2482 | 8446      | **8537** `clone_ast(bt->Struct.node)`        | +91 |
+| :2503 | 8451      | **8540** `Struct.polymorphic_parent = ...`   | +89 |
+| :2517 | 8438-8441 | **8527-8529** `ctx.scope = ...parent_scope`  | +89 |
+| :2548 | 8456      | **8547** `clone_ast(bt->Union.node)`         | +91 |
+| :2566 | 8461      | **8550** `Union.polymorphic_parent = ...`    | +89 |
+| :2577 | 8462-8464 | **8551-8554** ...`check_union_type(&ctx,...)`| +89 |
+
+**AND THE TWO CITING 8547-8583 (:2535, :2591) ARE CORRECT.** So this is #770's signature EXACTLY: a
+partial correction. Two citations in this group were updated; the other six never were.
+**THIS ONE IS UNIFORM DRIFT, i.e. squarely inside what #739 CLOSED -- unlike #770, where the targets
+were semantically unrelated code. I am NOT proposing to renumber it. Recorded so the next reader does
+not re-derive it, and as evidence about the SHAPE of the residue #739 leaves behind.**
+
+**>>> THE ONE THING HERE THAT IS A LIVE SEMANTIC QUESTION (found BY reading, which is #610's point): <<<**
+```
+C++ 8527-8530:  CheckerContext ctx = *c;
+                ctx.scope = polymorphic_record_parent_scope(original_type);
+                GB_ASSERT(ctx.scope != nullptr);          <-- C++ treats non-nil as an INVARIANT
+port 2529-2532: inst_ctx := ctx^
+                if parent_scope := polymorphic_record_parent_scope(original_type); parent_scope != nil {
+                    inst_ctx.scope = parent_scope         <-- port SILENTLY keeps the caller's scope
+                }
+```
+If the nil case is UNREACHABLE the guard is dead and the two agree. If it is REACHABLE, C++ ABORTS
+and the port silently instantiates the record against the WRONG lookup scope -- which is precisely
+the failure the port's own comment above it says it added the parent-scope lookup to fix
+(core/container/queue `MPSC_Queue :: struct($T: typeid) { q: Queue(T) }` -> "Undeclared name").
+**NOT DEMONSTRATED EITHER WAY -- I have no repro that makes it return nil, and an assert is not
+portable here anyway (#12: the checker must not take down its host).** The faithful-and-safe shape
+would RECORD the nil case rather than swallow it. **UNRESOLVED, NOT ACTED ON.**
+
+**Group left UNDISPOSITIONED**: 3 of 4 inversions are artifacts and could be dispositioned honestly,
+but the entry would be filed next to a stale-citation table and an open semantic question, and
+`citemono_dispositioned.txt`'s header asks for evidence that the inversions are NOT defects -- which
+is true here while NOT being the whole truth about the group.
+
+## #772 -- check_is_castable_to (3/7): DISPOSITIONED. The first group in three that could be, and
+## only after correcting the drift far enough to ask the real question.
+
+`check_expr.odin check_is_castable_to -> check_expr.cpp check_is_castable_to`.
+
+**ALL SEVEN CITATIONS ARE STALE by +35..+40.** Found by the #771 method -- grep each comment's own
+QUOTED predicate for its real home rather than trusting the number:
+
+| port  | cites     | ACTUALLY at | what is really AT the cited line |
+|-------|-----------|-------------|----------------------------------|
+| :9869 | 3713-3716 | **3752-3755** `is_type_u16_slice(src) && is_type_string16(dst)` | MATRIX square-count return |
+| :9898 | 3759-3785 | **3799-3823** the six cstring16 POINTER rules | the u8 cstring block |
+| :9925 | 3722-3728 | **3757-3762** `cstring->string` + `add_package_dependency(...,"cstring_to_string")` @3760 | pointer/uintptr casts |
+| :9937 | 3725-3731 | **3764-3769** `cstring16->string16` + `cstring16_to_string16` @3767 | pointer casts |
+| :9941 | 3729-3735 | **3767** the registration | uintptr <-> pointer |
+| :9950 | 3815-3836 | **3854** `is_type_simd_vector(src) && is_type_simd_vector(dst)` | -- |
+| :9968 | 3827-3832 | **3866** `is_type_simd_vector(dst)` (splat) | -- |
+
+**BUT CORRECTING THE DRIFT DOES NOT REMOVE THE INVERSION** -- and that is the whole point of doing it
+first. Real positions in port order are `3752, 3799, 3757, 3764, 3767, 3854, 3866`: :9898 genuinely
+precedes its neighbours. **CAUSE: the port HOISTS the six-rule cstring16 POINTER block (C++ 3799-3823)
+above the cstring->string / cstring16->string16 CONVERSIONS (C++ 3757-3769)**, grouping every UTF-16
+rule together. The site says so in its own words ("the UTF-16 counterparts of the block above"); the
+block dates from task 114.
+
+**INERT, and this is the dispositionable part:** `check_is_castable_to` is a flat chain of independent
+`if (<concrete type pair>) return ...;` guards. Each tests NAMED concrete types (`t_cstring`,
+`t_cstring16`, `t_string`, `t_string16`) or a specific pointer shape (u8/u16 ptr, multi_ptr, rawptr),
+so **no (src,dst) pair can satisfy two of them** -- the order cannot change which guard fires or what
+it returns. **LIMIT, STATED IN THE ENTRY: mutual exclusivity is argued from reading the predicates,
+not machine-checked exhaustively.**
+
+**DISPOSITIONED** in `.claude/tools/citemono_dispositioned.txt` (backup `$S/pre772_citemono_dispositioned.txt`,
+md5 `7997e2e2420d01547d1cac5418824a63` pre-edit). Tool re-run: group now prints
+`[untriaged; DISPOSITIONED]` with the reason, `CITEMONO-RC=0`. **Totals stay 66/266 BY DESIGN --
+citemono LABELS dispositioned groups, it does not remove them (its header: "reports these separately").
+Do not read an unchanged total as a failed edit.**
+**The drift is RECORDED, NOT CORRECTED, per #739.** Third group running where the citations are stale;
+see #770 (content-wrong, partial correction) and #771 (uniform +90, partial correction).
+
+## #773 -- check_type_assertion (3/6): ONE inversion is a DELIBERATE goto->HELPER EXTRACTION (clean),
+## and TWO citations point OUTSIDE the cited function entirely. LEFT UNDISPOSITIONED, on purpose.
+
+`check_expr.odin check_type_assertion -> check_expr.cpp check_type_assertion`. Machine was at
+**loadavg 85.87 and RISING** (1min >> 5min >> 15min) during this tick -- Jon's harness. Source reading
+only, no sweeps, per #301. Oracle mtime unchanged.
+
+**INVERSION 3 of 3 (:7259) IS CLEAN AND IS THE TOOL'S OWN NAMED EXCEPTION.** `:7259` is not inside
+check_type_assertion at all -- it is the DOC COMMENT of `add_type_assertion_dependencies`, a separate
+top-level proc, and its comment says exactly why it exists:
+> "WHY IT IS A SEPARATE PROC. C++ reaches that block from THREE places: the two `.?` success paths
+> (one via `goto end`, one by falling out of the optional-ok branch) and the ordinary `x.(T)`
+> fall-through. Odin has no `goto`, and the port had transcribed each `.?` success as `return kind`
+> -- so both of them skipped this entirely."
+`check_type_assertion` CALLS it at :7252. This is "a hoisted helper cites call sites below it", which
+citemono's own footer names as legitimate. **Tell-tale I nearly missed: :7259's comment sits at COLUMN
+0 while the other five are indented inside the proc body. Indentation identified it before I read it.**
+
+**THE OTHER TWO ARE NOT ABOUT ORDER AT ALL -- THEY POINT OUTSIDE THE FUNCTION.**
+`check_type_assertion` BEGINS at **check_expr.cpp:11665** (`gb_internal ExprKind check_type_assertion(...)`).
+ * `:7114` cites **11659** for a C++ ``goto end`` -- 11659 is `o->mode = Addressing_Value;` in the
+   **PRECEDING** function, and it is not a goto. The real `goto end` is at **11720** -> drift **+61**.
+ * `:7163` cites **11657-11665**, a range that spans the previous function's tail and ENDS on
+   check_type_assertion's own signature line.
+ * (`:7259`'s prose also names ``goto end`` at ":11641" -- likewise before the function starts.)
+**So the 11657/11659 "inversion" is not a reordering; it is two citations that resolve to code the
+function does not contain.** Same positive-drift direction as #771 (+90) and #772 (+35..+40).
+
+**WHAT I DID NOT ESTABLISH, AND WHY THE GROUP STAYS UNDISPOSITIONED.** The remaining pair
+(`:7190` cites 11689-11695 "THE ORDER HERE IS LOAD-BEARING"; `:7230` cites 11684 "reports the actual
+type") is unresolved. 11684 is `if (is_type_untyped(o->type)) {`, whose message is "A type assertion
+cannot be applied to an untyped expression" -- it reports the EXPRESSION, not the type, so the
+citation does not support its claim either. **But I did not locate their true homes, and that is
+exactly the test that made #772 dispositionable: does the inversion SURVIVE the drift correction?
+Unanswered here, so no entry.** An entry now would generalise from the one inversion I did clear.
+
+**PORT BEHAVIOUR IS NOT IN QUESTION** -- this surface was fixed by #561 (`.?` skipped the
+type-assertion dependency tail; flags column went to 0 corpus-wide) and by the helper extraction
+above. This is a citation finding, not a semantics finding.
+**Drift RECORDED, NOT CORRECTED, per #739.** Fourth group running with stale citations.
+
+## #774 -- check_files (3/6): the PHASE DRIVER. One inversion PROVEN to be a stale range over a
+## phase order that MATCHES C++ EXACTLY. The other two are a REAL ORDER QUESTION, still OPEN.
+
+`check_files.odin check_files -> checker.cpp check_parsed_files` (note the RENAME). Loadavg 7.81 and
+falling. Oracle unchanged. **This is the highest-stakes file in the #610 queue: phase ORDER here is
+semantics, which is exactly what #111 proved (file-scope #assert drained before exports permanently
+cached wrong sizes, -18,226).** So "the inversion is probably an artifact" is NOT a safe default here.
+
+**PART 1 -- SETTLED, AND IT IS A NON-DEFECT.** The C++ phase order, read off the TIME_SECTION list
+(the authority, not the citations):
+```
+7753 check deferred procedures      7762 add type info for type definitions
+7756 check objc context provider    7766 update dependency tree for procedures
+7759 calculate global init order    7769 generate minimum dependency set
+```
+The port runs `check_deferred_procedures` -> `check_objc_context_provider_procedures` ->
+`store_global_init_order` -> `add_type_info_for_type_definitions` -> merge ->
+`check_update_dependency_tree_for_procedures` -> `generate_minimum_dependency_set_internal`.
+**THAT IS C++'s ORDER, PHASE FOR PHASE. There is no reordering.**
+The `:276` inversion is manufactured ENTIRELY by a stale RANGE: it cites **7755-7768** claiming to
+span "add type info for type definitions" through "check #soa types", but those phases are really at
+**7762** and **7775** -- the true span is **7762-7775**, and the cited start (7755, which is inside
+"check objc context provider") dips below `:258`'s correct 7759. **A wrong range, not a wrong order.**
+`:258` (7759-7760, "calculate global init order") is CORRECT -- partial-correction signature for the
+third time (#770, #771, #772).
+
+**PART 2 -- OPEN, AND NOT SAFE TO ASSUME BENIGN.** The remaining two inversions sit in the tail.
+Phases there (now pinned):
+```
+7823 check unique package names   7851 initialize and check for collisions in type info array
+7826 sanity checks                7905 sort init and fini procedures
+7842 add untyped expression values 7909 check intrinsics.__entry_point usage
+```
+Port order is `:346` (**7900-7909** = sort init/fini + __entry_point) THEN `:371` (**7824** = unique
+package names) THEN `:417` (**7851-7902** = type-info-array collisions). **C++ runs 7823 and 7851
+BEFORE 7905.** So on the citations as written the port runs sort-init/fini FIRST -- a genuine
+reordering of the driver, or three more stale ranges. **I DID NOT RESOLVE WHICH, AND I AM NOT GUESSING
+IT.** Given #111, the two candidate readings have very different consequences.
+**NEXT STEP IS SPECIFIC: read check_files.odin :340-:420 and compare the CALL SEQUENCE against the
+TIME_SECTION list above, the same way Part 1 was settled.** The method that worked: trust the
+TIME_SECTION list, not the citation numbers.
+
+**Group UNDISPOSITIONED.** Part 1 alone would be dispositionable, but the entry would sit next to an
+unresolved ordering question in the one file where ordering is semantics.
+**Drift RECORDED, NOT CORRECTED, per #739.** FIFTH group running, ALL with stale citations.
+
+### #774 PART 2 -- ANSWERED, AND IT IS NOT STALE RANGES. THE PORT'S TAIL PHASE ORDER GENUINELY
+### DIVERGES FROM CURRENT C++ IN THREE PLACES. **NOT ACTED ON -- THIS NEEDS JON.**
+
+Method: extracted the COMPLETE top-level call sequence of `check_files` (not a filtered grep -- the
+partial extraction I did first could have missed calls, and that distinction decides the finding) and
+compared it against the `TIME_SECTION` list, which is the structural authority.
+
+**THE HEAD MATCHES C++ EXACTLY, phase for phase, all the way to `generate_minimum_dependency_set`:**
+```
+:152 check_all_global_entities 7702   :240 add_basic_type_information        7728
+:156 init_preload             7705    :248 check_deferred_procedures         7753
+:163 add_untyped_expressions  7708    :255 check_objc_context_provider       7756
+:192 check_procedure_bodies   7715    :273 store_global_init_order           7759
+:200 check_foreign_import_...  7718   :281 add_type_info_for_type_definitions 7762
+:204 merge (add entities...)  7721    :284 check_update_dependency_tree      7766
+:229 check_all_scope_usages   7724    :290 generate_minimum_dependency_set   7769
+```
+**AFTER THAT IT DOES NOT.** Port tail vs C++ tail:
+```
+PORT  :337 check_unchecked_bodies      :363 check_for_type_cycles     :403 check_instrumentation_calls
+      :343 check_sort_init_and_fini    :367 check_for_inline_cycles   :411 resolve_global_untyped_exprs
+      :347 check_intrinsics_entry_pt   :377 check_entry_point         :437 finalize_min_dep_type_info
+      :351 check_test_procedures
+C++   7747 type cycles / 7750 inline cycles  <- BEFORE deferred(7753), i.e. VERY EARLY
+      7783 test procs / 7789 entry point / 7817 unchecked / 7823 unique names
+      7831 instrumentation / 7842 untyped values / 7851 type info array
+      7905 sort init+fini / 7909 __entry_point usage / 7920 collate / 7926 finish
+```
+**THREE DIVERGENCES, each verified from the call list:**
+1. **`check_for_type_cycles` / `check_for_inline_cycles`** -- C++ runs them at **7747/7750**, right
+   after "add basic type information" (7728) and BEFORE "check deferred procedures" (7753). The port
+   runs them at **:363/:367**, after min-dep-set, after sort-init/fini, after test procedures. A move
+   of roughly ELEVEN phases.
+2. **`check_sort_init_and_fini_procedures` (7905)** and **`check_intrinsics_entry_point_usage`
+   (7909)** -- C++ runs these nearly LAST, after the type-info array (7851). The port runs them at
+   **:343/:347**, before test procedures, entry point, unique names, instrumentation and the type-info
+   array.
+3. **`check_test_procedures` (7783) / `check_entry_point` (7789)** are ADJACENT in C++; the port
+   separates them by the two cycle checks.
+
+**WHY I AM NOT CALLING THIS A DEFECT, AND NOT TOUCHING IT:**
+ * Some moves in this file are DELIBERATE and documented at the site -- `store_global_init_order`
+   (:273) carries a written rationale for exactly such a move, and its citation is CORRECT. I have
+   NOT read the prose at :358, :371, :383 and :417 in full; those comments may justify these three.
+ * **THIS FILE CARRIES TWO CITATION VINTAGES.** :190 says "C++ line 7343: check_procedure_bodies",
+   and :358/:362/:366/:376 cite **7364-7427 / 7400 / 7403 / 7441-7463** -- a layout in which
+   check_parsed_files lived around 7343-7463. The 7700-7909 citations are a different, later vintage.
+   **So the tail was very likely written against an OLDER checker.cpp, and whether C++'s ORDER (not
+   just its line numbers) changed between those vintages is UNKNOWN TO ME.** That question decides
+   whether this is port drift or upstream churn, and I cannot answer it from this checkout alone.
+ * Reordering phases here is the #111 class (file-scope `#assert` drained before exports ->
+   permanently cached wrong sizes, -18,226). **A speculative "fix" could be far worse than the
+   divergence.** Every gate is currently green, so nothing here is presently observable.
+
+**FOR JON -- THIS IS THE MOST SUBSTANTIVE THING #610 HAS TURNED UP.** It is a structural question
+about the phase driver, not a citation question. Suggested order of work if you want it pursued:
+(a) read the four comment blocks named above for existing rationales; (b) establish whether the C++
+tail order changed between the two vintages; (c) only then decide if anything moves.
+**NO EDIT MADE. Group remains UNDISPOSITIONED.**
+
+### #774 PART 3 -- THE VINTAGE QUESTION IS ANSWERED. **CORRECTION: I WROTE THAT IT WAS "NOT
+### ANSWERABLE FROM THIS CHECKOUT". THAT WAS WRONG -- THE GIT HISTORY IS RIGHT HERE.**
+
+`git log` on `src/checker.cpp` reaches back to 2016. Read-only history commands (`git log`, `git
+show`) are outside the NEVER-list, which bans stash/checkout--/restore/reset. **A claim of
+"unanswerable" should have been tested before being written down (#208: logs are claims).**
+
+**METHOD:** compare the ORDER OF TIME_SECTION NAMES (line numbers stripped) between revisions. The
+name order is the phase order; it is immune to the numbering drift that makes the citations useless.
+
+| probe date | rev | `check procedure bodies` @ | TIME_SECTIONs | tail-33 order vs TODAY |
+|---|---|---|---|---|
+| 2026-01-15 | f4a7e0b27 | -- | 52 | **IDENTICAL (full slice 7696-7926)** |
+| 2026-01-01 | 93d7e2a45 | **7373** | 52 | **SAME-ORDER** |
+| 2025-09-01 | 938104071 | 7103 | 49 | ORDER-DIFFERS |
+| 2025-06-01 | 229c73482 | 6762 | 48 | ORDER-DIFFERS |
+| 2025-01-01 | e38a08013 | 6499 | 46 | ORDER-DIFFERS |
+
+**THE PORT'S TAIL CITES A LAYOUT WITH `check_procedure_bodies` AT ~7343 (and the function spanning
+~7343-7463). THE 2026-01-01 REVISION HAS IT AT 7373 -- THIRTY LINES AWAY. AT THAT VINTAGE THE TAIL
+PHASE ORDER IS ALREADY IDENTICAL TO TODAY'S.**
+
+**CONCLUSION: the three divergences in Part 2 are a PORT-SIDE ordering choice, NOT upstream churn.**
+C++ has not moved these phases relative to one another since ~2026-01. That removes the strongest
+benign explanation I had offered.
+
+**~~WHAT REMAINS~~ -- BISECT DONE, THE WINDOW IS CLOSED.** Signature = md5 of the full TIME_SECTION
+NAME list (whitespace-stripped, numbers absent), walked backwards from HEAD until it changes:
+```
+OLDEST rev carrying TODAY'S order:  01258d481   2025-09-10  "Multithread 'check all scope usages'"
+  check_procedure_bodies@ there:    7295
+boundary is GENUINE, not a search-depth artifact:  938104071 (2025-09-01, @7103) DIFFERS
+```
+**The port's tail cites `check_procedure_bodies` at ~7343, which is AFTER 7295.** The line number
+grows monotonically across every sample (7103 -> 7295 -> 7343 -> 7373 -> 7715), so a 7343 vintage
+necessarily falls inside `[01258d481, HEAD]` -- and EVERY commit in that range carries today's order.
+**THEREFORE THE PORT'S TAIL WAS WRITTEN AGAINST A C++ THAT ALREADY HAD TODAY'S PHASE ORDER. The
+divergence is PORT-SIDE, unambiguously. No residual window, no "maybe it was churn".**
+(The phase COUNT going 49 -> 52 was phases being ADDED, which does not reorder the survivors.)
+Also note the earlier rows' "ORDER-DIFFERS" is partly an artifact -- with 46-49 total sections a
+"tail-33" slice covers a different phase set. The 2026-01-15 row is the clean one: FULL slice,
+52 vs 52, identical.
+
+**THIS DOES NOT MAKE IT A DEFECT, AND STILL NOTHING MOVES WITHOUT JON.** Reason (a) from Part 2
+survives untouched: moves here are sometimes deliberate and documented at the site, and :358/:371/
+:383/:417 are still unread. Reason (c) survives: this is the #111 class and every gate is green.
+What has changed is that reason (b) -- "probably upstream churn" -- is now **refuted**.
+
+### #774 PART 4 -- THE FOUR COMMENT BLOCKS ARE READ. **REASON (a) IS NOW REFUTED TOO, AND BY THE
+### PORT'S OWN WORDS. ALSO: I MIS-MAPPED TWO PROCS IN PART 2 -- CORRECTED HERE.**
+
+**CORRECTION TO PART 2 (my error, not a new finding).** `:383` shows there are TWO distinct
+"unchecked" procedures and I conflated them:
+ * `:388 check_safety_all_procedures_for_unchecked` = C++ **7817** "check unchecked (safety measure)".
+   Its comment says "immediately after the entry-point block", and in the port it IS immediately
+   after `check_entry_point` (:377). **CORRECTLY PLACED.**
+ * `:337 check_unchecked_bodies` is therefore C++ **7772** "check bodies have all been checked",
+   which follows `generate_minimum_dependency_set` (7769). **ALSO CORRECTLY PLACED.**
+Re-deriving the whole tail with that fixed, most of it is faithful:
+```
+:337 unchecked_bodies      7772 OK      :377 entry_point            7789 OK
+:343 sort_init_and_fini    7905 WRONG   :388 safety_all_procedures  7817 OK
+:347 intrinsics_entry_pt   7909 WRONG   :403 instrumentation        7831 OK
+:351 test_procedures       7783 OK      :411 resolve_global_untyped 7842 OK
+:363 for_type_cycles       7747 WRONG   :437 finalize_min_dep       7851 OK
+:367 for_inline_cycles     7750 WRONG
+```
+**So the divergence is not three loose items -- it is TWO CLUSTERS:**
+1. **`sort_init_and_fini` (7905) + `intrinsics_entry_point` (7909) run ~9 phases TOO EARLY** -- they
+   belong AFTER `finalize_minimum_dependency_type_info` (:437 / 7851), not at :343/:347.
+2. **`for_type_cycles` (7747) + `for_inline_cycles` (7750) run ~11 phases TOO LATE** -- C++ runs them
+   BEFORE `check_deferred_procedures` (7753), i.e. before the port's :248.
+(Part 2's third item -- test_procedures/entry_point being split -- was just a consequence of 2.)
+
+**>>> THE DECISIVE EVIDENCE: :417 CONTRADICTS ITSELF, IN THE PORT'S OWN WORDS. <<<**
+`:417`'s comment on `finalize_minimum_dependency_type_info` states:
+> "C++ runs this block immediately after TIME_SECTION("add untyped expression values") (:7842-7849),
+> which is `resolve_global_untyped_expressions` above, and **immediately before TIME_SECTION("sort
+> init and fini procedures") (:7905). That is the position here.**"
+
+**IT IS NOT THE POSITION HERE.** `check_sort_init_and_fini_procedures` is at **:343** -- roughly
+NINETY LINES EARLIER, and before `resolve_global_untyped_expressions` (:411) as well. The first half
+of the claim holds (finalize does follow resolve_global_untyped_expressions); the second half is
+false. **The site documents the intended order and the file violates it.**
+
+**THAT KILLS REASON (a).** These two are NOT deliberate documented moves. Compare the genuinely
+deliberate ones, which are explicit and self-consistent:
+ * `:273 store_global_init_order` -- written rationale, correct citation, correct position.
+ * `:371 package_names_are_unique` -- carries a VALUE to the tail collision check "exactly as C++
+   carries its local (#711)", and the relative order (unique names before type-info array) IS
+   preserved. Genuinely fine.
+ * `:383`, `:403` -- both cite their C++ position and both sit at it.
+**Every block that explains a move places it correctly. Cluster 1 has no rationale anywhere and is
+contradicted by :417. Cluster 2 (`:358` "Phase 7: Validation", citing the OLD 7364-7427 span) is a
+grouping header, not a justification -- and in current C++ eleven phases sit between inline cycles
+(7750) and entry point (7789), so the "Phase 7" grouping does not correspond to any C++ block.**
+
+**WHAT IS STILL NOT ESTABLISHED, AND WHY I STILL WILL NOT TOUCH IT:** whether either cluster CHANGES
+OBSERVABLE BEHAVIOUR. All gates are green. :417 itself notes the type-info table is **EXPLICITLY
+UNMEASURED** -- `type_info_index`/`type_info_index_pair` have ZERO CALLERS in this port (C++'s only
+real caller is `lb_type_info_index` in the LLVM backend, out of scope), so no gate here can observe
+the table. That cuts BOTH ways: it is why cluster 1 is invisible today, and why moving it cannot be
+validated by any gate in this repository. **#111 is the standing warning. NOTHING MOVES WITHOUT JON.**
+
+**RECOMMENDATION IF PURSUED:** cluster 1 is the cheaper and better-evidenced fix -- move
+`check_sort_init_and_fini_procedures` + `check_intrinsics_entry_point_usage` to AFTER :437, which is
+exactly what :417 already says the layout should be. Cluster 2 (hoisting the cycle checks above
+`check_deferred_procedures`) is the riskier one and should be judged separately.
+
+## #775 -- check_struct_type (2/4): DISPOSITIONED. The cleanest case in the #610 walk -- the
+## inversion DISSOLVES COMPLETELY under drift correction, so there is nothing to explain.
+
+`check_type.odin check_struct_type -> check_type.cpp check_struct_type`. Loadavg 1.74, box quiet.
+Backup `$S/pre775_citemono_dispositioned.txt` md5 `7d95ae966ca09dfe549b60dd0da43764` (pre-edit).
+
+**Function bounds checked first (#773's lesson): C++ `check_struct_type` begins at 659, so all four
+cited lines are genuinely INSIDE it.** Then each comment's own claim grepped for its real home:
+
+| port  | cites | what is AT the cited line | REAL home | drift |
+|-------|-------|---------------------------|-----------|-------|
+| :1126 | 665 | `isize min_field_count = 0;` | **694** `wait_signal_set(&...polymorphic_wait_signal)` | +29 |
+| :1153 | 711-723 | the `#simple` block (LEDGER #312) | **CORRECT** | 0 |
+| :1186 | 681 | `struct_type->Struct.is_raw_union = true;` | **725** `wait_signal_set(&...fields_wait_signal)` | +44 |
+| :1202 | 686 | `struct_type->Struct.scope = ctx->scope;` | **730** `"'#%s' cannot be applied with '#packed'"` | +44 |
+
+**CORRECTED ORDER IS 694, 711-723, 725, 730 -- STRICTLY ASCENDING, matching the port's :1126, :1153,
+:1186, :1202 exactly. THE INVERSION VANISHES.** No reordering, no guard-overlap question, nothing to
+argue: the port's sequence IS C++'s sequence, and the inversion was manufactured entirely by three
+stale numbers. **This is the first group where step (6) of the method -- "does the inversion SURVIVE
+drift correction?" -- answered NO, which is what makes it trivially dispositionable.**
+
+**:1153 being correct while its three neighbours are stale is the PARTIAL-CORRECTION SIGNATURE for the
+FOURTH time** (#770 check_proc_group copy only; #771 :2535/:2591 only; #772 :9898-adjacent; #774
+:273/:371 only). Someone has repeatedly corrected part of a group and stopped.
+
+**Also worth noting:** :1202 sits inside the NESTED `check_align` proc defined at :1196 -- it would
+have qualified for the tool's own "hoisted nested helper" exemption. **Checking the drift first made
+that exemption unnecessary; had I reached for it, I would have "explained" the group without noticing
+the citations were wrong.** Prefer the arithmetic to the exemption.
+
+**DISPOSITIONED** in `.claude/tools/citemono_dispositioned.txt`; tool re-run prints
+`[untriaged; DISPOSITIONED]` with the reason, `CITEMONO-RC=0`.
+**Drift RECORDED, NOT CORRECTED, per #739.** Seventh group read; SEVEN of seven had stale citations.
+
+## #776 -- check_unary_expr (2/5): DISPOSITIONED. A REAL reordering this time, but inert -- and the
+## FIRST group in eight whose citations are NOT wholesale stale.
+
+`check_expr.odin check_unary_expr -> check_expr.cpp check_unary_expr`. Loadavg 20.8, oracle unchanged.
+Backup `$S/pre776_citemono_dispositioned.txt` md5 `8ed072f0ab0b2d658094db101fe9180b` (pre-edit).
+
+Function begins at **2923**, so all five citations are inside it. **The last four ASCEND PERFECTLY**
+(:2730 -> 2930-2957, :2767 -> 2976-3006, :2803 -> 3004-3013, :2823 -> 3008-3016). The only thing
+breaking monotonicity is the LEADING `:2675`, citing 2995-3035 for the `**x` expand_values operator.
+
+**Verified by content: `case Token_MulMul` is at 3034.** The cited range brackets it but starts 39
+lines early -- imprecise, though its tail does contain the real line. **So unlike #775, the inversion
+SURVIVES drift correction** (3034 genuinely follows 2930 and 2976): the port really does hoist the
+`.Mul_Mul` branch to the top of the procedure, above the address-of arm.
+
+**INERT.** C++ 3034 is an arm of a `switch (op.kind)` whose preceding address-of arm ends with
+`return;` at 3031; the port's hoisted branch is guarded by `if op.kind == .Mul_Mul`. A token kind
+cannot be both `.Mul_Mul` and `&`, so no input reaches both arms and order cannot decide which fires.
+Same class as the already-dispositioned `check_expr_base_internal` / `check_builtin_procedure_directive`
+entries. **The port's comment ("handled before check_unary_op") is CORRECT** -- `check_unary_op` is
+called at **3077**, after the switch, so C++ also handles MulMul before it; the port only moves it
+earlier WITHIN that pre-3077 region. The branch opens `if o.type == nil { return }`, matching C++
+3035-3037 exactly. **LIMIT: mutual exclusivity argued from the switch/guard structure, not
+machine-checked.**
+
+**NOTABLE -- THE STREAK BREAKS.** Eight groups read and this is the first whose citations are not
+wholesale stale: four of five are accurate, and the fifth is a loose-but-bracketing range rather than
+a wrong target. **So "the citations are always rotten" is itself becoming a premise worth doubting**
+(#208). The partial-correction signature does not appear here either.
+
+**DISPOSITIONED**; tool re-run prints `[untriaged; DISPOSITIONED]`, `CITEMONO-RC=0`.
+**#610 tail now: `check_type_switch_stmt` 2/9, `check_switch_stmt` 2/7, `process_all_delayed_decls` 2/6.**
+
+## #777 -- process_all_delayed_decls (2/6): DISPOSITIONED. A NEW ARTIFACT CLASS, and the phase the
+## port DELIBERATELY DOES NOT RUN turns out to be the #111 fix.
+
+`check_collect.odin process_all_delayed_decls -> checker.cpp check_import_entities`. Loadavg 74.4 and
+rising -- reading only, which is why #610 is the right task under load. Oracle unchanged. Backup
+`$S/pre777_citemono_dispositioned.txt` md5 `1fbe45f17551140ec08aa399455cbc90`.
+
+**THE TELL WAS A REPEATED RANGE.** :1566 cites the same 6235-6238 as :1560, and :1569 the same
+6284-6296 as :1561. That is not a loop and not a reordering -- **the proc's DOC COMMENT enumerates its
+three phases with a citation each, and then the BODY re-cites the same lines at the actual calls:**
+```
+DOC HEADER  :1557 whole fn 6228-6310 | :1560 ph1 6235-6238 | :1561 ph2 6284-6296 | :1562 ph3 6303-6307
+BODY        :1566 ph1 6235-6238      | :1569 ph2 6284-6296
+```
+The header ascends 6235 -> 6284 -> 6303, the body restarts at 6235, and the inversion is manufactured
+entirely by that duplication. **A DOC COMMENT IS NOT CODE -- there is no ordering claim to violate.**
+**NEW CLASS, WILL RECUR: recognise it by the SAME RANGE appearing twice, once above the signature and
+once inside the body.** None of the eight earlier groups had this shape.
+
+**THE MORE INTERESTING HALF: only phases 1 and 2 repeat.** Phase 3 (directive expressions, 6303-6307)
+is cited in the header but **deliberately NOT run here** -- and the site explains why at length. This
+is the **#111 fix**, stated in its own words: C++ drains the Expr queue inside `check_import_entities`
+(6303-6307), which is AFTER `check_export_entities_in_pkg` (6119) has published entities into the
+package scope. `process_all_delayed_decls` runs during `check_collect_entities_all`, i.e. BEFORE any
+export, so a file-scope `#assert(size_of(T) == N)` evaluated here cannot see types declared in OTHER
+FILES of the same package. The consequence was severe and silent: sizing the asserted type forced a
+bit_set whose element enum lived in another file, the enum resolved to nothing, the bit_set degraded
+to 1 byte, and **the wrong size was cached for the rest of the run** --
+`core/sys/linux/types.odin`'s `#assert(size_of(IO_Uring_SQE) == 64)` is why `linux.Mode` measured 1
+instead of 4 and every dependent package saw `bit_set[0..=0]`. The drain happens in
+`check_delayed_expressions_all` instead.
+**RECORDED IN THE DISPOSITION AS "DO NOT RESTORE PHASE 3 HERE"** -- a reader who saw a cited-but-absent
+phase could easily "fix" it and reintroduce -18,226 diagnostics.
+
+**DISPOSITIONED**; tool re-run prints `[untriaged; DISPOSITIONED]`, `CITEMONO-RC=0`.
+**2-inversion tier now has TWO left: `check_type_switch_stmt` 2/9, `check_switch_stmt` 2/7.**
+
+## #778 -- check_switch_stmt (2/7): DISPOSITIONED. A pure IF/ELSE ARM SWAP, and ALL SEVEN CITATIONS
+## ARE ACCURATE -- the third clean group running.
+
+`check_stmt.odin check_switch_stmt -> check_stmt.cpp check_switch_stmt`. Loadavg 12.6 falling; oracle
+unchanged. Backup `$S/pre778_citemono_dispositioned.txt` md5 `f6f5d8913ce8386ed04934964e6ad10d`.
+
+Function begins at **1150**, so all seven citations are inside it. C++ **1304-1329 is ONE
+`if (y.mode == Addressing_Type) { ... } else { ... }`**:
+```
+TYPE  arm 1304-1312: error("Invalid type for case clause") guard; t = default_type(t);
+                     add_type_info_type(ctx, t); add_type_to_seen_map(ctx, &seen, y)   <- 1312
+VALUE arm 1314-1329: convert_to_typed; check_comparison; update_untyped_expr_type;
+                     add_to_seen_map        -- carries `// NOTE(bill): the ordering here matters` @1319
+```
+Checked by content, **every citation holds**: `:2243` (1303-1313) brackets the TYPE arm; `:2269`
+(1312) is exactly `add_type_to_seen_map`, which its own comment calls "record the type for duplicate
+detection (#298)"; `:2199` (1314-1329) is the VALUE arm and its comment refers to the `NOTE(bill)`
+line that arm carries.
+
+**The inversion is a pure ARM SWAP** -- the port emits the VALUE arm first and the TYPE arm second,
+where C++ writes `if (Type) ... else ...`. **INERT:** the two are branches of a single condition on
+`y.mode`; an operand either IS `Addressing_Type` or is not, so no input reaches both and order cannot
+decide which runs. Same family as #771's two-arm artifact and the mutual-exclusivity arguments in
+#772/#776. **LIMIT: argued from the if/else structure, not machine-checked.**
+
+**THIRD CONSECUTIVE CLEAN GROUP (#776, #777, #778).** The "citations are always stale" impression from
+#770-#775 does not generalise, and I have now recorded that in the disposition itself so the next
+reader does not inherit my earlier bias. **Premise (a) is now firmly refuted, not merely doubted.**
+
+**DISPOSITIONED**; tool re-run prints `[untriaged; DISPOSITIONED]`, `CITEMONO-RC=0`.
+**2-inversion tier: ONE left -- `check_type_switch_stmt` 2/9. Then the tier is EXHAUSTED and whether
+#610 continues into the 1-inversion tier is JON'S CALL, not mine.**
+
+## #779 -- check_type_switch_stmt (2/9): **NOT DISPOSITIONED. A REAL UNDER-REPORTING DIVERGENCE** --
+## the first genuine semantic finding the 2-inversion tier has produced.
+
+`check_stmt.odin check_type_switch_stmt -> check_stmt.cpp check_type_switch_stmt`. Loadavg 66.7 and
+rising; reading only. Oracle unchanged. Function begins at **1407**, so all nine citations are inside.
+
+**THE STRUCTURE (verified by reading both sides):**
+```
+C++    ... case-clause LOOP ... 1475-1484 "Multiple default clauses"  (INSIDE the loop)
+       1485 }                                                          (loop CLOSES)
+       1487-1490 if (lhs->kind != Ast_Ident) { error(rhs, "Expected an identifier..."); RETURN; }
+PORT   :2487 the lhs-identifier check ... :2499 `error_node(rhs, ...); return viral_flags`  <- RETURNS
+       :2520 the case-clause loop ... :2523 "Multiple default clauses"   <- NEVER REACHED if lhs is bad
+```
+**CONSEQUENCE: for a type switch whose LHS is not an identifier AND which also has MULTIPLE DEFAULT
+CLAUSES, C++ emits the "Multiple default clauses" error(s) from the loop and THEN the identifier
+error. The port returns at :2499 and emits ONLY the identifier error.** A missing diagnostic in a
+compound-error case.
+
+**THIS IS A HALF-APPLIED FIX, AND THE SITE SAYS SO.** `:2487`'s comment documents three deliberate
+points, the first being: *"It sits AFTER the switch-kind validation, which RETURNS. The port ran it
+before check_expr, so an invalid type switch reported this extra diagnostic that C++ never emits."*
+So the check was moved from FAR TOO EARLY to AFTER SWITCH-KIND VALIDATION -- **but C++ has it after
+the CASE-CLAUSE LOOP, one step further still.** The earlier fix stopped short. (The comment's other
+two points are sound and verified: it names the node KIND not the node -- the old `%v` dumped ~700
+chars of Expr struct, the #83 class; and it reproduces an UPSTREAM ODDITY where C++ reports the kind
+of RHS and positions at RHS though it is LHS that failed. Both faithful.)
+
+**NOT REPRODUCED. NO PROBE BUILT.** The input needs BOTH a non-identifier LHS and duplicate defaults
+in one type switch -- a compound error case, which is why every gate is green and no corpus package
+exercises it. **The divergence is derived from reading the control flow on both sides, not observed.**
+Building `sw := x.(type)`-shaped probe with a bad LHS plus two `case:` clauses would settle it in one
+run; not done this tick.
+
+**SECOND INVERSION UNTRACED:** `:2679` (1593-1597, "This is a SECOND ...") precedes `:2709`
+(1557-1565, creating the narrowed tag-variable entity). Same shape, not yet read. **Stating it rather
+than assuming it matches the first.**
+
+**GROUP LEFT UNDISPOSITIONED** -- an entry would claim the inversions are NOT defects, and the first
+one looks like one. **2-inversion tier is now EXHAUSTED. Whether #610 continues into the 1-inversion
+tier is JON'S CALL.**
+
+---
+
+## #780 — #773 CLOSED: `check_type_assertion`'s three inversions all dissolve under drift correction
+
+**Status: DISPOSITIONED. No source change. `citemono.py --proc check_type_assertion` RC=0, group now
+labelled `[untriaged; DISPOSITIONED]`.**
+**Port:** `core/odin/checker/check_expr.odin` `check_type_assertion` (3 inversions / 6 citations)
+**Reference:** `src/check_expr.cpp` `check_type_assertion`, **which begins at 11665**
+
+This finishes the one loose end left open when #773 ran out of tick. Two citations were untraced
+(`:7190`, `:7230`); a third (`:7163`) had been read but not resolved.
+
+### Method: grep each comment's own quoted text for its real home (#610 rule 3)
+
+The citations are useless here — **two of the six point OUTSIDE the function entirely**: `:7114`
+cites 11659 and `:7163` cites 11657-11665, both landing on the *preceding* function's tail plus this
+one's signature line. So every site was located by its own quoted C++ text instead:
+
+| port site | cites | quoted / emitted text used to locate it | REAL home | drift |
+|---|---|---|---|---|
+| `:7114` | 11659 | ``goto end`` | **11720** | +61 |
+| `:7163` | 11657-11665 | `"Cannot type assert '%s' to '%s' as this is an empty union"` | **11755** | ~+95 |
+| `:7190` | 11689-11695 | `} else if (is_type_any(src)) { o->type = t; o->mode = Addressing_OptionalOk;` | **11769** | +80 |
+| `:7230` | 11684 | `"Type assertions can only operate on unions and 'any', got %s"` | **11777** | +93 |
+
+**Corrected order: 11720 → 11755 → 11769 → 11777. STRICTLY ASCENDING**, and it matches the port's
+own order `:7114 → :7163 → :7190 → :7230` position for position. **Every numeric inversion is an
+artifact of stale line numbers. There is no reordering here.** This is the #775 pattern — prefer the
+arithmetic to the exemption.
+
+### The fifth flagged item is a different procedure
+
+`:7259` is **not inside `check_type_assertion` at all**. It is the doc comment of
+`add_type_assertion_dependencies`, a separate top-level proc the port extracted because **Odin has no
+`goto`** and C++ reaches its `end:` block from three places (both `.?` success paths and the ordinary
+`x.(T)` fall-through). `check_type_assertion` *calls* it at `:7252`. That is precisely the tool's own
+"a hoisted helper cites call sites below it" exemption.
+
+**TELL-TALE, reusable:** `:7259` sits at **column 0** while the five real citations are indented
+inside a body. Same signal that settled #773's first pass and #777.
+
+### Port behaviour is not in question
+
+This surface was already corrected by **#561** (`.?` skipped the type-assertion dependency tail; the
+modelsweep flags column went to 0 corpus-wide) and by the helper extraction itself. Nothing here is
+a behavioural finding — it is a citation-vintage finding, and per **#739** the drift is **RECORDED,
+NOT CORRECTED**.
+
+### Scorecard movement
+
+**#610: 12 groups read, 6 DISPOSITIONED, 4 still open.** The 2-inversion tier remains exhausted;
+#773 was a 3-inversion group and the last loose end from it. Still open and undispositioned:
+**#770 (18/23, blocked on Jon), #771 (4/8, live semantic question), #779 (2/9, a REAL divergence).**
+
+---
+
+## #781 — `check_type_switch_stmt`: the tag variable is bound at POINTER type in every non-single-type clause
+
+**Status: FOUND, NOT FIXED, NOT REPRODUCED. Derived from reading both sides. Second real finding in
+the #779 group, which therefore stays UNDISPOSITIONED.**
+**Port:** `core/odin/checker/check_stmt.odin` `check_type_switch_stmt` — `:2567`, `:2676`, `:2715`
+**Reference:** `src/check_stmt.cpp` `check_type_switch_stmt` — 1516, 1586-1591, 1601
+
+Found while tracing #779's second inversion (`:2679` cites 1593-1597 yet precedes `:2709` citing
+1557-1565). **`:2679`'s citation is ACCURATE** — C++ 1592-1596 is exactly that `add_type_info_type`
+block. `:2709`'s is not: 1557-1565 is the in-loop variant validation, while the tag variable is
+created at **1601**. But the ordering question turned out to be the less interesting half.
+
+### C++ uses a two-step nullptr sentinel; the port collapses it to one condition
+
+```cpp
+Type *case_type = nullptr;                                        // 1516, per clause
+...
+if (cc->list.count > 1 || saw_nil) { case_type = nullptr; }       // 1586-1588
+if (case_type == nullptr)          { case_type = type_deref(x.type); }  // 1589-1591
+...
+Entity *tag_var = alloc_entity_variable(ctx->scope, lhs->Ident.token, case_type, ...);  // 1601
+```
+```odin
+case_type := x.type                                    // :2567  <- init, NOT type_deref
+...
+if len(case_clause.list) > 1 || saw_nil {
+    case_type = x.type                                 // :2676  <- NOT type_deref
+}
+...
+tag_var := alloc_entity_variable(ctx.scope, tag_token, case_type, ...)   // :2715
+```
+
+**Two defects, both in the same collapse:**
+
+1. **No `type_deref`.** C++'s fallback is `type_deref(x.type)`; the port writes `x.type`.
+2. **The DEFAULT clause is not covered.** C++'s test is `case_type == nullptr`, which is still true
+   for a clause with an empty list. The port's `len(list) > 1` is FALSE for `len == 0`, so a default
+   clause never enters the branch at all and keeps the `:2567` initialiser — which is also `x.type`.
+
+### `x.type` really can be a pointer — C++ says so twice
+
+- **`check_valid_type_switch_type` (1396-1404) begins `type = type_deref(type);`** — so a subject of
+  type `^Union` is a perfectly valid `TypeSwitch_Union`.
+- **1496:** `if (x.mode != Addressing_Variable && !is_type_pointer(x.type))` — the addressable-element
+  check explicitly contemplates a pointer subject.
+- The port itself derefs at **`:2617`** (`base_type(type_deref(x.type))`), so it already knows this.
+
+### Consequence
+
+For a type switch whose subject is a pointer, e.g. `p: ^U; switch v in p`:
+
+| clause | C++ binds `v` as | port binds `v` as |
+|---|---|---|
+| `case A:` (exactly one type) | `A` | `A` — **correct** |
+| `case A, B:` | `U` | **`^U`** |
+| a clause including `nil` | `U` | **`^U`** |
+| `default:` | `U` | **`^U`** |
+
+Every subsequent use of `v` in those clauses is then checked at the wrong type — `v.field` needs an
+extra deref, assignment compatibility differs, and `size_of(v)` is pointer-sized.
+
+### The half-applied-fix signature, for the second time in this procedure
+
+The port **does** spell C++'s fallback correctly — but only for the RTTI registration, forty lines
+below, and only under `switch_kind == .Any`:
+
+```odin
+reg_type := case_type
+if len(case_clause.list) != 1 || saw_nil { reg_type = type_deref(x.type) }   // :2696-2699
+```
+
+Note `!= 1`, which **does** catch the default clause, and the deref, which is present. Its comment
+even states the rule correctly — *"The deref is deliberate and NOT applied to the single-type case:
+`case ^Foo:` registers `^Foo` in C++, and a blanket `type_deref` would wrongly reduce it to `Foo`"*
+— and cites **LEDGER #690**. So the rule was understood and implemented on the registration path,
+and the tag-variable path one branch above was left with both defects.
+
+**That is exactly #779's shape:** a comment at `:2685-2690` claims equivalence — *"The port's
+`case_type` follows the same flow but keeps `x.type` rather than nil as its sentinel, so the fallback
+is spelled as the explicit condition below"* — and the equivalence fails, because `x.type` is not a
+drop-in for `type_deref(x.type)` and `> 1` is not a drop-in for `== nullptr`.
+
+### Not reproduced
+
+No probe built. **This is read, not observed.** All gates are green, which is consistent: the corpus
+would need a pointer-subject type switch with a multi-type or default clause whose tag variable is
+then *used* in a way that distinguishes `U` from `^U`. One probe settles it:
+
+```odin
+U :: union { int, f32 }
+u: U; p := &u
+switch v in p {
+case int:      _ = v      // both: int
+case int, f32: _ = v      // C++: U      port: ^U
+case:          _ = v      // C++: U      port: ^U
+}
+```
+
+**Same standing question as #779: building it is Jon's call (#178 boundary).** The two probes are the
+same shape and could share one directory.
+
+---
+
+## #782 — polymorphic record instantiation: the STRUCT arm omits the scope C++ opens; the UNION arm has it
+
+**Status: STRUCTURAL DIVERGENCE CONFIRMED, CONSEQUENCE NOT ESTABLISHED — and the evidence points at
+INERT. Not fixed. #771's citemono group is now DISPOSITIONED (see below); this is the residue.**
+**Port:** `core/odin/checker/check_type.odin` `check_polymorphic_record_type` — `:2533` vs `:2587-2589`
+**Reference:** `src/check_expr.cpp` `check_polymorphic_record_type` (begins 8231) — 8543-8545, 8553-8555
+
+### What #771's four inversions actually were
+
+Three of four are **arm-boundary artifacts**. The procedure mirrors C++'s
+`if (bt->kind == Type_Struct) ... else if (bt->kind == Type_Union)` (8536/8546) as a struct arm
+(`:2482-:2535`) and a union arm (`:2548-:2591`), each walking C++ from its own start. **The union arm
+is strictly ascending on its own — 8456 < 8461 < 8462 < 8547.** The tool compares `:2535` (8547-8583)
+against `:2548` (8456) across the boundary and cascades.
+
+The fourth is real but inert. **Every citation here is stale by roughly +90** — C++ 8432-8466 is the
+"replace missing operands with default values" loop and the scoring loop, not instantiation at all.
+Real homes, by grepping each comment's own quoted text:
+
+| port | cites | real |
+|---|---|---|
+| `:2503` `polymorphic_parent` write | 8451 | **8540** |
+| `:2517` `ctx.scope = polymorphic_record_parent_scope(...)` | 8438-8441 | **8529** |
+| `:2566` union `polymorphic_parent` write | 8461 | **8550** |
+| `:2577` `check_union_type` | 8462-8464 | **8554** |
+
+**Corrected, the `:2503`/`:2517` inversion SURVIVES**: C++ sets `ctx.scope` at 8529 *before* writing
+`polymorphic_parent` at 8540; the port writes the field first. It is inert — the two statements are
+independent (a field write on a freshly allocated type vs. copying the caller's ctx into a local),
+with no data dependency either way. The reorder exists because **C++ hoists the ctx setup above the
+struct/union branch (8526-8529, shared), while the port duplicates it inside each arm.**
+
+**A prediction of mine, refuted:** I expected the union arm to lack the parent-scope fix (i.e. #771
+half-applied). It does not — `:2583-2585` has it, same as `:2529-2531`.
+
+### The residue: an asymmetry inside the port
+
+```
+C++ STRUCT 8543-8545:  check_open_scope(&ctx, node); check_struct_type(...); check_close_scope(&ctx);
+C++ UNION  8553-8555:  check_open_scope(&ctx, node); check_union_type(...);  check_close_scope(&ctx);
+PORT UNION :2587-2589: check_open_scope(&inst_ctx, cloned_node); check_union_type(...); check_close_scope(...)
+PORT STRUCT      :2533: check_struct_type(&inst_ctx, ...)              <-- NO open/close pair
+```
+
+The pair is load-bearing in principle: a full-body audit shows **neither `check_struct_type` nor
+`check_union_type` opens a scope internally, on either side** — C++ 659-768 and 769-878, port
+1073-1247 and 2890-3029, zero `check_open_scope`/`check_close_scope` hits in all four.
+
+### Why it nonetheless looks inert here
+
+The port's `check_struct_type` touches `ctx.scope` in exactly three places, and **never inserts an
+entity into it**: `:1092` is a commented-out `scope_reserve`, `:1108` is
+`st.scope = create_scope(ctx.scope, ...)`, `:1144` passes it to `evaluate_where_clauses`. So the
+missing pair changes the scope parent chain by one link — C++ has
+`parent_scope → instantiation_scope → struct_scope`, the port has `parent_scope → struct_scope` —
+and that intermediate link carries nothing the port ever writes. Lookups traverse it identically.
+
+**That is consistent with the observed evidence**: 323 corpus packages, full of polymorphic structs
+(`Queue`, `MPSC_Queue`, the whole `core/container` family), are green on every gate.
+
+**Not claimed proven.** What would settle it: whether anything reaches `inst_ctx.scope` during a
+struct instantiation by a path other than the three above — `evaluate_where_clauses` in particular
+takes it and was not traced. Recording the asymmetry rather than acting on it, since the union arm
+already demonstrates the shape a fix would take.
+
+### Still open and separate: #771's nil guard
+
+C++ 8530 is `GB_ASSERT(ctx.scope != nullptr)` immediately after 8529; the port writes
+`if parent_scope != nil { inst_ctx.scope = parent_scope }`, silently keeping the caller's scope in
+exactly the case C++ declares impossible — the failure mode its own comment says it fixed
+(`MPSC_Queue :: struct($T: typeid) { q: Queue(T) }` → "Undeclared name"). No repro; the assert is not
+portable (#12). **This is tracked as behaviour, and is NOT covered by the disposition.**
+
+---
+
+## #783 — #782 RESOLVED as NOT A DEFECT, and a correction to my own #782 reasoning
+
+**Status: CLOSED. Both arms of `check_polymorphic_record_type` are correct. No change needed.**
+**This also CORRECTS #782's stated evidence, which was right in its conclusion and wrong in its
+mechanism.**
+
+### The mechanism
+
+#782 flagged that the port's struct arm omits the `check_open_scope`/`check_close_scope` pair that
+C++ has around both calls and that the port's own union arm has. The reason is that **the callee
+asymmetry is the mirror image of the caller asymmetry**:
+
+| implementation | what it assigns to the record's `.scope` | so the caller must |
+|---|---|---|
+| C++ `check_struct_type` **688** | `struct_type->Struct.scope = ctx->scope` — **adopts** | **push** — 8543 does |
+| C++ `check_union_type` **775** | `union_type->Union.scope = ctx->scope` — **adopts** | **push** — 8553 does |
+| port `check_union_type` **:2898** | `ut.scope = ctx.scope` — **adopts**, faithful to 775 | **push** — `:2587` does |
+| port `check_struct_type` **:1106-1119** | `st.scope = create_scope(ctx.scope, ...)` then `push_scope(ctx, st.scope)` — **creates** | **not push** — `:2533` doesn't |
+
+C++ pushes an instantiation scope and then *uses that very scope* as the struct scope. The port
+builds the same scope directly and pushes it itself. **Both end with exactly one fresh scope, child
+of the record's parent scope, serving as the record scope.** Had the port's struct arm also called
+`check_open_scope`, it would have had one scope too many.
+
+The port's `:1092` commented-out `scope_reserve` is the visible trace of this: C++ reserves on
+`ctx->scope` at **686** *because* that scope is about to become the struct scope; the port cannot,
+because at that point `ctx.scope` is still the parent.
+
+### The correction
+
+#782 stated that the port's `check_struct_type` "touches `ctx.scope` in exactly three places and
+never inserts an entity into it", concluding the missing scope was a dead link in the lookup chain.
+**That reasoning is wrong.** It came from a textual grep for `ctx.scope`, which cannot see
+`push_scope(ctx, st.scope)` at **`:1119`** — after that line `ctx.scope` *is* `st.scope`. So:
+
+- **`check_record_polymorphic_params` at `:1121` does insert the polymorphic parameters**, into
+  `st.scope`, exactly as C++ inserts them into `ctx->scope`(=`Struct.scope`) at **690-694**. The
+  port's own comment at `:1115-1118` says so and gives the reason: *"critical for nested polymorphic
+  types like `Box(Box(int))` where each level needs its own T binding."*
+- **`evaluate_where_clauses(ctx, node, ctx.scope, ...)` at `:1144` therefore receives `st.scope`,
+  not the parent scope** — matching C++ **706**, which passes its `ctx->scope`(=`Struct.scope`).
+
+So the untraced path I flagged (*"does `evaluate_where_clauses` reach `inst_ctx.scope`?"*) resolves
+cleanly: it receives the record scope on both sides, and a `where` clause naming `$T` resolves
+identically.
+
+**The conclusion of #782 stands — inert — but for a stronger reason than it gave: not "the missing
+scope holds nothing", but "the port already built the equivalent scope by another route."**
+
+### Method note
+
+This is rule 15 (*"missing call" != "defect"; check what the missing call would have held*) applied
+one step further: **check whether the callee already does the work.** A grep for a field name cannot
+see a rebinding of the variable that field hangs off — `push_scope` silently changes what every
+later `ctx.scope` means. **When auditing scope usage, find the `push_scope`/`check_open_scope` calls
+FIRST and read the region between them; a textual hit list is not a data-flow trace.**
+
+---
+
+## #784 — adversarial re-read of #778 finds an EIGHTH citation the tool cannot see, pointing outside the file
+
+**Status: ONE FIRM FINDING (citation), ONE OPEN QUESTION (invented gate). No source change.**
+**Port:** `core/odin/checker/check_stmt.odin` `check_switch_stmt` — `:2273`
+**Reference:** `src/check_stmt.cpp` `check_switch_stmt`, **1150-1387**; the file is **3084 lines**
+
+Ran because #778 was dispositioned on a single fast pass, and `check_switch_stmt` is the direct
+sibling of `check_type_switch_stmt` in the same file — where a fast "clean" pass missed **two** real
+defects (#779, #781).
+
+### Finding 1 — the citation citemono structurally cannot see
+
+`citemono.py` matches citations of the form `check_switch_stmt:NNNN`. It found **seven** in this
+procedure and I verified all seven. But `:2273` carries an eighth, written differently:
+
+```odin
+// C++ lines 8995-9038: Duplicate case value detection
+if y.mode == .Constant && y.value != nil {
+```
+
+**check_stmt.cpp is 3084 lines, and `check_switch_stmt` spans 1150-1387. Line 8995 does not exist in
+that file** — the citation overshoots the end by roughly 5,900 lines. It names no file, so it may
+have been meant for `check_expr.cpp` (which is long enough), but nothing at this site relates to that
+file, and as written it is unverifiable.
+
+**This corrects my own #778 disposition**, which asserted "ALL SEVEN CITATIONS ARE ACCURATE". That
+remains true *of the seven the tool tracks* — but the group has at least eight, and the tool's regex
+is why the eighth was never in the sample. **A group being "fully verified" means fully verified
+against the tool's own extraction, not against the procedure.**
+
+### Finding 2 — OPEN: is `y.value != nil` an invented gate?
+
+C++ ends its value branch with `add_to_seen_map(ctx, &seen, y);` at **1328**, *inside* the
+`else`, reached only after `if (y.mode != Addressing_Constant) continue;`. The port has no call
+there; its `if y.mode != .Type` block ends at `update_untyped_expr_type` (`:2241`). The equivalent
+work was moved **below both branches** under a different gate:
+
+```odin
+if y.mode == .Constant && y.value != nil {   // :2273
+```
+
+Reachability matches C++ on the first conjunct (the port's `continue` above guarantees `.Constant`,
+and the `.Type` branch cannot satisfy it, so no double-record). **The `y.value != nil` conjunct is
+the open question**: C++ passes `y` unconditionally at that point. If a constant operand can carry a
+nil exact value, C++ records it in `seen` and the port does not — which would weaken duplicate-case
+detection on that input.
+
+**Not established.** C++ has (at least) two `add_to_seen_map` overloads — the six-argument **range**
+form at **1279** (`add_to_seen_map(ctx, &seen, upper_op, x, lhs, rhs)`, for `case a..=b:`) and the
+single-value form at 1328. Only the range one was located this tick; whether the single-value
+overload itself skips a valueless constant is what decides this. **Stating it rather than guessing.**
+
+### Worth noting for whoever picks this up
+
+The range branch at **1262-1279** is a *third* instance of the copy-vs-alias shape that caused #84
+and #333: `Operand a = lhs; Operand b = rhs;` … `Operand a1 = lhs; Operand b1 = rhs;` — four
+by-value copies, with `add_to_seen_map` then passed the **original** `lhs`/`rhs`, not the mutated
+copies. The port's `:2167` cites 1247-1254, inside that region. **The single-value branch's copy
+(`z := y`, `:2234`) is correct** — verified this tick, and its comment records the #84 history.
+
+### Method note
+
+**A dispositioned group is only as complete as the tool's extraction.** Before writing "all N
+citations are accurate", grep the procedure's own line range for citation-shaped comments that the
+tool's pattern would miss — bare "C++ lines NNNN", "C++ Reference: <file>:NNNN" without the function
+name, or a different function's name. Then check each survivor against the *file length* first: a
+range past EOF is the cheapest possible refutation.
+
+---
+
+## #785 — #784's open half CLOSED (faithful, not invented); its firm half STRENGTHENED; and a 491-strong population of tool-invisible citations
+
+**Status: #784 fully resolved. New population recorded, not yet audited. No source change.**
+
+### 1. `y.value != nil` is FAITHFUL — guards hoisted from callee to caller
+
+C++'s single-value `add_to_seen_map` (check_expr.cpp **9704**) is a one-line wrapper around
+`add_constant_switch_case` (**9630**), which opens with exactly two guards:
+
+```cpp
+if (operand.mode != Addressing_Constant) { return; }
+if (operand.value.kind == ExactValue_Invalid) { return; }
+```
+
+The port's `if y.mode == .Constant && y.value != nil` (`check_stmt.odin:2273`) is **those two guards,
+moved from the callee into the caller**. `ExactValue_Invalid` is C++'s no-value sentinel; the port's
+exact-value union spells the same state `nil`. **Not invented. No behavioural difference.**
+
+This is rule 16 a second time (#783 was the first): *check whether the callee already does the work.*
+There the callee did work the caller appeared to skip; here the caller does work the callee would
+otherwise do. Same lesson, opposite direction. The sibling `add_type_switch_case` (**9711**) guards
+the same way — `if (operand.mode != Addressing_Type) return;` — which is what made the pattern
+visible.
+
+### 2. #784's firm finding STANDS, and is stronger for being re-tested
+
+#784 hedged: the citation names no file, so it *might* have meant `check_expr.cpp`, which at 13,631
+lines is long enough to contain 8995. **Tested. It does not hold either.** check_expr.cpp:8995-9038
+is the `#force_inline` / `#no_inline` / `#must_tail` block — nothing to do with duplicate case
+detection. **The citation is wrong under both readings**: the line does not exist in check_stmt.cpp
+(3084 lines), and in check_expr.cpp it points at unrelated code.
+
+### 3. NEW: 491 bare `C++ lines` citations, none of which citemono can see
+
+The #784 shape is not a one-off. Sweeping the checker for the bare form:
+
+```
+check_type.odin 167   ast_clone.odin 61   check_compound_lit.odin 59   check_decl_helpers.odin 44
+check_poly_proc.odin 34   docs.odin 28   check_stmt.odin 22   check_expr.odin 18
+check_proc_group.odin 14   basic_flags_table.odin 13   scope.odin 6   types.odin 5
+name_canonicalization.odin 3   checker.odin 3   check_expr_helpers.odin 4   entity_helpers.odin 2
+check_import_export.odin 2   error.odin 1   type_info.odin 1   entity.odin 1   check_builtin.odin 1
+```
+
+**491 total.** `citemono`'s regex requires `<function>:NNNN`, so **every one of these is outside the
+tool's sample** — the 266 inversions over 66 groups it reports are drawn from a strictly smaller
+population than the citations that actually exist.
+
+**Cheap filter applied, and it came back empty — a useful negative result.** Rule 19 says test a
+cited range against file length first. The largest C++ source is `src/check_expr.cpp` at **13,631**
+lines; **zero** of the 491 name a line beyond that. So length alone refutes none of them, and #784's
+instance was only caught because its *context* pinned the file to a 3084-line one. **Auditing the
+rest requires inferring the intended file per site, which is per-site work, not a sweep.**
+
+Not proposing to audit 491 sites — most are likely fine (`ast_clone.odin`'s 61 are sequential small
+ranges over a mechanical 1:1 switch port). Recording the population and its invisibility, which is
+the durable fact.
+
+### Method note
+
+**A negative result from a cheap filter is worth recording precisely because it bounds the next
+step.** "No citation exceeds any file's length" means the remaining audit cannot be done by
+arithmetic — it needs the file identity, which these citations omit by construction.
+
+---
+
+## #786 — #776 SURVIVES adversarial re-read; and a REFINEMENT of #784's lesson
+
+**Status: #776's disposition CONFIRMED, now backed by a verified claim instead of an assumption.
+No change. Negative result, recorded because it bounds the 491-site population from #785.**
+**Port:** `core/odin/checker/check_expr.odin` `check_unary_expr` (2638-2903)
+**Reference:** `src/check_expr.cpp` `check_unary_expr` (**2923-3142**)
+
+### Rule 18 applied first, as intended
+
+`citemono` sees **five** citations here (`check_unary_expr:NNNN` — `:2675`, `:2730`, `:2767`,
+`:2803`, `:2823`). Grepping the procedure's own range for every citation shape found **nine more**
+the regex cannot see: `:2649`→12486-12491, `:2657`→12496-12507, `:2700`→1996-2020 & 2691-2746,
+`:2702`→2910-2960, `:2851`→2802-2808, `:2860`→2809-2815, `:2874`→2828-2831, `:2870` (no line at
+all), `:2811`→`parser.cpp:628`.
+
+**14 citations, not 5.** Same shape as #784.
+
+### But — and this is the refinement — none of the nine is suspect
+
+They are `check_expr.cpp:NNNN` **without** a function name because they deliberately cite *other*
+functions:
+- **2802-2831** sits *before* `check_unary_expr` starts (2923) — the bit-operation helpers.
+- **12486-12507** is ~9,500 lines later, around **12600**, which is `check_unary_expr`'s own **call
+  site**. Citing your caller is legitimate.
+- `parser.cpp:628` names a different file outright, correctly.
+
+**#784's lesson needed this bound.** "The tool's regex chose the sample" is true, but it does not
+follow that the unseen citations are wrong — **the commonest reason a citation omits the function
+name is that it points at a different function on purpose.** #784's instance was defective because
+its *content* claim ("Duplicate case value detection") did not match either candidate file; that
+content mismatch, not its invisibility, is what convicted it.
+
+### The two inversions are inert, and the claim behind them is now verified
+
+Both trace to `:2675`, which sits first in the port while citing **2995-3035** — later than
+`:2730` (2930-2957) and `:2767` (2976-3006). Its comment asserts a fact about C++:
+*"(case Token_MulMul), handled before check_unary_op."*
+
+**Tested (rule 12 — check the claim, not the conclusion):**
+- `case Token_MulMul:` is at **3034**
+- `check_unary_op` is called at **3077**, inside `check_unary_expr`, *after* the switch
+
+**The claim is accurate.** And `check_unary_expr` is a `switch (op.kind)`, so hoisting one case
+above another is inert by construction — an operator token cannot be both `&` and `**` (rule 11).
+Two inversions, one cause, no behavioural difference.
+
+**One imprecision, noted not filed:** `:2675`'s range **2995-3035** begins ~39 lines before the
+actual `case Token_MulMul:` at 3034, so most of it covers the *tail of the `Token_And` case*. The
+range does contain the cited case; it is loose, not false. Per **#739**, recorded, not corrected.
+
+### Method note
+
+**A dispositioned group that survives an adversarial re-read is worth recording as such**, with what
+was tested — otherwise the next reader re-does it. #776 has now been checked twice by different
+routes: once on citation accuracy (4 of 5), once on the C++ ordering claim its inversions depend on.
+
+---
+
+## #787 — `check_struct_type`: C++'s `#packed` conflict RETURNS from the function; the port's helper returns to its caller, which discards it
+
+**Status: REAL OVER-REPORTING DIVERGENCE. NOT FIXED, NOT REPRODUCED — derived from reading both
+sides. Found by adversarially re-reading #775, whose citation inversions are separately INERT.**
+**Port:** `core/odin/checker/check_type.odin` `check_struct_type` — `:1195-1214` (helper), `:1216-1222` (three call sites)
+**Reference:** `src/check_type.cpp` `check_struct_type` — `#define ST_ALIGN` **728-737**, expansions **739-741**, coherence checks **742-762**
+
+### The mechanism
+
+C++ implements the three alignment directives with a **macro**, expanded three times:
+
+```cpp
+#define ST_ALIGN(_name) if (st->_name != nullptr) {                       // 728
+        if (st->is_packed) {
+            error(st->_name, "'#%s' cannot be applied with '#packed'", #_name);
+            return;                       // <-- RETURNS FROM check_struct_type
+        }
+        i64 align = 1;
+        if (check_custom_align(ctx, st->_name, &align, #_name)) {
+            struct_type->Struct.custom_##_name = align;
+        }
+    }
+ST_ALIGN(min_field_align);   // 739
+ST_ALIGN(max_field_align);   // 740
+ST_ALIGN(align);             // 741
+```
+
+Odin has no macros, so the port translates the macro body into a **nested procedure** — structurally
+the right call, and the reason `:1202`'s citation sits inside a nested proc at all:
+
+```odin
+check_align := proc(..., attr_name: string, st: ^Type_Struct) -> bool {   // :1195
+    if align_expr == nil { return false }
+    if st.is_packed {
+        error(align_expr, "'#%s' cannot be applied with '#packed'", attr_name)
+        return false                      // <-- returns from the HELPER only
+    }
+    ...
+}
+check_align(ctx, node, node.min_field_align, &st.custom_min_field_align, "min_field_align", st)  // :1216
+check_align(ctx, node, node.max_field_align, &st.custom_max_field_align, "max_field_align", st)  // :1219
+check_align(ctx, node, node.align,           &st.custom_align,           "align",           st)  // :1222
+```
+
+**All three results are discarded.** `return` became `return false`, and nothing reads it.
+
+### Consequence
+
+For a `#packed` struct carrying more than one alignment directive:
+
+```odin
+S :: struct #packed #min_field_align(2) #max_field_align(8) #align(4) { x: int }
+```
+
+| | C++ | port |
+|---|---|---|
+| `#packed` conflict errors | **1** (first directive, then returns) | **3** |
+| alignment-coherence checks (742-762) | **skipped entirely** | **all three run** |
+
+C++ emits one diagnostic and leaves `custom_align` / `custom_min_field_align` /
+`custom_max_field_align` all at 0, so none of the three coherence comparisons can fire. The port
+emits one per directive and then evaluates coherence over values C++ never computed — so it can
+additionally emit `#align(..) is defined to be less than #min_field_align(..)` and siblings that C++
+suppresses by construction.
+
+**This is the #779 family**: a C++ `return` that the port localised into a helper. It is also the
+**#303 shape** — *"handle_field's result was discarded at the first call site"* — and the fix has the
+same form: the helper already returns the bool that would reproduce C++'s early exit; the call sites
+need to honour it.
+
+### Not reproduced
+
+No probe built. **Read, not observed.** It needs a `#packed` struct with two or more alignment
+directives — a compound case, which is why every gate is green. One probe settles it:
+`S :: struct #packed #min_field_align(2) #align(4) { x: int }` → expect 1 diagnostic from the oracle,
+2+ from the port.
+
+### Separately: #775's citation inversions ARE inert (re-verified)
+
+The rule-18 sweep found **five** citations, one of them tool-invisible and *unverifiable by
+construction*: `:1226` reads `check_type.cpp (alignment validation section)` — **no line number at
+all**. That is a distinct sub-class of #785's population: not "no file", but "no line".
+
+The four with numbers were all resolved by content:
+
+| port | cites | real | what it is |
+|---|---|---|---|
+| `:1126` polymorphic wait signal | 665 | **693** | `wait_signal_set(&…polymorphic_wait_signal)` |
+| `:1153` `check_struct_fields` | 711-723 | **711** | correct |
+| `:1186` fields wait signal | 681 | **725** | `wait_signal_set(&…fields_wait_signal)` |
+| `:1202` `#packed` conflict error | 686 | **730** | inside `ST_ALIGN` |
+
+**Corrected: 693 < 711 < 725 < 730 — strictly ascending. Both inversions dissolve.** #775's recorded
+lesson holds and is now exact: *prefer the arithmetic to the exemption* — `:1202` sits in a nested
+proc and would have qualified for the hoisted-helper exemption, but the arithmetic resolves it
+without needing one.
+
+### Method note
+
+**A group can be clean on citations and defective on behaviour.** #775 was dispositioned correctly —
+the inversions really are stale-citation artifacts — and the procedure still contains a real
+divergence, which no amount of citation checking would have found. What found it was reading the
+C++ the citation *pointed at* (`ST_ALIGN` at 730) rather than only checking whether the number was
+right. **Chase the citation to its real home, then read what is actually there.**
+
+---
+
+## #788 — #777 SURVIVES the adversarial re-read; its deliberate omission is verified end to end
+
+**Status: #777 CONFIRMED. Every citation accurate. The behavioural claim behind its deliberate
+divergence is now verified at all four points, not assumed. No change. Negative result, recorded per
+rule 21.**
+**Port:** `core/odin/checker/check_collect.odin` `process_all_delayed_decls` (**1565-1589**), doc header **1556-1563**
+**Reference:** `src/checker.cpp`
+
+### The inversions are doc-header duplication, exactly as #777 recorded
+
+The rule-18 sweep had to widen past the proc body: **the duplication is in the doc header above it**,
+which my first pass (starting at the `proc` line) missed.
+
+| line | cites |
+|---|---|
+| 1556 header | `check_import_entities:6228-6310` (whole span) |
+| 1559 header | `6235-6238, 6264-6267` |
+| 1560 header | `6284-6296` |
+| 1561 header | **`6303-6307`** ← high-water mark |
+| 1566 body | `6235-6238` ← repeats 1559 |
+| 1569 body | `6284-6296` ← repeats 1560 |
+
+Running max reaches **6303** at the header's Phase-3 line, then the body's Phase-1 (6235) and
+Phase-2 (6284) both fall below it. **That is both inversions, from one cause.** Inert — the header
+enumerates all three phases, the body implements two.
+
+Two further citations are tool-invisible (`checker.cpp:6303-6307` and `checker.cpp:6119`, no
+function name) — and per **#786** both are legitimate: they name the C++ function by its definition
+line while discussing a *different* function's behaviour.
+
+### Rule 22 applied: the claim behind the deliberate omission, tested
+
+Phase 3 is deliberately **not** run here, and `:1574-1580` justifies that with a factual claim about
+C++. It is load-bearing — if the claim were wrong, the omission would be wrong. **All four points
+verified:**
+
+| claim | verified |
+|---|---|
+| "C++ drains the Expr queue … (checker.cpp:6303-6307)" | **6303-6307** — the `for (Ast *expr : f->delayed_decls_queues[AstDelayQueue_Expr])` loop and its `array_clear`. **Exact.** |
+| "… inside `check_import_entities`" | that function is defined at **6159**; the drain is inside it |
+| "… which is AFTER `check_export_entities_in_pkg` (checker.cpp:6119)" | defined at **6119** as cited, and **called at 6241** — 62 lines *before* the drain, same function |
+| "This function runs during `check_collect_entities_all`, i.e. before any export" | that worker loop ends at **6116**, before `check_import_entities` at 6159 |
+
+So a file-scope `#assert(size_of(T) == N)` evaluated at this point genuinely **cannot** see types
+declared in other files of the same package. The omission is correct, and its stated reason is the
+real one — this is **#111**'s root cause (`core/sys/linux/types.odin`'s
+`#assert(size_of(IO_Uring_SQE) == 64)` forcing `linux.Mode` to measure 1 instead of 4, and every
+dependent package seeing `bit_set[0..=0]`), correctly documented at the site.
+
+### Scorecard
+
+**All four small dispositioned groups have now been adversarially re-read**, by two different routes
+each: #775 → **#787, a real defect** (citations inert, behaviour divergent); #776 → **#786, survives**;
+#777 → **this, survives**; #778 → **#784/#785**, a citation defect found and its behavioural half
+cleared. **Yield: 1 real defect, 1 citation defect, 2 clean — from 4 groups previously marked
+settled.**
+
+Remaining never-re-read, in ascending size: `check_call_arguments_internal` 5,
+`check_basic_directive_expr` 6, `check_matrix_type_expr` 11, `check_type_decl` 18,
+`check_builtin_procedure_directive` 18.
+
+### Method note
+
+**Rule 18's sweep must start at the DOC HEADER, not the `proc` line.** #777's entire inversion
+signature lives above the procedure. A range that starts at the declaration silently excludes the
+commonest place for duplicated citations to sit.
+
+---
+
+## #789 — `check_call_arguments_internal` re-read: 5 inversions explained, one citation content-wrong, NO behavioural defect
+
+**Status: group SURVIVES behaviourally (#510's fix verified in place). One CITATION defect found by
+content mismatch, recorded not corrected per #739. A new sub-form of rule 10.**
+**Port:** `core/odin/checker/check_proc_group.odin` `check_call_arguments_internal` (**792-1447**)
+**Reference:** `src/check_expr.cpp` `check_call_arguments_internal` (**6668-7104**)
+**Machine note:** taken during a 1min loadavg of **124.29** (5min 46.0, 15min 31.0) — Jon's harness
+(`mirc`, `grade.py`, `rexcode-abi/.work/oracle`, `odin-snapshot`) spiked hard and is actively invoking
+`./odin`. Nothing of mine ran; this was source reading only, which is why the tick was safe.
+
+### The 5 inversions are FORWARD REFERENCES in explanatory prose — a new sub-form
+
+Tool-visible citation starts, in port order from `:812`:
+**6706, 6962, 6962, 6697, 6697, 6825, 6825, 6962, 6903, 6976, 6976.**
+The running max hits **6962** at `:814`, and exactly five later citations fall below it (6697, 6697,
+6825, 6825, 6903). **One cause, five inversions.**
+
+The cause is not duplication (#777) and not an arm boundary (#782): `:812-818` is a single
+explanatory block about **why the arity check's position is load-bearing**, and to explain it, it
+**forward-references the consuming gate** far below. The prose legitimately runs
+"this check at X … because of the gate at Y", with Y ≫ X.
+
+**Rule 10 extended: a REPEATED range is doc-header duplication; a FORWARD range inside an
+explanation is a forward reference. Both create a high-water mark that inverts everything after.**
+
+### The citation defect: 6962 vs 6976 (content mismatch)
+
+`:818` claims the gate is *"check_call_arguments_internal:6962's `err == CallArgumentError_None`
+then consults, suppressing instantiation"*. Chasing it (rule 22):
+
+| line | what is actually there |
+|---|---|
+| **6962-6963** | `if (ordered_operands.count == 0 && param_count_excluding_defaults == 0) { err = CallArgumentError_None; }` — an **assignment**, and of the opposite polarity |
+| **6976** | `if (pt->is_polymorphic && !pt->is_poly_specialized && err == CallArgumentError_None) {` — **the consultation the comment describes** |
+
+**Three sites (`:814`, `:818`, `:999`) name 6962; the real home is 6976, drift +14.** This is a
+content mismatch, not mere invisibility, so it is convictable on #786's standard.
+
+**And the same file already has it right** — `:1293` cites **6976-6983** and `:1309` cites
+**6976-6980**, both correct. Rule 13 again: when one procedure cites the same C++ construct twice,
+diff the copies; the correct one tells you what the other should say.
+
+One further imprecision: `:812`'s range **6706-6723** stops one line short — the
+`err = CallArgumentError_TooManyArguments` assignment it names is at **6724**. Loose, not false.
+
+### No behavioural defect — #510's fix verified in place
+
+The substance of the comment is correct even though its line number is not: C++ has **one**
+`check_call_arguments_internal` that both direct calls and proc-group scoring go through, so the
+single arity check at 6721-6724 both sets `err = TooManyArguments` **and** emits the diagnostic, and
+the gate at 6976 then consults `err == CallArgumentError_None` to suppress instantiation. The port
+split that function in two and this copy originally had neither half — **LEDGER #510**, whose fix is
+present and correctly positioned (`:812`, before the polymorphic instantiation below it).
+
+**Noted, not claimed:** 6962-6963 *resets* `err` to `None` when
+`ordered_operands.count == 0 && param_count_excluding_defaults == 0`. For that input the arity test
+at 6723 (`positional_operand_count > pt->param_count`, i.e. `0 > 0`) is false, so nothing it could
+undo was ever set. **Inert on the reading above; not traced further.**
+
+### Scorecard
+
+First of the five never-re-read groups. **Yield so far across 5 re-read groups: 1 real defect (#787),
+2 citation defects (#784, this), 2 clean (#786, #788).**
+Remaining: `check_basic_directive_expr` 6, `check_matrix_type_expr` 11, `check_type_decl` 18,
+`check_builtin_procedure_directive` 18.
+
+---
+
+## #790 — `check_basic_directive_expr` re-read: FOUR citation vintages in one procedure; both deliberate omissions VERIFIED CORRECT
+
+**Status: group SURVIVES behaviourally — both LEDGER #668 omissions verified name-for-name at the
+source. Citation state is the worst seen so far: FOUR distinct vintages interleaved, which is what
+produces all 6 inversions. Recorded not corrected (#739).**
+**Port:** `core/odin/checker/check_expr.odin` `check_basic_directive_expr` (**7623-7831**), doc header **7622**
+**Reference:** `src/check_expr.cpp` `check_basic_directive_expr` (**9747-9875**)
+
+### Both deliberate omissions are CORRECT — verified, not assumed
+
+Two comments assert that the port deliberately has **no** arm where C++ has none. Both are
+load-bearing (rule 12), and both check out exactly:
+
+**`:7687` — no `#column` arm.** C++ tests exactly eight names, and the comment lists them in order:
+file **9754**, directory **9771**, line **9789**, procedure **9805**, caller_location **9827**,
+caller_expression **9832**, branch_location **9836**, location **9849**. **No `column` anywhere in
+9747-9875.** The comment adds oracle evidence (`x := #column` → "Unknown directive: #column"; port
+was silent, so it *accepted source the reference rejects*) and a 0-hit tree-wide usage count against
+1412 for `#caller_location` as positive control.
+
+**`:7761` — no `#panic` arm.** C++'s must-be-a-call list is exactly eight: assert, defined, config,
+exists, load, load_hash, load_directory, load_or (**9855-9862**). **No `panic`.** Oracle-verified in
+both directions per the comment.
+
+**Both are LEDGER #668, and both were empirically tested when written.** Nothing to do.
+
+### Four citation vintages — the cause of all 6 inversions
+
+| vintage | drift | sites |
+|---|---|---|
+| **V1** | ~**+689** | doc header `:7622` (9058-9188), `:7630` (9065), `:7644`/`:7678` (9076), `:7704` (9098) |
+| **V2** | ~**+18** | `:7687` (9729-9855; function starts 9747), `:7761` (9836-9844; list is 9855-9862, **+19**) |
+| **V3** | **+93** | `:7768`→9827, `:7788`→9832, `:7797`→9836, `:7808`→9849 (all four arms, uniform) |
+| **current** | **0** | `:7711` (9788-9790 vs line arm 9789), `:7725` (9761-9769 vs file arm 9754-9770), `:7743` (9831-9835 vs caller_expression 9832) |
+
+**V3 is textbook #780**: four consecutive arm citations sharing one uniform +93, i.e. written when
+the function began at ~9654 instead of 9747. **V1 predates that by ~600 lines more.**
+
+Ordering the live starts — 9058, 9065, 9076, 9076, **9729**, 9098, 9788, 9761, 9831, **9836**, 9734,
+9739, 9743, 9757 — the running max jumps to 9729 at `:7687` (V2), inverting `:7704` (V1); then to
+9836 at `:7761`, inverting all four V3 arms. **Six inversions, entirely from vintage interleaving.**
+
+### Two content-wrong citations (convictable per #786)
+
+- **`:7761`** names **9836-9844** for the must-be-a-call list. 9836 is the `branch_location` arm and
+  9844 is inside it; the list is at **9855-9862**. The *claim* is right, the *lines* point at a
+  different arm.
+- **`:7687`** names **9729-9855** for the eight-name test region, which is **9754-9849** — it starts
+  18 lines before the function even begins.
+
+Also `:7797` cites a 13-line span (9743-9755) for what is a single-line arm head at 9836.
+
+### The author was already doing this audit
+
+`:7696` records a prior correction in exactly this class: *"The old citation here read
+`check_expr.cpp:9087-9097`, which is inside a different function entirely — the kind of
+wrong-function citation citefn cannot detect (#47)."* **The same defect class survives four more
+times in the same procedure** — evidence that a one-pass fix does not clear a multi-vintage
+procedure.
+
+### Scorecard
+
+Second of the five never-re-read groups. **Yield across 6 re-read groups: 1 real defect (#787),
+3 citation defects (#784, #789, this), 2 clean (#786, #788).**
+Remaining: `check_matrix_type_expr` 11, `check_type_decl` 18, `check_builtin_procedure_directive` 18.
+
+### Method note
+
+**Rule 25: when several consecutive citations share ONE uniform drift, they are a VINTAGE, and a
+procedure can carry several.** Sorting citations by drift rather than by line separates them
+instantly — V1/V2/V3 here fell out of four subtractions. A procedure with interleaved vintages will
+show inversions no amount of local reasoning explains, because the cause is chronological, not
+structural.
+
+---
+
+## #791 — `check_matrix_type_expr` re-read: CLEAN. One vintage (uniform −1), 11 inversions from two forward references, both behavioural claims verified
+
+**Status: SURVIVES on every axis. Best-conditioned procedure re-read so far. No change.**
+**Port:** `core/odin/checker/check_type.odin` `check_matrix_type_expr` (**3867-4054**), doc header **3865-3866**
+**Reference:** `src/check_type.cpp` `check_matrix_type` (**3094-3162**)
+**Machine note:** taken at 1min loadavg **107.45** (5min 76.4, 15min 49.5), rising — Jon's harness
+spiking a second time. Source reading only.
+
+### Rule 18: every function-named citation is INSIDE the function
+
+Fourteen of them — 3113-3136, 3139, 3099-3111, 3105-3111, 3113-3120, 3123-3130, 3128, 3158,
+3133-3136, 3128-3131, 3133-3136, 3133-3136, 3139-3156, 3153 — **all within 3094-3162.** No
+outside-function citations, unlike #790. Three tool-invisible ones are all legitimate: the doc header
+(`check_type.cpp:3093-3160 (check_matrix_type, ~68 lines)` — and **3162−3094 = 68, exactly right**),
+`types.cpp:402-403` naming a different file explicitly, and one more header-style range.
+
+### Rule 25: ONE vintage, uniform −1
+
+| citation | real | drift |
+|---|---|---|
+| doc header 3093-3160 | 3094-3162 | **−1** |
+| max-elements block 3133-3136 | 3134-3137 | **−1** |
+| elem resolution 3139 | 3140 | **−1** |
+
+A single clean vintage, off by one line throughout — the opposite of #790's four interleaved
+vintages. Recorded, not corrected (#739).
+
+### The 11 inversions are two forward references
+
+`:3898` cites **3139** (the *late* element-type resolution) while sitting early, and `:3983` cites
+**3158** (the *final* `alloc_type_matrix`) while sitting before the citations for 3133 and 3128. Each
+sets a high-water mark; everything after falls under it. **Eleven inversions, two causes** — the
+#789 sub-form of rule 10, at scale. Both are legitimate explanatory prose: `:3898` explains *where*
+C++ resolves the element type in order to justify the port doing it in the same place.
+
+### Both load-bearing claims TESTED and CORRECT
+
+**`:4001` — "C++ REPORTS AND CONTINUES … a bare `if { error(); }` with no bail."** Verified:
+
+```cpp
+if ((generic_row == nullptr && generic_column == nullptr) && row_count*column_count > MATRIX_ELEMENT_COUNT_MAX) {
+    i64 element_count = row_count*column_count;
+    error(node, "Matrix types are limited to a maximum of %d elements, got %lld", ...);
+}                                              // no bail, no return
+Type *elem = check_type_expr(ctx, mt->elem, nullptr);   // 3140 — execution continues
+```
+
+**`:3992` — the anchor is the matrix type node, not the column expression.** Verified: 3136 is
+`error(node, ...)`, in direct contrast to 3129's `error(column.expr, ...)` a few lines above.
+
+**`:4010` — "element type AFTER the counts, where C++ does it."** Verified: 3140 follows 3134-3137.
+
+### This procedure has already been through two corrections of exactly the classes I am hunting
+
+- **LEDGER #676 + INSTRUMENT-MISREPORT #49** — the anchor. The comment notes that *"the comment that
+  used to stand here asserted the opposite and cited it as settled — it was wrong against the C++
+  line it names, and nothing pinned it (there is no m88 corpus member)."* That is #789's content
+  mismatch, caught and fixed, with the absence of a gate stated.
+- **LEDGER #372** — the invented bail. *"The port's `type^ = t_invalid; set_base_type(...);
+  return false` was invented, and it cost a second diagnostic."* **That is #787's exact shape**
+  (C++ continues, port returns) — already found and fixed here.
+
+**Contrast with #790**, where a recorded fix (`:7696`) left four more instances of its own class
+alive. Here both fixes appear complete, and the procedure is internally consistent.
+
+### Scorecard
+
+Third of five never-re-read groups. **Yield across 7: 1 real defect (#787), 3 citation defects
+(#784, #789, #790), 3 clean (#786, #788, this).**
+Remaining: `check_type_decl` 18, `check_builtin_procedure_directive` 18.
+
+### Method note
+
+**A high inversion count is not a severity signal.** Eleven inversions here — the second-largest
+group re-read — resolve to two forward references in prose, with a single uniform −1 vintage and
+zero behavioural defects. #787's real defect came from a group with **two**. Inversion count measures
+citation *style*, not correctness.
+
+---
+
+## #792 — `check_type_decl` re-read: CLEAN. 18 inversions from two forward references; citations accurate to ±1
+
+**Status: SURVIVES. All 21 function-named citations inside the function, precision ±1, every tested
+claim correct. One stale duplicated header range and two unverifiable-by-construction citations,
+recorded not corrected (#739). No change.**
+**Port:** `core/odin/checker/check_decl_helpers.odin` `check_type_decl` (**1858-2169**), doc header **1857**
+**Reference:** `src/check_decl.cpp` `check_type_decl` (**452-622**)
+**Machine note:** taken at 1min **46.69** (5min 46.5, 15min 42.8), flat and down from the 107 spike.
+Source reading only.
+
+### Rule 27 applied first — this file has a history
+
+`check_decl_helpers.odin` is where **#266 deleted 253 lines of invented never-called helpers with
+fabricated citations**. That is the strongest prior for invented content anywhere in the port, so
+this group was read expecting the worst. **It is not there.**
+
+### Rule 18: all 21 function-named citations are inside 452-622
+
+520-524, 506-515, 473-475, 499-502, 504, 618-621, 609-614, 526-607, 521-528, 603, 530-540, 542-555,
+536-541, 532, 557-592, 559, 566-569, 571-574, 576, 581-584, 586-589, 593-596 — **every one within
+the function.** No wrong-function citations, unlike #790.
+
+### The 18 inversions are two forward references
+
+`:1981` cites **618-621** and `:1998` cites **609-614** — both near the *end* of C++'s function —
+while sitting in the port *before* its large tail block (2011-2165, which cites 526 through 596). Each
+sets a high-water mark and everything after drops below it. **Eighteen inversions, two causes** —
+the same #789/#791 shape, now confirmed as the dominant mechanism in large groups: #789's 5, #791's
+11, and this 18 all reduce to one or two forward references.
+
+### Precision: ±1, single vintage
+
+Counting C++ lines directly:
+
+| port | cites | real | |
+|---|---|---|---|
+| `:2097` `TypeSet super_set` | **559** | **559** | **exact** |
+| `:2114` named-struct check | 566-569 | 566-570 | ✓ |
+| `:2119` cycle check | 571-574 | 572-575 | −1 (571 is blank) |
+| `:2127` `check_single_global_entity` | 576 | 577 | +1 (576 is blank) |
+
+Off-by-one against *blank lines* on either side — the citations bracket their targets rather than
+drifting. Nothing like #790's four vintages.
+
+### Every tested claim is correct
+
+**`:2097` — "Nothing iterates this set — it is pure membership."** Verified: `super_set` is written
+at 563 (`type_set_update(&super_set, e->type)`) and read only at **572**, as the *return value* of
+`type_set_update`, which is true on re-insertion. That return is the cycle detector. **No iteration
+anywhere.** The comment then gives a defensible reason to key it canonically regardless — consistency
+with its two siblings, per the #112 sweep, *"because ONE of three canonical-hash containers had been
+modelled with pointer identity while the others were correct."* That is a dead-store claim made
+*and* justified, which is the opposite of the #103/#347 defect class.
+
+**`:2119` — "C++'s `type_set_update` returns true …"** Verified at 572:
+`if (type_set_update(&super_set, super)) { error(e->token, "@(objc_superclass) Superclass hierarchy cycle encountered"); break; }`.
+
+**`:2085` — both the objc_superclass store and the validation walk live inside the
+`objc_is_implementation` gate.** Consistent with the deep nesting at 557-580, and already settled
+empirically: **LEDGER #283**, probe `objcsuper`, *oracle 0 diagnostics, port 2 errors* — the port had
+the validation as a sibling and rejected code C++ never looks at. Fixed.
+
+### The two blemishes, both recorded not corrected
+
+- **`:1857` and `:1859` carry the SAME range, `check_decl.cpp:449-517`** — doc-header duplication
+  (rule 10), and the range is stale twice over: it begins at **449**, three lines *before* the
+  function starts at 452, and ends at **517**, some **105 lines short** of 622.
+- **`:2074` and `:2154` have NO line number at all** — "check_decl.cpp, immediately after the …" and
+  "the `else` of the objc_is_implementation …". Unverifiable by construction; the sub-class first
+  seen at #775's `:1226`.
+
+### Scorecard
+
+Fourth of five never-re-read groups. **Yield across 8: 1 real defect (#787), 3 citation defects
+(#784, #789, #790), 4 clean (#786, #788, #791, this).**
+Remaining: `check_builtin_procedure_directive` 18 — the last one.
+
+### Method note
+
+**Rule 26 is now strongly supported, not just observed.** Three of the four largest groups re-read —
+5, 11 and 18 inversions — each reduce to **one or two forward references in explanatory prose**, with
+zero behavioural defects among them. The single real defect (#787) came from a **2**-inversion group.
+Inversion count tracks how much cross-referencing prose a procedure carries, and nothing else.
+
+## #793 — check_builtin_procedure_directive (18): citations CLEAN, but C++'s single `check_load_directive` was SPLIT into TWO LIVE PORT COPIES
+
+**Group:** `check_builtin.odin` doc header 3292 / proc 3306-4007 vs `src/check_builtin.cpp` 2415-2776.
+**LAST never-re-read dispositioned group. The re-read pass is now COMPLETE.**
+
+### Citations: clean, TWO VINTAGES
+
+All **25** citations naming `check_builtin_procedure_directive` land inside **2415-2776**. No
+wrong-function citations.
+
+The 5 BARE `check_builtin.cpp:NNNN` citations about the proc's own body are an **older vintage,
+drift +326**, confirmed exactly:
+
+| port | cites | +326 | real home |
+|---|---|---|---|
+| :3294 / :3307 (doc header, DUPLICATE pair) | 2089-2175 | 2415-2501 | fn starts **2415 EXACTLY** |
+| :3351 `#location` arm | 2093-2112 | 2419-2438 | arm IS 2419-2438 — **exact** |
+| :3328 `#caller_expression` validation | 2117-2128 | 2443-2454 | inside the 2439 arm |
+| :3421 `#config` arm | 2130-2175 | 2456-2501 | — |
+
+`2089 + 326 = 2415` = the function's exact start line. The vintage is real, not fabricated.
+
+### Three doc-header blemishes (recorded, NOT corrected — #739)
+
+1. **:3294 and :3307 carry the SAME range** — doc-header duplication, the **third** instance
+   (#777, #788, #792 `:1857`/`:1859`). Rule 10 holds again.
+2. **Stale twice over:** the start is right after drift correction, but `2175+326 = 2501` is
+   **275 lines SHORT** of the real end 2776. Same shape as #792's `:1857` (105 short).
+3. **The "Implemented directives" list is INCOMPLETE.** It names 7; the proc implements **11**.
+   `#load_hash`, `#hash`, `#load_directory` were added later (LEDGER #249 / #229 / #248) and the
+   header was never updated.
+
+### Arm sets MATCH — 11 vs 11
+
+C++ 2419-2720 and port 3321-3920 carry the same 11 names. Order differs (C++ is an `else if` chain,
+the port separate `if`s), but the discriminant is one string, so no two arms can run — **inert**
+(rule 11, fourth confirmation after #771/#778/#786).
+
+### Both cross-function citation clusters are CURRENT and CORRECT
+
+`:3700`/`:3713` name `check_load_directive:2152-2176` (defined **2146**); `:3751` names 2191 (same
+function); `:3915`/`:3922`/`:3952`/`:3974` name 2219-2330 (`check_load_directory_directive`, defined
+**2219**). All land correctly. **Second confirmation of #786: cross-function citations are
+legitimate, not a backlog.**
+
+### The `:3887` copy-paste-slip claim: VERIFIED EXACTLY (rule 12)
+
+> "C++:2591 formats the FIRST operand's type here too — the same copy-paste slip as #load_hash
+> (:2521). Reproduced deliberately in both places."
+
+Both C++ sites validate `o_hash` and then print `type_to_string(o.type)` — the **first** operand:
+
+```cpp
+2520  if (!is_type_string(o_hash.type)) {          // #load_hash
+2521      gbString str = type_to_string(o.type);   // <-- o, not o_hash
+2590  if (!is_type_string(o_hash.type)) {          // #hash
+2591      gbString str = type_to_string(o.type);   // <-- same slip
+```
+
+Port reproduces it at **both** sites (`:3813` `path_op.type`, `:3889` `str_op.type`) and says so.
+A correctly-identified upstream bug, deliberately mirrored, documented twice. Correct.
+
+### THE FINDING — one C++ function, TWO live port copies
+
+C++ 2483-2484 is a **two-line delegation**:
+
+```cpp
+} else if (name == "load") {
+    return check_load_directive(c, operand, call, type_hint, true) == LoadDirective_Success;
+```
+
+`check_load_directive` (C++ **2146-2209**) has **two** callers: this one (`err_on_not_found=true`)
+and the `or_else` edge case in check_expr.cpp.
+
+**The port has two separate implementations:**
+
+| copy | site | caller | err_on_not_found |
+|---|---|---|---|
+| faithful port of C++ 2146-2209 | `check_expr.odin:55` | **exactly one** — `check_expr.odin:7848` (`or_else`) | `false` |
+| **inline reimplementation, ~77 lines** | `check_builtin.odin:3697` | the `#load` directive arm | `true` |
+
+**The doc header at :3305 states the opposite and is FALSE:** *"Note: #load directive is handled
+separately in check_load_directive (check_expr.odin)"*. It is handled **inline at :3697**.
+
+**The copies ALREADY DIVERGE.** C++ sets the operand *before* the cache load, so the fields survive
+the NotFound return:
+
+```cpp
+2179  operand->type = t_u8_slice;      // before the arity branch
+2197  operand->mode = Addressing_Constant;
+2199  if (cache_load_file_directive(...)) { operand->value = ...; return Success; }
+2205  return LoadDirective_NotFound;   // type and mode still set
+```
+
+- `check_expr.odin`'s copy **does** this — `operand.type = t_u8_slice` / `= type_hint` /
+  `= loaded_type`, then `operand.mode = .Constant`, all **above** its three `.Not_Found` returns.
+  **Faithful.**
+- `check_builtin.odin:3697`'s copy keeps the type in a **local** `result_type` and assigns
+  `operand.type/.mode/.value` **only inside `if load_ok && cache != nil`**. On not-found it sets
+  `.Directive_Was_False` and returns with the operand **untouched**.
+
+This is the **#633 shape inverted**: there, the faithful port is dead and the reimplementation live;
+here **both are live**, each serving one of C++'s two call sites, and they have already drifted apart
+on operand state.
+
+**NOT REPRODUCED — no probe built (#178).** Whether the untouched operand is observable depends on
+what reads it after `check_builtin_procedure_directive` returns false; the `or_else` path (which
+demonstrably reads `x.type` at check_expr.odin:7853) is served by the **faithful** copy, so the
+exposed path is the plain `#load` directive one. Consolidating the two copies onto
+`check_expr.odin:55` — exactly what C++ does — would remove the question entirely and is the
+recommended fix. **Awaiting Jon.**
+
+### Verdict
+
+**Citations CLEAN (25/25 in-function, one explained old vintage). Every tested claim CORRECT.
+One STRUCTURAL finding: a duplicated implementation that has already diverged, plus a doc header
+that asserts the duplication does not exist.**
+
+## #794 — #793 follow-up: the two `#load` copies diverge in THREE places, and my consolidation recommendation was BACKWARDS
+
+**This corrects #793's "Recommendation, if pursued".** #793 said to delete the inline arm and
+delegate to `check_expr.odin:55`, "but FIRST confirm LEDGER #670's fixes are present in the
+surviving copy". They are — **and the surviving copy carries a defect the inline copy does not.**
+
+Reference: `src/check_builtin.cpp` `check_load_directive` **2146-2209**.
+
+### Divergence 1 — the `got 0` anchor. The SURVIVING copy is wrong.
+
+```cpp
+2153  if (ce->args.count == 0) {
+2154      error(ce->close, "'#%.*s' expects 1 or 2 arguments, got 0", LIT(name));
+2155  } else {
+2156      error(ce->args[0], "'#%.*s' expects 1 or 2 arguments, got %td", LIT(name), ce->args.count);
+```
+
+| | anchor for `got 0` | anchor for `got N` |
+|---|---|---|
+| **C++ 2154 / 2156** | `ce->close` (closing paren) | `ce->args[0]` |
+| **inline, check_builtin.odin:3706/3708** | `call_expr.close` ✓ | `call_expr.args[0]` ✓ |
+| **surviving, check_expr.odin:70/72** | **`call_node`** — the WHOLE CALL ✗ | `ce.args[0]` ✓ |
+
+LEDGER #670's actual fix was the **`args[0]` anchoring for count > 0**, and that IS present in both
+copies. This is a **separate, still-live** anchor divergence in the surviving copy only: `#load()`
+reports at the start of the call instead of at the closing paren.
+
+### Divergence 2 — operand state on the not-found path (carried from #793)
+
+C++ sets `operand->type` (2179) and `operand->mode` (2197) before the cache load. The surviving copy
+does the same — **faithful**. The inline copy assigns the operand only inside
+`if load_ok && cache != nil` — **not faithful**. Opposite direction to divergence 1.
+
+### Divergence 3 — two different port-only messages for C++'s one `GB_ASSERT`
+
+C++ 2176 is `GB_ASSERT(o.value.kind == ExactValue_String)`. Both copies substitute a diagnostic
+(correct in principle — the #669 rationale, a diagnostic beats an abort), but with **different text**:
+
+- surviving: `"'#%s' could not extract path string from constant"`, gated on `err_on_not_found`
+- inline: `"'#load' expected a constant string for file path"`, ungated
+
+The surviving copy also has a second port-only message with no C++ counterpart at all,
+`"'#%s' could not resolve path for '%s'"`, on a `filepath.join` failure.
+
+### What this changes
+
+**Neither copy is the clean one.** Consolidating onto either as-is regresses something:
+
+- onto `check_expr.odin:55` → loses the correct `got 0` anchor (divergence 1)
+- onto `check_builtin.odin:3697` → loses the faithful operand-on-NotFound state (divergence 2)
+
+A consolidation must be **assembled from both**: C++'s anchors (inline's), C++'s operand ordering
+(surviving's), and one decision about the assert-substitute text (divergence 3). That is a genuine
+port task, not a delete-and-delegate.
+
+**This is the strongest available evidence for method rule 28.** Two live realisations of one C++
+function drifted apart in **three** independent places, in **both** directions, and no gate saw any
+of it. Whatever the decision on #793, the divergence count is the argument.
+
+**NOT REPRODUCED — no probe built (#178). Awaiting Jon.**
+
+## #795 — REAL DEFECT, OPEN: `#load(p) or_else <diverging>` loses the load's type. ONE MISSING LINE.
+
+**Port:** `core/odin/checker/check_expr.odin` `check_or_else_expr`, the `#load` edge case ~7847-7896
+**Reference:** `src/check_expr.cpp` **10062-10107**
+
+Found by extending #794's rule-28 audit to the OTHER side of the `#load` family — the shared caller
+rather than the duplicated callee.
+
+### C++
+
+```cpp
+10062  if (is_load_directive_call(arg)) {
+10063      LoadDirectiveResult res = check_load_directive(c, &x, arg, type_hint, false);
+10066      if (!(is_load_directive_call(default_value) && res == LoadDirective_Success)) {
+10067          bool y_is_diverging = false;
+10068          check_expr_base(c, &y, default_value, x.type);
+10069          switch (y.mode) {
+10070          case Addressing_NoValue:
+10071              if (is_diverging_expr(y.expr)) {
+10072                  y.mode = Addressing_Value;
+10073                  y.type = x.type;              // <<-- THE LINE
+10074                  y_is_diverging = true;
+                   } else { error_operand_no_value(&y); y.mode = Addressing_Invalid; }
+                   ...
+10094          if (!y_is_diverging) {
+10095              check_assignment(c, &y, x.type, name);
+                   ...
+10102      if (res == LoadDirective_Success) { *o = x; }
+10104      else                              { *o = y; }   // <<-- y IS THE RESULT
+```
+
+### Port — `y.type = x.type` is absent
+
+```odin
+7855  #partial switch y.mode {
+7856  case .No_Value:
+7857      if is_diverging_expr(ctx, default_value) {
+7858          // Allow diverging expressions
+7859          y.mode = .Value
+7860          y_is_diverging = true        // <<-- NO `y.type = x.type`
+7861      } else { error_operand_no_value(&y); y.mode = .Invalid }
+      ...
+7877  if !y_is_diverging {
+7878      check_assignment(ctx, &y, x.type, name)
+      ...
+7890  if res == .Success { o^ = x } else { o^ = y }
+```
+
+### Why it is observable
+
+The two conditions are exactly the ones the construct exists for:
+
+1. **`res != .Success`** — the file is missing. That is the whole point of `#load(p) or_else d`
+   (`err_on_not_found` is passed `false` here precisely so a miss is recoverable). On that path
+   `o^ = y`, so **`y` IS the result operand**.
+2. **the default is a diverging expression** — `panic(...)`, `os.exit()`, anything `-> !`.
+
+`y_is_diverging` being true also **skips `check_assignment`** (7877), which is the only other place
+`x.type` would have reached `y`. So nothing else can supply the type.
+
+C++ hands the expression the load's resolved type (`t_u8_slice`, or the hint / explicit second
+argument). The port hands it whatever `check_expr_base` left on a `No_Value` operand — not `x.type`
+either way.
+
+**Repro shape (NOT RUN — #178):**
+```odin
+data := #load("definitely-does-not-exist.bin") or_else panic("missing")
+```
+
+### Scope
+
+This is a **single missing assignment**, unrelated to the #793/#794 duplication except by family —
+it lives in the caller both copies share the C++ counterpart of. Note the same block already carries
+a LEDGER #670 fix two screens down (the deliberately-reproduced `"conjuction"` typo at 7882-7885),
+so this region **has** been read against C++ before and the missing line survived it — the #790b
+pattern again.
+
+**NOT REPRODUCED. Awaiting Jon.**
+
+## #796 — REAL, OPEN: `or_return` and `or_break`/`or_continue` skip the operand-validity switch (2 of 3 sites)
+
+**Port:** `core/odin/checker/check_expr.odin` — `check_or_return_expr:7985`, `check_or_branch_expr:8094`
+**Reference:** `src/check_expr.cpp` — `check_or_return_expr:10185`, `check_or_branch_expr:10268`
+
+Found by continuing #795's read past the end of `check_or_else_expr` into its two siblings.
+
+### The helper
+
+`check_multi_expr_with_type_hint` (C++ **12825-12842**) is `check_expr_base` **plus** a validity switch:
+
+```cpp
+12826  check_expr_base(c, o, e, type_hint);
+12827  switch (o->mode) {
+12829  default:                 return;                        // valid, leave alone
+12830  case Addressing_NoValue: error_operand_no_value(o);      break;
+12832  case Addressing_Type:
+12833      if (type_hint != nullptr && is_type_typeid(type_hint)) { add_type_info_type(c, o->type); return; }
+12837      error_operand_not_expression(o);                     break;
+12841  o->mode = Addressing_Invalid;
+```
+
+It emits the diagnostic **and** sets `Addressing_Invalid`, which arms the `if (x.mode == Addressing_Invalid)`
+bail that is the very next statement at every one of its call sites.
+
+### The divergence
+
+| checker | C++ entry call | port entry call |
+|---|---|---|
+| `check_or_else_expr` | `check_multi_expr_with_type_hint` (10111) | **same** (7900) ✓ |
+| `check_or_return_expr` | `check_multi_expr_with_type_hint` (**10185**) | **`check_expr_base`** (7985) ✗ |
+| `check_or_branch_expr` | `check_multi_expr_with_type_hint` (**10268**) | **`check_expr_base`** (8094) ✗ |
+
+The port **has** the helper (`check_expr.odin:4941`) and uses it correctly in the first sibling. The
+structure of all three procs is otherwise line-for-line: entry call, `if x.mode == .Invalid` bail,
+`left_type`/`right_type`, `check_or_return_split_types`, `add_type_and_value`. Only the entry differs.
+
+### Consequence
+
+For `x or_return` / `x or_break` / `x or_continue` where `x` is:
+
+- a **No_Value** expression (a call to a procedure that returns nothing), or
+- a **type** rather than an expression,
+
+C++ emits `error_operand_no_value` / `error_operand_not_expression` and then bails immediately with
+`t_invalid`. The port emits neither, the `.Invalid` guard does not fire, and it proceeds into
+`check_or_return_split_types` carrying the raw operand.
+
+**Stated precisely, and NOT overclaimed:** both sides do reach
+`check_or_else_expr_no_value_error` when `right_type` comes back nil, so this is not necessarily
+"port silent, C++ loud" — it is **C++ emits a specific diagnostic and stops; the port skips that
+diagnostic and continues into code C++ never reaches on this input.** The resulting message text and
+count differ. The downstream behaviour of `check_or_return_split_types` on a No_Value or Type operand
+was **not traced**.
+
+Also note the `Addressing_Type` arm carries a **typeid special case** (12833-12835:
+`add_type_info_type` then return *without* invalidating). The port skips that registration too at
+both sites.
+
+### Why no gate caught it
+
+The trigger needs `or_return`/`or_break`/`or_continue` applied to a valueless or type operand — code
+that is already wrong, so it does not appear in the corpus, and the parity sweeps compare packages
+that check cleanly.
+
+**NOT REPRODUCED — no probe built (#178).** Repro shapes:
+```odin
+f :: proc() {}
+g :: proc() -> bool { f() or_return; return true }   // No_Value operand
+h :: proc() -> bool { int or_return; return true }   // Type operand
+```
+
+**Fix, if pursued:** change both entry calls to `check_multi_expr_with_type_hint`, matching C++ 10185
+and 10268 — the port's own `check_or_else_expr` is the model. **Awaiting Jon.**

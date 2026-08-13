@@ -151,21 +151,65 @@ run_guarded() {
 died() { [ "$1" -eq 124 ] || [ "$1" -ge 128 ]; }
 why()  { [ "$1" -eq 124 ] && echo "TIMEOUT" || echo "SIG$(($1-128))"; }
 
-cnt_mismatch=0; txt_mismatch=0; att_mismatch=0; n=0; excluded=0
-while read -r p; do
-  [ -z "$p" ] && continue
-  n=$((n+1))
+# ------------------------------------------------------------------------------------------------
+# #594 STEP 2 (LEDGER #766): BOUNDED FAN-OUT.
+#
+# Step 1 (#765) gave every package its own scratch dir and was verified inert over a full 323-package
+# sweep. That was the precondition: with the old shared fixed-name scratch, two concurrent workers
+# would have compared one package's ORACLE output against another's PORT output -- silently, and
+# surfacing as a TEXT row, the one GATED column.
+#
+# THE OTHER TWO BLOCKERS, and how they are handled here:
+#
+#  * COUNTERS. They used to be shell variables incremented in the loop body. Under `&` the body runs
+#    in a SUBSHELL and every increment is lost at the join -- the script would print
+#    `PARITY-DONE ... 0 0 0` and exit 0, a green gate that measured nothing (#380/#385's family).
+#    So each worker now writes a one-word VERDICT FILE, and the parent tallies after the join.
+#    Nothing is counted in a subshell.
+#
+#  * OUTPUT ORDER. Findings used to print in list order, which is what makes two sweeps
+#    line-comparable -- the technique that caught every regression in this batch. Interleaved
+#    parallel output would destroy that. Workers therefore write their rows to a per-package file
+#    and the parent cats them IN LIST ORDER at the join.
+#
+# THE TIMEOUT PROBLEM, AND WHY THIS DOES NOT JUST RAISE IT.
+# This script's own concurrency-guard comment records the precedent: a concurrent plain+vet run
+# excluded core/rexcode/isa/mips/tablegen/generated on a TIMEOUT that completes in ~1s alone. A
+# spurious timeout is reported EXCLUDED, i.e. UNMEASURED, and `compared` silently drops (#275). That
+# is the exact failure this change could mass-produce.
+#
+# Simply multiplying PARITY_TIMEOUT by the width would trade one bad property for another: a genuine
+# deadlock (#25/#41/#141 are real here) would then take width x 180s to surface, every time.
+#
+# So instead: **a death under concurrency is not admissible evidence.** Any package whose oracle or
+# port run times out or takes a signal during the parallel pass is put on a RETRY LIST and re-run
+# SEQUENTIALLY, alone, at the normal timeout. Only a second death makes it EXCLUDED. Contention and
+# a real hang are thereby distinguished by measurement rather than assumed apart -- and `excluded=0`
+# stays a meaningful acceptance criterion instead of becoming noise.
+#
+# WIDTH is deliberately conservative. The machine has 32 cores and #301 was loadavg 88; the PORT is
+# itself a threaded checker, so W workers do not use W cores. Default 6, override with PARITY_JOBS.
+PARITY_JOBS="${PARITY_JOBS:-6}"
 
-  run_guarded "$TMP/o.raw" oracle "$p" ./odin check "$p" -no-entry-point; orc=$?
-  run_guarded "$TMP/p.raw" port   "$p" "$PORT" "$p";                        prc=$?
+mapfile -t PKGS < <(grep -v '^[[:space:]]*$' "$LIST")
+
+# check_one <idx> <pkg> -- the entire former loop body, writing a verdict + rows instead of
+# mutating shell state. Runs in a background subshell; must touch nothing the parent reads.
+check_one() {
+  local n="$1" p="$2" D orc prc tag o q
+  D="$TMP/pkg$n"
+  mkdir -p "$D"
+  : > "$D/out"
+
+  run_guarded "$D/o.raw" oracle "$p" ./odin check "$p" -no-entry-point; orc=$?
+  run_guarded "$D/p.raw" port   "$p" "$PORT" "$p";                      prc=$?
 
   if died "$orc" || died "$prc"; then
-    excluded=$((excluded+1))
     tag=""
     died "$orc" && tag="oracle=$(why "$orc") "
     died "$prc" && tag="${tag}port=$(why "$prc")"
-    printf "EXCLUDED %-44s %s\n" "$p" "$tag"
-    continue
+    printf 'DIED %s\n' "$tag" > "$D/verdict"
+    return 0
   fi
 
   # Pattern covers LABELLED and UNLABELLED diagnostics alike. `error_no_newline`
@@ -178,13 +222,13 @@ while read -r p; do
   # over all 225 packages and the finding lines were BYTE-IDENTICAL, while a probe carrying an
   # unlabelled diagnostic went 2 -> 3 captured. Free, and strictly more sensitive. Per #275, an
   # instrument change that silently alters what is counted is never adopted without that diff.
-  grep -oP '(?<=/odin/)[^ ]*\.odin\(\d+:\d+\) \S.*' < "$TMP/o.raw" | sort > "$TMP/o"
-  grep -oP '(?<=/odin/)[^ ]*\.odin\(\d+:\d+\) \S.*' < "$TMP/p.raw" | sort > "$TMP/p"
-  o=$(wc -l < "$TMP/o"); q=$(wc -l < "$TMP/p")
+  grep -oP '(?<=/odin/)[^ ]*\.odin\(\d+:\d+\) \S.*' < "$D/o.raw" | sort > "$D/o"
+  grep -oP '(?<=/odin/)[^ ]*\.odin\(\d+:\d+\) \S.*' < "$D/p.raw" | sort > "$D/p"
+  o=$(wc -l < "$D/o"); q=$(wc -l < "$D/p")
   if [ "$o" != "$q" ]; then
-    cnt_mismatch=$((cnt_mismatch+1))
-    printf "COUNT  %-46s oracle=%-6s port=%s\n" "$p" "$o" "$q"
-  elif ! diff -q "$TMP/o" "$TMP/p" >/dev/null; then
+    printf 'COUNT\n' > "$D/verdict"
+    printf "COUNT  %-46s oracle=%-6s port=%s\n" "$p" "$o" "$q" >> "$D/out"
+  elif ! diff -q "$D/o" "$D/p" >/dev/null; then
     # ATTRIB vs TEXT (LEDGER #318). Strip the file(line:col) prefix and compare the MESSAGE
     # TEXTS alone. If those agree as a multiset, both compilers reported the same diagnostics
     # and disagree only about WHICH SITE to blame.
@@ -229,18 +273,75 @@ while read -r p; do
     # The known-nondeterministic family: the ten core/rexcode/isa/*/tools packages each have
     # 2-4 files declaring `main`, so "Redeclaration of 'main'" can be blamed on any of them and
     # C++'s file order decides which. Measured 2 events across one plain+vet sweep pair.
-    sed -E 's/^[^ ]*\.odin\([0-9]+:[0-9]+\) //' "$TMP/o" | sort > "$TMP/om"
-    sed -E 's/^[^ ]*\.odin\([0-9]+:[0-9]+\) //' "$TMP/p" | sort > "$TMP/pm"
-    if diff -q "$TMP/om" "$TMP/pm" >/dev/null; then
-      att_mismatch=$((att_mismatch+1))
-      printf "ATTRIB %-46s (%s diagnostics, same TEXT, different site)\n" "$p" "$o"
+    sed -E 's/^[^ ]*\.odin\([0-9]+:[0-9]+\) //' "$D/o" | sort > "$D/om"
+    sed -E 's/^[^ ]*\.odin\([0-9]+:[0-9]+\) //' "$D/p" | sort > "$D/pm"
+    if diff -q "$D/om" "$D/pm" >/dev/null; then
+      printf 'ATTRIB\n' > "$D/verdict"
+      printf "ATTRIB %-46s (%s diagnostics, same TEXT, different site)\n" "$p" "$o" >> "$D/out"
     else
-      txt_mismatch=$((txt_mismatch+1))
-      printf "TEXT   %-46s (%s diagnostics, same count, different text)\n" "$p" "$o"
+      printf 'TEXT\n' > "$D/verdict"
+      printf "TEXT   %-46s (%s diagnostics, same count, different text)\n" "$p" "$o" >> "$D/out"
     fi
-    diff "$TMP/o" "$TMP/p" | head -6 | sed 's/^/         /'
+    diff "$D/o" "$D/p" | head -6 | sed 's/^/         /' >> "$D/out"
+  else
+    printf 'OK\n' > "$D/verdict"
   fi
-done < "$LIST"
+  return 0
+}
+
+# --- PASS 1: bounded fan-out -------------------------------------------------------------------
+n=0
+for p in "${PKGS[@]}"; do
+  n=$((n+1))
+  check_one "$n" "$p" &
+  # Throttle. `wait -n` returns as soon as ANY child finishes, which keeps the pipe full without
+  # the barrier a `wait` every W would impose.
+  while [ "$(jobs -rp | wc -l)" -ge "$PARITY_JOBS" ]; do wait -n 2>/dev/null || break; done
+done
+wait
+
+# --- PASS 2: RETRY THE DEAD, SEQUENTIALLY ------------------------------------------------------
+# A death under concurrency is not evidence (see the header). Re-run alone before believing it.
+n=0; retried=0; retry_rescued=0
+for p in "${PKGS[@]}"; do
+  n=$((n+1))
+  case "$(cat "$TMP/pkg$n/verdict" 2>/dev/null)" in
+    DIED*)
+      retried=$((retried+1))
+      printf "RETRY  %-46s died under fan-out; re-running alone\n" "$p" >&2
+      check_one "$n" "$p"
+      case "$(cat "$TMP/pkg$n/verdict" 2>/dev/null)" in
+        DIED*) ;;
+        *) retry_rescued=$((retry_rescued+1)) ;;
+      esac
+      ;;
+  esac
+done
+[ "$retried" -gt 0 ] && printf "RETRY-SUMMARY retried=%s rescued=%s still_dead=%s\n" \
+  "$retried" "$retry_rescued" "$((retried-retry_rescued))"
+
+# --- JOIN: tally and emit IN LIST ORDER ---------------------------------------------------------
+cnt_mismatch=0; txt_mismatch=0; att_mismatch=0; excluded=0
+n=0
+for p in "${PKGS[@]}"; do
+  n=$((n+1))
+  v=$(cat "$TMP/pkg$n/verdict" 2>/dev/null)
+  case "$v" in
+    OK)      ;;
+    COUNT)   cnt_mismatch=$((cnt_mismatch+1)) ;;
+    ATTRIB)  att_mismatch=$((att_mismatch+1)) ;;
+    TEXT)    txt_mismatch=$((txt_mismatch+1)) ;;
+    DIED*)   excluded=$((excluded+1))
+             printf "EXCLUDED %-44s %s\n" "$p" "${v#DIED }" ;;
+    # A MISSING verdict means the worker never wrote one -- it was killed, or check_one hit an
+    # unhandled path. That is NOT a pass. Count it as unmeasured and say so, or the fan-out could
+    # silently shrink `compared` exactly as #275 describes.
+    *)       excluded=$((excluded+1))
+             printf "EXCLUDED %-44s NO-VERDICT (worker produced no result)\n" "$p" ;;
+  esac
+  [ -s "$TMP/pkg$n/out" ] && cat "$TMP/pkg$n/out"
+done
+n=${#PKGS[@]}
 compared=$((n-excluded))
 echo "PARITY-DONE packages=$n compared=$compared excluded=$excluded count_mismatches=$cnt_mismatch text_mismatches=$txt_mismatch attrib_mismatches=$att_mismatch"
 

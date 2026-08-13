@@ -31,21 +31,44 @@ died() { [ "$1" -eq 124 ] || [ "$1" -ge 128 ]; }
 why()  { [ "$1" -eq 124 ] && echo "TIMEOUT" || echo "SIG$(($1-128))"; }
 
 rc_all=0
+n_match=0; n_diff=0; n_empty=0; n_expected=0; n_failed=0; n_died=0; n_nostate=0; n_total=0
 for p in "$@"; do
-  name=$(basename "$p")
+  n_total=$((n_total+1))
+  # #760: this was `basename "$p"`, which is AMBIGUOUS at corpus scale and silently so. The
+  # 323-package list contains TWELVE packages whose basename is `tools`
+  # (core/crypto/_edwards25519/tools, core/unicode/tools, ten under core/rexcode/isa/*/tools) --
+  # so twelve rows printed the identical label `tools`, ten of them DOC-EMPTY and two STATE-MATCH,
+  # and NOTHING in the output said which was which. A report you cannot act on is not a report:
+  # the whole point of a per-package row is to name the package that failed. Full path now.
+  name="$p"
 
   timeout "$TO" ./odin doc "$p" > "$TMP/doc.raw" 2>&1; drc=$?
   timeout "$TO" "$DOC_BIN" "$p" > "$TMP/port.raw" 2>&1; prc=$?
 
   # rc on BOTH sides before any diff -- a crash prints nothing and looks like agreement (#285).
   if died "$drc"; then
-    printf "%-30s DOC-DIED   %s\n" "$name" "$(why $drc)"; rc_all=1; continue
+    printf "%-46s DOC-DIED   %s\n" "$name" "$(why $drc)"; n_died=$((n_died+1)); rc_all=1; continue
+  fi
+  # #760: `odin doc`'s ORDINARY exit status was never examined -- only signals/timeouts were. So a
+  # package where the REFERENCE ITSELF FAILED fell through to the nd==0 branch and printed
+  # DOC-EMPTY, which reads as a property of the package ("nothing to document") when it is really a
+  # property of the run ("the oracle could not check this"). Measured on the 323-package list: of
+  # 22 DOC-EMPTY rows, SEVEN were rc=0 with genuinely nothing exported and FIFTEEN were rc!=0 --
+  # core/sys/darwin (3 errors, platform-gated names undeclared on this target), core/sys/freebsd
+  # (31), the ten core/rexcode/isa/*/tools (each a directory of standalone `package main` generators,
+  # so `Redeclaration of 'main'`), core/path, core/odin/format, core/odin/printer. Same family as
+  # #275 and #759: a comparison whose reference side failed is NOT a measurement, and must not be
+  # reported in the same breath as one that succeeded and found nothing.
+  if [ "$drc" -ne 0 ]; then
+    nerr=$(grep -c ' Error: ' "$TMP/doc.raw")
+    printf "%-46s DOC-FAILED rc=%s errors=%s (oracle could not document this -- NOT a measurement)\n" \
+           "$name" "$drc" "$nerr"; n_failed=$((n_failed+1)); rc_all=1; continue
   fi
   if died "$prc"; then
-    printf "%-30s PORT-DIED  %s\n" "$name" "$(why $prc)"; rc_all=1; continue
+    printf "%-46s PORT-DIED  %s\n" "$name" "$(why $prc)"; n_died=$((n_died+1)); rc_all=1; continue
   fi
   if grep -q '^### \(LOAD-FAILED\|NO-ROOT-SCOPE\|ABS-FAILED\)' "$TMP/port.raw"; then
-    printf "%-30s PORT-NO-STATE\n" "$name"; rc_all=1; continue
+    printf "%-46s PORT-NO-STATE\n" "$name"; n_nostate=$((n_nostate+1)); rc_all=1; continue
   fi
 
   # `odin doc`: one-tab section headings, two-tab entries as "NAME :: ..." or "NAME := ...".
@@ -87,19 +110,32 @@ for p in "$@"; do
     # named here rather than counted as a failure. Any OTHER empty listing is still a failure:
     # an empty comparison is a vacuous pass, which is what #1 was filed for.
     if [ "$p" = "base/runtime" ]; then
-      printf "%-30s DOC-EMPTY-EXPECTED  (oracle emits no doc for base/runtime; port=%s entities)\n" "$name" "$np"
+      printf "%-46s DOC-EMPTY-EXPECTED  (oracle emits no doc for base/runtime; port=%s entities)\n" "$name" "$np"; n_expected=$((n_expected+1))
     else
-      printf "%-30s DOC-EMPTY  (nothing to compare -- NOT a pass)\n" "$name"; rc_all=1
+      printf "%-46s DOC-EMPTY  (nothing to compare -- NOT a pass)\n" "$name"; n_empty=$((n_empty+1)); rc_all=1
     fi
     continue
   fi
 
   if [ "$nm" -eq 0 ]; then
-    printf "%-30s STATE-MATCH  doc=%-5s port=%-5s port-only=%s\n" "$name" "$nd" "$np" "$extra"
+    printf "%-46s STATE-MATCH  doc=%-5s port=%-5s port-only=%s\n" "$name" "$nd" "$np" "$extra"; n_match=$((n_match+1))
   else
-    printf "%-30s STATE-DIFFER doc=%-5s port=%-5s MISSING=%s\n" "$name" "$nd" "$np" "$nm"
+    printf "%-46s STATE-DIFFER doc=%-5s port=%-5s MISSING=%s\n" "$name" "$nd" "$np" "$nm"; n_diff=$((n_diff+1))
     head -8 "$TMP/missing" | sed 's/^/                                 missing: /'
     rc_all=1
   fi
 done
+
+# #227: a SUMMARY line, because this tool had none. Every per-package row on a clean run is
+# STATE-MATCH, and batch_gates filters rows it does not recognise -- so inside the batch a fully
+# green doccmp stage printed NOTHING AT ALL, which is indistinguishable from "the stage never ran"
+# (#26: an absent result is never a pass; #10: never conclude clean from an empty grep). The
+# counts also make the partition add up in one glance, so a shortfall is visible rather than
+# inferred from a missing row.
+printf "DOCCMP-DONE packages=%s match=%s differ=%s empty=%s empty_expected=%s doc_failed=%s died=%s no_state=%s\n" \
+       "$n_total" "$n_match" "$n_diff" "$n_empty" "$n_expected" "$n_failed" "$n_died" "$n_nostate"
+if [ "$n_match" -eq 0 ] && [ "$n_expected" -eq 0 ]; then
+  echo "DOCCMP-ABORTED 0 of $n_total packages were compared -- the counts above are NOT a measurement" >&2
+  exit 2
+fi
 exit $rc_all

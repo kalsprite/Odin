@@ -146,21 +146,40 @@ fi
 died() { [ "$1" -eq 124 ] || [ "$1" -ge 128 ]; }
 why()  { [ "$1" -eq 124 ] && echo "TIMEOUT" || echo "SIG$(($1-128))"; }
 
-cnt_mismatch=0; txt_mismatch=0; att_mismatch=0; n=0; excluded=0
-while read -r p; do
-  [ -z "$p" ] && continue
-  n=$((n+1))
+# ------------------------------------------------------------------------------------------------
+# #594 STEP 2 (LEDGER #767): BOUNDED FAN-OUT -- the same change already VERIFIED 2/2 in parity.sh
+# (#766). See that file's header for the full rationale; the short form:
+#   * counters move OUT of the loop body into per-package VERDICT FILES, because under `&` the body
+#     is a SUBSHELL and every increment would be lost -> `PARITY-VET-DONE ... 0 0 0` + exit 0, a
+#     green gate that measured nothing;
+#   * output is buffered per package and emitted IN LIST ORDER at the join, because sweep-to-sweep
+#     line comparison is the technique that catches regressions here;
+#   * the timeout is NOT multiplied by the width. A death under concurrency is not admissible
+#     evidence: that package is re-run SEQUENTIALLY, ALONE, at the normal timeout, and only a SECOND
+#     death is EXCLUDED. This script's own concurrency-guard note records a concurrent run excluding
+#     core/rexcode/isa/mips/tablegen/generated on a TIMEOUT it clears in ~1s alone -- exactly the
+#     failure fan-out could otherwise mass-produce, and a spurious timeout reads EXCLUDED = UNMEASURED
+#     (#275).
+#   * a MISSING verdict counts as EXCLUDED `NO-VERDICT`, never as a pass.
+PARITY_JOBS="${PARITY_JOBS:-6}"
 
-  timeout "${PER_PKG_TIMEOUT:-180}" ./odin check "$p" -vet -no-entry-point > "$TMP/o.raw" 2>&1; orc=$?
-  timeout "${PER_PKG_TIMEOUT:-180}" "$PORT" "$p"                      > "$TMP/p.raw" 2>&1; prc=$?
+mapfile -t PKGS < <(grep -v '^[[:space:]]*$' "$LIST")
+
+check_one() {
+  local n="$1" p="$2" D orc prc tag o q
+  D="$TMP/pkg$n"
+  mkdir -p "$D"
+  : > "$D/out"
+
+  timeout "${PER_PKG_TIMEOUT:-180}" ./odin check "$p" -vet -no-entry-point > "$D/o.raw" 2>&1; orc=$?
+  timeout "${PER_PKG_TIMEOUT:-180}" "$PORT" "$p"                           > "$D/p.raw" 2>&1; prc=$?
 
   if died "$orc" || died "$prc"; then
-    excluded=$((excluded+1))
     tag=""
     died "$orc" && tag="oracle=$(why "$orc") "
     died "$prc" && tag="${tag}port=$(why "$prc")"
-    printf "EXCLUDED %-44s %s\n" "$p" "$tag"
-    continue
+    printf 'DIED %s\n' "$tag" > "$D/verdict"
+    return 0
   fi
 
   # Pattern covers LABELLED and UNLABELLED diagnostics alike. `error_no_newline`
@@ -173,31 +192,82 @@ while read -r p; do
   # over all 225 packages and the finding lines were BYTE-IDENTICAL, while a probe carrying an
   # unlabelled diagnostic went 2 -> 3 captured. Free, and strictly more sensitive. Per #275, an
   # instrument change that silently alters what is counted is never adopted without that diff.
-  grep -oP '(?<=/odin/)[^ ]*\.odin\(\d+:\d+\) \S.*' < "$TMP/o.raw" | sort > "$TMP/o"
-  grep -oP '(?<=/odin/)[^ ]*\.odin\(\d+:\d+\) \S.*' < "$TMP/p.raw" | sort > "$TMP/p"
-  o=$(wc -l < "$TMP/o"); q=$(wc -l < "$TMP/p")
+  grep -oP '(?<=/odin/)[^ ]*\.odin\(\d+:\d+\) \S.*' < "$D/o.raw" | sort > "$D/o"
+  grep -oP '(?<=/odin/)[^ ]*\.odin\(\d+:\d+\) \S.*' < "$D/p.raw" | sort > "$D/p"
+  o=$(wc -l < "$D/o"); q=$(wc -l < "$D/p")
   if [ "$o" != "$q" ]; then
-    cnt_mismatch=$((cnt_mismatch+1))
-    printf "COUNT  %-46s oracle=%-6s port=%s\n" "$p" "$o" "$q"
-  elif ! diff -q "$TMP/o" "$TMP/p" >/dev/null; then
+    printf 'COUNT\n' > "$D/verdict"
+    printf "COUNT  %-46s oracle=%-6s port=%s\n" "$p" "$o" "$q" >> "$D/out"
+  elif ! diff -q "$D/o" "$D/p" >/dev/null; then
     # ATTRIB vs TEXT -- see the long note in parity.sh (LEDGER #318). Summary: same message
     # multiset, different blamed site.
     #
     # !! AN ATTRIB IS NOT AUTOMATICALLY BENIGN. !! #179 was an attribution bug and a REAL
     # DEFECT, accounting for 88/88 of the vet-mode divergences at the time. The split makes the
     # classes distinguishable; it does not make either one skippable.
-    sed -E 's/^[^ ]*\.odin\([0-9]+:[0-9]+\) //' "$TMP/o" | sort > "$TMP/om"
-    sed -E 's/^[^ ]*\.odin\([0-9]+:[0-9]+\) //' "$TMP/p" | sort > "$TMP/pm"
-    if diff -q "$TMP/om" "$TMP/pm" >/dev/null; then
-      att_mismatch=$((att_mismatch+1))
-      printf "ATTRIB %-46s (%s diagnostics, same TEXT, different site -- still investigate)\n" "$p" "$o"
+    sed -E 's/^[^ ]*\.odin\([0-9]+:[0-9]+\) //' "$D/o" | sort > "$D/om"
+    sed -E 's/^[^ ]*\.odin\([0-9]+:[0-9]+\) //' "$D/p" | sort > "$D/pm"
+    if diff -q "$D/om" "$D/pm" >/dev/null; then
+      printf 'ATTRIB\n' > "$D/verdict"
+      printf "ATTRIB %-46s (%s diagnostics, same TEXT, different site -- still investigate)\n" "$p" "$o" >> "$D/out"
     else
-      txt_mismatch=$((txt_mismatch+1))
-      printf "TEXT   %-46s (%s diagnostics, same count, different text)\n" "$p" "$o"
+      printf 'TEXT\n' > "$D/verdict"
+      printf "TEXT   %-46s (%s diagnostics, same count, different text)\n" "$p" "$o" >> "$D/out"
     fi
-    diff "$TMP/o" "$TMP/p" | head -6 | sed 's/^/         /'
+    diff "$D/o" "$D/p" | head -6 | sed 's/^/         /' >> "$D/out"
+  else
+    printf 'OK\n' > "$D/verdict"
   fi
-done < "$LIST"
+  return 0
+}
+
+# --- PASS 1: bounded fan-out -------------------------------------------------------------------
+n=0
+for p in "${PKGS[@]}"; do
+  n=$((n+1))
+  check_one "$n" "$p" &
+  while [ "$(jobs -rp | wc -l)" -ge "$PARITY_JOBS" ]; do wait -n 2>/dev/null || break; done
+done
+wait
+
+# --- PASS 2: retry the dead, SEQUENTIALLY ------------------------------------------------------
+n=0; retried=0; retry_rescued=0
+for p in "${PKGS[@]}"; do
+  n=$((n+1))
+  case "$(cat "$TMP/pkg$n/verdict" 2>/dev/null)" in
+    DIED*)
+      retried=$((retried+1))
+      printf "RETRY  %-46s died under fan-out; re-running alone\n" "$p" >&2
+      check_one "$n" "$p"
+      case "$(cat "$TMP/pkg$n/verdict" 2>/dev/null)" in
+        DIED*) ;;
+        *) retry_rescued=$((retry_rescued+1)) ;;
+      esac
+      ;;
+  esac
+done
+[ "$retried" -gt 0 ] && printf "RETRY-SUMMARY retried=%s rescued=%s still_dead=%s\n" \
+  "$retried" "$retry_rescued" "$((retried-retry_rescued))"
+
+# --- JOIN: tally and emit IN LIST ORDER ---------------------------------------------------------
+cnt_mismatch=0; txt_mismatch=0; att_mismatch=0; excluded=0
+n=0
+for p in "${PKGS[@]}"; do
+  n=$((n+1))
+  v=$(cat "$TMP/pkg$n/verdict" 2>/dev/null)
+  case "$v" in
+    OK)      ;;
+    COUNT)   cnt_mismatch=$((cnt_mismatch+1)) ;;
+    ATTRIB)  att_mismatch=$((att_mismatch+1)) ;;
+    TEXT)    txt_mismatch=$((txt_mismatch+1)) ;;
+    DIED*)   excluded=$((excluded+1))
+             printf "EXCLUDED %-44s %s\n" "$p" "${v#DIED }" ;;
+    *)       excluded=$((excluded+1))
+             printf "EXCLUDED %-44s NO-VERDICT (worker produced no result)\n" "$p" ;;
+  esac
+  [ -s "$TMP/pkg$n/out" ] && cat "$TMP/pkg$n/out"
+done
+n=${#PKGS[@]}
 compared=$((n-excluded))
 echo "PARITY-VET-DONE packages=$n compared=$compared excluded=$excluded count_mismatches=$cnt_mismatch text_mismatches=$txt_mismatch attrib_mismatches=$att_mismatch"
 

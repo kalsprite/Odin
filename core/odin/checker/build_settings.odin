@@ -479,6 +479,28 @@ Build_Context :: struct {
 	strict_target_features:             bool,
 	minimum_os_version_string_given:    bool,
 
+	// #591 STAGE A. The `-target-features:` INPUT and its RESOLVED result.
+	//
+	// C++ has TWO writers of build_context.target_features_set and the port had NEITHER as an
+	// input -- `enabled_target_features()` recomputed the microarch defaults from scratch at each
+	// of its call sites and there was no way to feed a user feature list in at all:
+	//   1. main.cpp:4199-4207 seeds the set from get_default_features(), i.e. the microarch.
+	//   2. main.cpp:4222-4281 merges `-target-features:` on top, per item: strip the sign to
+	//      VALIDATE, then re-add with '+' defaulted, REMOVING the opposite-signed entry first so
+	//      a later `-f` overrides an earlier `+f`.
+	// `target_features_string` is writer 2's input; `target_features_set` is the resolved answer
+	// both writers produce, and is what every consumer must read. Resolution happens ONCE, at
+	// C++'s placement, rather than being recomputed per query -- that is the "authoritative
+	// resolved read-back" the task asks for, and it is also what makes the two writers composable:
+	// a per-call recomputation can only ever see writer 1.
+	target_features_string:             string,
+	target_features_set:                string,
+	target_features_resolved:           bool,
+	// The INPUTS the cached set was resolved from, so a later change to either invalidates it.
+	// See resolve_target_features for why this exists -- it is not defensive, it is a bug I hit.
+	target_features_resolved_march:     string,
+	target_features_resolved_input:     string,
+
 	// Debug flags
 	// C++: build_settings.cpp:567
 	show_debug_messages:                bool,
@@ -1118,6 +1140,25 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	if bc.metrics.os == .Freestanding {
 		bc.ODIN_DEFAULT_TO_NIL_ALLOCATOR = !bc.ODIN_DEFAULT_TO_PANIC_ALLOCATOR
 	}
+
+	// #591 STAGE A: resolve the target-feature set HERE, once the target is final.
+	//
+	// Placement is forced by a data dependency, not by taste: resolve_target_features reads
+	// bc.metrics.arch (to pick the validity table) and get_final_microarchitecture(), so it cannot
+	// run before this procedure has chosen them. C++ has the same ordering -- its seeding at
+	// main.cpp:4199 runs after init_build_context.
+	//
+	// This is INERT for every existing caller: with an empty target_features_string the resolved
+	// set is exactly microarch_default_features(get_final_microarchitecture()), which is precisely
+	// what enabled_target_features() returned before. The behaviour only changes for a caller that
+	// actually supplies the input.
+	//
+	// The error is deliberately DROPPED here rather than reported: init_build_context has no error
+	// collector (it runs before one exists) and a checker library must not exit its host process
+	// (#12). An embedder that supplies target_features_string should call resolve_target_features
+	// ITSELF and inspect the returned invalid-feature name -- it is idempotent and safe to re-run,
+	// which is also how a context whose features are set AFTER init gets a correct set.
+	_, _ = resolve_target_features()
 }
 
 // get_default_microarchitecture returns the microarchitecture used when none was requested.
@@ -1492,10 +1533,252 @@ target_feature_is_enabled :: proc(features: string, enabled: string) -> bool {
 // enabled_target_features returns the feature set active for the current build target, i.e. what
 // C++ seeds build_context.target_features_set with at init_build_paths (build_settings.cpp:2284).
 enabled_target_features :: proc() -> string {
-	// get_final_microarchitecture (build_settings.odin, ported from llvm_backend.cpp:54) already
-	// applies the "empty means default" rule. An earlier draft of this reintroduced that logic as
-	// a second copy of get_default_microarchitecture; deleted -- one implementation, not two.
+	// #591 STAGE A: READ THE RESOLVED SET, do not recompute. Before this, every call recomputed
+	// the microarch defaults, which structurally could not see the `-target-features:` input --
+	// so the flag had nowhere to land even once it existed. resolve_target_features() is the
+	// single writer; this is the authoritative read-back.
+	// The cache is keyed on the INPUTS, and this is a bug I actually shipped and crosstarget.sh
+	// caught: resolving at the end of init_build_context looked right, but `-microarch:` is applied
+	// to build_context AFTER init_build_context returns, so the cached set was computed from the
+	// DEFAULT microarch and then never updated. Every `-microarch:bleeding-edge` probe regressed --
+	// the port claimed `atomics` was unavailable on a target where it is. C++ does not have this
+	// problem because it seeds at main.cpp:4199, AFTER all flag parsing; the port has no single
+	// such point, so the cache must invalidate itself instead of trusting placement.
+	if build_context.target_features_resolved &&
+	   build_context.target_features_resolved_march == get_final_microarchitecture() &&
+	   build_context.target_features_resolved_input == build_context.target_features_string {
+		return build_context.target_features_set
+	}
+	// NOT-YET-RESOLVED FALLBACK, deliberately identical to the old behaviour. Callers that build a
+	// build_context by hand (probes, tests, the triage harnesses) never call the resolver, and
+	// silently returning "" there would DISABLE every feature and read as a checker regression
+	// rather than as an unresolved context. Falling back to the microarch defaults keeps those
+	// paths exactly as they were, so this change is inert unless the resolver actually ran.
+	// get_final_microarchitecture (ported from llvm_backend.cpp:54) already applies the
+	// "empty means default" rule. An earlier draft reintroduced that as a second copy of
+	// get_default_microarchitecture; deleted -- one implementation, not two.
 	return microarch_default_features(get_final_microarchitecture())
+}
+
+// #591 STAGE B (#764): the `-define:NAME=VALUE` INPUT.
+//
+// `build_context.defined_values` was DECLARED and READ -- populate_config_package_scope (wired into
+// init_checker in #667) turns each entry into a constant in the config package scope, which is what
+// `#config(NAME, default)` resolves against -- but it had ZERO WRITERS. The whole override path was
+// therefore correct and unreachable: every `#config` in the tree silently took its default and no
+// input could say otherwise. These three procedures are the missing writer.
+//
+// Errors are RETURNED, never printed or fatal. C++ sets `bad_flags = true` and main() exits; a
+// checker library must not exit its host process (#12), and the caller is the only party that knows
+// whether a bad define should be fatal.
+Define_Error :: enum {
+	None,
+	Malformed,        // no '=', or an empty name or value  -> "Expected 'name=value', got '%s'"
+	Not_Identifier,   // -> "Defined constant name '%s' must be a valid identifier"
+	Underscore,       // -> "Defined constant name cannot be an underscore"
+	Already_Exists,   // -> "Defined constant '%s' already exists"
+	Invalid_Value,    // -> "Invalid define constant value: '%s'. ..."
+}
+
+// build_param_looks_like_float decides float-vs-integer for a `-define` value.
+// C++ Reference: main.cpp build_param_looks_like_float:542-559.
+//
+// The middle test is the one that is easy to drop and changes behaviour: a leading `0` followed by
+// a NON-DIGIT returns false immediately, so `0x1e` is an INTEGER even though it contains an `e`.
+// Without it the trailing scan would see that `e` and route a hex literal to the float parser.
+build_param_looks_like_float :: proc(param: string) -> bool {
+	if strings.contains_rune(param, '.') {
+		return true
+	}
+	i := 0
+	if len(param) > 0 && (param[0] == '-' || param[0] == '+') {
+		i = 1
+	}
+	if len(param) > i + 1 && param[i] == '0' && !(param[i + 1] >= '0' && param[i + 1] <= '9') {
+		return false
+	}
+	for ; i < len(param); i += 1 {
+		if param[i] == 'e' || param[i] == 'E' {
+			return true
+		}
+	}
+	return false
+}
+
+// build_param_to_exact_value parses a `-define` VALUE, in C++'s order.
+// C++ Reference: main.cpp build_param_to_exact_value:561-613.
+//
+// Order is load-bearing: bools are tested BEFORE numbers, and the numeric attempt FALLS THROUGH to
+// the string arm when the parse fails rather than erroring, so `-define:X=1abc` is the string
+// "1abc" and not an error. The single-quote form is the documented escape hatch for forcing `true`
+// or `123` to be a string, and the quotes are stripped only when BOTH ends carry one.
+build_param_to_exact_value :: proc(param: string) -> Exact_Value {
+	if len(param) == 0 {
+		return nil
+	}
+
+	// C++ 575-580: case-INSENSITIVE, and `t`/`f` are accepted as well as the full words.
+	if strings.equal_fold(param, "t") || strings.equal_fold(param, "true") {
+		return exact_value_bool(true)
+	}
+	if strings.equal_fold(param, "f") || strings.equal_fold(param, "false") {
+		return exact_value_bool(false)
+	}
+
+	// C++ 585-594.
+	if param[0] == '-' || param[0] == '+' || (param[0] >= '0' && param[0] <= '9') {
+		value: Exact_Value
+		if build_param_looks_like_float(param) {
+			value = exact_value_float_from_string(param)
+		} else {
+			value = exact_value_integer_from_string(param)
+		}
+		if value != nil {
+			return value
+		}
+		// Deliberately NOT an error: fall through to the string arm, as C++ does.
+	}
+
+	// C++ 600-607.
+	if len(param) > 1 && param[0] == '\'' && param[len(param) - 1] == '\'' {
+		return exact_value_string(param[1:len(param) - 1])
+	}
+	return exact_value_string(param)
+}
+
+// add_defined_value applies one `-define:NAME=VALUE` argument to build_context.defined_values.
+// C++ Reference: main.cpp BuildFlag_Define:1156-1205.
+//
+// SIX validations in C++'s ORDER, and the order is observable because each one `break`s: only the
+// FIRST failure is reported for a given argument. `detail` carries whatever the corresponding C++
+// message interpolates -- note that the malformed case interpolates the WHOLE argument, not the
+// post-`=` remainder, which is why it is returned rather than reconstructed by the caller.
+add_defined_value :: proc(arg: string, allocator := context.allocator) -> (err: Define_Error, detail: string) {
+	eq := strings.index_byte(arg, '=')
+	if eq < 0 {
+		return .Malformed, arg
+	}
+	name  := arg[:eq]
+	value := arg[eq + 1:]
+	if len(name) == 0 || len(value) == 0 {
+		return .Malformed, arg
+	}
+	if !is_string_an_identifier(name) {
+		return .Not_Identifier, name
+	}
+	if name == "_" {
+		return .Underscore, name
+	}
+	if _, exists := build_context.defined_values[name]; exists {
+		return .Already_Exists, name
+	}
+
+	v := build_param_to_exact_value(value)
+	if v == nil {
+		return .Invalid_Value, value
+	}
+
+	if build_context.defined_values == nil {
+		build_context.defined_values = make(map[string]ast.Exact_Value, 16, allocator)
+	}
+	build_context.defined_values[strings.clone(name, allocator)] = v
+	return .None, ""
+}
+
+// resolve_target_features computes build_context.target_features_set ONCE, reproducing C++'s two
+// writers in C++'s order. Idempotent: re-resolving with the same inputs yields the same set, and
+// the `resolved` flag is what enabled_target_features() keys off.
+//
+// C++ REFERENCE, in order:
+//   main.cpp:4199-4207  seed from get_default_features() -- the microarch defaults, UNSIGNED
+//                       (e.g. "sse2"), added one comma-separated item at a time.
+//   main.cpp:4222-4281  for each comma-separated item of `-target-features:`:
+//                         - strip a leading '+'/'-' to get the name to VALIDATE
+//                         - an unrecognised name is FATAL in C++ (it prints the valid list and
+//                           exits 1); here it is reported through `invalid` and the caller decides,
+//                           because a checker library must not exit its host process (#12).
+//                         - re-attach the sign, defaulting to '+'
+//                         - REMOVE the opposite-signed entry, then ADD this one
+// The removal is the subtle part and is why a set, not an append, is required: `+f` then `-f` must
+// leave ONLY `-f`. target_feature_is_enabled already reads signs correctly (it is a line-for-line
+// port of check_target_feature_is_enabled), so the resolved set can hold signed entries directly.
+//
+// ONE DELIBERATE REPRESENTATIONAL DIFFERENCE, stated with its equivalence argument rather than
+// left implicit (#758: a divergence's EXTENT is part of its claim). C++ removes only the
+// OPPOSITE-signed entry, so seeding `sse2` and then passing `-sse2` leaves the set holding BOTH
+// `sse2` and `-sse2`. This keeps at most ONE entry per feature name -- the last one specified.
+// The two are observably identical because the only consumer, check_target_feature_is_enabled,
+// answers `(has_plus || has_raw) && !has_minus`:
+//   C++ {sse2, -sse2} -> has_raw && has_minus -> false;  here {-sse2} -> has_minus -> false.
+//   C++ {sse2, +sse2} -> true;                           here {+sse2} -> true.
+//   last-wins holds in both, because a later item always removes what it contradicts.
+// If a future consumer ever inspects the set's MEMBERSHIP rather than asking this predicate, the
+// difference becomes visible and this note is where to start.
+resolve_target_features :: proc(allocator := context.allocator) -> (invalid_feature: string, ok: bool) {
+	base := microarch_default_features(get_final_microarchitecture())
+
+	entries: [dynamic]string
+	defer delete(entries)
+
+	rest := base
+	for item in strings.split_iterator(&rest, ",") {
+		if len(item) == 0 {
+			continue
+		}
+		append(&entries, item)
+	}
+
+	if len(build_context.target_features_string) > 0 {
+		feature_list := target_features_list[build_context.metrics.arch]
+		user := build_context.target_features_string
+		for item in strings.split_iterator(&user, ",") {
+			// C++ 4226: `if (item == "") break;` -- an empty item ENDS the walk rather than being
+			// skipped, so "sse2,,aes" drops `aes`. Kept, because it is observable.
+			if len(item) == 0 {
+				break
+			}
+
+			stripped := item
+			if stripped[0] == '+' || stripped[0] == '-' {
+				stripped = stripped[1:]
+			}
+
+			// C++ 4234-4245: `help` and `?` are query forms, not features, and are exempted from
+			// validation there. A checker has no list to print, so they are simply not features.
+			if stripped != "help" && stripped != "?" {
+				if !check_single_target_feature_is_valid(feature_list, stripped) {
+					return stripped, false
+				}
+			}
+
+			signed_item := item
+			if item[0] != '+' && item[0] != '-' {
+				signed_item = strings.concatenate({"+", item}, allocator)
+			}
+
+			// Remove the opposite-signed entry, then add this one (C++ 4269-4279).
+			opposite_rest := signed_item[1:]
+			for i := 0; i < len(entries); {
+				e := entries[i]
+				bare := e
+				if len(bare) > 0 && (bare[0] == '+' || bare[0] == '-') {
+					bare = bare[1:]
+				}
+				if bare == opposite_rest {
+					ordered_remove(&entries, i)
+				} else {
+					i += 1
+				}
+			}
+			append(&entries, signed_item)
+		}
+	}
+
+	build_context.target_features_set = strings.join(entries[:], ",", allocator)
+	build_context.target_features_resolved = true
+	build_context.target_features_resolved_march = get_final_microarchitecture()
+	build_context.target_features_resolved_input = build_context.target_features_string
+	return "", true
 }
 
 // check_target_feature_is_superset_of asks whether every feature in `of` also appears in `superset`,

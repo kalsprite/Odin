@@ -61,5 +61,28 @@ def main():
     print("stable totals: base=%d new=%d" % (
         sum(a[k]["errors"] for k in stable), sum(b[k]["errors"] for k in stable)))
 
+    # #750/#761: THE COVERAGE ABORT, AND DELIBERATELY NOTHING ELSE.
+    #
+    # This tool must NOT be gated on its difference counts. It is HISTORY-anchored (#269): it
+    # answers "did this change alter port behaviour anywhere?", so after an intentional fix a
+    # nonzero `diagnostic-text differences` is THE POINT, not a failure. parity.sh is the
+    # reference-anchored gate and is where divergence-from-the-oracle is judged. Run both.
+    #
+    # What CAN go silently wrong is coverage. Every package is partitioned out if it is
+    # error-capped or crashed/timed-out on EITHER side, so a run in which everything was
+    # partitioned away prints `error-count differences: 0 / diagnostic-text differences: 0` --
+    # which is exactly what a clean run prints. Measured on two EMPTY sweeps:
+    #     keys=0 both=0 capped=0 unstable=0 STABLE=0 / 0 / 0   RC=0
+    # A missing or non-executable binary handed to sweep_det.sh produces precisely this shape,
+    # because every package is then recorded `### CRASH` and excluded. To its credit this tool
+    # already PRINTED `STABLE=0` -- it was only the exit status that could not say so (#745: the
+    # exit status IS the announcement).
+    if not stable:
+        print("SWDIFF-ABORTED 0 packages were comparable (keys=%d both=%d capped=%d unstable=%d)"
+              " -- every difference count above is zero because NOTHING WAS COMPARED"
+              % (len(keys), len(both), len(capped), len(bad)), file=sys.stderr)
+        return 2
+    return 0
 
-main()
+
+sys.exit(main())

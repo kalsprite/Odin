@@ -29,6 +29,20 @@ PORT="$1"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 fail=0
 
+# ---- (0) BINARY CONTRACT (#759). This gate requires a triage_st-family binary, because that is
+# the one that implements `-dump-doc:<path>` (triage_st/main.odin:102). Handed `triage_doc` -- a
+# different tool with a different contract -- every dump below silently fails to appear, the probe
+# checks all report `<missing>`, and the reachability check reports EVERY flag as unreachable. That
+# is exactly what happened, and it read as sixteen dead bits in the checker rather than as one
+# wrong argument. #621 is the same lesson on parity_vet (the plain harness passed where the vet
+# harness was required), and it is the second time a gate has been fed the wrong binary. REFUSE.
+"$PORT" .claude/tools/docflag_probe -dump-doc:"$TMP/contract.txt" >/dev/null 2>&1
+if [ ! -s "$TMP/contract.txt" ]; then
+	echo "DOCFLAG-ABORTED '$PORT' produced no doc dump for -dump-doc: -- this gate needs a" >&2
+	echo "  triage_st-family binary (odin build .claude/tools/triage_st). NOTHING WAS MEASURED." >&2
+	exit 2
+fi
+
 # ---- (1) POSITIVE + NEGATIVE CONTROL on the dedicated probe --------------------------------
 # plain_proc matters as much as the other three: without a declaration that must come back with
 # NO bits, a bug that sets every bit unconditionally would pass all of them.
@@ -105,10 +119,22 @@ fi
 # ---- (3) DETERMINISM -- the dump must not vary run to run ----------------------------------
 # #484: the doc writer had an item-tracker overflow that was ~80% and is now ~1-3%, so a varying
 # dump is a live hazard rather than a hypothetical one.
+# #757 CHANGED THIS TO CAPTURE STDOUT, AND #759 REVERTS THAT: #757's root cause was WRONG.
+# `-dump-doc:` IS a real flag -- on `triage_st` (triage_st/main.odin:102), which is the binary this
+# gate takes. I diagnosed it against `triage_doc`, which is a DIFFERENT tool with a different
+# contract (`<package-path>...`, prints `ENTITY <Kind> <Name>` to stdout and carries no flags at
+# all), because that is the binary I happened to be invoking the gate with. Running the gate with
+# the wrong binary produced "no dump", and reading the wrong tool's source explained it perfectly.
+# Two wrongs that agreed. The stdout capture #757 installed would have compared triage_st's
+# DIAGNOSTIC output, not its doc dump -- a determinism check on the wrong stream.
 "$PORT" core/strings -dump-doc:"$TMP/d1.txt" >/dev/null 2>&1
 "$PORT" core/strings -dump-doc:"$TMP/d2.txt" >/dev/null 2>&1
 echo
-if cmp -s "$TMP/d1.txt" "$TMP/d2.txt"; then
+# EXISTENCE BEFORE COMPARISON (#228). A missing or empty dump is an ABORT -- the tool produced
+# nothing and the comparison is not a measurement -- and must never be reported as a difference.
+if [ ! -s "$TMP/d1.txt" ] || [ ! -s "$TMP/d2.txt" ]; then
+	echo "DETERMINISM: ABORTED (core/strings produced no dump -- NOT a determinism result)"; fail=1
+elif cmp -s "$TMP/d1.txt" "$TMP/d2.txt"; then
 	echo "DETERMINISM: OK (core/strings byte-identical across 2 runs)"
 else
 	echo "DETERMINISM: FAIL (core/strings differs between runs -- see #484)"; fail=1

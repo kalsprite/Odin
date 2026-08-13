@@ -2793,8 +2793,20 @@ check_unary_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, ty
 			index_expr := unparen_expr(ue.expr)
 			if ie, ie_ok := index_expr.derived.(^ast.Index_Expr); ie_ok {
 				soa_type := type_deref(type_of_expr(ie.expr, ctx.info))
-				assert(is_type_soa_struct(soa_type))
-				o.type = alloc_type_soa_pointer(soa_type)
+				if is_type_soa_struct(soa_type) {
+					o.type = alloc_type_soa_pointer(soa_type)
+				} else {
+					// `&soa[i][j]` -- the inner index already yielded an ARRAY element of the
+					// #soa container, so what is being addressed is one component of that array,
+					// not the scattered element itself. A plain pointer, not an #soa pointer.
+					//
+					// C++ Reference: check_expr.cpp check_unary_expr:3004-3013, added by upstream
+					// merge b9bbcd33b (#754) -- it converted its own `GB_ASSERT(is_type_soa_struct)`
+					// into exactly this branch. The port carried the identical PRE-merge assert, so
+					// `&soa[i][j]` aborted the checker (SIGILL) on code the reference accepts.
+					assert(is_type_array(soa_type))
+					o.type = alloc_type_pointer(o.type)
+				}
 			} else {
 				// C++ routes this through ast_node_expect (parser.cpp:628), which EMITS and then
 				// falls back to a plain pointer. Ported with its message and its fallback. I could
@@ -3579,6 +3591,18 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 		s, ok := in_value.(string)
 		if !ok {
 			return false
+		}
+		// A UTF-8 constant has to be RE-EXPRESSED in UTF-16 when the target is a UTF-16 string
+		// type, otherwise its length and indices stay those of the UTF-8 encoding.
+		// C++ Reference: check_expr.cpp check_representable_as_constant, added by upstream #7268
+		// (this port's #636). `check_cast` is the paired site: it keys its conversion off the
+		// VALUE's encoding rather than the source TYPE precisely because the value may already
+		// have been re-expressed here -- change one without the other and casts double-convert.
+		if is_type_string16(ct) || is_type_cstring16(ct) {
+			if out_value != nil {
+				out_value^ = exact_value_string16(string_to_string16(s))
+			}
+			return true
 		}
 		if out_value != nil {
 			out_value^ = s
@@ -5796,7 +5820,15 @@ check_set_index_data :: proc(operand: ^Operand, t: ^Type, indirection: bool, max
 		max_count^ = arr.count
 		if indirection {
 			operand.mode = .Variable
-		} else if operand.mode != .Variable && operand.mode != .Constant {
+		} else if operand.mode != .Variable &&
+		          operand.mode != .Soa_Variable &&
+		          operand.mode != .Constant {
+			// C++ Reference: check_expr.cpp check_set_index_data:9172-9175, added by upstream
+			// merge b9bbcd33b (#754). An #soa element of ARRAY type keeps Soa_Variable, so
+			// `soa[i][j]` stays an lvalue. Its components are one per lane rather than
+			// contiguous, but a single component still has a real address -- the same one
+			// `soa[i].y` denotes. Without this arm the mode collapsed to Value and
+			// `&soa[i][j]` was rejected as "Cannot take the pointer address of".
 			operand.mode = .Value
 		}
 		operand.type = arr.elem
@@ -6537,8 +6569,14 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 
 		// Arrays require addressability to be sliced
 		if operand.mode != .Variable && !is_type_pointer(operand.type) {
-			// C++ Reference: check_expr.cpp check_slice_expr:12091-12098
-			expr_str := expr_to_string(operand.expr)
+			// C++ Reference: check_expr.cpp check_slice_expr -- `expr_to_string(node)`, the WHOLE
+			// slice expression, not the operand. The port passed `operand.expr`, so
+			// `soa[0][:]` rendered as `Cannot slice array 'soa[0]'` where the oracle says
+			// `'soa[0][:]'`. The caret was already right (both span the full slice); only the
+			// interpolated string differed, which is why no anchor-based check caught it. Found
+			// while probing for #754's #soa-pointer slice error -- that error is still UNREACHED,
+			// this was a different divergence sitting on the path to it.
+			expr_str := expr_to_string(node)
 			defer delete(expr_str)
 			error(node, "Cannot slice array '%s', value is not addressable", expr_str)
 			operand.mode = .Invalid
@@ -6695,13 +6733,15 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	}
 
 	// Validate that low <= high
-	// Reference: check_expr.cpp check_slice_expr:12203-12211
+	// Reference: check_expr.cpp check_slice_expr:12249-12259
+	invalid_indices := false
 	for i in 0 ..< len(indices) {
 		a := indices[i]
 		for j in i + 1 ..< len(indices) {
 			b := indices[j]
 			if a > b && b >= 0 {
 				error(se.close, "Invalid slice indices: [%d > %d]", a, b)
+				invalid_indices = true
 			}
 		}
 	}
@@ -6746,7 +6786,17 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 	//      node is absent, which is exactly C++ 12197-12199.
 	// The extra `operand.value != nil` guard on the condition was inert (max_count >= 0 is only
 	// reached from the constant-string arms) but is dropped anyway, since C++ does not have it.
-	if is_type_string(t) && max_count >= 0 {
+	//
+	// The `!invalid_indices` term is C++ 12282, added upstream by PR #7268. Before it, C++
+	// diagnosed low > high above but did NOT return, then reached substring() with lo > hi and
+	// died on its own assertion (src/string.cpp(77): `lo <= hi && hi <= max` 3..1..5, reproduced
+	// with `S :: "hello"; x := S[3:1]`). The port worked around that crash by skipping only the
+	// value extraction, which is NOT what the flag does: the flag skips the whole block, so the
+	// operand keeps mode == .Value rather than becoming .Constant. That difference is observable
+	// -- `S :: "hello"; T :: S[3:1]` makes the oracle add "'S[3:1]' is not a compile-time known
+	// constant" (and, in turn, "Invalid declaration value" on any use of T), which the port's
+	// narrower workaround suppressed.
+	if is_type_string(t) && max_count >= 0 && !invalid_indices {
 		// C++ 12235-12244.
 		all_constant := true
 		for i in 0 ..< len(nodes) {
@@ -6779,23 +6829,20 @@ check_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node, t
 		operand.mode = .Constant
 		operand.type = t
 
-		// C++ 12260-12271. DELIBERATE DIVERGENCE, and the reason is demonstrated rather than
-		// assumed: the low > high case is diagnosed above (C++ 12208) but NOT returned from, so
-		// C++ reaches substring() with lo > hi and dies on its own assertion --
-		//     src/string.cpp(77): Assertion Failure: `lo <= hi && hi <= max` 3..1..5
-		// reproduced with `S :: "hello"; x := S[3:1]` against the reference compiler. Reproducing
-		// that would mean reproducing a compiler crash, so the extraction is skipped when the
-		// range is inverted; the diagnostic the oracle emits before dying is already reported.
-		if indices[0] <= indices[1] {
-			#partial switch v in operand.value {
-			case Exact_Value_String16:
-				operand.value = Exact_Value_String16{
-					text = v.text[indices[0]:],
-					len  = int(indices[1] - indices[0]),
-				}
-			case string:
-				operand.value = v[indices[0]:indices[1]]
+		// C++ 12305-12318. The port previously guarded this extraction on
+		// `indices[0] <= indices[1]` to avoid reproducing the upstream substring() assertion; the
+		// `!invalid_indices` term on the enclosing condition now excludes that case at the same
+		// point C++ does, so the guard is gone rather than left as dead defence. The remaining
+		// ways an index could be negative or past the end all return false from
+		// check_index_value, which leaves indices[i] at max_count.
+		#partial switch v in operand.value {
+		case Exact_Value_String16:
+			operand.value = Exact_Value_String16{
+				text = v.text[indices[0]:],
+				len  = int(indices[1] - indices[0]),
 			}
+		case string:
+			operand.value = v[indices[0]:indices[1]]
 		}
 	}
 
@@ -7809,7 +7856,13 @@ check_or_else_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, 
 			case .No_Value:
 				if is_diverging_expr(ctx, default_value) {
 					// Allow diverging expressions
+					// C++ Reference: check_expr.cpp:10072-10074. The type assignment is SPECIFIC
+					// to this `#load` block -- the main or_else path below (C++ 10127-10130) has
+					// the same arm WITHOUT it, because there the result is built from `left_type`.
+					// Here the tail does `o^ = y` on the not-found path, so `y` IS the result
+					// operand and must carry the load's resolved type. LEDGER #795.
 					y.mode = .Value
+					y.type = x.type
 					y_is_diverging = true
 				} else {
 					error_operand_no_value(&y)
@@ -7935,7 +7988,11 @@ check_or_return_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 
 	name := re.token.text
 	x: Operand
-	check_expr_base(ctx, &x, re.expr, type_hint)
+	// C++ Reference: check_expr.cpp:10185. C++ enters through check_multi_expr_with_type_hint,
+	// NOT bare check_expr_base: the helper adds the No_Value and Type diagnostics and the
+	// `Invalid` write that arms the guard immediately below. With the bare call that guard was
+	// dead for exactly the operands it exists to reject. LEDGER #796.
+	check_multi_expr_with_type_hint(ctx, &x, re.expr, type_hint)
 
 	if x.mode == .Invalid {
 		o.mode = .Value
@@ -8044,7 +8101,9 @@ check_or_branch_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 
 	name := be.token.text
 	x: Operand
-	check_expr_base(ctx, &x, be.expr, type_hint)
+	// C++ Reference: check_expr.cpp:10268. Same entry helper as check_or_return_expr -- see the
+	// note there. LEDGER #796.
+	check_multi_expr_with_type_hint(ctx, &x, be.expr, type_hint)
 
 	if x.mode == .Invalid {
 		o.mode = .Value

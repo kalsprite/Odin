@@ -505,6 +505,12 @@ Entity_Constant :: struct {
 	field_group_index: i32,
 	docs:              ^Comment_Group,
 	comment:           ^Comment_Group,
+	// C++ Reference: entity.cpp `Ast *init_expr; // only used for enum values`, added by
+	// upstream PR #7289 (merge b9bbcd33b). ENUM MEMBERS have no Decl_Info, so the doc writer's
+	// usual `e.decl_info.init_expr` source is always nil for them; without this the doc FORMAT
+	// records no initialiser for any enum value. Written by check_enum_type, read by
+	// docs_writer as the fallback. #755.
+	init_expr:         ^Expr,
 }
 
 Entity_Variable :: struct {
@@ -706,7 +712,6 @@ Builtin_Proc_Id :: enum {
 	Simd_Sub,
 	Simd_Mul,
 	Simd_Div,
-	Simd_Rem,
 	Simd_Shl, // Odin logic
 	Simd_Shr, // Odin logic
 	Simd_Shl_Masked, // C logic

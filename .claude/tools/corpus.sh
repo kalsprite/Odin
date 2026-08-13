@@ -586,6 +586,31 @@ CORPUS=(
   #   hexf2  the value-revealing REJECT -- int(0h3fb999999999999a) forces the checker to PRINT the
   #          decoded value (0.1), so a wrong decode cannot pass as a matching error message
   hexf hexf2
+  # #751/#636 (upstream #7268): string16 constants must hold UTF-16, not UTF-8 bytes.
+  # All three go RED on the pre-#636 port build and GREEN after, so they discriminate (#25):
+  #   s16len   len() of a string16 constant == UTF-16 CODE UNITS, not UTF-8 bytes
+  #   s16cast  a `string -> string16` CONSTANT CAST re-expresses the value (the only legal
+  #            direction; `string16 -> string` is rejected outright by both compilers)
+  #   s16slice slicing a string16 constant -- was #583's spurious "Cannot slice constant value",
+  #            which turned out to be the SAME root cause rather than a second defect
+  s16len s16cast s16slice
+  # #754 (upstream merge b9bbcd33b): #soa of an ARRAY element. Both go RED on the pre-#754 build:
+  #   soaarr       `#soa[4][3]f32` + `soa[0][1]` + `&soa[0][1]` -- CRASHED the port (SIGILL,
+  #                "SOA element must be struct type"), three sites deep: complete_soa_type had no
+  #                array arm, check_set_index_data dropped Soa_Variable, check_unary_expr asserted
+  #   soaarrslice  `soa[0][:]` -- the "Cannot slice array '%s'" message interpolated the OPERAND
+  #                where C++ interpolates the whole SLICE node ('soa[0]' vs 'soa[0][:]')
+  soaarr soaarrslice
+  # #758 (upstream merge b9bbcd33b): C++ check_slice_expr grew an `invalid_indices` flag that
+  # suppresses the whole constant-string folding block, not just the substring() call the port had
+  # already skipped to avoid reproducing the upstream assertion. The difference is the operand's
+  # MODE, so it only shows where constness is demanded. Both go RED on the pre-#758 build:
+  #   slcinv   `S :: "hello"; T :: S[3:1]` -- the port folded anyway and left mode == .Constant,
+  #            so it dropped the oracle's "'S[3:1]' is not a compile-time known constant"
+  #   slcinv2  the same plus `U :: len(T)`, which shows the suppression CASCADES: the oracle also
+  #            reports "Invalid declaration value 'len(T)'" on the use, and the port reported
+  #            neither. An under-rejection two diagnostics deep, from one missing flag.
+  slcinv slcinv2
   # #633: the DRIFT gate. C++ has ONE function (exact_value_from_token, parser.cpp:815) that both
   # computes a literal's value AND raises the syntax error when it comes back Invalid. The port
   # cannot have that, because the diagnostic must be raised by the PARSER and the value is computed
