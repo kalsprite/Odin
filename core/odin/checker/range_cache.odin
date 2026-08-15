@@ -21,7 +21,7 @@ Range_Cache :: struct {
 }
 
 // range_cache_make creates a new RangeCache
-// C++ Reference: range_cache.cpp range_cache_make:13-17
+// C++ Reference: range_cache.cpp range_cache_make
 range_cache_make :: proc() -> Range_Cache {
 	cache := Range_Cache{}
 	cache.ranges = make([dynamic]Range_Value)
@@ -29,14 +29,14 @@ range_cache_make :: proc() -> Range_Cache {
 }
 
 // range_cache_destroy frees the RangeCache resources
-// C++ Reference: range_cache.cpp range_cache_destroy:19-21
+// C++ Reference: range_cache.cpp range_cache_destroy
 range_cache_destroy :: proc(c: ^Range_Cache) {
 	delete(c.ranges)
 }
 
 // range_cache_add_index adds a single index to the cache
 // Returns true if the index is new, false if it overlaps with existing range
-// C++ Reference: range_cache.cpp range_cache_add_index:23-33
+// C++ Reference: range_cache.cpp range_cache_add_index
 range_cache_add_index :: proc(c: ^Range_Cache, index: i64) -> bool {
 	// Check if index already covered by an existing range
 	for v in c.ranges {
@@ -53,7 +53,7 @@ range_cache_add_index :: proc(c: ^Range_Cache, index: i64) -> bool {
 
 // range_cache_add_range adds a range [lo, hi] to the cache
 // Returns true if the range is completely new, false if it overlaps with existing range
-// C++ Reference: range_cache.cpp range_cache_add_range:36-59
+// C++ Reference: range_cache.cpp range_cache_add_range
 range_cache_add_range :: proc(c: ^Range_Cache, lo: i64, hi: i64) -> bool {
 	assert(lo <= hi, "Range lo must be <= hi")
 
@@ -68,7 +68,7 @@ range_cache_add_range :: proc(c: ^Range_Cache, lo: i64, hi: i64) -> bool {
 		}
 
 		// Ranges overlap! Merge them and return false
-		// C++ Reference: range_cache.cpp range_cache_add_range:47-54
+		// C++ Reference: range_cache.cpp range_cache_add_range
 		if v.hi < hi {
 			v.hi = hi
 		}

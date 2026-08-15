@@ -24,7 +24,7 @@ import "core:sync"
 // check_builtin_procedure is the central dispatcher for builtin checking
 // C++ Reference: check_builtin.cpp:2396-2506
 check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, id: Builtin_Proc_Id, type_hint: ^Type) -> bool {
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:2779-2782. This guard did not exist in the port at all, so
+	// C++ Reference: check_builtin.cpp check_builtin_procedure. This guard did not exist in the port at all, so
 	// `#force_inline len(x)` was silently accepted. It is NOT an early return in C++ either -- the
 	// diagnostic is emitted and checking continues.
 	if call.inlining != .None {
@@ -35,7 +35,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	info := builtin_proc_infos[id]
 
 	// Step 2: Validate argument count
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:2784-2801. Two divergences were fixed here:
+	// C++ Reference: check_builtin.cpp check_builtin_procedure. Two divergences were fixed here:
 	//
 	//   * C++ reports at `ce->close` -- the closing parenthesis -- not at the call node. The port
 	//     pointed at the start of the call expression, which is a different column on every probe
@@ -59,7 +59,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	}
 
 	// Step 3: Pre-check first argument for special builtins
-	// C++ ref: check_builtin.cpp check_builtin_procedure_directive:2421-2468
+	// C++ ref: check_builtin.cpp check_builtin_procedure_directive
 	// Some builtins accept types or expressions, handle specially
 	#partial switch id {
 	case .Len, .Cap, .Size_Of, .Align_Of, .Offset_Of, .Type_Of, .Type_Info_Of, .Typeid_Of,
@@ -67,7 +67,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	     .Objc_Send, .Objc_Find_Selector, .Objc_Find_Class,
 	     .Objc_Register_Selector, .Objc_Register_Class,
 	     .Atomic_Type_Is_Lock_Free, .Has_Target_Feature, .Procedure_Of, .Simd_Indices:
-		// C++ Reference: check_builtin.cpp check_builtin_procedure:2803-2826 -- "NOTE(bill): The first arg may be a
+		// C++ Reference: check_builtin.cpp check_builtin_procedure -- "NOTE(bill): The first arg may be a
 		// Type, this will be checked case by case". The port listed 8 of C++'s 21 names; the
 		// twelve added here were falling through to the default arm and having their first
 		// argument checked as a plain expression. That is invisible today only because the
@@ -77,11 +77,11 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		break
 
 	case .Min, .Max:
-		// C++ Reference: check_builtin.cpp check_builtin_procedure:2811-2812. min/max must check the first argument as
+		// C++ Reference: check_builtin.cpp check_builtin_procedure. min/max must check the first argument as
 		// type-or-expr, so they do it themselves.
 		//
 		// NOTE: .Swizzle, .Complex, .Real, .Imag and .Conj used to be listed here too, but C++
-		// does NOT exclude them (check_builtin.cpp check_builtin_procedure:2803-2824) - they fall through to the default
+		// does NOT exclude them (check_builtin.cpp check_builtin_procedure) - they fall through to the default
 		// arm and have args[0] checked into `operand`. Their handlers are written against that
 		// contract: C++'s swizzle case opens with `if (!operand->type) return false;`, and the
 		// complex/conj cases open with `Operand x = *operand;`. Excluding them here left `operand`
@@ -91,7 +91,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		break
 
 	case .Atomic_Thread_Fence, .Atomic_Signal_Fence:
-		// C++ Reference: check_builtin.cpp check_builtin_procedure:2827-2830 — "first type will require a type hint".
+		// C++ Reference: check_builtin.cpp check_builtin_procedure — "first type will require a type hint".
 		//
 		// Their sole argument is an Atomic_Memory_Order, and it is almost always written as a
 		// bare implicit selector: `intrinsics.atomic_thread_fence(.Acquire)`. Pre-checking it
@@ -109,7 +109,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		// Default: check first arg as multi-expr
 		//
 		// A `field = value` first argument is NOT pre-checked here. C++ gates named arguments
-		// immediately after this switch (check_builtin.cpp check_builtin_procedure:2856-2868): they are rejected for every
+		// immediately after this switch (check_builtin.cpp check_builtin_procedure): they are rejected for every
 		// builtin except soa_zip and quaternion, whose handlers resolve the names themselves. Since
 		// no expression dispatch - C++'s or this port's - has a case for ^ast.Field_Value, feeding
 		// one in here produced "Expression type not yet supported: ^Field_Value" for every
@@ -117,7 +117,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		// 32 in core/strings.
 		if arg_count > 0 {
 			if _, is_field_value := call.args[0].derived_expr.(^ast.Field_Value); !is_field_value {
-				// C++ Reference: check_builtin.cpp check_builtin_procedure:2844-2850.
+				// C++ Reference: check_builtin.cpp check_builtin_procedure.
 				//
 				//     default:
 				//         if (BuiltinProc__type_begin < id && id < BuiltinProc__type_end) {
@@ -147,7 +147,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		}
 	}
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:2856-2868. Only soa_zip and quaternion accept `field = value`.
+	// C++ Reference: check_builtin.cpp check_builtin_procedure. Only soa_zip and quaternion accept `field = value`.
 	if arg_count > 0 {
 		if _, is_field_value := call.args[0].derived_expr.(^ast.Field_Value); is_field_value {
 			#partial switch id {
@@ -161,7 +161,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	}
 
 	// Step 4: Dispatch to per-builtin handler
-	// C++ ref: check_builtin.cpp check_builtin_procedure_directive:2506 (main switch)
+	// C++ ref: check_builtin.cpp check_builtin_procedure_directive (main switch)
 	result := false
 	#partial switch id {
 	case .Len, .Cap:
@@ -653,6 +653,9 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	case .Soa_Struct:
 		result = check_builtin_soa_struct(ctx, operand, call)
 
+	case .Soa_Copy_From_Slice:
+		result = check_builtin_soa_copy_from_slice(ctx, operand, call)
+
 	case .Procedure_Of:
 		result = check_builtin_procedure_of(ctx, operand, call)
 
@@ -1121,7 +1124,7 @@ check_atomic_memory_order_argument :: proc(ctx: ^Checker_Context, expr: ^ast.Exp
 	}
 
 	if x.mode != .Constant {
-		// C++ Reference: check_builtin.cpp check_atomic_memory_order_argument:880-883 -- names the type that was supplied.
+		// C++ Reference: check_builtin.cpp check_atomic_memory_order_argument -- names the type that was supplied.
 		type_str := type_to_string(x.type)
 		if extra_message != "" {
 			error_node(expr, "Expected a constant Atomic_Memory_Order value for the %s of '%s', got %s", extra_message, builtin_name, type_str)
@@ -1522,7 +1525,7 @@ check_builtin_objc_send :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		// the oracle names the offending type, we did not. Two of C++'s spellings look like slips
 		// and are reproduced VERBATIM anyway, same rule as #287's inconsistent capitalisation and
 		// #185's faithful truncation: `@(obj_class=` (missing the 'c', plus a space before the
-		// comma) at check_builtin.cpp:331/357, and "pointer OF a value" at :347 where we had
+		// comma) in check_builtin.cpp, and "pointer OF a value" where we had
 		// written "pointer to". Parity is the goal, not prose. LEDGER #378.
 		if !is_type_objc_object(ctx.checker, self.type) {
 			// C++ ref: check_builtin.cpp:323-327
@@ -3350,7 +3353,7 @@ check_builtin_clamp :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast
 // - #panic: Compile-time panic
 //
 // Note: the `#load` arm below DELEGATES to check_load_directive (check_expr.odin), exactly as
-// C++'s check_builtin_procedure_directive:2483-2484 does. Before #884 this header was FALSE: an
+// C++'s check_builtin_procedure_directive does. Before #884 this header was FALSE: an
 // inline ~77-line reimplementation lived here and the two copies had drifted (#793).
 check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Node, type_hint: ^Type) -> bool {
 	// C++ Reference: check_builtin.cpp:2089-2175
@@ -3402,7 +3405,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			error(call_expr.args[0], "'#location' expects either 0 or 1 arguments, got %d", len(call_expr.args))
 		}
 
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2422-2435. The argument must NAME AN ENTITY, and only
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive. The argument must NAME AN ENTITY, and only
 		// two node kinds can: an identifier and a selector. C++ routes each to the helper that
 		// returns an ^Entity and errors when neither yields one -- it never calls plain check_expr
 		// here, so `#location(1)` is rejected. The port did call check_expr and dropped the result,
@@ -3422,7 +3425,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			}
 		}
 
-		// Return Source_Code_Location type (C++ check_builtin.cpp check_builtin_procedure_directive:2437-2438)
+		// Return Source_Code_Location type (C++ check_builtin.cpp check_builtin_procedure_directive)
 		//
 		// The GLOBAL, not info.cached_source_code_location. C++ reads t_source_code_location at
 		// every one of these sites and has no "requires core:runtime to be imported" error at all
@@ -3494,7 +3497,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 	if name == "config" {
 		// #config(name, default_value) - compile-time configuration
 		// C++ Reference: check_builtin.cpp:2130-2175
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2721-2724.
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive.
 		//
 		// Anchored on the WHOLE CALL, not on the closing paren, and the text carries no
 		// "name and default value" gloss. The anchor is not cosmetic: same-position
@@ -3506,7 +3509,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2725-2729.
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive.
 		//
 		// The message NAMES the node kind that was found (C++ `ast_strings[arg->kind]`), and
 		// is anchored on the call for the same merge reason as above. C++ tests
@@ -3528,7 +3531,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		}
 
 		// Second argument is the default value.
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2731-2738.
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive.
 		//
 		// Anchored on C++'s `def_arg` -- the UNPARENTHESISED expression that was actually
 		// checked -- not on the raw argument. With `#config(FOO, (f()))` the paren makes
@@ -3542,7 +3545,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2744-2757
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive
 		//
 		// The default's type is carried through AS IS - notably NOT through
 		// default_type(). `FD_SETSIZE :: #config(POSIX_FD_SETSIZE, 1024)` has to
@@ -3553,7 +3556,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		operand.mode = default_op.mode
 		operand.value = default_op.value
 
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2748-2757.
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive.
 		//
 		// An explicitly defined value overrides the default. C++ resolves it through the
 		// CONFIG PACKAGE SCOPE -- the very entities populate_config_package_scope inserts --
@@ -3583,7 +3586,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		// #defined(identifier) - checks if an identifier is defined
 		// C++ Reference: check_builtin.cpp related to defined checks
 		if len(call_expr.args) != 1 {
-			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2688 anchors this
+			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive anchors this
 			// on `call`, not on the closing paren. The text already matched; the ANCHOR did not,
 			// which moves the column and collapses the caret from a span to a single character
 			// (`#defined()` reported at 2:29 with `^` instead of 2:20 with `^~~~~~~~~^`).
@@ -3592,7 +3595,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2691-2706
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive
 		//
 		// The argument may be an identifier OR a selector expression, and it must
 		// be looked up WITHOUT being checked - `#defined(X)` exists precisely to
@@ -3604,7 +3607,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		_, is_ident = arg.derived.(^ast.Ident)
 		_, is_sel = arg.derived.(^ast.Selector_Expr)
 		if !is_ident && !is_sel {
-			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2693 -- names the node kind that was found,
+			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive -- names the node kind that was found,
 			// and reports against the CALL, not the argument.
 			error(call_expr, "'#defined' expects an identifier or selector expression, got %s", ast_kind_string(arg))
 			return false
@@ -3625,7 +3628,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		// #assert(condition, message?) - compile-time assertion
 		// C++ Reference: check_builtin.cpp assertion handling
 		if len(call_expr.args) < 1 || len(call_expr.args) > 2 {
-			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2616 reports at `call` -- the whole call
+			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive reports at `call` -- the whole call
 			// expression -- not at its closing paren, so the position is the '#'.
 			error_node(call, "'#assert' expects either 1 or 2 arguments, got %d", len(call_expr.args))
 			return false
@@ -3633,7 +3636,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 		// First argument must be a constant boolean condition.
 		//
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2620-2625.
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive.
 		//
 		//     // operand->type can be nil if the condition is a procedure, for example:
 		//     // #assert(assert()) So let's check it before we use it, so we get the same
@@ -3658,7 +3661,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 		cond_val := exact_value_to_bool(cond_op.value)
 		if !cond_val {
-			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2638-2649. C++ prints the CONDITION EXPRESSION,
+			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive. C++ prints the CONDITION EXPRESSION,
 			// not the word "failed", and in the two-argument form appends the second argument
 			// in parentheses. The port printed "Compile-time assertion failed" -- a hyphen C++
 			// does not use, and no condition at all.
@@ -3671,7 +3674,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			// and the continuation was implemented at some point after. The comment sat
 			// directly above the working code claiming it did not exist. Verified against the
 			// oracle: single-argument, two-argument and file-scope forms all match.
-			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2639 ERROR_BLOCK() -- keeps the continuation
+			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive ERROR_BLOCK() -- keeps the continuation
 			// line attached to this error instead of being flushed ahead of it.
 			begin_error_block()
 			defer end_error_block()
@@ -3680,7 +3683,8 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 				sig := type_to_string(ctx.curr_proc_sig)
 				error_line("\tCalled within '%s' :: %s\n", ctx.proc_name, sig)
 			}
-			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2644 and :2647 both pass `call` -- the
+			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive -- both the #assert
+			// and #panic arms pass `call` -- the
 			// WHOLE call expression -- not the callee:
 			//
 			//     error(call, "Compile time assertion: %s", arg1);
@@ -3715,7 +3719,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 	if name == "panic" {
 		// #panic(message?) - compile-time panic
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2664-2686. ERROR_BLOCK() spans the WHOLE arm there,
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive. ERROR_BLOCK() spans the WHOLE arm there,
 		// so the "Called within" continuation stays attached to the panic error. Without it the
 		// buffered `error` and the immediate `error_line` come out in the wrong order and the
 		// continuation prints BEFORE the diagnostic it belongs to.
@@ -3739,7 +3743,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		msg_op: Operand
 		check_expr(ctx, &msg_op, call_expr.args[0])
 
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2670-2675. This check was absent entirely, so a
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive. This check was absent entirely, so a
 		// non-constant or non-string argument fell through to a bare "Compile time panic"
 		// instead of being rejected.
 		// C++ Reference: check_builtin.cpp:2690 (merge ebac23eb0). Upstream was `&&` and is now
@@ -3752,12 +3756,12 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2677. One form only, always carrying the value;
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive. One form only, always carrying the value;
 		// the port had three branches and two of them dropped the message.
 		msg_str, _ := msg_op.value.(string)
 		error(call_expr, "Compile time panic: %s", msg_str)
 
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2678-2682 -- same continuation as #assert.
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive -- same continuation as #assert.
 		// NOTE: no `delete` on the type_to_string result. type_to_string does not always
 		// return freshly-allocated storage, and freeing it aborts with
 		// "free(): invalid pointer" (LEDGER tasks 192 and 231).
@@ -3772,7 +3776,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 	}
 
 	// LEDGER #884, closing #793. THIS WAS A ~77-LINE REIMPLEMENTATION and is now C++'s two-line
-	// dispatch. C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2483-2484 --
+	// dispatch. C++ Reference: check_builtin.cpp check_builtin_procedure_directive --
 	//
 	//     } else if (name == "load") {
 	//         return check_load_directive(c, operand, call, type_hint, true) == LoadDirective_Success;
@@ -3797,7 +3801,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		return check_load_directive(ctx, operand, call, type_hint, true) == .Success
 	}
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2487-2534. #load_hash had NO handler at all, so the
+	// C++ Reference: check_builtin.cpp check_builtin_procedure_directive. #load_hash had NO handler at all, so the
 	// call form was silently accepted. It routes through the SAME cache_load_file_directive
 	// the #load arm uses, at the Contents tier with err_on_not_found = true.
 	if name == "load_hash" {
@@ -3835,7 +3839,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 		if !is_type_string(hash_op.type) {
-			// NOTE: C++ (check_builtin.cpp check_builtin_procedure_directive:2521) formats the FIRST operand's type here,
+			// NOTE: C++ (check_builtin.cpp check_builtin_procedure_directive) formats the FIRST operand's type here,
 			// not arg1's -- a copy-paste slip in the reference compiler. Reproduced
 			// deliberately; changing it would be a divergence.
 			ts := type_to_string(path_op.type)
@@ -3852,7 +3856,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2546 -- the kind is validated AFTER the file is
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive -- the kind is validated AFTER the file is
 		// loaded, so a bad path reports the file error and never reaches this.
 		cache, load_ok := cache_load_file_directive(ctx, call, original_path, true, .Contents)
 		if load_ok && cache != nil {
@@ -3862,7 +3866,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			}
 		}
 		if load_ok && cache != nil {
-			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2552-2554 -- t_untyped_integer, Constant,
+			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive -- t_untyped_integer, Constant,
 			// exact_value_u64(hash_value), over the file CONTENTS.
 			operand.type = t_untyped_integer
 			operand.mode = .Constant
@@ -3874,7 +3878,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2558-2612. #hash had NO handler, so every `#hash(...)`
+	// C++ Reference: check_builtin.cpp check_builtin_procedure_directive. #hash had NO handler, so every `#hash(...)`
 	// was silently accepted -- including invalid hash kinds. It is the simpler sibling of
 	// #load_hash: it hashes a STRING LITERAL, so there is no file load and the kind check
 	// happens immediately.
@@ -3912,8 +3916,8 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 		if !is_type_string(kind_op.type) {
-			// C++:2591 formats the FIRST operand's type here too -- the same copy-paste slip
-			// as #load_hash (:2521). Reproduced deliberately in both places.
+			// C++ formats the FIRST operand's type here too -- the same copy-paste slip
+			// as #load_hash. Reproduced deliberately in both places.
 			ts := type_to_string(str_op.type)
 			error(arg1, "'#hash' expected a constant string, got %s", ts)
 			return false
@@ -3929,7 +3933,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
-		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2607-2610.
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive.
 		original_string, os_ok := str_op.value.(string)
 		if !os_ok {
 			return false
@@ -3947,7 +3951,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 	// t_load_directory_file{,_ptr,_slice} in types.odin (only ever assigned nil).
 	if name == "load_directory" {
 		if len(call_expr.args) != 1 {
-			// C++:2226 anchors at args[0] unconditionally, which indexes an EMPTY array when
+			// C++ anchors at args[0] unconditionally, which indexes an EMPTY array when
 			// the call has no arguments -- undefined behaviour upstream. The port anchors at
 			// the closing paren in that case instead; the message is C++'s either way. This
 			// is the one place here we deliberately do NOT reproduce the reference.
@@ -3977,7 +3981,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
-		// C++:2247-2250 -- resolve the result type lazily, then set the operand BEFORE
+		// C++ -- resolve the result type lazily, then set the operand BEFORE
 		// reading the directory so the type is in place even on the error paths.
 		init_core_load_directory_file(ctx.checker)
 		if ctx.checker.t_load_directory_file_slice != nil {
@@ -3999,7 +4003,7 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			path = joined
 		}
 
-		// C++:2306-2324 maps ReadDirectoryError to six messages, all prefixed with the BARE
+		// C++ maps ReadDirectoryError to six messages, all prefixed with the BARE
 		// name (no '#'). Two of them differ only by a comma -- Permission ends
 		// "reading path, %s" and Unknown ends "reading path %s" -- which is an upstream
 		// inconsistency reproduced verbatim.
@@ -4163,7 +4167,7 @@ SUPPORTED_HASH_KINDS := [?]string{
 
 // check_hash_kind_valid reports C++'s invalid-hash-kind diagnostic.
 //
-// C++ Reference: check_builtin.cpp check_hash_kind:2371-2386. Shared by `#load_hash` and `#hash`; the
+// C++ Reference: check_builtin.cpp check_hash_kind. Shared by `#load_hash` and `#hash`; the
 // message interpolates whichever directive name was used and anchors at ce->proc. The
 // continuation lines are an ERROR_BLOCK -- a header plus one line per kind -- so the whole
 // thing is 10 lines, and error_line must be inside begin/end_error_block or it escapes to
@@ -4478,7 +4482,7 @@ check_builtin_quaternion :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 // two differences (the gate accepts only quaternions, and the non-constant untyped branch has no
 // complex fallback). The port's version was a REIMPLEMENTATION with EIGHT divergences, all measured
 // against the oracle before the rewrite (7 of 16 probes DIFFER):
-//   1. It re-ran check_expr on call.args[0]. The prologue at :108-147 has ALREADY checked the first
+//   1. It re-ran check_expr on call.args[0]. The prologue has ALREADY checked the first
 //      argument into `operand` for every non-type builtin, so this checked the argument TWICE.
 //   2. An arity check with an invented message; check_builtin_procedure validates arg_count at
 //      :46-59 and RETURNS, so it could never fire.
@@ -5309,14 +5313,34 @@ check_builtin_type_field_index_of :: proc(ctx: ^Checker_Context, operand: ^Opera
 		return false
 	}
 
-	// Find the field
-	st := bt.variant.(Type_Struct)
+	// C++ Reference: check_builtin.cpp BuiltinProc_type_field_index_of --
+	//
+	//     Selection sel = lookup_field(type, field_name, false);
+	//     if (sel.entity == nullptr) { error("'%s' has no field named '%s'"); ... return false; }
+	//     if (sel.indirect)          { error("Field '%s' is embedded via a pointer in '%s'"); ... }
+	//
+	// #923: THE PORT DID NEITHER, and it did not use lookup_field at all. It scanned the DIRECT
+	// fields only and, on a miss, left `field_index = -1` and RETURNED IT AS A CONSTANT -- so
+	// `type_field_index_of(A, "z")` on a struct with no `z` was silently accepted with the value
+	// -1 where the reference reports an error. Three cells in the DSL fieldindex suite (#919).
+	//
+	// Using lookup_field also fixes a gap no cell measured: the hand-rolled scan could not see a
+	// field reached through an embedded/`using` member, which lookup_field resolves.
+	sel := lookup_field(ctx.checker, bt, field_name, false)
+	if sel.entity == nil {
+		error_node(call.args[0], "'%s' has no field named '%s'", type_to_string(bt), field_name)
+		return false
+	}
+	if sel.indirect {
+		error_node(call.args[0], "Field '%s' is embedded via a pointer in '%s'", field_name, type_to_string(bt))
+		return false
+	}
+
+	// The index is the FIRST step of the selection path -- the field's position in the type the
+	// caller named, which is what C++ returns.
 	field_index: int = -1
-	for field, idx in st.fields {
-		if field.token.text == field_name {
-			field_index = idx
-			break
-		}
+	if len(sel.index) > 0 {
+		field_index = int(sel.index[0])
 	}
 
 	operand.mode = .Constant
@@ -5642,8 +5666,8 @@ check_builtin_type_proc_type_at_index :: proc(ctx: ^Checker_Context, operand: ^O
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp:7819-7822 (type_proc_parameter_type) and :7883-7886
-	// (type_proc_return_type), merge ebac23eb0. LEDGER #798.
+	// C++ Reference: check_builtin.cpp type_proc_parameter_type and type_proc_return_type,
+	// merge ebac23eb0. LEDGER #798.
 	convert_to_typed(ctx, &op, t_int)
 	if op.mode == .Invalid {
 		return false
@@ -5995,8 +6019,75 @@ check_builtin_bit_count :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	operand.mode = .Value
 	operand.type = type
 
-	// Note: Constant evaluation for bit counting is deferred to runtime
-	// for simplicity, matching the C++ implementation pattern for reverse_bits
+	// CONSTANT FOLDING. C++ Reference: check_builtin.cpp, the shared
+	// count_ones/count_zeros/count_trailing_zeros/count_leading_zeros/count_trailing_ones/
+	// count_leading_ones/reverse_bits arm.
+	//
+	// #922: this used to read "Constant evaluation for bit counting is deferred to runtime for
+	// simplicity, matching the C++ implementation pattern for reverse_bits". **THAT JUSTIFICATION
+	// WAS FALSE.** C++ defers EXACTLY ONE of the seven -- `reverse_bits`, with its own comment
+	// "make runtime only for the time being" -- and folds the other six. The port took the single
+	// exception and generalised it into the rule, so `#assert(count_leading_ones(u16(0xFFFF)) ==
+	// 16)` failed here with "is not a constant boolean" while the oracle accepted it. 54 cells in
+	// the DSL bitcount suite (#919).
+	//
+	// `reverse_bits` stays runtime-only, which is now the faithful behaviour rather than an
+	// accidental one.
+	if id != .Reverse_Bits && x.mode == .Constant {
+		convert_to_typed(ctx, &x, type)
+		if x.mode == .Invalid {
+			return false
+		}
+		if _, is_int := x.value.(big.Int); is_int {
+			sz := type_size_of(x.type)
+			bit_size := u64(sz) * 8
+			// C++ packs the value into a byte buffer and walks bits. The port reads the same bits
+			// out of the exact value directly; for the sizes Odin's integer kinds actually take
+			// (1/2/4/8) a u64 holds every one of them.
+			if sz >= 1 && sz <= 8 {
+				uv := exact_value_to_u64(x.value)
+				if bit_size < 64 {
+					uv &= (u64(1) << bit_size) - 1
+				}
+				v: u64 = 0
+				#partial switch id {
+				case .Count_Ones:
+					for i in 0 ..< bit_size {
+						if uv & (u64(1) << i) != 0 { v += 1 }
+					}
+				case .Count_Zeros:
+					ones: u64 = 0
+					for i in 0 ..< bit_size {
+						if uv & (u64(1) << i) != 0 { ones += 1 }
+					}
+					v = bit_size - ones
+				case .Count_Trailing_Zeros:
+					for i in 0 ..< bit_size {
+						if uv & (u64(1) << i) != 0 { break }
+						v += 1
+					}
+				case .Count_Leading_Zeros:
+					for i := bit_size; i > 0; i -= 1 {
+						if uv & (u64(1) << (i - 1)) != 0 { break }
+						v += 1
+					}
+				case .Count_Trailing_Ones:
+					for i in 0 ..< bit_size {
+						if uv & (u64(1) << i) == 0 { break }
+						v += 1
+					}
+				case .Count_Leading_Ones:
+					for i := bit_size; i > 0; i -= 1 {
+						if uv & (u64(1) << (i - 1)) == 0 { break }
+						v += 1
+					}
+				}
+				operand.mode = .Constant
+				operand.value = exact_value_i64(i64(v))
+				operand.type = type
+			}
+		}
+	}
 
 	return true
 }
@@ -6088,7 +6179,7 @@ check_builtin_overflow_arith :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 	if is_type_different_to_arch_endianness(ct) {
 		if basic, ok := ct.variant.(Type_Basic); ok {
 			if .Endian_Little in basic.flags || .Endian_Big in basic.flags {
-				// C++ Reference: check_builtin.cpp:5846 and :5897 (merge ebac23eb0) -- reworded
+				// C++ Reference: check_builtin.cpp, both endianness arms (merge ebac23eb0) -- reworded
 				// from "an integer which does not specify the explicit endianness" to name the
 				// requirement positively. LEDGER #798.
 				error_node(x.expr, "Expected an integer type of the same platform endianness for '%s', got %s", builtin_name, type_to_string(x.type))
@@ -6146,7 +6237,7 @@ check_builtin_saturating_arith :: proc(ctx: ^Checker_Context, operand: ^Operand,
 	if is_type_different_to_arch_endianness(ct) {
 		if basic, ok := ct.variant.(Type_Basic); ok {
 			if .Endian_Little in basic.flags || .Endian_Big in basic.flags {
-				// C++ Reference: check_builtin.cpp:5846 and :5897 (merge ebac23eb0) -- reworded
+				// C++ Reference: check_builtin.cpp, both endianness arms (merge ebac23eb0) -- reworded
 				// from "an integer which does not specify the explicit endianness" to name the
 				// requirement positively. LEDGER #798.
 				error_node(x.expr, "Expected an integer type of the same platform endianness for '%s', got %s", builtin_name, type_to_string(x.type))
@@ -6502,7 +6593,7 @@ check_builtin_mem_copy :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp:6049-6052 (mem_copy) and :6097-6100 (mem_zero), merge
+	// C++ Reference: check_builtin.cpp mem_copy and mem_zero, merge
 	// ebac23eb0. Narrow the constant from BigInt to a type BEFORE exact_value_to_i64, which
 	// cannot represent an arbitrary-width value. LEDGER #798.
 	convert_to_typed(ctx, &length, t_int)
@@ -6555,7 +6646,7 @@ check_builtin_mem_zero :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp:6049-6052 (mem_copy) and :6097-6100 (mem_zero), merge
+	// C++ Reference: check_builtin.cpp mem_copy and mem_zero, merge
 	// ebac23eb0. Narrow the constant from BigInt to a type BEFORE exact_value_to_i64, which
 	// cannot represent an arbitrary-width value. LEDGER #798.
 	convert_to_typed(ctx, &length, t_int)
@@ -7069,13 +7160,13 @@ check_builtin_wasm_memory_size :: proc(ctx: ^Checker_Context, operand: ^Operand,
 check_builtin_wasm_memory_atomic_wait32 :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "wasm_memory_atomic_wait32"
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:8462-8465
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	if !is_arch_wasm() {
 		error_node(call, "'%s' is only allowed on wasm targets", builtin_name)
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:8467-8470
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	//
 	// #611: this gate was missing entirely, and the TODO that stood here claimed it "requires frontend
 	// integration to populate the features set". That was FALSE when written and doubly so now: the
@@ -7097,7 +7188,7 @@ check_builtin_wasm_memory_atomic_wait32 :: proc(ctx: ^Checker_Context, operand: 
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:8472-8513
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	//
 	// #611: what stood here was a REIMPLEMENTATION with three divergences, exposed only once the
 	// atomics gate above stopped masking it (the probe reached this code for the first time under
@@ -7148,7 +7239,7 @@ check_builtin_wasm_memory_atomic_wait32 :: proc(ctx: ^Checker_Context, operand: 
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:8511-8513
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	operand.mode = .Value
 	operand.type = t_u32
 
@@ -7159,13 +7250,13 @@ check_builtin_wasm_memory_atomic_wait32 :: proc(ctx: ^Checker_Context, operand: 
 check_builtin_wasm_memory_atomic_notify32 :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "wasm_memory_atomic_notify32"
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:8519-8522
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	if !is_arch_wasm() {
 		error_node(call, "'%s' is only allowed on wasm targets", builtin_name)
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:8524-8527
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	// See the wait32 arm above for why the TODO that stood here was false (#611) and why the message
 	// names a flag the port cannot yet accept (#591).
 	if !target_feature_is_enabled("atomics", enabled_target_features()) {
@@ -7178,7 +7269,7 @@ check_builtin_wasm_memory_atomic_notify32 :: proc(ctx: ^Checker_Context, operand
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:8529-8558
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	// Same three divergences as the wait32 arm above (#611) -- ^i32/i32 for C++'s ^u32/u32, the
 	// generic check_assignment message for C++'s two bespoke ones, and interleaved rather than
 	// check-all/convert-all/validate-all.
@@ -7209,7 +7300,7 @@ check_builtin_wasm_memory_atomic_notify32 :: proc(ctx: ^Checker_Context, operand
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:8556-8558
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	operand.mode = .Value
 	operand.type = t_u32
 
@@ -7802,6 +7893,80 @@ check_builtin_concatenate :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 	return true
 }
 
+// soa_copy_from_slice(array_ptr, offset, slice) -- copy a slice into a #soa dynamic array at an
+// offset. A STATEMENT: it yields no value.
+//
+// C++ Reference: check_builtin.cpp BuiltinProc_soa_copy_from_slice.
+//
+// #926: THE BUILTIN WAS MISSING ENTIRELY -- no enum member, no table entry, no dispatch arm, no
+// check. Calling it produced "Undeclared name" instead of any of the diagnostics below. Found by
+// diffing all 295 builtin declarations between C++'s table and the port's (#920), NOT by a failing
+// test: no generated cell exercises it, so nothing else in this project would have noticed.
+//
+// The three argument checks are C++'s, in C++'s order. Note the reference anchors the SECOND and
+// THIRD errors on `array_ptr.expr` rather than on the offending argument, and its format arguments
+// for the offset message are ordered (type, builtin_name) against a "%s ... '%.*s'" format -- so the
+// message reads with its operands swapped. Both quirks are reproduced verbatim: agreeing is the job,
+// and a silently nicer diagnostic is still a divergence.
+check_builtin_soa_copy_from_slice :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
+	builtin_name := "soa_copy_from_slice"
+
+	if len(call.args) != 3 {
+		error_node(call, "'%s' expects 3 arguments, got %d", builtin_name, len(call.args))
+		return false
+	}
+
+	array_ptr: Operand
+	check_expr(ctx, &array_ptr, call.args[0])
+	if array_ptr.mode == .Invalid {
+		return false
+	}
+	if !is_type_pointer(array_ptr.type) {
+		error_node(array_ptr.expr, "Expected a pointer to a #soa dynamic array, got %s", type_to_string(array_ptr.type))
+		return false
+	}
+
+	array_type := type_deref(array_ptr.type)
+	at := base_type(array_type)
+	is_soa_dynamic := false
+	if at != nil {
+		if st, is_struct := at.variant.(Type_Struct); is_struct {
+			is_soa_dynamic = st.soa_kind == .Dynamic
+		}
+	}
+	if !is_soa_dynamic {
+		error_node(array_ptr.expr, "Expected a pointer to a #soa dynamic array, got %s", type_to_string(array_ptr.type))
+		return false
+	}
+	elem := at.variant.(Type_Struct).soa_elem
+
+	offset: Operand
+	check_expr_with_type_hint(ctx, &offset, call.args[1], t_int)
+	if offset.mode == .Invalid {
+		return false
+	}
+	if !is_type_integer(offset.type) {
+		error_node(array_ptr.expr, "Expected an integer as the offset for '%s', got %s", type_to_string(array_ptr.type), builtin_name)
+		return false
+	}
+
+	slice_hint := alloc_type_slice(elem)
+
+	args: Operand
+	check_expr_with_type_hint(ctx, &args, call.args[2], slice_hint)
+	if args.mode == .Invalid {
+		return false
+	}
+	if !are_types_identical(base_type(args.type), slice_hint) {
+		error_node(array_ptr.expr, "Expected a %s to use as the slice '%s', got %s", type_to_string(slice_hint), builtin_name, type_to_string(args.type))
+		return false
+	}
+
+	operand.mode = .No_Value
+	operand.type = nil
+	return true
+}
+
 // soa_struct - create SOA type from struct
 check_builtin_soa_struct :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "soa_struct"
@@ -7904,7 +8069,7 @@ check_builtin_soa_struct :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 }
 
 // procedure_of - get procedure from method value
-// C++ Reference: check_builtin.cpp check_builtin_procedure:7737-7770
+// C++ Reference: check_builtin.cpp check_builtin_procedure
 check_builtin_procedure_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "procedure_of"
 
@@ -7915,7 +8080,7 @@ check_builtin_procedure_of :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 
 	arg := call.args[0]
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:7741-7746
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	// The argument must be a call expression (method call)
 	call_arg, is_call := arg.derived.(^ast.Call_Expr)
 	if !is_call {
@@ -7930,7 +8095,7 @@ check_builtin_procedure_of :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:7748-7752
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	// Handle builtin procedures - they don't have a procedure type
 	if x.mode == .Builtin {
 		error_node(arg, "'%s' does not work on built-in procedures", builtin_name)
@@ -7942,7 +8107,7 @@ check_builtin_procedure_of :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:7753-7756
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	// Store entity for later use and return the actual procedure type
 	e := entity_of_node(&ctx.checker.info, call_arg.expr)
 	if e != nil {
@@ -8067,35 +8232,81 @@ check_builtin_type_has_field :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 	return true
 }
 
-// type_has_shared_fields - check if union has shared fields
+// type_has_shared_fields(U, V) -- does every field of V appear in U with the same name AND type?
+//
+// C++ Reference: check_builtin.cpp BuiltinProc_type_has_shared_fields.
+//
+// #921: THE PORT'S VERSION WAS WRONG IN EVERY PART. It took ONE argument where C++ takes two, it
+// demanded a UNION where C++ demands a STRUCT, and it returned a hardcoded `false` under the note
+// "Odin's Type_Union does not have shared_fields" -- which is true and irrelevant, because the
+// intrinsic is about STRUCTS. Nothing about it was recoverable, so it is replaced rather than
+// patched.
+//
+// Found by the DSL cell corpus (#919): 64 of 66 cells in the `sharedfields` suite diverged, all as
+// "malformed" -- the arity check rejected every call before the predicate could even run, which is
+// why the wrong RESULT had never been observed either.
+//
+// Both operands must be non-SOA structs. The relation is DIRECTIONAL -- every field of the second
+// must be present in the first, not the reverse -- so the argument order is load-bearing.
 check_builtin_type_has_shared_fields :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "type_has_shared_fields"
 
-	if len(call.args) != 1 {
-		error_node(call, "'%s' expects 1 argument", builtin_name)
+	if len(call.args) != 2 {
+		error_node(call, "'%s' expects 2 arguments", builtin_name)
 		return false
 	}
 
-	type_op: Operand
-	check_expr_or_type(ctx, &type_op, call.args[0])
-
-	if type_op.mode != .Type {
-		error_node(call.args[0], "Argument to '%s' must be a type", builtin_name)
+	u_op: Operand
+	check_expr_or_type(ctx, &u_op, call.args[0])
+	if u_op.mode != .Type || u_op.type == nil || u_op.type == t_invalid {
+		error_node(call.args[0], "Expected a type for '%s'", builtin_name)
+		return false
+	}
+	ut := base_type(u_op.type)
+	u_struct: Type_Struct
+	u_is_struct := false
+	if ut != nil {
+		u_struct, u_is_struct = ut.variant.(Type_Struct)
+	}
+	if !u_is_struct || u_struct.soa_kind != .None {
+		error_node(call.args[0], "Expected a struct type for '%s', got %s", builtin_name, type_to_string(u_op.type))
 		return false
 	}
 
-	if !is_type_union(type_op.type) {
-		error_node(call.args[0], "Argument to '%s' must be a union type", builtin_name)
+	v_op: Operand
+	check_expr_or_type(ctx, &v_op, call.args[1])
+	if v_op.mode != .Type || v_op.type == nil || v_op.type == t_invalid {
+		error_node(call.args[1], "Expected a type for '%s'", builtin_name)
+		return false
+	}
+	vt := base_type(v_op.type)
+	v_struct: Type_Struct
+	v_is_struct := false
+	if vt != nil {
+		v_struct, v_is_struct = vt.variant.(Type_Struct)
+	}
+	if !v_is_struct || v_struct.soa_kind != .None {
+		error_node(call.args[1], "Expected a struct type for '%s', got %s", builtin_name, type_to_string(v_op.type))
 		return false
 	}
 
-	// Check if union has shared fields
-	// NOTE: Odin's Type_Union does not have shared_fields - always returns false
-	result := false
+	// C++: for every field of V, look for a field of U with the SAME NAME and an IDENTICAL type.
+	// One miss and the answer is false.
+	is_shared := true
+	v_loop: for v_field in v_struct.fields {
+		for u_field in u_struct.fields {
+			if v_field.token.text == u_field.token.text &&
+			   are_types_identical(entity_type(v_field), entity_type(u_field)) {
+				continue v_loop
+			}
+		}
+		is_shared = false
+		break
+	}
 
 	operand.mode = .Constant
 	operand.type = t_untyped_bool
-	operand.value = exact_value_bool(result)
+	operand.value = exact_value_bool(is_shared)
 
 	return true
 }
@@ -8330,17 +8541,33 @@ check_builtin_type_is_variant_of :: proc(ctx: ^Checker_Context, operand: ^Operan
 		return false
 	}
 
-	if !is_type_union(type2_op.type) {
-		error_node(call.args[1], "Second argument to '%s' must be a union type", builtin_name)
+	// #921: THE ARGUMENT ROLES WERE REVERSED. C++ (check_builtin.cpp
+	// BuiltinProc_type_is_variant_of) requires the FIRST argument to be the union and searches it
+	// for the SECOND:
+	//
+	//     Type *u = operand->type;                    // args[0]
+	//     if (!is_type_union(u)) { error("Expected a union type for '%s'"); ... }
+	//     Type *v = check_type(c, ce->args[1]);       // the variant to look for
+	//     for (Type *vt : u->Union.variants) if (are_types_identical(v, vt)) ...
+	//
+	// The port demanded args[1] be the union, so `type_is_variant_of(U, bool)` -- the natural
+	// spelling, and the one the reference accepts -- was rejected outright with "Second argument
+	// must be a union type". 9 of 11 cells in the DSL `variantof` suite (#919), and the message
+	// text was invented too: C++ says "Expected a union type for '%s'" and anchors on the FIRST
+	// operand.
+	if !is_type_union(type1_op.type) {
+		error_node(call.args[0], "Expected a union type for '%s'", builtin_name)
+		operand.mode = .Invalid
+		operand.type = t_invalid
 		return false
 	}
 
-	// Check if type1 is a variant of union type2
+	// Is the SECOND argument one of the FIRST's variants?
 	result := false
-	bt2 := base_type(type2_op.type)
-	if union_type, ok := bt2.variant.(Type_Union); ok {
+	bt1 := base_type(type1_op.type)
+	if union_type, ok := bt1.variant.(Type_Union); ok {
 		for variant in union_type.variants {
-			if are_types_identical(type1_op.type, variant) {
+			if are_types_identical(type2_op.type, variant) {
 				result = true
 				break
 			}
@@ -9031,7 +9258,7 @@ check_builtin_c_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 		}
 
 		args: Operand
-		// C++ check_builtin.cpp check_builtin_c_procedure:768-771 brackets THIS check_expr with allow_c_vararg_param.
+		// C++ check_builtin.cpp check_builtin_c_procedure brackets THIS check_expr with allow_c_vararg_param.
 		// c_va_start's second argument is the one context in which naming a `#c_vararg`
 		// parameter is legal; check_expr's Ident arm rejects it everywhere else.
 		ctx.allow_c_vararg_param = true

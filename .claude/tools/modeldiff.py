@@ -297,6 +297,12 @@ def main():
         for f in (rp, pp):
             if os.path.exists(f): os.remove(f)
         env = dict(os.environ, ODIN_ROOT=REPO, ODIN_DUMP_MODEL=rp)
+        # #900: the PORT arm needs ODIN_ROOT too. It never had `env=` -- it relied on `cwd=REPO`
+        # making the checker's cwd walk-up succeed, and #898 removed that walk-up because it made a
+        # LIBRARY's answer depend on the caller's working directory. The reference arm has always
+        # passed ODIN_ROOT explicitly; the port arm was asymmetric and nobody noticed, because the
+        # one gate that would have caught it (modelsweep) was itself out of service on a stale ref.
+        port_env = dict(os.environ, ODIN_ROOT=REPO)
         # -thread-count:1 pins the REFERENCE the way -no-threads pins the port, and for the same
         # reason. #468/#509 established that threading only ever ADDS polymorphic instantiations on
         # the C++ side, so an unpinned reference makes the multiplicity counts wander run to run:
@@ -315,7 +321,7 @@ def main():
         # fixed side, so anything that moves between runs is the reference (#468 instantiation
         # multiplicity) rather than an open question about the port.
         subprocess.run([port, p, f"-dump-model:{pp}", "-no-threads"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=REPO)
+                       env=port_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=REPO)
         if not os.path.exists(rp) or not os.path.exists(pp):
             print(f"{p:34s} SKIPPED (a dump is missing -- one side failed to run)")
             continue

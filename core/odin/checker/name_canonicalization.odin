@@ -97,7 +97,7 @@ proc_calling_convention_strings := [Calling_Convention]string {
 }
 
 // quote_to_ascii escapes special characters in strings for canonical representation
-// C++ Reference: string.cpp quote_to_ascii:851 (String) and string.cpp quote_to_ascii:935 (String16)
+// C++ Reference: string.cpp quote_to_ascii (String) and string.cpp quote_to_ascii (String16)
 quote_to_ascii :: proc {
 	quote_to_ascii_string,
 	quote_to_ascii_string16,
@@ -105,7 +105,7 @@ quote_to_ascii :: proc {
 
 // quote_to_ascii_string escapes a UTF-8 string and wraps the result in `quote`.
 //
-// C++ Reference: string.cpp quote_to_ascii:851-919 (quote_to_ascii for String)
+// C++ Reference: string.cpp quote_to_ascii (quote_to_ascii for String)
 //
 // The surrounding quote characters are part of the result, exactly as in C++.
 // All three call sites depend on that: exact_value_to_string renders a string
@@ -171,7 +171,7 @@ quote_to_ascii_string :: proc(s: string, allocator := context.allocator, quote: 
 // quote_to_ascii_string16 escapes a UTF-16 string to ASCII, wrapping the result
 // in `quote`.
 //
-// C++ Reference: string.cpp quote_to_ascii:935-1010 (quote_to_ascii for String16)
+// C++ Reference: string.cpp quote_to_ascii (quote_to_ascii for String16)
 quote_to_ascii_string16 :: proc(val: Exact_Value_String16, allocator := context.allocator, quote: byte = '"') -> string {
 	sb := strings.builder_make(0, val.len * 2 + 2, allocator)
 	strings.write_byte(&sb, quote)
@@ -203,7 +203,7 @@ quote_to_ascii_string16 :: proc(val: Exact_Value_String16, allocator := context.
 		}
 
 		// Handle invalid UTF-16 sequences
-		// C++ Reference: string.cpp quote_to_ascii:959-965
+		// C++ Reference: string.cpp quote_to_ascii
 		//
 		// UPSTREAM (LEDGER task 275): C++ indexes lower_hex with the full u16
 		// `s[0]>>4`, which for the surrogate values that are the only way to reach
@@ -216,7 +216,7 @@ quote_to_ascii_string16 :: proc(val: Exact_Value_String16, allocator := context.
 		}
 
 		// Handle quote and backslash escaping
-		// C++ Reference: string.cpp quote_to_ascii:967-971
+		// C++ Reference: string.cpp quote_to_ascii
 		if r == rune(quote) || r == '\\' {
 			strings.write_byte(&sb, '\\')
 			strings.write_byte(&sb, byte(r))
@@ -225,7 +225,7 @@ quote_to_ascii_string16 :: proc(val: Exact_Value_String16, allocator := context.
 		}
 
 		// Handle printable ASCII
-		// C++ Reference: string.cpp quote_to_ascii:972-975
+		// C++ Reference: string.cpp quote_to_ascii
 		if r < 0x80 && is_printable_ascii(r) {
 			strings.write_byte(&sb, byte(r))
 			i += width
@@ -579,7 +579,7 @@ write_canonical_params :: proc(w: ^Type_Writer, params: ^Type) {
 			}
 
 			// Handle default values for doc writer
-			// C++ Reference: name_canonicalization.cpp write_canonical_params:472-488
+			// C++ Reference: name_canonicalization.cpp write_canonical_params
 			if is_in_doc_writer() {
 				var_ent := v.variant.(Entity_Variable)
 				// Get default value expression - try init_expr first, then param_value
@@ -603,7 +603,7 @@ write_canonical_params :: proc(w: ^Type_Writer, params: ^Type) {
 		case .Constant:
 			const_ent := v.variant.(Entity_Constant)
 			type_writer_appendc(w, CANONICAL_PARAM_CONST)
-			// C++ Reference: name_canonicalization.cpp write_canonical_params:497 and :851 pass a string limit of
+			// C++ Reference: name_canonicalization.cpp -- both constant-writing sites pass a string limit of
 			// 1<<16. With the default (36) a constant string longer than 36 chars is ELIDED in
 			// the canonical name, so two distinct constants can canonicalise identically.
 			s := exact_value_to_string(const_ent.value, 1 << 16)
@@ -892,7 +892,7 @@ write_canonical_entity_name :: proc(w: ^Type_Writer, e: ^Entity) {
 			// keeps the semantics identical on every input C++ can produce and converts an
 			// unreachable-by-construction violation into a diagnosable failure. Same trade the
 			// `#exists`/`#load` guards record: the difference between a diagnostic and an abort.
-			// Style matches `:814` in this same function.
+			// Style matches the other assert in this same function.
 			assert(e.pkg != nil, "write_canonical_entity_name: file-scope branch reached with a nil pkg (entity is not package-owned -- see the bit_field field case)")
 
 			type_writer_append(w, raw_data(e.pkg.name), len(e.pkg.name))
@@ -904,7 +904,7 @@ write_canonical_entity_name :: proc(w: ^Type_Writer, e: ^Entity) {
 		} else if .Builtin in s.flags {
 			// Jump to write_base_name
 		} else if e.kind == .Type_Name {
-			// C++ Reference: name_canonicalization.cpp write_canonical_entity_name:689-691 --
+			// C++ Reference: name_canonicalization.cpp write_canonical_entity_name --
 			//     if (e->kind == Entity_TypeName) {
 			//         goto write_base_name;
 			//     }
@@ -915,24 +915,24 @@ write_canonical_entity_name :: proc(w: ^Type_Writer, e: ^Entity) {
 			// diagnostic. The old comment cited "C++ line 530-546", which is the typeid-hashing
 			// and WebKit-workaround block -- a drifted citation pointing at unrelated code.
 		} else {
-			// C++ Reference: name_canonicalization.cpp write_canonical_entity_name:693 onward -- C++ prints a detailed
+			// C++ Reference: name_canonicalization.cpp write_canonical_entity_name onward -- C++ prints a detailed
 			// WEIRD ENTITY TYPE diagnostic (position, type, scope flags, decl_info) and then dies.
 			// The port keeps the die; the diagnostic detail is not reproduced.
 			panic(fmt.tprintf("write_canonical_entity_name: Weird entity %s", e.token.text))
 		}
 
-	// C++ Reference: name_canonicalization.cpp write_canonical_entity_name:711-714
+	// C++ Reference: name_canonicalization.cpp write_canonical_entity_name
 	//
 	// LEDGER #880. THIS IS AN `else if`, NOT AN `if`, AND THAT IS THE WHOLE DEFECT.
 	//
 	// C++ reaches its package-prefix block by FALLING OFF THE END of the chain above. Every arm
 	// that does not fall off ends in `goto write_base_name`, which jumps PAST this block:
-	//     :657  Builtin scope              -> goto write_base_name
-	//     :676  parent decl_info           -> goto write_base_name
-	//     :684  file scope (writes pkg::[file]::) -> goto write_base_name
-	//     :686  Builtin scope, inner       -> goto write_base_name
-	//     :690  TypeName                   -> goto write_base_name
-	//     :709  anything else              -> GB_PANIC
+	//     Builtin scope                      -> goto write_base_name
+	//     parent decl_info                   -> goto write_base_name
+	//     file scope (writes pkg::[file]::)  -> goto write_base_name
+	//     Builtin scope, inner               -> goto write_base_name
+	//     TypeName                           -> goto write_base_name
+	//     anything else                      -> GB_PANIC
 	// So the package prefix is written on EXACTLY ONE path: the one where neither outer condition
 	// held. An `else if` is the faithful rendering of that; a plain `if` is not.
 	//
@@ -942,7 +942,7 @@ write_canonical_entity_name :: proc(w: ^Type_Writer, e: ^Entity) {
 	//     @private runtime.__init_context
 	//       port  runtime::[core.odin]::runtime::__init_context
 	//       C++   runtime::[core.odin]::__init_context
-	// -- the file-scope arm at :898 writes `runtime::[core.odin]::`, then this block wrote
+	// -- the file-scope arm above writes `runtime::[core.odin]::`, then this block wrote
 	// `runtime::` again. A `@private` entity qualifies via `.Not_Exported in e.flags`; a public one
 	// skips the chain entirely, which is why `default_context` in the SAME FILE was always correct
 	// and is the control for this fix (measured unchanged: `runtime::default_context`).
@@ -1077,7 +1077,7 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		write_type_to_canonical_string(w, dyn.elem)
 
 	case .Fixed_Capacity_Dynamic_Array:
-		// C++ Reference: name_canonicalization.cpp write_type_to_canonical_string:812-814 --
+		// C++ Reference: name_canonicalization.cpp write_type_to_canonical_string --
 		//     type_writer_append_fmt(w, "[dynamic;%lld]", capacity);
 		//     write_type_to_canonical_string(w, elem);
 		// LEDGER #482. This arm was MISSING, so `[dynamic; N]T` panicked in the canonical-name
@@ -1130,7 +1130,7 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 			type_writer_append(w, raw_data(f.token.text), len(f.token.text))
 			type_writer_appendc(w, "=")
 
-			// C++ Reference: name_canonicalization.cpp:497 and :851 pass a string limit of
+			// C++ Reference: name_canonicalization.cpp -- both constant-writing sites pass a string limit of
 			// 1<<16. With the default (36) a constant string longer than 36 chars is ELIDED in
 			// the canonical name, so two distinct constants can canonicalise identically.
 			s := exact_value_to_string(const_ent.value, 1 << 16)
@@ -1164,7 +1164,7 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		type_writer_appendc(w, "union")
 
 		// Handle polymorphic_params for doc writer
-		// C++ Reference: name_canonicalization.cpp write_type_to_canonical_string:853-855
+		// C++ Reference: name_canonicalization.cpp write_type_to_canonical_string
 		if is_in_doc_writer() && union_type.polymorphic_params != nil {
 			write_canonical_params(w, union_type.polymorphic_params)
 		}
@@ -1213,7 +1213,7 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		type_writer_appendc(w, "struct")
 
 		// Handle polymorphic_params for doc writer
-		// C++ Reference: name_canonicalization.cpp write_type_to_canonical_string:885-887
+		// C++ Reference: name_canonicalization.cpp write_type_to_canonical_string
 		if is_in_doc_writer() && struct_type.polymorphic_params != nil {
 			write_canonical_params(w, struct_type.polymorphic_params)
 		}
@@ -1293,7 +1293,7 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 			write_canonical_params(w, proc_type.results)
 		}
 
-		// C++ Reference: name_canonicalization.cpp write_type_to_canonical_string:983-988
+		// C++ Reference: name_canonicalization.cpp write_type_to_canonical_string
 		//
 		// BOTH TAGS WERE MISSING. The port stopped after the results, so every #optional_ok
 		// procedure got a canonical name 12 characters shorter than the reference's, and every
@@ -1359,7 +1359,7 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 
 	case:
 		// LEDGER #482. This used to print `type.kind` -- the ORIGINAL type's kind -- while the
-		// switch above dispatches on `actual_type.kind` (actual_type := default_type(type), :773).
+		// switch above dispatches on `actual_type.kind` (actual_type := default_type(type)).
 		// So an unhandled kind was reported under the name of whatever was passed IN, and a
 		// Generic input whose default_type() lands on an unhandled kind said "Unknown type kind
 		// Generic" -- pointing at the .Generic arm, which exists and is fine. It cost a wrong fix

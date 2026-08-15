@@ -18,7 +18,7 @@ Type_And_Token :: struct {
 //
 // C++ Reference: check_expr.cpp:9650-9690. C++ reaches it via the one-line wrapper
 // add_type_to_seen_map (check_expr.cpp:9650), called from the case-clause Type branch
-// (check_stmt.cpp check_switch_stmt:1312).
+// (check_stmt.cpp check_switch_stmt).
 //
 // The port had NO counterpart, so duplicate TYPE cases in a typeid switch went undetected:
 //     f :: proc(tid: typeid) -> int { switch tid { case int: return 1; case int: return 2 }; ... }
@@ -253,14 +253,14 @@ contains_deferred_call :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> bool {
 	}
 
 	// Check viral flags first (fast path)
-	// C++ Reference: check_stmt.cpp contains_deferred_call:34
+	// C++ Reference: check_stmt.cpp contains_deferred_call
 	// Viral flags are stored directly on AST nodes
 	if .Contains_Deferred_Procedure in node.viral_state_flags {
 		return true
 	}
 
 	// Fallback: recursively check child nodes
-	// C++ Reference: check_stmt.cpp contains_deferred_call:37-59
+	// C++ Reference: check_stmt.cpp contains_deferred_call
 	#partial switch n in node.derived {
 	case ^ast.Expr_Stmt:
 		expr_node := cast(^ast.Node)n.expr
@@ -441,7 +441,7 @@ check_has_break_expr :: proc(ctx: ^Checker_Context, expr: ^ast.Expr, label: stri
 	}
 
 	// Check viral flags for or_break
-	// C++ Reference: check_stmt.cpp check_has_break_expr:173
+	// C++ Reference: check_stmt.cpp check_has_break_expr
 	// Viral flags are stored directly on AST nodes
 	if expr == nil {
 		return false
@@ -500,19 +500,19 @@ check_has_break :: proc(ctx: ^Checker_Context, stmt: ^ast.Stmt, label: string, i
 		return check_has_break_list(ctx, s.body, label, implicit)
 
 	case ^ast.Switch_Stmt:
-		// C++ Reference: check_stmt.cpp check_has_break:226 --
+		// C++ Reference: check_stmt.cpp check_has_break --
 		//     if (stmt->SwitchStmt.init && check_has_break_expr(stmt->SwitchStmt.init, label))
 		//
 		// This site previously read "This appears to be a typo in the C++ code. Using
 		// check_has_break instead." THAT WAS WRONG, and the reasoning behind it is worth keeping.
-		// check_has_break_expr does NOT inspect expression kinds (check_stmt.cpp check_has_break_expr:172-177):
+		// check_has_break_expr does NOT inspect expression kinds (check_stmt.cpp check_has_break_expr):
 		//     if (expr && expr->viral_state_flags & ViralStateFlag_ContainsOrBreak) return true;
 		// viral_state_flags lives on the BASE Ast node, shared by statements and expressions, so
 		// passing an init STATEMENT is entirely meaningful -- it asks "does this subtree contain
 		// an or_break?". Only the function's name suggests otherwise.
 		//
 		// C++ deliberately uses DIFFERENT functions for the two inits: check_has_break for
-		// IfStmt.init (:209) but check_has_break_expr for SwitchStmt.init (:226). The port had
+		// IfStmt.init but check_has_break_expr for SwitchStmt.init. The port had
 		// normalised that asymmetry away, which is a real behavioural divergence: the structural
 		// walker looks for break STATEMENTS, the viral flag records or_break EXPRESSIONS.
 		// Restored to C++'s form. The port's check_has_break_expr is typed ^ast.Expr, so the flag
@@ -549,7 +549,7 @@ check_has_break :: proc(ctx: ^Checker_Context, stmt: ^ast.Stmt, label: string, i
 		}
 
 	case ^ast.Expr_Stmt:
-		// C++ Reference: check_stmt.cpp check_has_break:262-266
+		// C++ Reference: check_stmt.cpp check_has_break
 		if check_has_break_expr(ctx, s.expr, label) {
 			return true
 		}
@@ -589,7 +589,7 @@ check_is_terminating :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, label: stri
 		}
 
 	case ^ast.Expr_Stmt:
-		// C++ Reference: check_stmt.cpp check_is_terminating:314-316
+		// C++ Reference: check_stmt.cpp check_is_terminating
 		// An expression statement terminates if it contains a diverging call (e.g., panic())
 		return is_diverging_expr(ctx, s.expr)
 
@@ -610,7 +610,7 @@ check_is_terminating :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, label: stri
 		}
 
 	case ^ast.When_Stmt:
-		// C++ Reference: check_stmt.cpp check_is_terminating:340-364
+		// C++ Reference: check_stmt.cpp check_is_terminating
 		// When statements with constant conditions only check the relevant branch
 		if s.is_cond_determined {
 			// Condition was evaluated at compile time
@@ -763,7 +763,7 @@ check_stmt_list :: proc(ctx: ^Checker_Context, stmts: []^ast.Stmt, flags: Stmt_F
 	}
 
 	// Check scope declarations (constants, types, procedures) before checking statements
-	// C++ Reference: check_stmt.cpp check_stmt_list:69-71
+	// C++ Reference: check_stmt.cpp check_stmt_list
 	// IMPORTANT: Set ctx.stmt_flags BEFORE check_scope_decls because entity collection
 	// may trigger expression checking (for type inference), which needs proper flags
 	// (e.g., Break_Allowed for or_break expressions inside loops)
@@ -779,7 +779,7 @@ check_stmt_list :: proc(ctx: ^Checker_Context, stmts: []^ast.Stmt, flags: Stmt_F
 	// handles fallthrough validation differently, so flags2 is not needed
 
 	// Find last non-empty statement
-	// C++ Reference: check_stmt.cpp check_stmt_list:76-82
+	// C++ Reference: check_stmt.cpp check_stmt_list
 	// Decrements max for each trailing empty statement until a non-empty statement is found
 	max := len(stmts)
 	loop1: for i := len(stmts) - 1; i >= 0; i -= 1 {
@@ -792,7 +792,7 @@ check_stmt_list :: proc(ctx: ^Checker_Context, stmts: []^ast.Stmt, flags: Stmt_F
 	}
 
 	// Find last non-constant declaration
-	// C++ Reference: check_stmt.cpp check_stmt_list:84-95
+	// C++ Reference: check_stmt.cpp check_stmt_list
 	// Decrements max for each trailing empty statement or constant declaration
 	max_non_constant_declaration := len(stmts)
 	loop2: for i := len(stmts) - 1; i >= 0; i -= 1 {
@@ -850,7 +850,7 @@ check_stmt_list :: proc(ctx: ^Checker_Context, stmts: []^ast.Stmt, flags: Stmt_F
 		}
 
 		if i + 1 < max_non_constant_declaration {
-			// C++ Reference: check_stmt.cpp check_stmt_list:112-127. The diagnostic is UNCONDITIONAL there:
+			// C++ Reference: check_stmt.cpp check_stmt_list. The diagnostic is UNCONDITIONAL there:
 			// there is no "but the unreachable statements are themselves diverging" escape.
 			// The port used to compute an `all_remaining_diverging` guard and suppress on it,
 			// which silently dropped the error for `return 1; panic("x")` and for
@@ -1255,14 +1255,14 @@ check_assign_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 				lhs_operands[i].expr = stmt.lhs[i]
 				lhs_operands[i].mode = .Value
 			} else {
-				// C++ Reference: check_stmt.cpp check_assign_stmt:2531. The LHS being checked is published
+				// C++ Reference: check_stmt.cpp check_assign_stmt. The LHS being checked is published
 				// so check_expr's Implicit arm can tell `context = ...` (which DEFINES the
 				// context) from a read of it.
 				ctx.assignment_lhs_hint = unparen_expr(stmt.lhs[i])
 				check_expr(ctx, &lhs_operands[i], stmt.lhs[i])
 			}
 		}
-		ctx.assignment_lhs_hint = nil // C++ Reference: check_stmt.cpp check_assign_stmt:2535
+		ctx.assignment_lhs_hint = nil // C++ Reference: check_stmt.cpp check_assign_stmt
 
 		// Unpack RHS into operands (handles tuples, multi-return, etc.)
 		check_assignment_arguments(ctx, lhs_operands[:], &rhs_operands, stmt.rhs)
@@ -1272,8 +1272,8 @@ check_assign_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 		max := min(lhs_count, rhs_count)
 		for i in 0 ..< max {
 			// LEDGER #315. The `if is_blank { continue }` that stood here was INVENTED.
-			// C++ check_stmt.cpp check_assign_stmt:2547 calls check_assignment_variable for EVERY pair and
-			// handles the blank identifier INSIDE it (check_stmt.cpp check_assignment_variable:433-440), where it runs
+			// C++ check_stmt.cpp check_assign_stmt calls check_assignment_variable for EVERY pair and
+			// handles the blank identifier INSIDE it (check_stmt.cpp check_assignment_variable), where it runs
 			// `check_assignment(rhs, nullptr, "assignment to '_' identifier")` -- and passing
 			// a nil type is exactly what triggers the default-type conversion and its range
 			// check.
@@ -1290,7 +1290,7 @@ check_assign_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 
 		// Check for count mismatch
 		if lhs_count != rhs_count {
-			// C++ Reference: check_stmt.cpp check_assign_stmt:2550 -- "Assignment count mismatch '%td' = '%td'".
+			// C++ Reference: check_stmt.cpp check_assign_stmt -- "Assignment count mismatch '%td' = '%td'".
 				// The port's sibling at check_decl.odin:210 renders C++'s form correctly
 				// (matching check_decl.cpp:150); this one was written from scratch, and its
 				// "%d values" is ungrammatical for a count of 1. One of the two sites ported,
@@ -1904,8 +1904,8 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 			if len(case_clause.list) == 0 {
 				// This is a default clause
 				if first_default != nil {
-					// C++ Reference: check_stmt.cpp check_switch_stmt:1198-1202. TWO LINES, and the first word is
-					// LOWERCASE here -- C++'s type-switch twin at :1475-1479 capitalises it. The
+					// C++ Reference: check_stmt.cpp check_switch_stmt. TWO LINES, and the first word is
+					// LOWERCASE here -- C++'s type-switch twin capitalises it. The
 					// port had capitalised BOTH and replaced C++'s "\n\tfirst at <pos>"
 					// continuation with an inline "(first at line N)" of its own invention.
 					// Reproduced verbatim, inconsistent capitalisation included: same class as
@@ -2164,7 +2164,7 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 				}
 
 				// Handle string type dependencies
-				// C++ Reference: check_stmt.cpp check_switch_stmt:1247-1254
+				// C++ Reference: check_stmt.cpp check_switch_stmt
 				// Add runtime dependencies for string comparison functions
 				base_type_x := base_type(x.type)
 				if is_type_string16(base_type_x) {
@@ -2196,7 +2196,7 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 				continue
 			}
 
-			// C++ Reference: check_stmt.cpp check_switch_stmt:1314-1329, which carries the comment
+			// C++ Reference: check_stmt.cpp check_switch_stmt, which carries the comment
 			// "NOTE(bill): the ordering here matters":
 			//     convert_to_typed(ctx, &y, x.type);
 			//     Operand z = y;                                  // a COPY
@@ -2240,7 +2240,7 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 				update_untyped_expr_type(ctx, z.expr, x.type, !is_type_untyped(x.type))
 			}
 
-			// C++ Reference: check_stmt.cpp check_switch_stmt:1303-1313 -- when the case expression resolves to a
+			// C++ Reference: check_stmt.cpp check_switch_stmt -- when the case expression resolves to a
 			// TYPE, the type itself is validated before anything else happens to it:
 			//     if (y.mode == Addressing_Type) {
 			//         Type *t = y.type;
@@ -2266,7 +2266,7 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 				}
 				t = default_type(t)
 				add_type_info_type(ctx, t)
-				// C++ check_stmt.cpp check_switch_stmt:1312 -- record the type for duplicate detection (#298).
+				// C++ check_stmt.cpp check_switch_stmt -- record the type for duplicate detection (#298).
 				add_type_switch_case(ctx, &seen_cases, y)
 			}
 
@@ -2302,8 +2302,8 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 								// "previous case at" line in the wrong place:
 								//     oracle: Error / previous case at / source / caret
 								//     port:   Error / source / caret / previous case at
-								// The port's OTHER FOUR duplicate-case emitters (:48, :2064, :2103,
-								// :2149) already use the embedded form -- which is why the TYPE-switch
+								// The port's OTHER FOUR duplicate-case emitters already use
+								// the embedded form -- which is why the TYPE-switch
 								// duplicate matched all along and only this one drifted. LEDGER #806.
 								error_node(case_expr, "Duplicate case '%s'\n\tprevious case at %s",
 									dup_str, token_pos_to_string(entry.token.pos))
@@ -2377,14 +2377,14 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 			defer end_error_block()
 
 			if len(unhandled) == 1 {
-				// C++ Reference: check_stmt.cpp check_switch_stmt:1363 -- error_no_newline, so the Suggestion
+				// C++ Reference: check_stmt.cpp check_switch_stmt -- error_no_newline, so the Suggestion
 				// below lands on the SAME line and no "Error: " label is printed unless the
 				// terminal has colours.
 				error_no_newline(node, "Unhandled switch case: %s", unhandled[0].token.text)
 			} else {
 				error_node(node, "Unhandled switch cases:")
 				for f in unhandled {
-					// C++ Reference: check_stmt.cpp check_switch_stmt:1367 -- "\t%.*s\n". The port omitted the
+					// C++ Reference: check_stmt.cpp check_switch_stmt -- "\t%.*s\n". The port omitted the
 					// newline, so every member and the Suggestion ran together on one line:
 					//     B	C	D	E5	Suggestion: Was '#partial switch' wanted?
 					// Same omission as the did-you-mean printer in task 249.
@@ -2462,7 +2462,7 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 	x.mode = .Invalid
 	check_expr(ctx, &x, rhs)
 	check_assignment(ctx, &x, nil, "type switch expression")
-	// C++ Reference: check_stmt.cpp check_type_switch_stmt:1443 -- the type switch's SUBJECT type is
+	// C++ Reference: check_stmt.cpp check_type_switch_stmt -- the type switch's SUBJECT type is
 	// registered for RTTI, immediately after check_assignment and BEFORE the Union/Any validation
 	// below. The port had the two surrounding statements and not this one, so every type switch
 	// registered one fewer type-info dependency than the reference. LEDGER #689; measured by the
@@ -2495,7 +2495,7 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 		return viral_flags
 	}
 
-	// C++ check_stmt.cpp check_type_switch_stmt:1487-1490. Three things about this, all deliberate:
+	// C++ check_stmt.cpp check_type_switch_stmt. Three things about this, all deliberate:
 	//
 	//   1. It sits AFTER the switch-kind validation, which RETURNS. The port ran it before
 	//      check_expr, so an invalid type switch reported this extra diagnostic that C++
@@ -2528,7 +2528,7 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 		if case_clause, is_case := case_stmt.derived.(^ast.Case_Clause); is_case {
 			if len(case_clause.list) == 0 {
 				if first_default != nil {
-					// C++ Reference: check_stmt.cpp check_type_switch_stmt:1475-1479 -- capital "Multiple" here, unlike
+					// C++ Reference: check_stmt.cpp check_type_switch_stmt -- capital "Multiple" here, unlike
 					// the value-switch twin above. See #287.
 					error_node(case_stmt, "Multiple default clauses\n\tfirst at %s", token_pos_to_string(first_default.pos))
 				} else {
@@ -2540,8 +2540,8 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 		}
 	}
 
-	// C++ Reference: check_stmt.cpp check_type_switch_stmt:1487-1490. RELOCATED HERE from before
-	// the `#partial` validation, because C++ runs the multiple-defaults loop (:1461-1485) FIRST and
+	// C++ Reference: check_stmt.cpp check_type_switch_stmt. RELOCATED HERE from before
+	// the `#partial` validation, because C++ runs the multiple-defaults loop FIRST and
 	// only then tests the identifier -- and that test RETURNS.
 	//
 	// The port had it earlier, so a type switch with a non-identifier tag AND duplicate defaults
@@ -2558,7 +2558,7 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 
 	// C++ lines 1457-1459: Track seen types for duplicate case type detection
 	// KEYED BY CANONICAL TYPE HASH, NOT BY TYPE POINTER. C++ Reference: check_stmt.cpp
-	// check_type_switch_stmt:1571 -- `if (type_set_update(&seen, y.type))`. `seen` is a **TypeSet**,
+	// check_type_switch_stmt -- `if (type_set_update(&seen, y.type))`. `seen` is a **TypeSet**,
 	// whose slot is chosen by type_hash_canonical_type (name_canonicalization.hpp:58-67), so two
 	// STRUCTURALLY IDENTICAL types built as separate Type objects collide into one entry and the
 	// duplicate IS reported.
@@ -2589,7 +2589,7 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 
 		// Determine the case type for the tag variable.
 		//
-		// C++ Reference: check_stmt.cpp check_type_switch_stmt:1587-1592. THE SENTINEL IS nil,
+		// C++ Reference: check_stmt.cpp check_type_switch_stmt. THE SENTINEL IS nil,
 		// NOT `x.type`, and that is load-bearing: C++ ends the clause with
 		//     if (cc->list.count > 1 || saw_nil) { case_type = nullptr; }
 		//     if (case_type == nullptr)          { case_type = type_deref(x.type); }
@@ -2669,7 +2669,7 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 				add_type_info_type(ctx, y.type)
 			}
 
-			// C++ Reference: check_stmt.cpp check_type_switch_stmt:1571-1581. Three corrections here:
+			// C++ Reference: check_stmt.cpp check_type_switch_stmt. Three corrections here:
 			//
 			//   * C++ names the offending EXPRESSION (expr_to_string(y.expr)), not the resolved
 			//     type. These coincide for `case f32:` and diverge for anything aliased.
@@ -2680,7 +2680,7 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 			//   * C++ breaks out of the type-expression loop; the port continued it.
 			if _, found := seen_types[type_hash_canonical_type(y.type)]; found {
 				// ONE error call with an EMBEDDED "\n\t", not error+error_line. C++ Reference:
-				// check_stmt.cpp check_type_switch_stmt:1574-1578 --
+				// check_stmt.cpp check_type_switch_stmt --
 				//
 				//     error(y.expr, "Duplicate type case '%s'\n"
 				//                   "\tprevious type case at %s", expr_str, ...);
@@ -2739,8 +2739,8 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 			case_type = type_deref(x.type)
 		}
 
-		// C++ Reference: check_stmt.cpp check_type_switch_stmt:1593-1597. This is a SECOND
-		// registration, and the port had only the first: :1566 registers per case EXPRESSION
+		// C++ Reference: check_stmt.cpp check_type_switch_stmt. This is a SECOND
+		// registration, and the port had only the first: the earlier one registers per case EXPRESSION
 		// (ported at the `switch_kind == .Any` arm inside the loop above), while THIS one runs once
 		// per case CLAUSE, after the list has been walked.
 		//
@@ -2751,14 +2751,14 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 		// The deref is deliberate and NOT applied to the single-type case: `case ^Foo:` registers
 		// `^Foo` in C++, and a blanket `type_deref` would wrongly reduce it to `Foo`.
 		//
-		// `!is_type_untyped` is C++'s guard at :1594. LEDGER #690.
+		// `!is_type_untyped` is C++'s guard. LEDGER #690.
 		//
 		// #781 COLLAPSED A DUPLICATE HERE. This block used to recompute the deref itself
 		// (`reg_type := case_type; if len(list) != 1 || saw_nil { reg_type = type_deref(x.type) }`)
 		// because the port's `case_type` did not carry it. That made the fallback rule exist in
 		// TWO places -- and only this copy was right, so the tag variable bound `^U` where C++
 		// binds `U`. `case_type` now carries the deref, exactly as C++'s does, and this block is
-		// C++:1593-1597 verbatim with no second copy of the rule to drift.
+		// C++ verbatim, with no second copy of the rule to drift.
 		if switch_kind == .Any {
 			if !is_type_untyped(case_type) {
 				add_type_info_type(ctx, case_type)
@@ -2769,7 +2769,7 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 		check_open_scope(ctx, case_stmt)
 
 		// Create the tag variable entity with the narrowed type
-		// C++ Reference: check_stmt.cpp check_type_switch_stmt:1557-1565
+		// C++ Reference: check_stmt.cpp check_type_switch_stmt
 		tag_token := tokenizer.Token {
 			text = lhs_ident.name,
 			pos  = lhs.pos,
@@ -2789,7 +2789,7 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 			error_node(lhs, "Tag variable '%s' conflicts with existing entity", lhs_ident.name)
 		}
 
-		// C++ Reference: check_stmt.cpp check_type_switch_stmt:1607-1609 -- THREE calls follow the
+		// C++ Reference: check_stmt.cpp check_type_switch_stmt -- THREE calls follow the
 		// insertion, and the port had only the insertion:
 		//
 		//     add_entity(ctx, ctx->scope, lhs, tag_var);
@@ -2849,7 +2849,7 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 			begin_error_block()
 			defer end_error_block()
 
-			// C++ Reference: check_stmt.cpp check_type_switch_stmt:1634-1646. Both calls are error_no_newline, which
+			// C++ Reference: check_stmt.cpp check_type_switch_stmt. Both calls are error_no_newline, which
 			// prints the position and message with NO "Error: " label; the port used
 			// error_node and so labelled a diagnostic C++ leaves unlabelled.
 			if len(unhandled) == 1 {
@@ -3316,7 +3316,7 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 	}
 
 	// Check initialization values
-	// C++ Reference: check_stmt.cpp check_value_decl_stmt:2295-2301. The type_hint_expr save/set/restore is
+	// C++ Reference: check_stmt.cpp check_value_decl_stmt. The type_hint_expr save/set/restore is
 	// part of this call, not decoration — it is what makes `x: [?]T = {...}` work, by
 	// letting the untyped compound literal borrow the declaration's type expression
 	// (read at check_compound_lit.odin:287, mirroring check_expr.cpp:10566).
@@ -3420,7 +3420,7 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 			} else if is_type_struct(t) || is_type_raw_union(t) {
 				// Apply using to struct/union fields, in SLOT order. LEDGER #498.
 				//
-				// C++ Reference: check_stmt.cpp check_value_decl_stmt:2375-2392 (the old citation here said 2302-2318,
+				// C++ Reference: check_stmt.cpp check_value_decl_stmt (the old citation here said 2302-2318,
 				// which is a foreign-variable loop over entities[i] -- a drifted reference of the
 				// #134 family, found by grepping the diagnostic text instead of trusting the line
 				// number):
@@ -3494,22 +3494,22 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 
 // check_assignment_variable validates an assignment to a variable
 // This performs variable-specific validation before delegating to check_assignment
-// C++ Reference: check_stmt.cpp check_assignment_variable:421-640
+// C++ Reference: check_stmt.cpp check_assignment_variable
 check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, context_name: string) -> ^Type {
-	// C++: check_stmt.cpp check_assignment_variable:422-424
+	// C++: check_stmt.cpp check_assignment_variable
 	if rhs.mode == .Invalid {
 		return nil
 	}
 
-	// C++: check_stmt.cpp check_assignment_variable:425-429
+	// C++: check_stmt.cpp check_assignment_variable
 	if rhs.type == t_invalid && rhs.mode != .Proc_Group && rhs.mode != .Builtin {
 		return nil
 	}
 
-	// C++: check_stmt.cpp check_assignment_variable:431
+	// C++: check_stmt.cpp check_assignment_variable
 	node := unparen_expr(lhs.expr)
 
-	// C++: check_stmt.cpp check_assignment_variable:433-440
+	// C++: check_stmt.cpp check_assignment_variable
 	// NOTE: Ignore assignments to '_'
 	is_blank := false
 	if ident, ok := node.derived.(^ast.Ident); ok {
@@ -3526,18 +3526,18 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 	e: ^Entity = nil
 	used := false
 
-	// C++: check_stmt.cpp check_assignment_variable:445-450
+	// C++: check_stmt.cpp check_assignment_variable
 	if lhs.mode == .Invalid || (lhs.type == t_invalid && lhs.mode != .Proc_Group && lhs.mode != .Builtin) {
 		return nil
 	}
 
-	// C++: check_stmt.cpp check_assignment_variable:452-493
+	// C++: check_stmt.cpp check_assignment_variable
 	if rhs.mode == .Proc_Group {
 		procs := proc_group_entities(ctx, rhs)
 		assert(len(procs) > 0)
 
 		// NOTE: These should be done
-		// C++: check_stmt.cpp check_assignment_variable:457-470
+		// C++: check_stmt.cpp check_assignment_variable
 		for i := 0; i < len(procs); i += 1 {
 			t := base_type(procs[i].type)
 			if t == t_invalid {
@@ -3553,14 +3553,14 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 			}
 		}
 
-		// C++: check_stmt.cpp check_assignment_variable:472-476
+		// C++: check_stmt.cpp check_assignment_variable
 		if e != nil {
 			rhs.mode = .Value
 			rhs.type = e.type
 			rhs.proc_group = nil
 		}
 	} else {
-		// C++: check_stmt.cpp check_assignment_variable:478-492
+		// C++: check_stmt.cpp check_assignment_variable
 		ident_node: ^ast.Node = nil
 
 		#partial switch n in node.derived {
@@ -3582,28 +3582,28 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 		}
 	}
 
-	// C++: check_stmt.cpp check_assignment_variable:495-497
+	// C++: check_stmt.cpp check_assignment_variable
 	if e != nil && used {
 		e.flags += {.Used}
 	}
 
-	// C++: check_stmt.cpp check_assignment_variable:499
+	// C++: check_stmt.cpp check_assignment_variable
 	assignment_type := lhs.type
 
-	// C++: check_stmt.cpp check_assignment_variable:501-505
+	// C++: check_stmt.cpp check_assignment_variable
 	if rhs.mode == .Type && is_type_polymorphic(rhs.type) {
 		t_str := type_to_string(rhs.type)
 		error_node(rhs.expr, "Invalid use of a non-specialized polymorphic type '%s'", t_str)
 	}
 
-	// C++: check_stmt.cpp check_assignment_variable:507-622
+	// C++: check_stmt.cpp check_assignment_variable
 	#partial switch lhs.mode {
 	case .Invalid:
-		// C++: check_stmt.cpp check_assignment_variable:508-509
+		// C++: check_stmt.cpp check_assignment_variable
 		return nil
 
 	case .Variable:
-		// C++: check_stmt.cpp check_assignment_variable:511-515
+		// C++: check_stmt.cpp check_assignment_variable
 		if e != nil && e.kind == .Variable {
 			var := e.variant.(Entity_Variable)
 			if var.is_rodata {
@@ -3612,7 +3612,7 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 		}
 
 		// NOTE: the parameter-immutability check does NOT belong in this arm. C++
-		// has it only in the DEFAULT arm of this switch (check_stmt.cpp check_assignment_variable:558-605),
+		// has it only in the DEFAULT arm of this switch (check_stmt.cpp check_assignment_variable),
 		// i.e. for modes that are not already `.Variable`. A field reached through a
 		// `using` on a POINTER parameter resolves as `.Variable` and is legitimately
 		// assignable — `defilter_8 :: proc(params: ^Filter_Params) { using params;
@@ -3621,7 +3621,7 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 		// carry `.Value` (see check_type.odin, alloc_entity_param).
 
 	case .Map_Index:
-		// C++: check_stmt.cpp check_assignment_variable:517-534
+		// C++: check_stmt.cpp check_assignment_variable
 		ln := unparen_expr(lhs.expr)
 		if idx_expr, ok := ln.derived.(^ast.Index_Expr); ok {
 			x := idx_expr.expr
@@ -3638,22 +3638,22 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 		}
 
 	case .Context:
-	// C++: check_stmt.cpp check_assignment_variable:536-537
+	// C++: check_stmt.cpp check_assignment_variable
 	// No checks needed for context assignment
 
 	case .Soa_Variable:
-	// C++: check_stmt.cpp check_assignment_variable:539-540
+	// C++: check_stmt.cpp check_assignment_variable
 	// No checks needed for SOA variable assignment
 
 	case .Swizzle_Variable:
-	// C++: check_stmt.cpp check_assignment_variable:542-543
+	// C++: check_stmt.cpp check_assignment_variable
 	// No checks needed for swizzle variable assignment
 
 	case:
-		// C++: check_stmt.cpp check_assignment_variable:545-621
+		// C++: check_stmt.cpp check_assignment_variable
 		// Default case: check for invalid assignments
 
-		// C++: check_stmt.cpp check_assignment_variable:546-557
+		// C++: check_stmt.cpp check_assignment_variable
 		if sel_expr, ok := lhs.expr.derived.(^ast.Selector_Expr); ok {
 			// NOTE: Extra error checks
 			op_c := Operand {
@@ -3668,7 +3668,7 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 			}
 		}
 
-		// C++: check_stmt.cpp check_assignment_variable:559-569
+		// C++: check_stmt.cpp check_assignment_variable
 		// In C++, this creates a new local 'e' that shadows the function-scope 'e'
 		// In Odin, we reuse the existing 'e' to avoid redeclaration
 		e = entity_of_node(&ctx.checker.info, lhs.expr)
@@ -3683,13 +3683,13 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 			e = original_e
 		}
 
-		// C++: check_stmt.cpp check_assignment_variable:571-619
+		// C++: check_stmt.cpp check_assignment_variable
 		str := expr_to_string(lhs.expr)
 		defer delete(str)
 
 		// Note: Named return values have both .Param and .Result flags, but they ARE mutable
 		if e != nil && .Param in e.flags && .Result not_in e.flags {
-			// C++: check_stmt.cpp check_assignment_variable:584 opens an ERROR_BLOCK here. This port recorded that as a
+			// C++: check_stmt.cpp check_assignment_variable opens an ERROR_BLOCK here. This port recorded that as a
 			// bare "// ERROR_BLOCK" comment and never opened one, so the error_line suggestions
 			// below had no current error value to attach to and fell back to writing straight
 			// to stderr - ahead of their own diagnostic, unsorted and uncounted. LEDGER 303.
@@ -3707,14 +3707,14 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 				error_line("\tSuggestion: Did you mean to pass '%s' by pointer?\n", e.token.text)
 			}
 		} else if e == nil || .Result not_in e.flags {
-			// C++: check_stmt.cpp check_assignment_variable:597 opens an ERROR_BLOCK here. Same omission as the arm
+			// C++: check_stmt.cpp check_assignment_variable opens an ERROR_BLOCK here. Same omission as the arm
 			// above; see LEDGER 303.
 			begin_error_block()
 			defer end_error_block()
 
 			error_node(lhs.expr, "Cannot assign to '%s'", str)
 
-			// C++ Reference: check_stmt.cpp check_assignment_variable:602-628. Both arms call show_error_on_line for
+			// C++ Reference: check_stmt.cpp check_assignment_variable. Both arms call show_error_on_line for
 			// the ENTITY's token and branch on what it returns:
 			//   offset <  0 (no source line available) -> the "Suggestion: Did you mean?" form
 			//   offset >= 0                            -> a line that ALIGNS under the variable
@@ -3745,7 +3745,7 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 		}
 	}
 
-	// C++: check_stmt.cpp check_assignment_variable:624-633
+	// C++: check_stmt.cpp check_assignment_variable
 	// Track bit field bit size for assignment checking
 	lhs_e := entity_of_node(&ctx.checker.info, lhs.expr)
 	prev_bit_field_bit_size := ctx.bit_field_bit_size
@@ -3756,18 +3756,18 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 		}
 	}
 
-	// C++: check_stmt.cpp check_assignment_variable:631
+	// C++: check_stmt.cpp check_assignment_variable
 	check_assignment(ctx, rhs, assignment_type, context_name)
 
-	// C++: check_stmt.cpp check_assignment_variable:633 - Restore previous bit field bit size
+	// C++: check_stmt.cpp check_assignment_variable - Restore previous bit field bit size
 	ctx.bit_field_bit_size = prev_bit_field_bit_size
 
-	// C++: check_stmt.cpp check_assignment_variable:635-637
+	// C++: check_stmt.cpp check_assignment_variable
 	if rhs.mode == .Invalid {
 		return nil
 	}
 
-	// C++: check_stmt.cpp check_assignment_variable:639
+	// C++: check_stmt.cpp check_assignment_variable
 	return rhs.type
 }
 
@@ -4134,7 +4134,7 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 
 			// Import all exported entities, in SLOT order. LEDGER #497.
 			//
-			// C++ Reference: check_stmt.cpp check_using_stmt_entity:804-816 --
+			// C++ Reference: check_stmt.cpp check_using_stmt_entity --
 			//     for (u32 i = 0; i < scope->elements.cap; i++) {
 			//         if (!scope->elements.slots[i].hash) continue;
 			//         Entity *decl = scope->elements.slots[i].value;
@@ -4190,7 +4190,7 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 				if found != nil {
 					expr_str := expr_to_string(expr)
 					defer delete(expr_str)
-					// C++ check_stmt.cpp check_using_stmt_entity:819-826 renders both positions with
+					// C++ check_stmt.cpp check_using_stmt_entity renders both positions with
 					// token_pos_to_string. The port passed raw tokenizer.Pos values to "%v",
 					// printing Pos{file = "...", offset = ..., line = ..., column = ...}
 					// instead of file(line:col). LEDGER 287.
@@ -4210,7 +4210,7 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 			#partial switch struct_type in t.variant {
 			case Type_Struct:
 				// Wait for struct fields to be resolved (multi-threaded synchronization)
-				// C++ Reference: check_stmt.cpp check_using_stmt_entity:818-822
+				// C++ Reference: check_stmt.cpp check_using_stmt_entity
 				// Need to use pointer to variant for wait group
 				st_ptr := &t.variant.(Type_Struct)
 				sync.wait_group_wait(&st_ptr.fields_wait_signal)
@@ -4284,7 +4284,7 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 				}
 			}
 		} else {
-			// C++ Reference: check_stmt.cpp check_using_stmt_entity:860 -- error(us->token, ...), NOT the expression.
+			// C++ Reference: check_stmt.cpp check_using_stmt_entity -- error(us->token, ...), NOT the expression.
 			// The position matters: when `using` is already rejected by the feature gate, that
 			// error sits on the same token, and the error collector merges neighbouring
 			// diagnostics at the same position. Reporting this one against `expr` gave it a
@@ -4337,7 +4337,7 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 
 	// `for <init>; <vals> in <expr>` carries an init statement, which must be checked
 	// inside the loop's scope so anything it declares is visible to the body.
-	// C++ Reference: check_stmt.cpp check_range_stmt:1754-1757.
+	// C++ Reference: check_stmt.cpp check_range_stmt.
 	if stmt.init != nil {
 		viral_flags |= check_stmt(ctx, stmt.init, mod_flags)
 	}
@@ -4416,7 +4416,7 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 				append(&vals, t_int)
 				add_type_info_type(ctx, operand.type)
 
-				// C++ Reference: check_stmt.cpp check_range_stmt:1763-1765
+				// C++ Reference: check_stmt.cpp check_range_stmt
 				if ctx.info.build_context != nil && ctx.info.build_context.no_rtti {
 					error_node(node, "Iteration over an enum type is not allowed runtime type information (RTTI) has been disallowed")
 				}
@@ -4482,7 +4482,7 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 					is_possibly_addressable = false
 					add_type_info_type(ctx, operand.type)
 
-					// C++ Reference: check_stmt.cpp check_range_stmt:1811-1813
+					// C++ Reference: check_stmt.cpp check_range_stmt
 					if ctx.info.build_context != nil && ctx.info.build_context.no_rtti && is_type_enum(bs.elem) {
 						error_node(node, "Iteration over a bit_set of an enum is not allowed runtime type information (RTTI) has been disallowed")
 					}
@@ -4663,7 +4663,7 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 					val_str := expr_to_string(stmt.vals[0])
 					defer delete(val_str)
 					error_line("\tSuggestion: place parentheses around the expression\n")
-					// LEDGER 346: braces escaped for Odin's fmt. C++ Reference: src/check_stmt.cpp check_range_stmt:2026
+					// LEDGER 346: braces escaped for Odin's fmt. C++ Reference: src/check_stmt.cpp check_range_stmt
 					error_line("\t            for (%s in %s) {{\n", val_str, expr_str)
 				}
 			}
@@ -4721,7 +4721,7 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 
 			if found == nil {
 				entity = alloc_entity_variable(ctx.scope, token, type, .Resolved, ctx.checker.allocator)
-				// C++ Reference: check_stmt.cpp check_range_stmt:2067-2069 -- `if (!is_range) flags |= ForValue`.
+				// C++ Reference: check_stmt.cpp check_range_stmt -- `if (!is_range) flags |= ForValue`.
 				// The port set .For_Value unconditionally. The flag is what gates the
 				// addressability Suggestion at check_expr.cpp:2937, so `for v in 0..<3 { &v }`
 				// printed a "Prefer doing 'for &v in ...'" hint that C++ never emits: there is
@@ -4730,7 +4730,7 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 				if !is_ast_range(cast(^ast.Expr)expr) {
 					entity.flags += {.For_Value}
 				}
-				// C++ Reference: check_stmt.cpp check_range_stmt:2043-2049
+				// C++ Reference: check_stmt.cpp check_range_stmt
 				// Add entity to scope before adding definition
 				add_entity(ctx, ctx.scope, name, entity)
 				add_entity_definition(&ctx.checker.info, name, entity)
@@ -4819,7 +4819,7 @@ is_ast_range :: proc(expr: ^ast.Expr) -> bool {
 
 // error_var_decl_identifier reports a declaration name that is not an identifier.
 //
-// C++ Reference: check_stmt.cpp error_var_decl_identifier:896-913. C++ funnels THREE call sites through this one
+// C++ Reference: check_stmt.cpp error_var_decl_identifier. C++ funnels THREE call sites through this one
 // helper -- check_unroll_range_stmt (1103), check_range_stmt (2098) and
 // check_value_decl_stmt (2150) -- so all three produce the same wording and the same
 // reserved-keyword note. The port had invented two different messages instead, "Expected an
@@ -4910,7 +4910,7 @@ check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flag
 	// Check if expression is a range (e.g., 0..<10)
 	skip_expr := false
 	if is_ast_range(cast(^ast.Expr)expr) {
-		// C++ Reference: check_unroll_range_stmt (src/check_stmt.cpp check_unroll_range_stmt:970-981):
+		// C++ Reference: check_unroll_range_stmt (src/check_stmt.cpp check_unroll_range_stmt):
 		//
 		//     if (is_ast_range(expr)) {
 		//         ast_node(ie, BinaryExpr, expr);
@@ -5037,7 +5037,7 @@ check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flag
 			defer delete(expr_str)
 			begin_error_block()
 			error_node(operand.expr, "Cannot iterate over '%s' of type '%s' in an '#unroll for' statement", expr_str, type_str)
-			// C++ check_stmt.cpp check_unroll_range_stmt:1059-1061 follows the error with a Suggestion, but ONLY for the
+			// C++ check_stmt.cpp check_unroll_range_stmt follows the error with a Suggestion, but ONLY for the
 			// three runtime-length kinds -- it is conditional, not unconditional. The port emitted
 			// the error and never the Suggestion. Probe n9_unroll.
 			if is_type_slice(operand.type) ||
@@ -5049,7 +5049,7 @@ check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flag
 		} else if operand.mode != .Constant &&
 		          unroll_count <= 0 &&
 		          compare_exact_values(.Cmp_Eq, inline_for_depth, exact_value_i64(0)) {
-			// C++ check_stmt.cpp check_unroll_range_stmt:1063-1065 has THREE conjuncts; the port had the first two and
+			// C++ check_stmt.cpp check_unroll_range_stmt has THREE conjuncts; the port had the first two and
 			// dropped the inline_for_depth test, so `#unroll for x in a` over a fixed [3]int was
 			// rejected as "not known at compile time" although the reference accepts it (probe
 			// n9_unrollctl).

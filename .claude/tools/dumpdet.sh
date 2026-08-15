@@ -24,6 +24,12 @@
 #
 # USAGE: dumpdet.sh <BIN> [TARGET] [N]
 set -u
+# #906: the checker library no longer walks up from CWD to find `base/runtime` (#898 removed it,
+# because a LIBRARY's answer must not depend on the caller's working directory). Tools that only
+# `cd` into the repo were relying on that walk-up BY ACCIDENT and now report "Undeclared name:
+# append" -- runtime never loaded. The harness conforms to the library: export the root.
+export ODIN_ROOT="${ODIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
 cd /home/kalsprite/dev/odin
 
 BIN="${1:-}"; TARGET="${2:-core/odin/parser}"; N="${3:-12}"; MODE="${4:-seq}"

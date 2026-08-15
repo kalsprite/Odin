@@ -18,7 +18,7 @@ import "core:sync"
 debugf_mutex: sync.Mutex
 
 // debugf prints a debug message to stderr if show_debug_messages is enabled
-// C++: main.cpp debugf:46-56
+// C++: main.cpp debugf
 debugf :: proc(format: string, args: ..any) {
 	if build_context.show_debug_messages {
 		sync.lock(&debugf_mutex)

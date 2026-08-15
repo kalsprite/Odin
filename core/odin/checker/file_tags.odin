@@ -180,7 +180,7 @@ parse_vet_tag :: proc(token_for_pos: tokenizer.Token, str: string, base_vet_flag
 			// (src/build_settings.cpp:328-357). Reproduced verbatim: the list is output.
 			//
 			// "semicolon" and "deprecated" used to be missing here too -- accepted by the
-			// name lookup but absent from the list. Upstream added them (parser.cpp parse_vet_tag:6589-6590)
+			// name lookup but absent from the list. Upstream added them (parser.cpp parse_vet_tag)
 			// and the port follows. LEDGER #385.
 			error_line("\textra\n")
 			error_line("\tsemicolon\n")
@@ -246,7 +246,7 @@ parse_feature_tag :: proc(token_for_pos: tokenizer.Token, str: string) -> Opt_In
 				feature_flags |= flag
 			}
 			if is_notted {
-				// C++ lists Trap, Zero and AllBits here but NOT Self (parser.cpp parse_feature_tag:6638-6643),
+				// C++ lists Trap, Zero and AllBits here but NOT Self (parser.cpp parse_feature_tag),
 				// so `#+feature !integer-division-by-zero:self` is accepted in silence.
 				NO_NOT :: Opt_In_Feature_Flag{
 					.Integer_Division_By_Zero_Trap,

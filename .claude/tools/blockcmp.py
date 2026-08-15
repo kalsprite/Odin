@@ -56,8 +56,15 @@ def blocks(text):
     if cur is not None: out.append("\n".join(cur))
     return sorted(out)
 
+# #906: ODIN_ROOT must be passed explicitly. `cwd=REPO` used to supply it BY ACCIDENT -- the checker
+# library walked up from the working directory looking for base/runtime -- and #898 removed that
+# walk-up because a library's answer must not depend on the caller's cwd. Without this the port
+# reports "Undeclared name: append" and every comparison is noise.
+_ENV = dict(os.environ, ODIN_ROOT=REPO)
+
+
 def run(cmd):
-    r = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, timeout=180)
+    r = subprocess.run(cmd, cwd=REPO, env=_ENV, capture_output=True, text=True, timeout=180)
     return r.stdout + r.stderr
 
 port = sys.argv[1]

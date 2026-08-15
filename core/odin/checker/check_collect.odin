@@ -169,11 +169,11 @@ collect_file_decls_from_when_stmt :: proc(ctx: ^Checker_Context, ws: ^ast.When_S
 
 // ======================================================================================
 // FILE DECLARATION COLLECTION
-// C++ Reference: checker.cpp collect_file_decl:5969-6033
+// C++ Reference: checker.cpp collect_file_decl
 // ======================================================================================
 
 // collect_file_decl processes a single file-level declaration
-// C++ Reference: checker.cpp collect_file_decl:5969-6033
+// C++ Reference: checker.cpp collect_file_decl
 // Returns true if type aliases need correction
 collect_file_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) -> bool {
 	// C++ line 5628: Verify file scope
@@ -208,7 +208,7 @@ collect_file_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) -> bool {
 		mark_been_handled(ctx, decl)
 
 		// Queue for delayed processing (C++ line 5653)
-		// C++ Reference: checker.cpp collect_file_decls_from_when_stmt:5939-5942 (processing phase)
+		// C++ Reference: checker.cpp collect_file_decls_from_when_stmt (processing phase)
 		if ctx.collect_delayed_decls && ctx.file != nil {
 			// Queue the foreign block declaration directly on file
 			append(&ctx.file.delayed_decls_foreign_block, decl)
@@ -254,7 +254,7 @@ collect_file_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) -> bool {
 			case ^ast.Basic_Directive:
 				// Queue directive expressions for delayed processing
 				// C++ line 5684: array_add(&curr_file->delayed_decls_queues[AstDelayQueue_Expr], es->expr)
-				// C++ Reference: checker.cpp collect_file_decls_from_when_stmt:5949-5953 (processing phase)
+				// C++ Reference: checker.cpp collect_file_decls_from_when_stmt (processing phase)
 				if ctx.collect_delayed_decls && ctx.file != nil {
 					// Queue the directive expression directly on file
 					append(&ctx.file.delayed_decls_expr, es.expr)
@@ -309,7 +309,7 @@ filename_from_path :: proc(path: string) -> string {
 }
 
 // check_create_file_scopes creates file-level scopes for all packages
-// C++ Reference: checker.cpp check_create_file_scopes:6056-6073
+// C++ Reference: checker.cpp check_create_file_scopes
 check_create_file_scopes :: proc(c: ^Checker) {
 	// NOTE: This assumes we have packages in c.info.packages
 	// The C++ version iterates c->parser->packages
@@ -318,7 +318,7 @@ check_create_file_scopes :: proc(c: ^Checker) {
 	// C++ line 5715-5730: Process each package
 	for pkg in sorted_packages(&c.info) {
 		// C++ line 5718: Sort files by name (for deterministic order)
-		// C++ Reference: checker.cpp sort_file_by_name:6048-6054
+		// C++ Reference: checker.cpp sort_file_by_name
 		// Extract files from map to slice for sorting
 		file_list := make([dynamic]^ast.File, 0, len(pkg.files), context.temp_allocator)
 		for file in sorted_files(pkg.files) {
@@ -359,7 +359,7 @@ check_create_file_scopes :: proc(c: ^Checker) {
 		}
 
 		// C++ line 5729: Initialize export queue
-		// C++ Reference: checker.cpp check_create_file_scopes:6063 - mpmc_init(&pkg->exported_entity_queue, total_pkg_decl_count);
+		// C++ Reference: checker.cpp check_create_file_scopes - mpmc_init(&pkg->exported_entity_queue, total_pkg_decl_count);
 		// The exported_entity_queue is a multi-producer multi-consumer queue used in C++ for
 		// thread-safe entity collection (see checker.cpp:2044 enqueue, 5780 dequeue).
 		// In multi-threaded mode, entities are enqueued during parallel file collection,
@@ -371,11 +371,11 @@ check_create_file_scopes :: proc(c: ^Checker) {
 
 // ======================================================================================
 // PARALLEL ENTITY COLLECTION
-// C++ Reference: checker.cpp check_collect_entities_all_worker_proc:6083-6099
+// C++ Reference: checker.cpp check_collect_entities_all_worker_proc
 // ======================================================================================
 
 // Collect_Entities_Task holds data for parallel entity collection
-// C++ Reference: checker.cpp check_collect_entities_all_worker_proc:6083-6099
+// C++ Reference: checker.cpp check_collect_entities_all_worker_proc
 // (The old range -- 5770-5775, into checker.cpp -- RESOLVED CLEANLY to
 //  check_foreign_import_fullpaths, a function it has nothing to do with, while this very
 //  comment named check_collect_entities_all_worker_proc. citefn cannot catch that: it checks
@@ -457,7 +457,7 @@ check_collect_entities_all :: proc(c: ^Checker) {
 		tasks := make([]Collect_Entities_Task, file_count, c.allocator)
 		defer delete(tasks)
 
-		// C++ Reference: checker.cpp check_collect_entities_all:6104-6110. One worker entry per
+		// C++ Reference: checker.cpp check_collect_entities_all. One worker entry per
 		// pool thread (the pool's count already includes the main thread). C++ takes these from
 		// the permanent allocator and never frees them; the port must, or every checker run leaks
 		// one map per thread -- see LEDGER #649 for what unfreed per-run allocations cost here.
@@ -484,7 +484,7 @@ check_collect_entities_all :: proc(c: ^Checker) {
 		task_idx := 0
 		// C++ Reference: checker.cpp:6052 sorts sort_file_by_name over pkg->files -- the
 		// PER-PACKAGE array, inside check_create_file_scopes. Its collection pass
-		// (checker.cpp check_collect_entities_all:6104) then iterates the GLOBAL c->info.files map unsorted.
+		// (checker.cpp check_collect_entities_all) then iterates the GLOBAL c->info.files map unsorted.
 		//
 		// The port applied that basename sort to the global set instead, which is a sort C++
 		// does not have on a collection C++ does not sort. It matters because the key is
@@ -603,7 +603,7 @@ is_ast_type :: proc(node: ^ast.Node) -> bool {
 	// In the Odin AST, type nodes are directly in the Any_Node union
 	#partial switch _ in node.derived {
 	// Type expressions
-	// C++ Reference: parser.hpp is_ast_type:926-928 — is_ast_type is a RANGE check over every kind
+	// C++ Reference: parser.hpp is_ast_type — is_ast_type is a RANGE check over every kind
 	// between Ast__TypeBegin and Ast__TypeEnd, so C++ picks up new type nodes for free.
 	// This port enumerates them, and three were missing: Bit_Field_Type,
 	// Relative_Type and Fixed_Capacity_Dynamic_Array_Type. A declaration whose
@@ -742,7 +742,7 @@ check_arity_match :: proc(ctx: ^Checker_Context, vd: ^ast.Value_Decl, is_global:
 check_builtin_attributes :: proc(ctx: ^Checker_Context, e: ^Entity, attributes: []^ast.Attribute) {
 	// C++ Reference: checker.cpp - processes various builtin attributes
 	// Process attributes and store in Attribute_Context
-	// C++ Reference: checker.cpp check_builtin_attributes:4790-4800. An @(builtin) declaration is added to the BUILTIN
+	// C++ Reference: checker.cpp check_builtin_attributes. An @(builtin) declaration is added to the BUILTIN
 	// PACKAGE SCOPE so it resolves everywhere without an import. Nothing in this port did that, so
 	// every @(builtin) proc group in base:runtime - append, resize, reserve, delete, make, clear and
 	// the rest - was undeclared in every consuming package.
@@ -762,7 +762,7 @@ check_builtin_attributes :: proc(ctx: ^Checker_Context, e: ^Entity, attributes: 
 			if attr_name != "builtin" {
 				continue
 			}
-			// C++ Reference: checker.cpp check_builtin_attributes:4796-4798
+			// C++ Reference: checker.cpp check_builtin_attributes
 			if has_value {
 				error(elem, "'builtin' cannot have a field value")
 			}
@@ -1090,7 +1090,7 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 		// For non-file-scope variables, we still need to add them to the scope
 		// so that later declarations (like `T :: type_of(x)`) can reference them.
 		// However, their actual checking happens in check_stmt.
-		// C++ Reference: checker.cpp check_collect_value_decl:4918-4922 -
+		// C++ Reference: checker.cpp check_collect_value_decl -
 		//	if (vd->is_mutable) {
 		//		if (!(c->scope->flags&ScopeFlag_File)) {
 		//			// NOTE(bill): local scope -> handle later and in order
@@ -1124,7 +1124,7 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 			// C++ line 4593-4596: Validate name is identifier
 			ident, name_ok := name.derived.(^ast.Ident)
 			if !name_ok {
-				// C++ checker.cpp check_collect_value_decl:4931 and 4977 both name the offending node kind via
+				// C++ checker.cpp check_collect_value_decl and 4977 both name the offending node kind via
 				// ast_strings[name->kind]. Confirmed against the oracle: `c.d: int` at file
 				// scope reports ", got selector expression".
 				error(name, "A declaration's name must be an identifier, got %s", ast_kind_string(name))
@@ -1199,7 +1199,7 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 			// C++ line 4639-4642: Validate name is identifier
 			ident, name_ok := name.derived.(^ast.Ident)
 			if !name_ok {
-				// C++ checker.cpp check_collect_value_decl:4931 and 4977 both name the offending node kind via
+				// C++ checker.cpp check_collect_value_decl and 4977 both name the offending node kind via
 				// ast_strings[name->kind]. Confirmed against the oracle: `c.d: int` at file
 				// scope reports ", got selector expression".
 				error(name, "A declaration's name must be an identifier, got %s", ast_kind_string(name))
@@ -1254,7 +1254,7 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 					if proc_ent, ok6 := &e.variant.(Entity_Procedure); ok6 {
 						proc_ent.is_foreign = true
 						proc_ent.foreign_library_ident = fl
-						// C++ Reference: checker.cpp check_collect_value_decl:5016-5034. The foreign block's calling
+						// C++ Reference: checker.cpp check_collect_value_decl. The foreign block's calling
 						// convention is resolved HERE, while foreign_context is still live,
 						// and written back into the AST node. By the time check_procedure_type
 						// runs the node no longer says .Foreign_Block_Default, so that
@@ -1339,7 +1339,7 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 			// C++ line 4736-4746: Validate foreign block constraints
 			if e.kind != .Procedure {
 				if fl != nil {
-					// C++ checker.cpp check_collect_value_decl:5073-5083. C++ does not choose between two messages:
+					// C++ checker.cpp check_collect_value_decl. C++ does not choose between two messages:
 					// it always names the offending node kind, and ADDITIONALLY appends the
 					// hint when that kind is a procedure type. The port had split this into
 					// two mutually exclusive arms, so every non-proc-type kind -- basic
@@ -1391,7 +1391,7 @@ check_add_foreign_import_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 	library_name := fl.name != nil ? fl.name.name : ""
 	if library_name == "" && len(fl.fullpaths) != 0 {
 		// Use first source path as basis for library name
-		// C++ Reference: checker.cpp check_add_foreign_import_decl:5836 - path_to_entity_name(fl->library_name.string, fullpath)
+		// C++ Reference: checker.cpp check_add_foreign_import_decl - path_to_entity_name(fl->library_name.string, fullpath)
 		// Extract library name from first fullpath
 		if basic_lit, fullpath_ok := fl.fullpaths[0].derived_expr.(^ast.Basic_Lit); fullpath_ok {
 			library_name = path_to_entity_name(library_name, basic_lit.tok.text)
@@ -1495,11 +1495,11 @@ make_checker_context :: proc(c: ^Checker) -> Checker_Context {
 
 // ======================================================================================
 // DELAYED DECLARATION PROCESSING
-// C++ Reference: checker.cpp check_import_entities:6228-6310
+// C++ Reference: checker.cpp check_import_entities
 // ======================================================================================
 
 // process_delayed_import_decls processes queued import declarations for a file
-// C++ Reference: checker.cpp check_import_entities:6235-6238, 6264-6267
+// C++ Reference: checker.cpp check_import_entities, 6264-6267
 //
 // Import declarations may be delayed during initial collection if they depend on
 // entities not yet available. This function processes them in a second pass.
@@ -1508,20 +1508,20 @@ process_delayed_import_decls :: proc(ctx: ^Checker_Context, file: ^ast.File) {
 		return
 	}
 
-	// C++ Reference: checker.cpp check_import_entities:6235-6237 -- process delayed imports
+	// C++ Reference: checker.cpp check_import_entities -- process delayed imports
 	for stmt in file.delayed_decls_import {
 		// Type assert ^ast.Stmt to ^ast.Import_Decl
-		// C++ Reference: checker.cpp check_import_entities:6236
+		// C++ Reference: checker.cpp check_import_entities
 		if import_decl, ok := stmt.derived.(^ast.Import_Decl); ok {
 			check_add_import_decl(ctx, import_decl)
 		}
 	}
-	// Clear the queue after processing (C++ Reference: checker.cpp check_import_entities:6238)
+	// Clear the queue after processing (C++ Reference: checker.cpp check_import_entities)
 	clear(&file.delayed_decls_import)
 }
 
 // check_add_foreign_block_decl COLLECTS the declarations inside a foreign block.
-// C++ Reference: checker.cpp check_add_foreign_block_decl:5105-5125
+// C++ Reference: checker.cpp check_add_foreign_block_decl
 //
 // This is distinct from check_foreign_block_decl (check_stmt.odin), which CHECKS a foreign block in
 // statement position via check_stmt_list. The two were conflated: the collection sites called the
@@ -1537,7 +1537,7 @@ check_add_foreign_block_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) -> 
 		return false
 	}
 
-	// C++ Reference: checker.cpp check_add_foreign_block_decl:5109-5115
+	// C++ Reference: checker.cpp check_add_foreign_block_decl
 	c := ctx^
 	foreign_library := fb.foreign_library
 	if foreign_library != nil {
@@ -1549,10 +1549,10 @@ check_add_foreign_block_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) -> 
 		}
 	}
 
-	// C++ Reference: checker.cpp check_add_foreign_block_decl:5117
+	// C++ Reference: checker.cpp check_add_foreign_block_decl
 	check_foreign_block_attributes(&c, fb.attributes)
 
-	// C++ Reference: checker.cpp check_add_foreign_block_decl:5119-5123
+	// C++ Reference: checker.cpp check_add_foreign_block_decl
 	block, block_ok := fb.body.derived.(^ast.Block_Stmt)
 	if !block_ok {
 		return false
@@ -1565,7 +1565,7 @@ check_add_foreign_block_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) -> 
 }
 
 // process_delayed_foreign_block_decls processes queued foreign block declarations for a file
-// C++ Reference: checker.cpp check_import_entities:6283-6296
+// C++ Reference: checker.cpp check_import_entities
 //
 // Foreign blocks may be delayed during initial collection. This function processes them
 // after imports have been resolved.
@@ -1577,20 +1577,20 @@ process_delayed_foreign_block_decls :: proc(ctx: ^Checker_Context, file: ^ast.Fi
 		return
 	}
 
-	// C++ Reference: checker.cpp check_import_entities:6284-6290 -- process delayed foreign blocks
+	// C++ Reference: checker.cpp check_import_entities -- process delayed foreign blocks
 	for stmt in file.delayed_decls_foreign_block {
 		// Process foreign block declaration
-		// C++ Reference: checker.cpp check_import_entities:6285
+		// C++ Reference: checker.cpp check_import_entities
 		// NOTE: this DISCARDS the bool. C++ breaks out and re-checks the package when it is
 		// true (checker.cpp:6285-6294); the port propagates no restart. See LEDGER #735.
 		check_add_foreign_block_decl(ctx, stmt)
 	}
-	// Clear the queue after processing (C++ Reference: checker.cpp check_import_entities:6296)
+	// Clear the queue after processing (C++ Reference: checker.cpp check_import_entities)
 	clear(&file.delayed_decls_foreign_block)
 }
 
 // process_delayed_expr_decls processes queued directive expressions for a file
-// C++ Reference: checker.cpp check_import_entities:6303-6307
+// C++ Reference: checker.cpp check_import_entities
 //
 // Directive expressions (like #assert, #config) may be delayed during collection.
 // This function evaluates them after all declarations are available.
@@ -1599,31 +1599,31 @@ process_delayed_expr_decls :: proc(ctx: ^Checker_Context, file: ^ast.File) {
 		return
 	}
 
-	// C++ Reference: checker.cpp check_import_entities:6303-6306 -- process delayed directive exprs
+	// C++ Reference: checker.cpp check_import_entities -- process delayed directive exprs
 	for expr in file.delayed_decls_expr {
 		// Evaluate the directive expression
-		// C++ Reference: checker.cpp check_import_entities:6304-6305
+		// C++ Reference: checker.cpp check_import_entities
 		operand := Operand{}
 		check_expr(ctx, &operand, expr)
 	}
-	// Clear the queue after processing (C++ Reference: checker.cpp check_import_entities:6307)
+	// Clear the queue after processing (C++ Reference: checker.cpp check_import_entities)
 	clear(&file.delayed_decls_expr)
 }
 
 // process_all_delayed_decls processes all delayed declarations for a file in correct order
-// C++ Reference: checker.cpp check_import_entities:6228-6310
+// C++ Reference: checker.cpp check_import_entities
 //
 // This function processes delayed declarations in three phases:
-// 1. Import declarations (C++ Reference: checker.cpp check_import_entities:6235-6238, 6264-6267)
-// 2. Foreign block declarations (C++ Reference: checker.cpp check_import_entities:6284-6296)
-// 3. Directive expressions (C++ Reference: checker.cpp check_import_entities:6303-6307)
+// 1. Import declarations (C++ Reference: checker.cpp check_import_entities, 6264-6267)
+// 2. Foreign block declarations (C++ Reference: checker.cpp check_import_entities)
+// 3. Directive expressions (C++ Reference: checker.cpp check_import_entities)
 //
 // The order is important because later phases may depend on earlier ones.
 process_all_delayed_decls :: proc(ctx: ^Checker_Context, file: ^ast.File) {
-	// Phase 1: Process import declarations (C++ Reference: checker.cpp check_import_entities:6235-6238)
+	// Phase 1: Process import declarations (C++ Reference: checker.cpp check_import_entities)
 	process_delayed_import_decls(ctx, file)
 
-	// Phase 2: Process foreign block declarations (C++ Reference: checker.cpp check_import_entities:6284-6296)
+	// Phase 2: Process foreign block declarations (C++ Reference: checker.cpp check_import_entities)
 	process_delayed_foreign_block_decls(ctx, file)
 
 	// Phase 3 — directive expressions — is deliberately NOT run here.
@@ -1648,7 +1648,7 @@ process_all_delayed_decls :: proc(ctx: ^Checker_Context, file: ^ast.File) {
 // check_delayed_foreign_blocks_all drains every file's queued foreign blocks a SECOND time,
 // after the import/export cycle has run.
 //
-// C++ Reference: checker.cpp check_import_entities:6283-6296 - the drain sits inside check_import_entities,
+// C++ Reference: checker.cpp check_import_entities - the drain sits inside check_import_entities,
 // collect_file_decls, and immediately before the Expr drain that check_delayed_expressions_all
 // mirrors.
 //
@@ -1689,7 +1689,7 @@ check_delayed_foreign_blocks_all :: proc(c: ^Checker) {
 }
 
 // check_delayed_expressions_all drains every file's queued directive expressions.
-// C++ Reference: checker.cpp check_import_entities:6299-6310 - a separate pass over the package's files, run
+// C++ Reference: checker.cpp check_import_entities - a separate pass over the package's files, run
 // after imports and exports have been processed.
 // (STRANDED above a different procedure until #734 -- another procedure was inserted between
 //  this doc comment and the definition it documents.)

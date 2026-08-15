@@ -350,7 +350,7 @@ get_feature_flag_from_name :: proc(name: string) -> Opt_In_Feature_Flag {
 	return {}
 }
 
-// C++: build_settings.cpp get_feature_flag_from_name:396-401
+// C++: build_settings.cpp get_feature_flag_from_name
 Sanitizer_Flag :: distinct bit_set[Sanitizer_Flag_Bit;u32]
 Sanitizer_Flag_Bit :: enum {
 	Address = 0,
@@ -1011,14 +1011,14 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	}
 
 	// Default host platform detection
-	// C++: build_settings.cpp init_build_context:1750-1802
+	// C++: build_settings.cpp init_build_context
 	metrics := cross_target
 	if metrics == nil {
 		metrics = default_target_metrics()
 	}
 
 	// Check for cross-compilation
-	// C++: build_settings.cpp init_build_context:1804-1808
+	// C++: build_settings.cpp init_build_context
 	if cross_target != nil {
 		// For checker, we can't detect host platform at runtime like C++
 		// so we assume cross_compiling if a target was explicitly provided
@@ -1026,7 +1026,7 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	}
 
 	// Validate metrics
-	// C++: build_settings.cpp init_build_context:1810-1820
+	// C++: build_settings.cpp init_build_context
 	assert(metrics.os != .Invalid, "init_build_context: Invalid target OS")
 	assert(metrics.arch != .Invalid, "init_build_context: Invalid target arch")
 	assert(metrics.ptr_size > 1, "init_build_context: Invalid ptr_size")
@@ -1039,7 +1039,7 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	}
 
 	// Copy metrics into build context
-	// C++: build_settings.cpp init_build_context:1822-1830
+	// C++: build_settings.cpp init_build_context
 	bc.metrics = metrics^
 	bc.ODIN_OS = target_os_names[metrics.os]
 	bc.ODIN_ARCH = target_arch_names[metrics.arch]
@@ -1050,19 +1050,19 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	bc.max_simd_align = i64(metrics.max_simd_align)
 
 	// Freestanding defaults
-	// C++: build_settings.cpp init_build_context:1844-1846
+	// C++: build_settings.cpp init_build_context
 	if metrics.os == .Freestanding {
 		bc.no_entry_point = true
 	}
 
 	// Default Windows subsystem
-	// C++: build_settings.cpp init_build_context:1854-1856
+	// C++: build_settings.cpp init_build_context
 	if bc.ODIN_WINDOWS_SUBSYSTEM == .UNKNOWN && metrics.os == .Windows {
 		bc.ODIN_WINDOWS_SUBSYSTEM = .CONSOLE
 	}
 
 	// Handle subtargets (iPhone, iPhoneSimulator, Android)
-	// C++: build_settings.cpp init_build_context:1882-1915
+	// C++: build_settings.cpp init_build_context
 	if metrics.os == .Darwin {
 		#partial switch subtarget {
 		case .IPhone:
@@ -1096,7 +1096,7 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	bc.subtarget = subtarget
 
 	// Minimum OS version defaults.
-	// C++: build_settings.cpp init_build_context:2041-2053. Only darwin has a default; every other target
+	// C++: build_settings.cpp init_build_context. Only darwin has a default; every other target
 	// leaves the string empty, which init_universal turns into ODIN_MINIMUM_OS_VERSION == 0.
 	if metrics.os == .Darwin && !bc.minimum_os_version_string_given {
 		switch subtarget {
@@ -1109,7 +1109,7 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	}
 
 	// Optimization level defaults.
-	// C++: build_settings.cpp init_build_context:2070-2081
+	// C++: build_settings.cpp init_build_context
 	if !bc.custom_optimization_level {
 		// C++: when building with `-debug` but no explicit optimization level, default to
 		// `-o:none` to improve debug symbol generation.
@@ -1118,7 +1118,7 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	bc.optimization_level = clamp(bc.optimization_level, -1, 3)
 
 	// Separate modules.
-	// C++: build_settings.cpp init_build_context:2027 (wasm forces it off), 2083-2085 (-o:none/-o:minimal turn
+	// C++: build_settings.cpp init_build_context (wasm forces it off), 2083-2085 (-o:none/-o:minimal turn
 	// it on for non-wasm), 2087-2089 (`-use-single-module` turns it back off).
 	// The port has no LTO support, so the `-lto:thin` branch (C++ 2091-2110) is not ported.
 	if is_arch_wasm() {
@@ -1130,13 +1130,13 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 		bc.use_separate_modules = false
 	}
 
-	// C++: build_settings.cpp init_build_context:2114-2121
+	// C++: build_settings.cpp init_build_context
 	bc.ODIN_VALGRIND_SUPPORT = false
 	if bc.metrics.os != .Windows && bc.metrics.arch == .Amd64 {
 		bc.ODIN_VALGRIND_SUPPORT = true
 	}
 
-	// C++: build_settings.cpp init_build_context:2123-2125
+	// C++: build_settings.cpp init_build_context
 	if bc.metrics.os == .Freestanding {
 		bc.ODIN_DEFAULT_TO_NIL_ALLOCATOR = !bc.ODIN_DEFAULT_TO_PANIC_ALLOCATOR
 	}
@@ -1162,7 +1162,7 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 }
 
 // get_default_microarchitecture returns the microarchitecture used when none was requested.
-// C++: llvm_backend.cpp get_default_microarchitecture:33-52
+// C++: llvm_backend.cpp get_default_microarchitecture
 get_default_microarchitecture :: proc() -> string {
 	#partial switch build_context.metrics.arch {
 	case .Amd64:
@@ -1178,7 +1178,7 @@ get_default_microarchitecture :: proc() -> string {
 }
 
 // get_final_microarchitecture resolves ODIN_MICROARCH_STRING.
-// C++: llvm_backend.cpp get_final_microarchitecture:54-63
+// C++: llvm_backend.cpp get_final_microarchitecture
 //
 // DEVIATION: C++ resolves the literal string "native" through LLVMGetHostCPUName(). The
 // checker does not link LLVM, so "native" is returned verbatim. It can only be reached by an
@@ -1428,7 +1428,7 @@ has_ansi_terminal_colours :: proc() -> bool {
 // microarch_default_features returns the features LLVM enables by default for the CURRENT TARGET's
 // microarchitecture -- i.e. exactly what C++ seeds build_context.target_features_set from.
 //
-// C++ Reference: llvm_backend.cpp get_default_features:66-116
+// C++ Reference: llvm_backend.cpp get_default_features
 //
 // It reads build_context.metrics.arch because C++ reads build_context, and because the arch is
 // LOAD-BEARING, not incidental: the same microarch NAME denotes different feature sets on different
@@ -1439,7 +1439,7 @@ has_ansi_terminal_colours :: proc() -> bool {
 microarch_default_features :: proc(microarch: string) -> string {
 	arch := build_context.metrics.arch
 
-	// C++ Reference: llvm_backend.cpp get_default_features:69-80
+	// C++ Reference: llvm_backend.cpp get_default_features
 	// DIVERGENCE, deliberate and recorded: `-microarch:native` asks LLVM for the HOST's feature string
 	// via LLVMGetHostCPUFeatures. The checker does not link LLVM, so no faithful answer exists here.
 	// "" means has_target_feature answers false for everything under -microarch:native. Matches the
@@ -1448,7 +1448,7 @@ microarch_default_features :: proc(microarch: string) -> string {
 		return ""
 	}
 
-	// C++ Reference: llvm_backend.cpp get_default_features:89-106
+	// C++ Reference: llvm_backend.cpp get_default_features
 	// riscv64's generic-rv64 is OVERRIDDEN rather than read from the table -- C++'s own note says this
 	// is to avoid defaulting to "a potato feature set". The table row for generic-rv64 is NOT this
 	// string, so reading the table here would be wrong.
@@ -1456,7 +1456,7 @@ microarch_default_features :: proc(microarch: string) -> string {
 		return "64bit,a,c,d,f,m,relax,zicsr,zifencei"
 	}
 
-	// C++ Reference: llvm_backend.cpp get_default_features:82-86 -- sum the counts of every arch
+	// C++ Reference: llvm_backend.cpp get_default_features -- sum the counts of every arch
 	// BEFORE this one to find where this arch's slice of the flat table begins.
 	off := 0
 	for a in Target_Arch_Kind {
@@ -1466,7 +1466,7 @@ microarch_default_features :: proc(microarch: string) -> string {
 		off += target_microarch_counts[a]
 	}
 
-	// C++ Reference: llvm_backend.cpp get_default_features:108-112 -- match the name WITHIN this
+	// C++ Reference: llvm_backend.cpp get_default_features -- match the name WITHIN this
 	// arch's slice only. Matching across the whole table by name is the #612 defect.
 	for i in off ..< off + target_microarch_counts[arch] {
 		if microarch_features_list[i].microarch == microarch {
@@ -1474,7 +1474,7 @@ microarch_default_features :: proc(microarch: string) -> string {
 		}
 	}
 
-	// C++ Reference: llvm_backend.cpp get_default_features:114 -- C++ reaches GB_PANIC("unknown
+	// C++ Reference: llvm_backend.cpp get_default_features -- C++ reaches GB_PANIC("unknown
 	// microarch") here.
 	// DIVERGENCE, deliberate: the checker is a LIBRARY and must not abort its host, which is the whole
 	// point of #12 (the error cap used to call os.exit and killed the calling process). An unknown
@@ -1484,7 +1484,7 @@ microarch_default_features :: proc(microarch: string) -> string {
 	return ""
 }
 
-// target_feature_is_enabled ports check_target_feature_is_enabled (build_settings.cpp check_target_feature_is_enabled:2200)
+// target_feature_is_enabled ports check_target_feature_is_enabled (build_settings.cpp check_target_feature_is_enabled)
 // line for line, including the two details that are easy to drop:
 //   - a leading '+' or '-' inverts what the caller is ASKING (want_enabled), it does not merely
 //     decorate the name
@@ -1581,7 +1581,7 @@ Define_Error :: enum {
 }
 
 // build_param_looks_like_float decides float-vs-integer for a `-define` value.
-// C++ Reference: main.cpp build_param_looks_like_float:542-559.
+// C++ Reference: main.cpp build_param_looks_like_float.
 //
 // The middle test is the one that is easy to drop and changes behaviour: a leading `0` followed by
 // a NON-DIGIT returns false immediately, so `0x1e` is an INTEGER even though it contains an `e`.
@@ -1606,7 +1606,7 @@ build_param_looks_like_float :: proc(param: string) -> bool {
 }
 
 // build_param_to_exact_value parses a `-define` VALUE, in C++'s order.
-// C++ Reference: main.cpp build_param_to_exact_value:561-613.
+// C++ Reference: main.cpp build_param_to_exact_value.
 //
 // Order is load-bearing: bools are tested BEFORE numbers, and the numeric attempt FALLS THROUGH to
 // the string arm when the parse fails rather than erroring, so `-define:X=1abc` is the string
@@ -1647,7 +1647,7 @@ build_param_to_exact_value :: proc(param: string) -> Exact_Value {
 }
 
 // add_defined_value applies one `-define:NAME=VALUE` argument to build_context.defined_values.
-// C++ Reference: main.cpp BuildFlag_Define:1156-1205.
+// C++ Reference: main.cpp BuildFlag_Define.
 //
 // SIX validations in C++'s ORDER, and the order is observable because each one `break`s: only the
 // FIRST failure is reported for a given argument. `detail` carries whatever the corresponding C++
@@ -1784,7 +1784,7 @@ resolve_target_features :: proc(allocator := context.allocator) -> (invalid_feat
 // check_target_feature_is_superset_of asks whether every feature in `of` also appears in `superset`,
 // reporting the FIRST one that does not.
 //
-// C++ Reference: build_settings.cpp check_target_feature_is_superset_of:2232-2243
+// C++ Reference: build_settings.cpp check_target_feature_is_superset_of
 //
 // #613: this had no port counterpart at all, which is why the `#force_inline` half of the call-site
 // target-feature check could not be ported. C++ needs it because LLVM cannot inline a call whose callee
@@ -1921,7 +1921,7 @@ check_target_feature_is_valid_globally :: proc(feature: string) -> (valid: bool,
 // requires target_features_set ... not available in standalone checker. The backend/LLVM will validate
 // enabled features." Every clause of that was false, and it was load-bearing -- it is why the wasm
 // atomics gate was never ported. The counterpart IS implemented, as target_feature_is_enabled above
-// (C++: build_settings.cpp check_target_feature_is_enabled:2200); the enabled set IS derivable, via
+// (C++: build_settings.cpp check_target_feature_is_enabled); the enabled set IS derivable, via
 // enabled_target_features(); and deferring to the backend is not available to a CHECKER, whose whole job
 // is to reject the program before a backend ever runs.
 //

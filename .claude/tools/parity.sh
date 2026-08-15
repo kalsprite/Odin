@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+# #898: the checker library no longer walks up from CWD to find `base/runtime` -- the root
+# must be given to it. The harness conforms to the library, not the other way round, so the
+# repo root is exported here (self-locating, and respects an ODIN_ROOT already in the env).
+export ODIN_ROOT="${ODIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 # Full oracle-vs-port PARITY at package granularity: error counts AND sorted diagnostic TEXT.
 #
 # This is the only instrument anchored to the REFERENCE rather than to the port's own history.

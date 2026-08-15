@@ -95,10 +95,18 @@ def _unused_normalise(text):
     return out
 
 
+# #898: the checker library no longer walks up from CWD to find `base/runtime`, so the root has to
+# be handed to it. cwd=REPO used to supply it by accident -- the walk-up found `base/runtime` in the
+# working directory -- which meant this harness depended on a library fallback that existed only for
+# harnesses. ODIN_ROOT is now passed explicitly. It is set for BOTH compilers: the oracle honours the
+# same variable and it names the tree it would have self-located to anyway.
+_ENV = dict(os.environ, ODIN_ROOT=REPO)
+
+
 def run(cmd, timeout=180):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
-                           errors="replace", cwd=REPO)
+                           errors="replace", cwd=REPO, env=_ENV)
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except subprocess.TimeoutExpired:
         return -9, "<<TIMEOUT>>"

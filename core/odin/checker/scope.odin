@@ -37,7 +37,7 @@ import "core:sync"
 //
 // The port started it at `true`, which is not a harmless default: check_files runs
 // check_collect_entities_all -- a THREAD-POOL phase -- at check_files.odin:98, long before
-// check_all_global_entities at :152. With the flag stuck true for that whole window every
+// check_all_global_entities. With the flag stuck true for that whole window every
 // `locked := !in_single_threaded_checker_stage()` guard in the checker evaluated to
 // locked=false, so the parallel collect phase ran with EVERY conditional mutex skipped:
 // scope.odin's three scope guards, entity_helpers.odin's add_dependency, type_info.odin's
@@ -63,7 +63,7 @@ set_single_threaded_checker_stage :: proc(value: bool) {
 }
 
 // create_scope creates a new scope with given parent
-// C++ Reference: checker.cpp create_scope:216-232
+// C++ Reference: checker.cpp create_scope
 create_scope :: proc(parent: ^Scope, allocator := context.allocator) -> ^Scope {
 	s := new(Scope, allocator)
 	s.parent = parent
@@ -71,7 +71,7 @@ create_scope :: proc(parent: ^Scope, allocator := context.allocator) -> ^Scope {
 	s.imported = make(map[^Scope]struct{}, allocator)
 
 	// Link as child of parent (with thread-safety and builtin_pkg check)
-	// C++ Reference: checker.cpp create_scope:220-225
+	// C++ Reference: checker.cpp create_scope
 	// NOTE: The C++ version uses atomic operations to prevent race conditions when
 	// multiple threads create child scopes simultaneously. It also excludes builtin_pkg
 	// scope from the child chain (global scope that doesn't need parent tracking).
@@ -83,7 +83,7 @@ create_scope :: proc(parent: ^Scope, allocator := context.allocator) -> ^Scope {
 
 		if !is_builtin {
 			// THREAD-SAFETY: The C++ version uses atomic exchange operations here:
-			// C++ Reference: checker.cpp create_scope:221-224
+			// C++ Reference: checker.cpp create_scope
 			//   Scope *prev_head_child = parent->head_child.exchange(s, std::memory_order_acq_rel);
 			//   if (prev_head_child) {
 			//       s->next.store(prev_head_child, std::memory_order_release);
@@ -100,7 +100,7 @@ create_scope :: proc(parent: ^Scope, allocator := context.allocator) -> ^Scope {
 	}
 
 	// Propagate ContextDefined flag from parent to child
-	// C++ Reference: checker.cpp create_scope:227-229
+	// C++ Reference: checker.cpp create_scope
 	if parent != nil && .Context_Defined in parent.flags {
 		s.flags += {.Context_Defined}
 	}
@@ -327,7 +327,7 @@ scope_lookup_parent :: proc(s: ^Scope, name: string) -> (scope: ^Scope, entity: 
 }
 
 // scope_insert_with_name_with_mutex adds an entity with explicit name (mutex-protected)
-// Ported from checker.cpp scope_insert_with_name:479-517 (multi-threaded version)
+// Ported from checker.cpp scope_insert_with_name (multi-threaded version)
 // Handles result parameter shadowing in procedure scopes
 scope_insert_with_name_with_mutex :: proc(s: ^Scope, name: string, entity: ^Entity) -> ^Entity {
 	if name == "" {
@@ -412,7 +412,7 @@ scope_insert_with_name_no_mutex :: proc(s: ^Scope, name: string, entity: ^Entity
 }
 
 // scope_insert_with_name adds an entity with explicit name
-// Ported from checker.cpp scope_insert_with_name:479-517
+// Ported from checker.cpp scope_insert_with_name
 // Dispatcher: chooses mutex or no-mutex version based on threading mode
 scope_insert_with_name :: proc(s: ^Scope, name: string, entity: ^Entity) -> ^Entity {
 	if in_single_threaded_checker_stage() {
@@ -561,7 +561,7 @@ create_scope_from_file :: proc(parent: ^Scope, file: ^ast.File, allocator := con
 }
 
 // create_scope_from_package creates a package-level scope
-// C++ Reference: checker.cpp create_scope_from_package:251-281
+// C++ Reference: checker.cpp create_scope_from_package
 // Creates a scope for a package with Init, Runtime, and Global flags as appropriate
 // NOTE: This requires builtin_pkg to be available in the Checker_Info or Checker
 // Structural Differences to cpp:
@@ -608,7 +608,7 @@ create_scope_from_package :: proc(ctx: ^Checker_Context, pkg: ^ast.Package, allo
 	s.flags += {.Pkg}
 	s.pkg = pkg
 
-	// C++ Reference: checker.cpp create_scope_from_package:266 - `pkg->scope = s;`
+	// C++ Reference: checker.cpp create_scope_from_package - `pkg->scope = s;`
 	pkg.scope = s
 
 	// The assignment above was omitted for a long time, and the omission was load-bearing in the
@@ -848,12 +848,12 @@ force_add_dependency_entity :: proc(c: ^Checker, scope: ^Scope, name: string) {
 }
 
 // generate_minimum_dependency_set_internal walks the roots and seeds the dependency set.
-// C++ Reference: checker.cpp generate_minimum_dependency_set_internal:2961-3116.
+// C++ Reference: checker.cpp generate_minimum_dependency_set_internal.
 //
 // WHAT THIS IS FOR, since no diagnostic reads the result: the dependency set is the checker's
 // output to a BACKEND. add_dependency_to_set drains each reached entity's decl.type_info_deps
 // into add_min_dep_type_info, which is the ONLY route into the type-info roster -- in C++ as
-// well as here (the only non-recursive callers are checker.cpp:2803 and :2861, both inside
+// well as here (the only non-recursive callers are two sites in checker.cpp, both inside
 // add_dependency_to_set). Basic types therefore arrive TRANSITIVELY, because
 // add_min_dep_type_info recurses through composites into their constituents
 // (checker.cpp:2657-2767). LEDGER #638 stage 2.
@@ -952,7 +952,7 @@ generate_minimum_dependency_set_internal :: proc(c: ^Checker, start: ^Entity) {
 }
 
 // add_dependency_to_set adds an entity to the global dependency tracking set
-// C++ Reference: checker.cpp add_dependency_to_set:2781-2836
+// C++ Reference: checker.cpp add_dependency_to_set
 // Used for minimum dependency set generation (only include what's actually used)
 // (STRANDED above a different procedure until #734 -- another procedure was inserted between
 //  this doc comment and the definition it documents.)
@@ -961,7 +961,7 @@ add_dependency_to_set :: proc(c: ^Checker, entity: ^Entity) {
 		return
 	}
 
-	// C++ Reference: checker.cpp add_dependency_to_set:2781-2836
+	// C++ Reference: checker.cpp add_dependency_to_set
 	// The previous citation pointed ~200 lines earlier, into check_procedure_later's tail.
 	// Skip polymorphic entities that haven't been specialized
 	if entity.type != nil && is_type_polymorphic(entity.type) {
@@ -1093,7 +1093,7 @@ scope_map_sim_insert :: proc(slots: []Scope_Map_Slot, mask: u32, hash_in: u32, e
 	}
 }
 
-// calc_decl_count is C++'s parser.cpp calc_decl_count:6720. It counts DECLARED NAMES, not
+// calc_decl_count is C++'s parser.cpp calc_decl_count. It counts DECLARED NAMES, not
 // statements: `a, b, c :: 1, 2, 3` counts 3, a `when` contributes max(body, else), and a foreign
 // block contributes its body's count. It feeds the scope-map RESERVE, so getting it wrong changes
 // the map's capacity and therefore the iteration order (#657) -- it is not merely a size hint.

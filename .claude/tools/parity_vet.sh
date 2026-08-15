@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+# #898: the checker library no longer walks up from CWD to find `base/runtime` -- the root
+# must be given to it. The harness conforms to the library, not the other way round, so the
+# repo root is exported here (self-locating, and respects an ODIN_ROOT already in the env).
+export ODIN_ROOT="${ODIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 # VET-MODE oracle-vs-port PARITY. Same contract as parity.sh, but both sides run with -vet and
 # both Error and Warning lines are captured.
 #

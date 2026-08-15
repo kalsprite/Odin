@@ -40,6 +40,11 @@
 # an excluded probe is UNMEASURED, not clean.
 
 set -o pipefail
+# #898: the checker library no longer walks up from CWD to find `base/runtime` -- the root
+# must be given to it. The harness conforms to the library, not the other way round, so the
+# repo root is exported here (self-locating, and respects an ODIN_ROOT already in the env).
+export ODIN_ROOT="${ODIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
 PORT="$1"
 ROOT="${2:-/home/kalsprite/dev/odin/.claude/probes}"
 ODIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/odin"

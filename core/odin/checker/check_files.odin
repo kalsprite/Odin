@@ -192,7 +192,7 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	check_procedure_bodies(c)
 
 	// Resolve `foreign import` library paths and finish WASM foreign declarations.
-	// C++ Reference: checker.cpp check_parsed_files:7710-7711 - "check foreign import fullpaths", between
+	// C++ Reference: checker.cpp check_parsed_files - "check foreign import fullpaths", between
 	// check_procedure_bodies and the merge below. This is the sole consumer of
 	// foreign_imports_to_check_fullpaths and foreign_decls_to_check; both are producer-side
 	// queues filled during collection, so if this never runs their contents are stranded and
@@ -292,7 +292,7 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	check_objc_context_provider_procedures(c)
 
 	// C++ Reference: check_parsed_files, TIME_SECTION("calculate global init order") --
-	// checker.cpp check_parsed_files:7759-7760. THIS IS THE CORRECT PHASE and the port used to run
+	// checker.cpp check_parsed_files. THIS IS THE CORRECT PHASE and the port used to run
 	// it in the wrong one: the call lived inside check_all_global_entities, which runs at line 152
 	// above, BEFORE check_procedure_bodies. The entity dependency graph is grown by body checking,
 	// so computing the order there used a graph missing every edge that bodies, deferred procedures
@@ -310,7 +310,7 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	store_global_init_order(c)
 
 	// C++ Reference: check_parsed_files, TIME_SECTION("add type info for type definitions")
-	// through TIME_SECTION("check #soa types") -- checker.cpp check_parsed_files:7755-7768. THREE phases that the
+	// through TIME_SECTION("check #soa types") -- checker.cpp check_parsed_files. THREE phases that the
 	// port implemented but never called.
 	//
 	// LEDGER task 222 claimed "all 28 phases present and called except one". That was wrong:
@@ -403,7 +403,7 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 
 	// Validate unique package names
 	// C++ Reference: check_parsed_files, `bool package_names_are_unique = check_unique_package_names(c);`
-	// -- checker.cpp check_parsed_files:7824. The result is carried to the type-info collision
+	// -- checker.cpp check_parsed_files. The result is carried to the type-info collision
 	// check at the tail of this driver, exactly as C++ carries its local (#711).
 	package_names_are_unique := check_unique_package_names(c)
 
@@ -449,10 +449,10 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// fill the open-addressed lookup array, and detect hash collisions.
 	//
 	// C++ Reference: check_parsed_files, TIME_SECTION("initialize and check for collisions in
-	// type info array") -- checker.cpp check_parsed_files:7851-7902. C++ runs this block
-	// immediately after TIME_SECTION("add untyped expression values") (:7842-7849), which is
+	// type info array") -- checker.cpp check_parsed_files. C++ runs this block
+	// immediately after TIME_SECTION("add untyped expression values"), which is
 	// `resolve_global_untyped_expressions` above, and immediately before TIME_SECTION("sort init
-	// and fini procedures") (:7905). That is the position here.
+	// and fini procedures"). That is the position here.
 	//
 	// LEDGER #711: this phase existed as a well-formed named procedure in type_info.odin and had
 	// ZERO CALLERS. Same shape as #637/#638 -- C++ runs the work INLINE inside its big driver, the
@@ -467,7 +467,7 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	//
 	// What IS observable is the collision panic, which is why `package_names_are_unique` is
 	// threaded down: C++ suppresses the panic when a duplicate package declaration was already
-	// reported (:7882). Reachability of the panic is NOT established in either implementation --
+	// reported. Reachability of the panic is NOT established in either implementation --
 	// it needs two distinct types whose canonical hashes collide (#169/#174 discipline).
 	finalize_minimum_dependency_type_info(c, package_names_are_unique)
 
@@ -481,7 +481,7 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	//
 	// THE COMMENT ON `finalize_minimum_dependency_type_info` ABOVE ALREADY DESCRIBED THIS ORDER and
 	// the file violated it -- it says C++ runs that block "immediately before TIME_SECTION('sort init
-	// and fini procedures') (:7905). That is the position here." It was not the position: both calls
+	// and fini procedures'). That is the position here." It was not the position: both calls
 	// sat ~90 lines earlier, ahead of test procedures, entry point, unique package names,
 	// instrumentation AND the type-info array. A site documenting the intended order while the file
 	// violates it is what settled #774 as a port-side ordering choice rather than upstream churn.
@@ -930,7 +930,7 @@ check_instrumentation_calls :: proc(c: ^Checker) {
 }
 
 // package_first_pkg_decl returns C++'s `pkg->files[0]->pkg_decl`
-// (checker.cpp check_unique_package_names:7403-7404).
+// (checker.cpp check_unique_package_names).
 //
 // C++ indexes `files[0]` directly. The port goes through `sorted_files` so the choice is
 // order-stable; that selects the SAME element, because C++'s `pkg->files` is already sorted by the
@@ -946,11 +946,11 @@ package_first_pkg_decl :: proc(pkg: ^ast.Package) -> ^ast.Package_Decl {
 
 // check_unique_package_names validates that no two packages share the same name.
 //
-// C++ Reference: checker.cpp check_unique_package_names:7380-7434.
+// C++ Reference: checker.cpp check_unique_package_names.
 //
-// The return value is C++'s `bool ok` (declared :7382, returned :7433): false once a genuine
-// duplicate has been reported. C++ captures it at check_parsed_files:7824 as
-// `package_names_are_unique` and uses it at :7882 to SUPPRESS the type-info hash-collision panic
+// The return value is C++'s `bool ok`: false once a genuine
+// duplicate has been reported. C++ captures it at check_parsed_files as
+// `package_names_are_unique` and uses it to SUPPRESS the type-info hash-collision panic
 // (LEDGER #711).
 //
 // LEDGER #712: this was a REIMPLEMENTATION, not a port, and it diverged from C++ in four MEASURED
@@ -970,7 +970,7 @@ package_first_pkg_decl :: proc(pkg: ^ast.Package) -> ^ast.Package_Decl {
 // invisible to a comparator that only ever sees the path not taken (#71's shape from the other
 // side) -- which is why this was found by reading C++, not by a sweep.
 //
-// KNOWN REMAINING GAP, deliberate and scoped: C++ :7418-7428 adds a case-folded-directory note for
+// KNOWN REMAINING GAP, deliberate and scoped: C++ adds a case-folded-directory note for
 // upstream issue 5080, but it sits inside `#if defined(GB_SYSTEM_WINDOWS)` -- a HOST compile-time
 // guard, compiled out on this machine. It is NOT one of the four measurable divergences and cannot
 // be gated locally (LEDGER #161). It is omitted rather than written blind: carrying it would need a
@@ -979,7 +979,7 @@ package_first_pkg_decl :: proc(pkg: ^ast.Package) -> ^ast.Package_Decl {
 check_unique_package_names :: proc(c: ^Checker) -> (ok: bool) {
 	ok = true
 
-	// C++ :7385-7387 -- `StringMap<AstPackage *> pkgs`, keyed by package NAME.
+	// C++ -- `StringMap<AstPackage *> pkgs`, keyed by package NAME.
 	pkgs: map[string]^ast.Package
 	defer delete(pkgs)
 
@@ -987,7 +987,7 @@ check_unique_package_names :: proc(c: ^Checker) -> (ok: bool) {
 		if pkg == nil {
 			continue
 		}
-		// C++ :7390-7392 -- its own comment is "Sanity check". Note this is a FILE-COUNT guard.
+		// C++ -- its own comment is "Sanity check". Note this is a FILE-COUNT guard.
 		// The port previously skipped on `pkg.name == ""` instead, which C++ does not do.
 		if len(pkg.files) == 0 {
 			continue
@@ -996,7 +996,7 @@ check_unique_package_names :: proc(c: ^Checker) -> (ok: bool) {
 		name := pkg.name
 		found, exists := pkgs[name]
 		if !exists {
-			// C++ :7397-7400 -- first sighting of this name, record and move on.
+			// C++ -- first sighting of this name, record and move on.
 			pkgs[name] = pkg
 			continue
 		}
@@ -1004,7 +1004,7 @@ check_unique_package_names :: proc(c: ^Checker) -> (ok: bool) {
 		curr := package_first_pkg_decl(pkg)
 		prev := package_first_pkg_decl(found)
 
-		// C++ :7405-7409 -- "NOTE(bill): A false positive was found, ignore it". NODE IDENTITY, not
+		// C++ -- "NOTE(bill): A false positive was found, ignore it". NODE IDENTITY, not
 		// a path comparison. This `continue` does NOT clear `ok`.
 		if curr == prev {
 			continue
@@ -1012,19 +1012,19 @@ check_unique_package_names :: proc(c: ^Checker) -> (ok: bool) {
 
 		ok = false
 
-		// C++ :7411 / :7430 -- begin_error_block() ... end_error_block() around the whole report.
+		// C++ -- begin_error_block() ... end_error_block() around the whole report.
 		begin_error_block()
 		defer end_error_block()
 
-		// C++ :7412 -- anchored on `curr`, the pkg_decl NODE, which is what draws the span caret.
+		// C++ -- anchored on `curr`, the pkg_decl NODE, which is what draws the span caret.
 		error_node(curr, "Duplicate declaration of 'package %s'", name)
-		// C++ :7413-7415 -- ONE error_line call carrying all three lines.
+		// C++ -- ONE error_line call carrying all three lines.
 		error_line(
 			"\tA package name must be unique\n" +
 			"\tThere is no relation between a package name and the directory that contains it, so they can be completely different\n" +
 			"\tA package name is required for link name prefixing to have a consistent ABI\n",
 		)
-		// C++ :7416.
+		// C++ -- the "found at previous location" line.
 		error_line("%s found at previous location\n", token_pos_to_string(ast_token(prev).pos))
 	}
 

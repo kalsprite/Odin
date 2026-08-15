@@ -426,6 +426,25 @@ first_invalid_token :: proc(src: string, path: string) -> (pos: tokenizer.Pos, f
 // same ordering constraint and solves it the same way - try_add_import_path takes the kind as
 // an argument and assigns it (src/parser.cpp:5909) before queueing any file for parsing
 // (src/parser.cpp:5999, parser_add_file_to_process).
+// package_base_dir returns the directory that a package's RELATIVE imports resolve against.
+//
+// For an ordinary package that is simply its fullpath. For a SINGLE-FILE package (#915) the
+// fullpath is the FILE -- deliberately, because it is the package's identity and two single-file
+// packages in one directory must not collide in the loader's `loaded` set -- so the containing
+// directory is taken instead.
+//
+// THERE ARE EXACTLY TWO CALLERS and they must agree: the loader's dependency walk and
+// `lookup_imported_package` in check_import_export.odin. They resolve the same import from the same
+// package and disagreeing makes the loader fetch a package the checker then cannot find, which
+// surfaces as "Unable to find package" on an import that is plainly there. That is precisely how
+// this was found (#915), so the rule lives here rather than being open-coded twice.
+package_base_dir :: proc(fullpath: string) -> string {
+	if os.is_dir(fullpath) {
+		return fullpath
+	}
+	return filepath.dir(fullpath)
+}
+
 collect_package_for_target :: proc(path: string, kind: ast.Package_Kind = .Normal) -> (pkg: ^ast.Package, success: bool) {
 	NO_POS :: tokenizer.Pos{}
 
@@ -440,8 +459,33 @@ collect_package_for_target :: proc(path: string, kind: ast.Package_Kind = .Norma
 		return
 	}
 
-	path_pattern := fmt.tprintf("%s/*.odin", pkg_path)
-	matches, glob_err := filepath.glob(path_pattern)
+	// SINGLE-FILE PACKAGE (#915). When `path` names a .odin FILE rather than a directory, the
+	// package is EXACTLY that one file and its siblings are not read. This is the equivalent of
+	// the reference compiler's `-file`, and it is a property of the PATH, not a flag: a caller
+	// that hands this a file is asking for a one-file package, which is the only thing that path
+	// can mean.
+	//
+	// WHY THE LIBRARY AND NOT THE HARNESS: every entry point funnels through here, so a file path
+	// works from `check_package_from_path`, from `session_check_package` and from the loader's own
+	// dependency walk without any of them learning a new concept. Doing it in the harness would
+	// have meant the harness assembling a file list and bypassing the loader, which
+	// `checker_lifecycle.odin` warns produces a checker with no runtime package at all.
+	//
+	// `pkg.fullpath` stays the FILE path, deliberately: it is the package's identity, and two
+	// single-file packages in one directory must not collide in the loader's `loaded` set. The
+	// consequence is that relative imports need the file's DIRECTORY as their base, which is
+	// handled at the resolve_import_path call site rather than here.
+	matches: []string
+	glob_err: os.Error  // filepath.glob aliases os.glob, so its error type is os.Error
+	single_file := !os.is_dir(pkg_path) && strings.has_suffix(pkg_path, ".odin")
+	if single_file {
+		one := make([]string, 1)
+		one[0] = strings.clone(pkg_path)
+		matches = one
+	} else {
+		path_pattern := fmt.tprintf("%s/*.odin", pkg_path)
+		matches, glob_err = filepath.glob(path_pattern)
+	}
 	defer {
 		for match in matches {
 			delete(match)
@@ -832,7 +876,7 @@ load_package_with_dependencies :: proc(
 						continue
 					}
 
-					child_fullpath, resolve_ok := resolve_import_path(child_import_path, pkg_path, allocator)
+					child_fullpath, resolve_ok := resolve_import_path(child_import_path, package_base_dir(pkg_path), allocator)
 					if resolve_ok && !(child_fullpath in loaded) {
 						// Check if the path exists
 						if os.is_dir(child_fullpath) {
@@ -910,40 +954,22 @@ init_odin_root_from_env :: proc() {
 			return
 		}
 
-		// Auto-detect ODIN_ROOT by looking for base/runtime in current or parent directories
-		// This enables tests to run without ODIN_ROOT being explicitly set
-		cwd, cwd_err := os.get_working_directory(persistent_allocator)
-		if cwd_err == nil && len(cwd) > 0 {
-			// Check if base/runtime exists in cwd (we're at ODIN_ROOT)
-			runtime_path, join_err := filepath.join({cwd, "base", "runtime"}, persistent_allocator)
-			if join_err != nil {
-				return
-			}
-			if os.is_dir(runtime_path) {
-				build_context.ODIN_ROOT = with_trailing_separator(cwd, persistent_allocator)
-				return
-			}
-
-			// Walk up parent directories to find ODIN_ROOT
-			// NOTE: filepath.dir does not allocate - `parent` is a substring of `dir`, and so
-			// remains valid for as long as `cwd` does (which is allocated persistently above).
-			dir := cwd
-			for i := 0; i < 10; i += 1 { // Limit depth to avoid infinite loop
-				parent := filepath.dir(dir)
-				if parent == dir || len(parent) == 0 {
-					break
-				}
-				runtime_path, join_err = filepath.join({parent, "base", "runtime"}, persistent_allocator)
-				if join_err != nil {
-					return
-				}
-				if os.is_dir(runtime_path) {
-					build_context.ODIN_ROOT = with_trailing_separator(parent, persistent_allocator)
-					return
-				}
-				dir = parent
-			}
-		}
+		// NO CWD WALK-UP. #898 REMOVED a fallback that searched the current working directory and
+		// its parents (depth 10) for `base/runtime`.
+		//
+		// It was introduced so tests could run without ODIN_ROOT being set -- the library
+		// conforming to its harnesses rather than the other way round -- and it had two properties
+		// a library must not have. It made the checker's answer depend on the caller's CWD, which
+		// is ambient, mutable, and unrelated to where the standard library lives: the SAME file
+		// checked from inside the Odin tree passed and from /tmp failed. And when it failed it
+		// failed SILENTLY, leaving t_context nil so that `context.allocator` was reported as
+		// "Cannot use a selector expression on nil-value expression" -- an accusation against
+		// valid source for what is purely an environment problem. LEDGER #897.
+		//
+		// The root now comes from Session_Options.odin_root or from ODIN_ROOT, and a failure to
+		// resolve it is REPORTED (Package_Check_Result.odin_root_not_found) rather than absorbed.
+		// The reference compiler's third mechanism -- deriving the root from its own executable's
+		// path -- is not available to a library, since that path belongs to the host application.
 	}
 }
 
@@ -992,6 +1018,21 @@ Package_Check_Result :: struct {
 	// check_warnings is the number of those diagnostics that were warnings rather than errors.
 	// Like check_errors, it is a floor when `limit_reached` is set.
 	check_warnings: int,
+
+	// odin_root_not_found reports that neither Session_Options.odin_root nor the ODIN_ROOT
+	// environment variable produced a usable root, so `base:runtime` was never seeded.
+	//
+	// THIS IS A PRECONDITION FAILURE, NOT A RESULT ABOUT THE SOURCE, and it must be read before
+	// any diagnostic is believed. Without runtime there is no `Context` type, so `t_context` stays
+	// nil and every `context.x` selector reports "Cannot use a selector expression on nil-value
+	// expression" -- a language-level complaint about perfectly valid code, and only the first of
+	// an unbounded family of them. The preload types go the same way.
+	//
+	// Same shape and same reasoning as `limit_reached` above: the reference compiler expresses
+	// this by calling compiler_error("Unable to find The 'base:runtime' package. Is the ODIN_ROOT
+	// set up correctly?") and stopping; as a library we cannot exit the host process, so it is
+	// surfaced here instead. LEDGER #897/#898.
+	odin_root_not_found: bool,
 
 	// diagnostics are the diagnostics themselves, OWNED BY THIS RESULT.
 	//
@@ -1070,6 +1111,15 @@ check_package_from_path :: proc(path: string, opts := Session_Options{}, allocat
 	build_context.no_entry_point = opts.no_entry_point
 	defer build_context.no_entry_point = saved_no_entry_point
 
+	// An explicit root wins over the environment, and is applied the same save/set/restore way as
+	// no_entry_point above. ODIN_ROOT is a process-lifetime global, so the restore matters: two
+	// consecutive checks with different roots must not leak into one another.
+	saved_odin_root := build_context.ODIN_ROOT
+	if opts.odin_root != "" {
+		build_context.ODIN_ROOT = with_trailing_separator(opts.odin_root, runtime.heap_allocator())
+	}
+	defer build_context.ODIN_ROOT = saved_odin_root
+
 	result, c, cf, _ = _check_package(path, allocator)
 	// Ownership stays here, exactly as before: the model dies with the call.
 	destroy_checker(c)
@@ -1090,6 +1140,11 @@ check_package_from_path :: proc(path: string, opts := Session_Options{}, allocat
 _check_package :: proc(path: string, allocator := context.allocator) -> (result: Package_Check_Result, checker: ^Checker, checked_files: []^ast.File, root: ^ast.Package) {
 	// Initialize ODIN_ROOT from environment if needed
 	init_odin_root_from_env()
+
+	// Recorded BEFORE anything else runs, because everything after it is unreliable without a
+	// root. See the field's own comment: this is a precondition failure, not a finding about the
+	// source, and the diagnostics produced in this state accuse valid code. LEDGER #897/#898.
+	result.odin_root_not_found = len(build_context.ODIN_ROOT) == 0
 
 	// Initialize error collector FIRST - needed by checker initialization.
 	//
@@ -1375,6 +1430,27 @@ Session_Options :: struct {
 	// inverts responsibility: the caller would be suppressing a diagnostic it provoked by failing
 	// to state a fact it already knew.
 	no_entry_point: bool,
+
+	// odin_root is the directory containing `base/` and `core/` -- the equivalent of the
+	// reference compiler's ODIN_ROOT. Empty means "fall back to the ODIN_ROOT environment
+	// variable".
+	//
+	// THE CALLER IS THE ONLY PARTY THAT RELIABLY KNOWS THIS, for the same reason it is the only
+	// party that knows `no_entry_point`. The reference compiler derives it from its own
+	// executable's path (`/proc/self/exe` and friends, build_settings.cpp internal_odin_root_dir),
+	// which is exactly the one trick a LIBRARY cannot use: `/proc/self/exe` is the HOST
+	// application's path, not this package's. A language server, a backend and a documentation
+	// tool all embed this checker and none of them live next to `base/runtime`.
+	//
+	// The environment variable remains as a fallback because it is an Odin-wide convention that
+	// the reference compiler honours too -- not because anything in-tree depends on it. What was
+	// REMOVED in #898 is a third mechanism: a walk up from the current working directory looking
+	// for `base/runtime`. That existed so tests could run without setting ODIN_ROOT, which is the
+	// library conforming to its harnesses rather than the other way round, and it made the
+	// checker's answer depend on the caller's CWD -- ambient state that has nothing to do with
+	// where the standard library lives. It failed silently and produced language-level
+	// diagnostics about valid code. LEDGER #897/#898.
+	odin_root: string,
 }
 
 // session_check_package checks a package and hands back the model, alive.

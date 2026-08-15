@@ -959,7 +959,7 @@ exact_binary_operator_value :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value)
 			big.int_mul(&c, &a, &b)
 		case .Quo:
 			// Integer `/` never reaches here: check_binary_expr rewrites the token to
-			// `.Quo_Eq` first (C++ check_expr.cpp check_binary_expr:4734), which is where integer division
+			// `.Quo_Eq` first (C++ check_expr.cpp check_binary_expr), which is where integer division
 			// happens. C++'s own `.Quo` integer arm is `fmod` and is dead code for it.
 			//
 			// C++'s arm is fmod (exact_value.cpp), and this now matches it.
@@ -985,7 +985,7 @@ exact_binary_operator_value :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value)
 			b_f, _ := big.int_get_float(&b)
 			return exact_value_float(math.mod(a_f, b_f))
 		case .Quo_Eq:
-			// C++ exact_value.cpp exact_binary_operator_value:797: integer (truncating) division
+			// C++ exact_value.cpp exact_binary_operator_value: integer (truncating) division
 			big.int_div(&c, &a, &b)
 		case .Mod:
 			// C++ line 784: Remainder
@@ -1981,7 +1981,7 @@ big_int_from_string :: proc(s: string) -> (dst: big.Int, success: bool) {
 }
 
 // exact_value_integer_from_string parses a string to create an integer exact value
-// C++ Reference: exact_value.cpp exact_value_integer_from_string:201-210
+// C++ Reference: exact_value.cpp exact_value_integer_from_string
 exact_value_integer_from_string :: proc(str: string) -> Exact_Value {
 	result, ok := big_int_from_string(str)
 	if !ok {
@@ -2085,11 +2085,12 @@ exact_value_float_from_string :: proc(str: string) -> Exact_Value {
 		//     EVERY `0h` literal, and the `!ok` bail turned that into a silent nil.
 		//   * C++'s u64_from_string cannot fail at all: it breaks out of its digit loop and returns
 		//     what it accumulated, so there is no success flag to propagate.
-		// The function is currently DEAD (zero callers -- the live path is check_expr.odin's
-		// parse_exact_value_from_token, which reaches `0h` through core:strconv instead), so this
-		// edit changes no observable behaviour today. It is made because a dead FAITHFUL port whose
-		// body is wrong is worse than either a correct one or none: the day anything calls it, it
-		// breaks all 113 `0h` constants in core/math/math_erf.odin alone.
+		// STALENESS CORRECTED TWICE, and it is worth keeping the trail. This said "the function is
+		// currently DEAD (zero callers)" -- true when written, false since #764 gave it the
+		// `-define:` caller, and doubly false since #893 routed EVERY float literal in the tree
+		// through it. The argument for fixing it while it was dead ("a dead FAITHFUL port whose
+		// body is wrong is worse than either a correct one or none") was right on the merits and is
+		// now simply moot: it breaks all 113 `0h` constants in core/math/math_erf.odin if wrong.
 		u := u64_from_string(str)
 
 		// C++ line 333-346: Convert based on digit count
@@ -2147,24 +2148,65 @@ exact_value_float_from_string :: proc(str: string) -> Exact_Value {
 	return f
 }
 
-// exact_value_from_basic_literal creates an exact value from a basic literal token
-// C++ Reference: exact_value.cpp:363-394
+// exact_value_from_basic_literal creates an exact value from a basic literal token.
+//
+// C++ Reference: exact_value.cpp exact_value_from_basic_literal.
+//
+// INPUT CONTRACT, and it is the whole reason this looks wrong at first glance: `str` is the token's
+// text AFTER the caller has unquoted it. C++'s parser does that in exact_value_from_token before
+// calling here, and so does the port's parse_exact_value_from_token (check_expr.odin). Handing this
+// RAW token text yields quoted strings and a `'` for every rune -- that is a misuse, not a defect.
+//
+// This was a caller-less "faithful port" for a long time while check_expr.odin carried a second,
+// fused implementation of the same rule. #893 made this the single one. LEDGER #633/#742/#893.
 exact_value_from_basic_literal :: proc(kind: tokenizer.Token_Kind, str: string) -> Exact_Value {
 	#partial switch kind {
 	// C++ line 365: String literal
 	case .String:
+		// Already unquoted by the prologue -- see the input contract above.
 		return exact_value_string(str)
 
 	// C++ line 366: Integer literal
 	case .Integer:
+		// C++ parses EVERY integer literal straight into arbitrary precision, and so does this.
+		//
+		// The other copy of this rule used to go through strconv, and that was wrong twice over.
+		// First parse_i64_maybe_prefixed, which reports ok=true for values above max(i64) and wraps
+		// them negative; replacing it with parse_u64_maybe_prefixed repeated the bug one bit
+		// further out:
+		//
+		//     18446744073709551616  -> ok=true, value=0
+		//     100000000000000000000 -> ok=true, value=7766279631452241920
+		//
+		// So a literal wider than u64 was not merely accepted, it was silently replaced by a
+		// DIFFERENT NUMBER, and the range check downstream then honestly approved the substitute:
+		// `x: int = 100000000000000000000` compiled as 7766279631452241920. Parsing into a BigInt
+		// removes the bound entirely. LEDGER #167, and #368 for the prefix/underscore/int_atoi
+		// sequence that was a reimplementation of big_int_from_string and disagreed with C++ about
+		// which literals are valid and what several of them are worth.
 		return exact_value_integer_from_string(str)
 
 	// C++ line 367: Float literal
 	case .Float:
+		// NOT ALWAYS A FLOAT. exact_value_float_from_string applies C++'s rule that a float TOKEN
+		// whose text carries neither '.' nor '-' becomes an INTEGER exact value, which is why the
+		// oracle reports `1e20` as an 'untyped integer' and calls a malformed `1e400` an "Invalid
+		// INTEGER literal". C++ notes the same fact at parser.cpp. The `0h` hexadecimal bit-pattern
+		// form is handled ahead of that test and stays a float. LEDGER #368/#632/#742/#764.
 		return exact_value_float_from_string(str)
 
 	// C++ line 368-380: Imaginary literal (i, j, k suffix)
 	case .Imag:
+		// THE SUFFIX DECIDES BOTH the value's KIND and WHICH COMPONENT the coefficient lands in.
+		// The other copy of this rule returned a bare f64 -- a REAL number -- for all three
+		// suffixes, so the imaginary-ness was discarded at parse time and never recoverable
+		// downstream: `3i` folded to the constant 3, making `real(3i)` evaluate to 3 and `imag(3i)`
+		// to 0. A silently WRONG VALUE rather than a diagnostic, which is why every parity, vet,
+		// model and corpus gate stayed green while it was live. LEDGER #632.
+		//
+		// C++ ignores float_from_string's success flag here, so a Token_Imag never yields an
+		// invalid value; the tokenizer guarantees the suffix, and one that is neither i, j nor k
+		// GB_PANICs.
 		// C++ line 369-371: Extract suffix (last character)
 		last_rune := rune(str[len(str) - 1])
 		str_without_suffix := str[:len(str) - 1]
@@ -2186,6 +2228,10 @@ exact_value_from_basic_literal :: proc(kind: tokenizer.Token_Kind, str: string) 
 
 	// C++ line 381-390: Rune literal
 	case .Rune:
+		// The prologue delivered the rune's BYTES, not its text. The one-byte case is a PLAIN CAST
+		// rather than a utf8 decode, and that asymmetry is load-bearing: unquote_string writes a
+		// raw byte whenever `r < 0x80 || !multiple_bytes`, so an escaped high byte like '\xff'
+		// arrives as a single 0xFF and must read back as rune 0xFF, not U+FFFD.
 		// C++ line 382-387: Decode rune (single char or UTF-8)
 		r: rune
 		if len(str) == 1 {
@@ -2278,7 +2324,7 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 
 	// C++ line 1075-1087: String
 	case string:
-		// C++ Reference: exact_value.cpp write_exact_value_to_string:1102-1112. quote_to_ascii supplies the
+		// C++ Reference: exact_value.cpp write_exact_value_to_string. quote_to_ascii supplies the
 		// surrounding quote characters, so a string constant renders as
 		// `"not an int"`.
 		//
@@ -2324,7 +2370,7 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 			strings.write_string(buf, str)
 		}
 
-	// C++ Reference: exact_value.cpp write_exact_value_to_string:1135-1141, rendered by gb__print_f64 (src/gb/gb.h:5942).
+	// C++ Reference: exact_value.cpp write_exact_value_to_string, rendered by gb__print_f64 (src/gb/gb.h:5942).
 	// See gb_write_f64 below for why this cannot be any host formatter.
 	case f64:
 		gb_write_f64(buf, val, 17)
@@ -2354,7 +2400,7 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 		// Return empty for pointer
 		return
 
-	// LEDGER #546. C++ (exact_value.cpp write_exact_value_to_string:1145,1147) passes shorthand=FALSE at both arms; the port
+	// LEDGER #546. C++ (exact_value.cpp write_exact_value_to_string,1147) passes shorthand=FALSE at both arms; the port
 	// passed TRUE, and write_expr_to_string's Comp_Lit arm renders `...` instead of the elements
 	// when shorthand is set. So every compound constant printed as `{...}` where C++ prints
 	// `{7, 7, 7, 7}`. Not cosmetic and not dump-only: exact_value_to_string feeds DIAGNOSTICS
@@ -2368,7 +2414,7 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 }
 
 // exact_value_to_string formats an exact value to a string
-// C++ Reference: exact_value.cpp write_exact_value_to_string:1126-1128
+// C++ Reference: exact_value.cpp write_exact_value_to_string
 exact_value_to_string :: proc(v: Exact_Value, string_limit: int = 36) -> string {
 	buf: strings.Builder
 	strings.builder_init(&buf)

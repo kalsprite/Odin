@@ -19,9 +19,9 @@ This module handles procedure checking ORCHESTRATION, not signature validation.
 Procedure signature checking (check_procedure_type, check_get_params, check_get_results)
 belongs in check_type.odin per architectural separation.
 
-C++ Reference: checker.cpp check_procedure_later:2550-2570
-               checker.cpp consume_proc_info:6731-6761, check_proc_info_worker_proc:6770-6797
-               checker.cpp check_init_worker_data:6799-6808, check_procedure_bodies:6810-6841
+C++ Reference: checker.cpp check_procedure_later
+               checker.cpp consume_proc_info, check_proc_info_worker_proc
+               checker.cpp check_init_worker_data, check_procedure_bodies
 */
 
 
@@ -68,11 +68,11 @@ check_procedure_bodies_worker_data: []Check_Procedure_Body_Worker_Data
 
 // ======================================================================================
 // PROCEDURE DEFERRAL
-// C++ Reference: checker.cpp check_procedure_later:2550-2570
+// C++ Reference: checker.cpp check_procedure_later
 // ======================================================================================
 
 // check_procedure_later queues a procedure for deferred checking
-// C++ Reference: checker.cpp check_procedure_later:2550-2570 (the ProcInfo * overload)
+// C++ Reference: checker.cpp check_procedure_later (the ProcInfo * overload)
 //
 // This is the main entry point for scheduling procedure body checking.
 // Depending on whether parallel checking is active, procedures are either:
@@ -86,7 +86,7 @@ check_procedure_later :: proc(c: ^Checker, info: ^Proc_Info) {
 	assert(info.decl != nil)
 
 	// Debug: Log if we're scheduling after bodies have been checked
-	// C++ Reference: checker.cpp check_procedure_later:2554-2557
+	// C++ Reference: checker.cpp check_procedure_later
 	if sync.atomic_load(&global_after_checking_procedure_bodies) {
 		e := info.decl.entity
 		if e != nil {
@@ -95,19 +95,19 @@ check_procedure_later :: proc(c: ^Checker, info: ^Proc_Info) {
 	}
 
 	// Decide how to queue based on worker queue status
-	// C++ Reference: checker.cpp check_procedure_later:2559-2563
+	// C++ Reference: checker.cpp check_procedure_later
 	if sync.atomic_load(&global_procedure_body_in_worker_queue) {
 		// Parallel mode: Add to worker task queue
-		// C++ Reference: checker.cpp check_procedure_later:2560
+		// C++ Reference: checker.cpp check_procedure_later
 		thread_pool_add_task(check_proc_info_worker_proc, info)
 	} else {
 		// Sequential mode: Add to procs_to_check array
-		// C++ Reference: checker.cpp check_procedure_later:2562
+		// C++ Reference: checker.cpp check_procedure_later
 		append(&c.procs_to_check, info)
 	}
 
 	// For debug builds, track all procedures in the all_procedures_queue
-	// C++ Reference: checker.cpp check_procedure_later:2565-2569
+	// C++ Reference: checker.cpp check_procedure_later
 	when DEBUG_CHECK_ALL_PROCEDURES {
 		assert(info != nil)
 		assert(info.decl != nil)
@@ -116,13 +116,13 @@ check_procedure_later :: proc(c: ^Checker, info: ^Proc_Info) {
 }
 
 // check_procedure_later_from_params creates a ProcInfo and queues it for checking
-// C++ Reference: checker.cpp check_procedure_later:2572-2581 (the raw-parameter overload)
+// C++ Reference: checker.cpp check_procedure_later (the raw-parameter overload)
 //
 // This overload constructs a ProcInfo from raw parameters before deferring.
 // Used when we have the procedure components but not a ProcInfo struct yet.
 check_procedure_later_from_params :: proc(c: ^Checker, file: ^ast.File, token: tokenizer.Token, decl: ^Decl_Info, type: ^Type, body: ^ast.Block_Stmt, tags: u64) {
 	// Allocate and initialize ProcInfo
-	// C++ Reference: checker.cpp check_procedure_later:2573-2579
+	// C++ Reference: checker.cpp check_procedure_later
 	info := new(Proc_Info)
 	info.file = file
 	info.token = token
@@ -132,12 +132,12 @@ check_procedure_later_from_params :: proc(c: ^Checker, file: ^ast.File, token: t
 	info.tags = tags
 
 	// Defer via the main check_procedure_later
-	// C++ Reference: checker.cpp check_procedure_later:2580
+	// C++ Reference: checker.cpp check_procedure_later
 	check_procedure_later(c, info)
 }
 
 // check_procedure_later_from_entity extracts procedure info from an entity and defers it
-// C++ Reference: checker.cpp check_procedure_later_from_entity:6467-6518
+// C++ Reference: checker.cpp check_procedure_later_from_entity
 //
 // This function converts an Entity_Procedure into a ProcInfo and queues it for checking.
 // It handles several edge cases:
@@ -153,7 +153,7 @@ check_procedure_later_from_params :: proc(c: ^Checker, file: ^ast.File, token: t
 //   from_msg: Debug message indicating caller (for logging)
 check_procedure_later_from_entity :: proc(c: ^Checker, e: ^Entity, from_msg: string = "") {
 	// Early validation
-	// C++ Reference: checker.cpp check_procedure_later_from_entity:6468-6470
+	// C++ Reference: checker.cpp check_procedure_later_from_entity
 	if e == nil || e.kind != .Procedure {
 		return
 	}
@@ -165,19 +165,19 @@ check_procedure_later_from_entity :: proc(c: ^Checker, e: ^Entity, from_msg: str
 	}
 
 	// Skip foreign procedures (no body to check)
-	// C++ Reference: checker.cpp check_procedure_later_from_entity:6471-6473
+	// C++ Reference: checker.cpp check_procedure_later_from_entity
 	if proc_var.is_foreign {
 		return
 	}
 
 	// Skip already-checked procedures
-	// C++ Reference: checker.cpp check_procedure_later_from_entity:6474-6476
+	// C++ Reference: checker.cpp check_procedure_later_from_entity
 	if sync.atomic_load(&e.proc_body_checked) {
 		return
 	}
 
 	// Handle procedure aliases (@(link_name) overrides)
-	// C++ Reference: checker.cpp check_procedure_later_from_entity:6477-6488
+	// C++ Reference: checker.cpp check_procedure_later_from_entity
 	if .Overridden in e.flags {
 		// NOTE(zen3ger): Delay checking of a proc alias until the underlying proc is checked
 		assert(e.aliased_of != nil)
@@ -190,13 +190,13 @@ check_procedure_later_from_entity :: proc(c: ^Checker, e: ^Entity, from_msg: str
 		}
 
 		// Defer the alias (with nil body and 0 tags since it's an alias)
-		// C++ Reference: checker.cpp check_procedure_later_from_entity:6486
+		// C++ Reference: checker.cpp check_procedure_later_from_entity
 		check_procedure_later_from_params(c, e.file, e.token, e.decl_info, e.type, nil, 0)
 		return
 	}
 
 	// Validate type
-	// C++ Reference: checker.cpp check_procedure_later_from_entity:6489-6493
+	// C++ Reference: checker.cpp check_procedure_later_from_entity
 	//
 	// C++ tests `type == t_invalid`, NOT nullptr, and RETURNS. The port tested only nil and then
 	// asserted kind == .Proc -- so an entity whose procedure type failed to check reached that
@@ -211,10 +211,10 @@ check_procedure_later_from_entity :: proc(c: ^Checker, e: ^Entity, from_msg: str
 		return
 	}
 
-	assert(type.kind == .Proc, "Expected procedure type") // C++ GB_ASSERT_MSG at :6493
+	assert(type.kind == .Proc, "Expected procedure type") // C++ GB_ASSERT_MSG
 
 	// Only check specialized polymorphic procedures
-	// C++ Reference: checker.cpp check_procedure_later_from_entity:6495-6497
+	// C++ Reference: checker.cpp check_procedure_later_from_entity
 	//
 	// C++ calls is_type_polymorphic(type), the RECURSIVE structural predicate; the port read
 	// Type_Proc.is_polymorphic, the raw flag. The predicate is strictly WIDER -- its .Proc arm
@@ -232,14 +232,14 @@ check_procedure_later_from_entity :: proc(c: ^Checker, e: ^Entity, from_msg: str
 	}
 
 	// Validate decl_info exists
-	// C++ Reference: checker.cpp check_procedure_later_from_entity:6499
+	// C++ Reference: checker.cpp check_procedure_later_from_entity
 	// Note: Entities from extracted runtime may not have decl_info
 	if e.decl_info == nil {
 		return
 	}
 
 	// Construct ProcInfo from entity
-	// C++ Reference: checker.cpp check_procedure_later_from_entity:6501-6510
+	// C++ Reference: checker.cpp check_procedure_later_from_entity
 	pi := new(Proc_Info)
 	pi.file = e.file
 	pi.token = e.token
@@ -247,37 +247,37 @@ check_procedure_later_from_entity :: proc(c: ^Checker, e: ^Entity, from_msg: str
 	pi.type = e.type
 
 	// Extract procedure literal to get body and tags
-	// C++ Reference: checker.cpp check_procedure_later_from_entity:6507-6510
+	// C++ Reference: checker.cpp check_procedure_later_from_entity
 	pl := e.decl_info.proc_lit
 	assert(pl != nil)
 	pi.body = pl.body.derived.(^ast.Block_Stmt)
 	pi.tags = u64(transmute(u32)pl.tags)
 
 	// Skip procedures without bodies
-	// C++ Reference: checker.cpp check_procedure_later_from_entity:6511-6513
+	// C++ Reference: checker.cpp check_procedure_later_from_entity
 	if pi.body == nil {
 		return
 	}
 
 	// Debug logging
-	// C++ Reference: checker.cpp check_procedure_later_from_entity:6514-6516
+	// C++ Reference: checker.cpp check_procedure_later_from_entity
 	if from_msg != "" {
 		debugf("CHECK PROCEDURE LATER [FROM %s]! %s :: %s {...}\n",
 			from_msg, e.token.text, type_to_string(e.type))
 	}
 
 	// Queue the procedure for checking
-	// C++ Reference: checker.cpp check_procedure_later_from_entity:6517
+	// C++ Reference: checker.cpp check_procedure_later_from_entity
 	check_procedure_later(c, pi)
 }
 
 // ======================================================================================
 // PROCEDURE CONSUMPTION
-// C++ Reference: checker.cpp consume_proc_info:6731-6761
+// C++ Reference: checker.cpp consume_proc_info
 // ======================================================================================
 
 // consume_proc_info attempts to check a procedure, handling dependencies
-// C++ Reference: checker.cpp consume_proc_info:6731-6761
+// C++ Reference: checker.cpp consume_proc_info
 //
 // Returns true if the procedure was successfully checked.
 // Returns false if checking was deferred (dependency not ready, already checked, etc.)
@@ -295,27 +295,27 @@ consume_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^
 	}
 
 	// Check current procedure checking state
-	// C++ Reference: checker.cpp consume_proc_info:6732-6738
+	// C++ Reference: checker.cpp consume_proc_info
 	#partial switch sync.atomic_load(&pi.decl.proc_checked_state) {
 	case .In_Progress:
 		// Already being checked, don't re-enter
-		// C++ Reference: checker.cpp consume_proc_info:6734-6735
+		// C++ Reference: checker.cpp consume_proc_info
 		return false
 	case .Checked:
 		// Already checked successfully
-		// C++ Reference: checker.cpp consume_proc_info:6736-6737
+		// C++ Reference: checker.cpp consume_proc_info
 		return true
 	}
 
 	// Handle nested procedure dependencies
-	// C++ Reference: checker.cpp consume_proc_info:6740-6752
+	// C++ Reference: checker.cpp consume_proc_info
 	if pi.decl.parent != nil && pi.decl.parent.entity != nil {
 		parent := pi.decl.parent.entity
 
 		// Only check nested procedures after their parent is checked
 		// This prevents race conditions in multithreaded evaluation
 		// In single-threaded mode, this should never trigger
-		// C++ Reference: checker.cpp consume_proc_info:6745-6751
+		// C++ Reference: checker.cpp consume_proc_info
 		//
 		// THE POLYMORPHIC GATE WAS MISSING HERE, exactly as it was missing from the SIBLING copy of
 		// this block in check_proc_info_worker_proc (fixed in #592). C++ defers only when the parent
@@ -332,7 +332,7 @@ consume_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^
 		// parent body is never checked, and no repro was built. Ported for parity regardless -- and
 		// because the failure mode here is a hang, not a wrong diagnostic.
 		if parent.kind == .Procedure && !sync.atomic_load(&parent.proc_body_checked) {
-			// C++ Reference: checker.cpp consume_proc_info:6746-6747
+			// C++ Reference: checker.cpp consume_proc_info
 			is_poly := false
 			if parent.type != nil {
 				if pt, ok := base_type(parent.type).variant.(Type_Proc); ok {
@@ -341,7 +341,7 @@ consume_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^
 			}
 			if !is_poly {
 				// Defer this procedure until parent is ready
-				// C++ Reference: checker.cpp consume_proc_info:6748-6749
+				// C++ Reference: checker.cpp consume_proc_info
 				check_procedure_later(c, pi)
 				return false
 			}
@@ -349,18 +349,18 @@ consume_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^
 	}
 
 	// Clear the untyped expression map before checking
-	// C++ Reference: checker.cpp consume_proc_info:6753-6755
+	// C++ Reference: checker.cpp consume_proc_info
 	if untyped != nil {
 		clear(untyped)
 	}
 
 	// Perform the actual procedure checking
-	// C++ Reference: checker.cpp consume_proc_info:6756-6759
+	// C++ Reference: checker.cpp consume_proc_info
 	success := check_proc_info(c, pi, untyped)
 
 	if success {
 		// Increment total checked counter atomically
-		// C++ Reference: checker.cpp consume_proc_info:6757
+		// C++ Reference: checker.cpp consume_proc_info
 		sync.atomic_add(&total_bodies_checked, 1)
 		return true
 	}
@@ -370,11 +370,11 @@ consume_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^
 
 // ======================================================================================
 // WORKER THREAD INFRASTRUCTURE
-// C++ Reference: checker.cpp check_proc_info_worker_proc:6770-6797
+// C++ Reference: checker.cpp check_proc_info_worker_proc
 // ======================================================================================
 
 // check_proc_info_worker_proc is the worker thread entry point for parallel checking
-// C++ Reference: checker.cpp check_proc_info_worker_proc:6770-6797 (WORKER_TASK_PROC(check_proc_info_worker_proc))
+// C++ Reference: checker.cpp check_proc_info_worker_proc (WORKER_TASK_PROC(check_proc_info_worker_proc))
 //
 // This function is called by worker threads to process procedures from the work queue.
 // It handles:
@@ -396,28 +396,28 @@ check_proc_info_worker_proc :: proc(data: rawptr) -> int {
 	}
 
 	// In C++, this retrieves per-worker data via current_thread_index()
-	// C++ Reference: checker.cpp check_proc_info_worker_proc:6771-6773
+	// C++ Reference: checker.cpp check_proc_info_worker_proc
 	thread_idx := current_thread_index()
 	wd := &check_procedure_bodies_worker_data[thread_idx]
 	untyped := &wd.untyped
 	c := wd.c
 
 	// Cast the data pointer to ProcInfo
-	// C++ Reference: checker.cpp check_proc_info_worker_proc:6775
+	// C++ Reference: checker.cpp check_proc_info_worker_proc
 	pi := cast(^Proc_Info)data
 
 	assert(pi.decl != nil)
 
 	// Handle nested procedure dependencies
-	// C++ Reference: checker.cpp check_proc_info_worker_proc:6778-6790
+	// C++ Reference: checker.cpp check_proc_info_worker_proc
 	if pi.decl.parent != nil && pi.decl.parent.entity != nil {
 		parent := pi.decl.parent.entity
 
 		// Only check nested procedures after parent's body is checked
 		// This prevents race conditions in multithreaded evaluation
-		// C++ Reference: checker.cpp check_proc_info_worker_proc:6783
+		// C++ Reference: checker.cpp check_proc_info_worker_proc
 		if parent.kind == .Procedure && !sync.atomic_load(&parent.proc_body_checked) {
-			// C++ Reference: checker.cpp check_proc_info_worker_proc:6784-6785
+			// C++ Reference: checker.cpp check_proc_info_worker_proc
 			//     Type *pt = base_type(parent->type);
 			//     if (!pt->Proc.is_polymorphic || pt->Proc.is_poly_specialized) {
 			//
@@ -442,7 +442,7 @@ check_proc_info_worker_proc :: proc(data: rawptr) -> int {
 			}
 			if !is_poly {
 				// Re-queue this task for later (parent not ready)
-				// C++ Reference: checker.cpp check_proc_info_worker_proc:6786-6787
+				// C++ Reference: checker.cpp check_proc_info_worker_proc
 				thread_pool_add_task(check_proc_info_worker_proc, pi)
 				return 1 // Failure/retry
 			}
@@ -450,14 +450,14 @@ check_proc_info_worker_proc :: proc(data: rawptr) -> int {
 	}
 
 	// Clear untyped map before checking
-	// C++ Reference: checker.cpp check_proc_info_worker_proc:6791
+	// C++ Reference: checker.cpp check_proc_info_worker_proc
 	clear(untyped)
 
 	// Check the procedure
-	// C++ Reference: checker.cpp check_proc_info_worker_proc:6792-6795
+	// C++ Reference: checker.cpp check_proc_info_worker_proc
 	if check_proc_info(c, pi, untyped) {
 		// Success: increment atomic counter
-		// C++ Reference: checker.cpp check_proc_info_worker_proc:6793
+		// C++ Reference: checker.cpp check_proc_info_worker_proc
 		sync.atomic_add(&total_bodies_checked, 1)
 		return 0 // Success
 	}
@@ -467,11 +467,11 @@ check_proc_info_worker_proc :: proc(data: rawptr) -> int {
 
 // ======================================================================================
 // WORKER INITIALIZATION
-// C++ Reference: checker.cpp check_init_worker_data:6799-6808
+// C++ Reference: checker.cpp check_init_worker_data
 // ======================================================================================
 
 // check_init_worker_data initializes per-worker thread data for parallel checking
-// C++ Reference: checker.cpp check_init_worker_data:6799-6808 (check_init_worker_data)
+// C++ Reference: checker.cpp check_init_worker_data (check_init_worker_data)
 //
 // Allocates and initializes worker data structures for each thread in the thread pool.
 // Each worker gets its own Checker pointer and untyped expression map to avoid contention.
@@ -479,7 +479,7 @@ check_proc_info_worker_proc :: proc(data: rawptr) -> int {
 // Initializes worker data for all threads in the thread pool
 check_init_worker_data :: proc(c: ^Checker) {
 	// Get thread count from global thread pool
-	// C++ Reference: checker.cpp check_init_worker_data:6800
+	// C++ Reference: checker.cpp check_init_worker_data
 	// u32 thread_count = cast(u32)global_thread_pool.threads.count;
 	thread_count := 1
 	if global_thread_pool != nil {
@@ -487,12 +487,12 @@ check_init_worker_data :: proc(c: ^Checker) {
 	}
 
 	// Allocate worker data array
-	// C++ Reference: checker.cpp check_init_worker_data:6802
+	// C++ Reference: checker.cpp check_init_worker_data
 	// check_procedure_bodies_worker_data = permanent_alloc_array<CheckProcedureBodyWorkerData>(thread_count)
 	check_procedure_bodies_worker_data = make([]Check_Procedure_Body_Worker_Data, thread_count)
 
 	// Initialize each worker's data
-	// C++ Reference: checker.cpp check_init_worker_data:6804-6807
+	// C++ Reference: checker.cpp check_init_worker_data
 	for i in 0 ..< thread_count {
 		check_procedure_bodies_worker_data[i].c = c
 		check_procedure_bodies_worker_data[i].untyped = make(map[^ast.Expr]^Expr_Info)
@@ -501,11 +501,11 @@ check_init_worker_data :: proc(c: ^Checker) {
 
 // ======================================================================================
 // MAIN PROCEDURE CHECKING ENTRY POINT
-// C++ Reference: checker.cpp check_procedure_bodies:6810-6841
+// C++ Reference: checker.cpp check_procedure_bodies
 // ======================================================================================
 
 // check_procedure_bodies is the main entry point for checking all queued procedure bodies
-// C++ Reference: checker.cpp check_procedure_bodies:6810-6841
+// C++ Reference: checker.cpp check_procedure_bodies
 //
 // This function coordinates procedure body checking, supporting both:
 // - Sequential mode (single-threaded, simple loop)
@@ -518,21 +518,21 @@ check_procedure_bodies :: proc(c: ^Checker) {
 	assert(c != nil)
 
 	// Determine thread count
-	// C++ Reference: checker.cpp check_procedure_bodies:6813-6816
+	// C++ Reference: checker.cpp check_procedure_bodies
 	thread_count := 1
 	if global_thread_pool != nil && !build_context.no_threaded_checker {
 		thread_count = global_thread_pool.thread_count
 	}
 
 	// Sequential mode (single-threaded)
-	// C++ Reference: checker.cpp check_procedure_bodies:6818-6826
+	// C++ Reference: checker.cpp check_procedure_bodies
 	if thread_count == 1 {
 		// Use worker_data[0]'s untyped map
-		// C++ Reference: checker.cpp check_procedure_bodies:6819
+		// C++ Reference: checker.cpp check_procedure_bodies
 		untyped := &check_procedure_bodies_worker_data[0].untyped
 
 		// Process all procedures in procs_to_check array
-		// C++ Reference: checker.cpp check_procedure_bodies:6820-6822
+		// C++ Reference: checker.cpp check_procedure_bodies
 		for i in 0 ..< len(c.procs_to_check) {
 			// Cooperative cancellation, mirroring the worker path below: once the error cap
 			// is hit every further diagnostic is dropped, so there is nothing to gain from
@@ -544,25 +544,25 @@ check_procedure_bodies :: proc(c: ^Checker) {
 		}
 
 		// Clear the procs_to_check array
-		// C++ Reference: checker.cpp check_procedure_bodies:6823
+		// C++ Reference: checker.cpp check_procedure_bodies
 		clear(&c.procs_to_check)
 
 		// Debug output
-		// C++ Reference: checker.cpp check_procedure_bodies:6825
+		// C++ Reference: checker.cpp check_procedure_bodies
 		debugf("Total Procedure Bodies Checked: %d\n", sync.atomic_load(&total_bodies_checked))
 
 		return
 	}
 
 	// Parallel mode (multi-threaded)
-	// C++ Reference: checker.cpp check_procedure_bodies:6829-6840
+	// C++ Reference: checker.cpp check_procedure_bodies
 
 	// Set global flag to indicate worker queue is active
-	// C++ Reference: checker.cpp check_procedure_bodies:6829
+	// C++ Reference: checker.cpp check_procedure_bodies
 	sync.atomic_store(&global_procedure_body_in_worker_queue, true)
 
 	// Add all procedures to worker task queue
-	// C++ Reference: checker.cpp check_procedure_bodies:6831-6836
+	// C++ Reference: checker.cpp check_procedure_bodies
 	prev_procs_to_check_count := len(c.procs_to_check)
 	for i in 0 ..< len(c.procs_to_check) {
 		thread_pool_add_task(check_proc_info_worker_proc, c.procs_to_check[i])
@@ -571,11 +571,11 @@ check_procedure_bodies :: proc(c: ^Checker) {
 	clear(&c.procs_to_check)
 
 	// Wait for all workers to complete
-	// C++ Reference: checker.cpp check_procedure_bodies:6838
+	// C++ Reference: checker.cpp check_procedure_bodies
 	thread_pool_wait()
 
 	// Clear worker queue flag
-	// C++ Reference: checker.cpp check_procedure_bodies:6840
+	// C++ Reference: checker.cpp check_procedure_bodies
 	sync.atomic_store(&global_procedure_body_in_worker_queue, false)
 
 	// Debug output
@@ -584,11 +584,11 @@ check_procedure_bodies :: proc(c: ^Checker) {
 
 // ======================================================================================
 // CORE PROCEDURE CHECKING LOGIC
-// C++ Reference: checker.cpp check_proc_info:6521-6637
+// C++ Reference: checker.cpp check_proc_info
 // ======================================================================================
 
 // check_proc_info validates and checks a single procedure's body
-// C++ Reference: checker.cpp check_proc_info:6521-6637
+// C++ Reference: checker.cpp check_proc_info
 //
 // This is the core procedure checking function. It performs:
 // 1. Procedure state validation (mutex-protected state machine)
@@ -608,7 +608,7 @@ check_procedure_bodies :: proc(c: ^Checker) {
 //   untyped: Map for storing untyped expression info (may be nil)
 check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Expr_Info) -> bool {
 	// Early validation
-	// C++ Reference: checker.cpp check_proc_info:6522-6527
+	// C++ Reference: checker.cpp check_proc_info
 	if pi == nil {
 		return false
 	}
@@ -617,14 +617,14 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Check procedure state with mutex protection
-	// C++ Reference: checker.cpp check_proc_info:6529-6550
+	// C++ Reference: checker.cpp check_proc_info
 	decl := pi.decl
 	if decl == nil {
 		return false
 	}
 
 	// State machine transition, guarded by this declaration's own mutex.
-	// C++ Reference: checker.cpp check_proc_info:6529-6550 - the C++ MUTEX_GUARD is scoped to exactly this
+	// C++ Reference: checker.cpp check_proc_info - the C++ MUTEX_GUARD is scoped to exactly this
 	// block and locks DeclInfo::proc_checked_mutex, not a global.
 	//
 	// The guard MUST NOT extend over check_proc_body below. It is only here to make
@@ -640,17 +640,17 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 		defer sync.unlock(&decl.proc_checked_mutex)
 
 		// State machine check
-		// C++ Reference: checker.cpp check_proc_info:6535-6549
+		// C++ Reference: checker.cpp check_proc_info
 		state := sync.atomic_load(&decl.proc_checked_state)
 		#partial switch state {
 		case .In_Progress:
 			// Currently being checked (by another thread in parallel mode)
-			// C++ Reference: checker.cpp check_proc_info:6536-6540
+			// C++ Reference: checker.cpp check_proc_info
 			return false
 
 		case .Checked:
 			// Already checked successfully
-			// C++ Reference: checker.cpp check_proc_info:6541-6545
+			// C++ Reference: checker.cpp check_proc_info
 			if decl.entity != nil {
 				assert(sync.atomic_load(&decl.entity.proc_body_checked))
 			}
@@ -658,18 +658,18 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 
 		case .Unchecked:
 			// Proceed with checking
-			// C++ Reference: checker.cpp check_proc_info:6546-6548
+			// C++ Reference: checker.cpp check_proc_info
 			break
 		}
 
 		// Claim the procedure. From here on this thread owns the body check, and every
 		// exit path below must move the state off In_Progress.
-		// C++ Reference: checker.cpp check_proc_info:6550
+		// C++ Reference: checker.cpp check_proc_info
 		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.In_Progress)
 	}
 
 	// Validate procedure type
-	// C++ Reference: checker.cpp check_proc_info:6552-6554
+	// C++ Reference: checker.cpp check_proc_info
 	assert(pi.type.kind == .Proc)
 	pt, pt_ok := &pi.type.variant.(Type_Proc)
 	if !pt_ok {
@@ -680,17 +680,17 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	name := pi.token.text
 
 	// Check for unspecialized polymorphic procedures
-	// C++ Reference: checker.cpp check_proc_info:6556-6564
+	// C++ Reference: checker.cpp check_proc_info
 	if pt.is_polymorphic && !pt.is_poly_specialized {
 		token := pi.token
 		if pi.poly_def_node != nil {
 			// Use polymorphic definition node's token if available
-			// C++ Reference: checker.cpp check_proc_info:6558-6560
+			// C++ Reference: checker.cpp check_proc_info
 			token = ast_token(pi.poly_def_node)
 		}
 
 		// Error: Cannot check unspecialized polymorphic procedures
-		// C++ Reference: checker.cpp check_proc_info:6561
+		// C++ Reference: checker.cpp check_proc_info
 		error(token, "Unspecialized polymorphic procedure '%s'", name)
 
 		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Unchecked)
@@ -698,13 +698,13 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Skip unused specialized polymorphic procedures
-	// C++ Reference: checker.cpp check_proc_info:6566-6575
+	// C++ Reference: checker.cpp check_proc_info
 	if pt.is_polymorphic && pt.is_poly_specialized {
 		e := pi.decl.entity
 		assert(e != nil)
 		if .Used not_in e.flags {
 			// Never used, don't check
-			// C++ Reference: checker.cpp check_proc_info:6570-6572
+			// C++ Reference: checker.cpp check_proc_info
 			// NOTE: This may need to be checked later if used elsewhere
 			sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Unchecked)
 			return false
@@ -712,7 +712,7 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Create and setup checker context
-	// C++ Reference: checker.cpp check_proc_info:6577-6580
+	// C++ Reference: checker.cpp check_proc_info
 	ctx := make_checker_context(c)
 	defer destroy_checker_context(&ctx)
 
@@ -720,18 +720,18 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	ctx.decl = pi.decl
 
 	// Process procedure tags
-	// C++ Reference: checker.cpp check_proc_info:6582-6602
+	// C++ Reference: checker.cpp check_proc_info
 	tags := pi.tags
 
 	// Extract tag bits using direct bitmask (Proc_Tag values are already 1<<n)
-	// C++ Reference: checker.cpp check_proc_info:6582-6586
+	// C++ Reference: checker.cpp check_proc_info
 	bounds_check := (tags & u64(Proc_Tag.Bounds_Check)) != 0
 	no_bounds_check := (tags & u64(Proc_Tag.No_Bounds_Check)) != 0
 	type_assert := (tags & u64(Proc_Tag.Type_Assert)) != 0
 	no_type_assert := (tags & u64(Proc_Tag.No_Type_Assert)) != 0
 
 	// Apply bounds checking flags
-	// C++ Reference: checker.cpp check_proc_info:6588-6594
+	// C++ Reference: checker.cpp check_proc_info
 	if bounds_check {
 		ctx.state_flags += {.Bounds_Check}
 		ctx.state_flags -= {.No_Bounds_Check}
@@ -741,7 +741,7 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Apply type assertion flags
-	// C++ Reference: checker.cpp check_proc_info:6596-6602
+	// C++ Reference: checker.cpp check_proc_info
 	if type_assert {
 		ctx.state_flags += {.Type_Assert}
 		ctx.state_flags -= {.No_Type_Assert}
@@ -751,20 +751,20 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Check the procedure body
-	// C++ Reference: checker.cpp check_proc_info:6604
+	// C++ Reference: checker.cpp check_proc_info
 	body_was_checked := check_proc_body(&ctx, pi.token, pi.decl, pi.type, pi.body)
 
 	// Update entity state based on checking result
-	// C++ Reference: checker.cpp check_proc_info:6606-6622
+	// C++ Reference: checker.cpp check_proc_info
 	if body_was_checked {
 		// Success: Mark as checked (atomic store for thread safety)
-		// C++ Reference: checker.cpp check_proc_info:6607-6613
+		// C++ Reference: checker.cpp check_proc_info
 		//
 		// DEVIATION (ordering): C++ stores ProcCheckedState_Checked first and sets
 		// EntityFlag_ProcBodyChecked second. It can afford to, because its
 		// proc_checked_mutex is held for the whole of check_proc_body_for_proc_info - so
 		// no other thread can be inside the `case ProcCheckedState_Checked` arm that
-		// asserts on the flag (checker.cpp check_proc_info:6541-6545) while this window is open.
+		// asserts on the flag (checker.cpp check_proc_info) while this window is open.
 		//
 		// This port deliberately narrows that guard to the state transition alone (see the
 		// long comment above the claim, and CPP_DEVIATIONS): the C++ shape would serialise
@@ -785,7 +785,7 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Checked)
 	} else {
 		// Failure: Mark as unchecked (atomic store for thread safety)
-		// C++ Reference: checker.cpp check_proc_info:6614-6621
+		// C++ Reference: checker.cpp check_proc_info
 		sync.atomic_store(&decl.proc_checked_state, Proc_Checked_State.Unchecked)
 		if pi.body != nil {
 			e := pi.decl.entity
@@ -797,11 +797,11 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Add untyped expressions to global queue
-	// C++ Reference: checker.cpp check_proc_info:6624
+	// C++ Reference: checker.cpp check_proc_info
 	add_untyped_expressions(&c.info, ctx.untyped)
 
 	// Check dependencies and queue unchecked procedures
-	// C++ Reference: checker.cpp check_proc_info:6626-6633
+	// C++ Reference: checker.cpp check_proc_info
 	// Thread-safe read access to dependencies
 	sync.rw_mutex_shared_lock(&ctx.decl.deps_mutex)
 	defer sync.rw_mutex_shared_unlock(&ctx.decl.deps_mutex)
@@ -825,7 +825,7 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 // make_checker_context is defined in check_collect.odin
 
 // destroy_checker_context cleans up a checker context
-// C++ Reference: checker.cpp destroy_checker_context:1695-1697 (destroy_checker_context)
+// C++ Reference: checker.cpp destroy_checker_context (destroy_checker_context)
 //
 // Cleans up resources owned by the Checker_Context:
 // - type_path: OWNED by the root context returned from make_checker_context, freed here
@@ -860,14 +860,14 @@ destroy_checker_context :: proc(ctx: ^Checker_Context) {
 // reset_checker_context is defined in check_import_export.odin
 
 // add_untyped_expressions adds untyped expressions to the global queue
-// C++ Reference: checker.cpp add_untyped_expressions:6842-6854
+// C++ Reference: checker.cpp add_untyped_expressions
 add_untyped_expressions :: proc(info: ^Checker_Info, untyped: ^map[^ast.Expr]^Expr_Info) {
 	if untyped == nil {
 		return
 	}
 
 	// Enqueue all untyped expressions to global queue
-	// C++ Reference: checker.cpp add_untyped_expressions:6846-6852
+	// C++ Reference: checker.cpp add_untyped_expressions
 	for expr, expr_info in untyped {
 		if expr != nil && expr_info != nil {
 			ue_info := Untyped_Expr_Info {
@@ -879,7 +879,7 @@ add_untyped_expressions :: proc(info: ^Checker_Info, untyped: ^map[^ast.Expr]^Ex
 	}
 
 	// Clear the map
-	// C++ Reference: checker.cpp add_untyped_expressions:6853
+	// C++ Reference: checker.cpp add_untyped_expressions
 	clear(untyped)
 }
 
@@ -896,7 +896,7 @@ Proc_Using_Var :: struct {
 }
 
 // evaluate_where_clauses checks that all where clauses evaluate to true
-// C++ Reference: check_expr.cpp check_call_arguments_internal:6717-6797
+// C++ Reference: check_expr.cpp check_call_arguments_internal
 //
 // This function evaluates each where clause in a polymorphic procedure or type
 // to verify they are constant boolean expressions that evaluate to true.
@@ -911,19 +911,19 @@ Proc_Using_Var :: struct {
 // Returns:
 //   true if all clauses pass, false if any fail
 evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scope: ^Scope, clauses: []^ast.Expr, print_err: bool) -> bool {
-	// C++ Reference: check_expr.cpp evaluate_where_clauses:7140
+	// C++ Reference: check_expr.cpp evaluate_where_clauses
 	if clauses == nil || len(clauses) == 0 {
 		return true
 	}
 
 	// Check each clause
-	// C++ Reference: check_expr.cpp evaluate_where_clauses:7141-7217
+	// C++ Reference: check_expr.cpp evaluate_where_clauses
 	for clause in clauses {
 		operand := Operand{}
 		check_expr(ctx, &operand, clause)
 
 		// Must be a constant
-		// C++ Reference: check_expr.cpp evaluate_where_clauses:7144-7147
+		// C++ Reference: check_expr.cpp evaluate_where_clauses
 		if operand.mode != .Constant {
 			if print_err {
 				error(clause, "'where' clauses expect a constant boolean evaluation")
@@ -935,7 +935,7 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 		}
 
 		// Must be a boolean
-		// C++ Reference: check_expr.cpp evaluate_where_clauses:7148-7151
+		// C++ Reference: check_expr.cpp evaluate_where_clauses
 		value_bool, is_bool := operand.value.(bool)
 		if !is_bool {
 			if print_err {
@@ -948,10 +948,10 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 		}
 
 		// Must evaluate to true
-		// C++ Reference: check_expr.cpp evaluate_where_clauses:7152-7202
+		// C++ Reference: check_expr.cpp evaluate_where_clauses
 		if !value_bool {
 			if print_err {
-				// C++ opens an ERROR_BLOCK here (check_expr.cpp evaluate_where_clauses:7154) so the header, the
+				// C++ opens an ERROR_BLOCK here (check_expr.cpp evaluate_where_clauses) so the header, the
 				// definition list and the caller-location line are flushed together. Without
 				// it the unblocked error_line output raced ahead of the error() -- which goes
 				// through the collector and is position-sorted -- so the continuation lines
@@ -960,17 +960,17 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 				defer end_error_block()
 
 				// Display error with clause expression
-				// C++ Reference: check_expr.cpp evaluate_where_clauses:7156-7158
+				// C++ Reference: check_expr.cpp evaluate_where_clauses
 				clause_str := expr_to_string(clause)
 				defer delete(clause_str)
 				error(clause, "'where' clause evaluated to false:\n\t%s", clause_str)
 
 				// Display polymorphic definitions from scope
-				// C++ Reference: check_expr.cpp evaluate_where_clauses:7160-7194
+				// C++ Reference: check_expr.cpp evaluate_where_clauses
 				if scope != nil {
 					print_count := 0
 
-					// C++ (check_expr.cpp evaluate_where_clauses:7162) walks scope->elements in SLOT order.
+					// C++ (check_expr.cpp evaluate_where_clauses) walks scope->elements in SLOT order.
 					//
 					// Iterating an Odin map directly made this block nondeterministic: ten runs
 					// of the SAME binary on the SAME input produced SIX different orderings.
@@ -1003,12 +1003,12 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 					ordered_slots := scope_map_slot_order(ordered[:], context.temp_allocator)
 
 					// Iterate through scope elements and display TypeName and Constant entities
-					// C++ Reference: check_expr.cpp evaluate_where_clauses:7162-7192
+					// C++ Reference: check_expr.cpp evaluate_where_clauses
 					for e in ordered_slots {
 						#partial switch e.kind {
 						case .Type_Name:
 							// Display type definitions: name :: type;
-							// C++ Reference: check_expr.cpp evaluate_where_clauses:7165-7175
+							// C++ Reference: check_expr.cpp evaluate_where_clauses
 							// Note: The C++ comment says to print header only on first entity,
 							// but then doesn't actually use that check (line 6752 is commented out)
 							// The header fires from THIS arm too now. It used to be commented out
@@ -1025,13 +1025,13 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 
 						case .Constant:
 							// Display constant definitions
-							// C++ Reference: check_expr.cpp evaluate_where_clauses:7176-7191
-							// C++ Reference: check_expr.cpp evaluate_where_clauses:7177.
+							// C++ Reference: check_expr.cpp evaluate_where_clauses
+							// C++ Reference: check_expr.cpp evaluate_where_clauses.
 							//
 							// THE TWO LEADING SPACES ARE LOAD-BEARING, and they are the whole of
 							// the upstream fix. The old header began with "\n", which put a BLANK
 							// LINE in the message; print_errors_standard breaks on the first empty
-							// line -- faithfully, C++ error.cpp print_all_errors:1017 does the same -- so emitting
+							// line -- faithfully, C++ error.cpp print_all_errors does the same -- so emitting
 							// the header TRUNCATED the rest of the block. The binding lines and
 							// "at caller location" were built and then discarded at print time.
 							// LEDGER 334 measured that and #185 could not explain it.
@@ -1054,11 +1054,11 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 
 							if is_type_untyped(e.type) {
 								// Untyped constant: name :: value;
-								// C++ Reference: check_expr.cpp evaluate_where_clauses:7180-7181
+								// C++ Reference: check_expr.cpp evaluate_where_clauses
 								error_line("\t\t%s :: %s;\n", e.token.text, value_str)
 							} else {
 								// Typed constant: name : type : value;
-								// C++ Reference: check_expr.cpp evaluate_where_clauses:7182-7186
+								// C++ Reference: check_expr.cpp evaluate_where_clauses
 								type_str := type_to_string(e.type)
 								error_line("\t\t%s : %s : %s;\n", e.token.text, type_str, value_str)
 							}
@@ -1067,7 +1067,7 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 					}
 				}
 
-				// C++ check_expr.cpp evaluate_where_clauses:7196-7199. Unlike the two "expects a constant boolean
+				// C++ check_expr.cpp evaluate_where_clauses. Unlike the two "expects a constant boolean
 				// evaluation" branches above (C++ 7145/7149), which DO emit a second
 				// diagnostic, this branch writes a CONTINUATION line carrying the position
 				// itself: error_line("%s at caller location\n", ...). The port used error()
@@ -1081,19 +1081,19 @@ evaluate_where_clauses :: proc(ctx: ^Checker_Context, call_expr: ^ast.Expr, scop
 		}
 
 		// Style check: prefer comma over &&
-		// C++ Reference: check_expr.cpp evaluate_where_clauses:7204-7215
+		// C++ Reference: check_expr.cpp evaluate_where_clauses
 		if ast_file_vet_style(ctx.file) {
 			c := unparen_expr(clause)
 			// Check if it's a binary expression with Cmp_And (&&)
-			// C++ Reference: check_expr.cpp evaluate_where_clauses:7206-7214
+			// C++ Reference: check_expr.cpp evaluate_where_clauses
 			if binary, ok := c.derived.(^ast.Binary_Expr); ok {
 				if binary.op.kind == .Cmp_And {
 					// Error: Prefer comma over &&
-					// C++ Reference: check_expr.cpp evaluate_where_clauses:7208
+					// C++ Reference: check_expr.cpp evaluate_where_clauses
 					error(c, "Prefer to separate 'where' clauses with a comma rather than '&&'")
 
 					// Show suggestion with left and right parts
-					// C++ Reference: check_expr.cpp evaluate_where_clauses:7209-7211
+					// C++ Reference: check_expr.cpp evaluate_where_clauses
 					x := expr_to_string(binary.left)
 					defer delete(x)
 					y := expr_to_string(binary.right)
@@ -1122,10 +1122,10 @@ check_vet_flags_from_context :: proc(ctx: ^Checker_Context) -> Vet_Flag {
 }
 
 // check_vet_flags_from_node retrieves vet flags from an AST node
-// C++ Reference: checker.cpp check_vet_flags:554-557
+// C++ Reference: checker.cpp check_vet_flags
 // Note: In Odin AST, nodes don't store their file, so this always returns empty flags
 // Callers should use check_vet_flags_from_context instead
-// C++ Reference: checker.cpp check_vet_flags:560-563.
+// C++ Reference: checker.cpp check_vet_flags.
 //
 //	gb_internal u64 check_vet_flags(Ast *node) {
 //		AstFile *file = node->file();
@@ -1157,7 +1157,7 @@ check_vet_flags :: proc {
 
 // in_vet_packages checks if a file's package is in the vet packages list.
 //
-// C++ Reference: parser.cpp in_vet_packages:5-38.
+// C++ Reference: parser.cpp in_vet_packages.
 //
 // Every bail returns TRUE, i.e. "vet it": an unknown package is vetted, not skipped.
 //
@@ -1169,27 +1169,27 @@ check_vet_flags :: proc {
 // rather than as a failed lookup. The nil pkg_decl guard is new for the same reason.
 // LEDGER #386.
 in_vet_packages :: proc(file: ^ast.File) -> bool {
-	// C++ Reference: parser.cpp in_vet_packages:6-8
+	// C++ Reference: parser.cpp in_vet_packages
 	if file == nil {
 		return true
 	}
 
-	// C++ Reference: parser.cpp in_vet_packages:10-12
+	// C++ Reference: parser.cpp in_vet_packages
 	if file.pkg == nil {
 		return true
 	}
 
-	// C++ Reference: parser.cpp in_vet_packages:14-16
+	// C++ Reference: parser.cpp in_vet_packages
 	if file.pkg_decl == nil {
 		return true
 	}
 
-	// C++ Reference: parser.cpp in_vet_packages:18-20. Empty vet_packages means vet all packages.
+	// C++ Reference: parser.cpp in_vet_packages. Empty vet_packages means vet all packages.
 	if len(build_context.vet_packages) == 0 {
 		return true
 	}
 
-	// C++ Reference: parser.cpp in_vet_packages:22-32.
+	// C++ Reference: parser.cpp in_vet_packages.
 	//
 	// C++ tests `name_token.kind == Token_Ident` on the package declaration's NAME TOKEN.
 	// The port's Package_Decl keeps only the name TEXT (parser.odin:299 stores
@@ -1205,7 +1205,7 @@ in_vet_packages :: proc(file: ^ast.File) -> bool {
 		pkg_name = file.pkg_decl.name
 	}
 
-	// C++ Reference: parser.cpp in_vet_packages:34-36
+	// C++ Reference: parser.cpp in_vet_packages
 	if len(pkg_name) == 0 {
 		return true
 	}
@@ -1318,11 +1318,11 @@ add_deps_from_child_to_parent :: proc(decl: ^Decl_Info) {
 // Child scopes with Proc, Type, or File flags are skipped (checked separately).
 check_scope_usage :: proc(c: ^Checker, scope: ^Scope, vet_flags: Vet_Flag) {
 	// Check this scope
-	// C++ Reference: checker.cpp check_scope_usage_internal:850
+	// C++ Reference: checker.cpp check_scope_usage_internal
 	check_scope_usage_internal(c, scope, vet_flags, false)
 
 	// Recursively check child scopes (except Proc/Type/File scopes)
-	// C++ Reference: checker.cpp check_scope_usage_internal:852-858
+	// C++ Reference: checker.cpp check_scope_usage_internal
 	for child := scope.head_child; child != nil; child = child.next {
 		if .Proc in child.flags || .Type in child.flags || .File in child.flags {
 			// These scopes are checked separately, skip them
@@ -1378,7 +1378,7 @@ check_vet_shadowing_assignment :: proc(c: ^Checker, shadowed: ^Entity, node: ^as
 	}
 
 	// Check ternary if expressions (x if cond else y)
-	// C++ Reference: checker.cpp check_vet_shadowing_assignment:631-636
+	// C++ Reference: checker.cpp check_vet_shadowing_assignment
 	if ternary, ok := init.derived.(^ast.Ternary_If_Expr); ok {
 		x := check_vet_shadowing_assignment(c, shadowed, cast(^ast.Node)ternary.x)
 		y := check_vet_shadowing_assignment(c, shadowed, cast(^ast.Node)ternary.y)
@@ -1419,7 +1419,7 @@ check_vet_unused :: proc(c: ^Checker, e: ^Entity, ve: ^Vetted_Entity) -> bool {
 
 	case .Import_Name, .Library_Name:
 		// Report unused imports/libraries
-		// C++ Reference: checker.cpp check_vet_unused:719-725
+		// C++ Reference: checker.cpp check_vet_unused
 		ve.kind = .Unused
 		ve.entity = e
 		return true
@@ -1435,7 +1435,7 @@ check_vet_unused :: proc(c: ^Checker, e: ^Entity, ve: ^Vetted_Entity) -> bool {
 // Fills in the VettedEntity structure with details.
 check_vet_shadowing :: proc(c: ^Checker, e: ^Entity, ve: ^Vetted_Entity) -> bool {
 	// Only variables can shadow
-	// C++ Reference: checker.cpp check_vet_shadowing_assignment:644-646
+	// C++ Reference: checker.cpp check_vet_shadowing_assignment
 	if e.kind != .Variable {
 		return false
 	}
@@ -1448,19 +1448,19 @@ check_vet_shadowing :: proc(c: ^Checker, e: ^Entity, ve: ^Vetted_Entity) -> bool
 	}
 
 	// Parameters don't shadow
-	// C++ Reference: checker.cpp check_vet_shadowing:651-653
+	// C++ Reference: checker.cpp check_vet_shadowing
 	if .Param in e.flags {
 		return false
 	}
 
 	// Variables in global/file/proc scopes don't shadow
-	// C++ Reference: checker.cpp check_vet_shadowing:655-657
+	// C++ Reference: checker.cpp check_vet_shadowing
 	if e.scope != nil && (.Global in e.scope.flags || .File in e.scope.flags || .Proc in e.scope.flags) {
 		return false
 	}
 
 	// Check parent scope (skip if global/file)
-	// C++ Reference: checker.cpp check_vet_shadowing:659-662
+	// C++ Reference: checker.cpp check_vet_shadowing
 	parent := e.scope.parent if e.scope != nil else nil
 	if parent == nil {
 		return false
@@ -1470,7 +1470,7 @@ check_vet_shadowing :: proc(c: ^Checker, e: ^Entity, ve: ^Vetted_Entity) -> bool
 	}
 
 	// Look for shadowed entity in parent scope
-	// C++ Reference: checker.cpp check_vet_shadowing:664-670
+	// C++ Reference: checker.cpp check_vet_shadowing
 	shadowed := scope_lookup(parent, name)
 	if shadowed == nil {
 		return false
@@ -1480,28 +1480,28 @@ check_vet_shadowing :: proc(c: ^Checker, e: ^Entity, ve: ^Vetted_Entity) -> bool
 	}
 
 	// Allow shadowing of global/file scope (commented out in C++)
-	// C++ Reference: checker.cpp check_vet_shadowing:672-674
+	// C++ Reference: checker.cpp check_vet_shadowing
 
 	// Entities must be in the same file
-	// C++ Reference: checker.cpp check_vet_shadowing:676-679
+	// C++ Reference: checker.cpp check_vet_shadowing
 	if e.token.pos.file != shadowed.token.pos.file {
 		return false
 	}
 
 	// Shadowed identifier must appear before this one
-	// C++ Reference: checker.cpp check_vet_shadowing:680-684
+	// C++ Reference: checker.cpp check_vet_shadowing
 	if token_pos_cmp(shadowed.token.pos, e.token.pos) > 0 {
 		return false
 	}
 
 	// If types differ, don't complain
-	// C++ Reference: checker.cpp check_vet_shadowing:685-688
+	// C++ Reference: checker.cpp check_vet_shadowing
 	if !are_types_identical(e.type, shadowed.type) {
 		return false
 	}
 
 	// Ignore intentional redeclaration (x := x)
-	// C++ Reference: checker.cpp check_vet_shadowing:690-700
+	// C++ Reference: checker.cpp check_vet_shadowing
 	if .Using not_in e.flags && e.kind == .Variable {
 		if e_var, ok := &e.variant.(Entity_Variable); ok {
 			if check_vet_shadowing_assignment(c, shadowed, e_var.init_expr) {
@@ -1511,7 +1511,7 @@ check_vet_shadowing :: proc(c: ^Checker, e: ^Entity, ve: ^Vetted_Entity) -> bool
 	}
 
 	// Report shadowing
-	// C++ Reference: checker.cpp check_vet_shadowing:702-706
+	// C++ Reference: checker.cpp check_vet_shadowing
 	ve.kind = .Shadowed
 	ve.entity = e
 	ve.other = shadowed
@@ -1546,26 +1546,26 @@ check_scope_usage_internal :: proc(c: ^Checker, scope: ^Scope, vet_flags_param: 
 	defer delete(vetted_entities)
 
 	// Lock scope for reading (thread safety)
-	// C++ Reference: checker.cpp check_scope_usage_internal:737
+	// C++ Reference: checker.cpp check_scope_usage_internal
 	sync.rw_mutex_shared_lock(&scope.mutex)
 	defer sync.rw_mutex_shared_unlock(&scope.mutex)
 
 	// Check each entity in the scope
-	// C++ Reference: checker.cpp check_scope_usage_internal:738-803
+	// C++ Reference: checker.cpp check_scope_usage_internal
 	for _, e in scope.elements {
 		if e == nil {
 			continue
 		}
 
 		// Use per-entity vet flags if requested
-		// C++ Reference: checker.cpp check_scope_usage_internal:742-745
+		// C++ Reference: checker.cpp check_scope_usage_internal
 		vet_flags := original_vet_flags
 		if per_entity {
 			vet_flags = ast_file_vet_flags(e.file)
 		}
 
 		// Extract individual vet flag checks
-		// C++ Reference: checker.cpp check_scope_usage_internal:747-752
+		// C++ Reference: checker.cpp check_scope_usage_internal
 		vet_unused := Vet_Flag_Unused & vet_flags != {}
 		vet_shadowing := (.Shadowing in vet_flags) || (.Using_Stmt in vet_flags)
 		vet_unused_procedures := .Unused_Procedures in vet_flags
@@ -1574,7 +1574,7 @@ check_scope_usage_internal :: proc(c: ^Checker, scope: ^Scope, vet_flags_param: 
 		}
 
 		// Check for unused entities
-		// C++ Reference: checker.cpp check_scope_usage_internal:754-777
+		// C++ Reference: checker.cpp check_scope_usage_internal
 		ve_unused := Vetted_Entity{}
 		ve_shadowed := Vetted_Entity{}
 		is_unused := false
@@ -1585,7 +1585,7 @@ check_scope_usage_internal :: proc(c: ^Checker, scope: ^Scope, vet_flags_param: 
 		}
 		if vet_unused_procedures && e.kind == .Procedure {
 			// Special handling for unused procedures
-			// C++ Reference: checker.cpp check_scope_usage_internal:759-776
+			// C++ Reference: checker.cpp check_scope_usage_internal
 			if .Used in e.flags {
 				is_unused = false
 			} else if .Require in e.flags {
@@ -1606,11 +1606,11 @@ check_scope_usage_internal :: proc(c: ^Checker, scope: ^Scope, vet_flags_param: 
 		}
 
 		// Check for shadowing
-		// C++ Reference: checker.cpp check_scope_usage_internal:778
+		// C++ Reference: checker.cpp check_scope_usage_internal
 		is_shadowed := vet_shadowing && check_vet_shadowing(c, e, &ve_shadowed)
 
 		// Add to vetted entities list
-		// C++ Reference: checker.cpp check_scope_usage_internal:779-786
+		// C++ Reference: checker.cpp check_scope_usage_internal
 		if is_unused && is_shadowed {
 			ve_both := ve_shadowed
 			ve_both.kind = .Shadowed_And_Unused
@@ -1621,13 +1621,13 @@ check_scope_usage_internal :: proc(c: ^Checker, scope: ^Scope, vet_flags_param: 
 			append(&vetted_entities, ve_shadowed)
 		} else if e.kind == .Variable && (.Param not_in e.flags && .Using not_in e.flags && .Static not_in e.flags && .Field not_in e.flags) {
 			// Check for large stack allocations
-			// C++ Reference: checker.cpp check_scope_usage_internal:787-802
+			// C++ Reference: checker.cpp check_scope_usage_internal
 			if e_var, ok := &e.variant.(Entity_Variable); ok && !e_var.is_global && e.type != nil {
 				sz := type_size_of(e.type)
 				// Warn about allocations >256 KiB
-				// C++ Reference: checker.cpp check_scope_usage_internal:789-791
+				// C++ Reference: checker.cpp check_scope_usage_internal
 				if sz > (1 << 18) {
-					// C++ Reference: checker.cpp check_scope_usage_internal:800-808. C++ derives is_ref from TWO
+					// C++ Reference: checker.cpp check_scope_usage_internal. C++ derives is_ref from TWO
 					// entity flags, not one:
 					//
 					//	if ((e->flags & EntityFlag_ForValue) != 0) {
@@ -1660,25 +1660,25 @@ check_scope_usage_internal :: proc(c: ^Checker, scope: ^Scope, vet_flags_param: 
 	}
 
 	// Sort vetted entities by token position
-	// C++ Reference: checker.cpp check_scope_usage_internal:806
+	// C++ Reference: checker.cpp check_scope_usage_internal
 	slice.sort_by_cmp(vetted_entities[:], vetted_entity_variable_pos_cmp)
 
 	// Report errors for vetted entities
-	// C++ Reference: checker.cpp check_scope_usage_internal:808-844
+	// C++ Reference: checker.cpp check_scope_usage_internal
 	for ve in vetted_entities {
 		e := ve.entity
 		other := ve.other
 		name := e.token.text
 
 		// Use per-entity vet flags if requested
-		// C++ Reference: checker.cpp check_scope_usage_internal:813-816
+		// C++ Reference: checker.cpp check_scope_usage_internal
 		vet_flags := original_vet_flags
 		if per_entity {
 			vet_flags = ast_file_vet_flags(e.file)
 		}
 
 		// Report based on kind
-		// C++ Reference: checker.cpp check_scope_usage_internal:818-843
+		// C++ Reference: checker.cpp check_scope_usage_internal
 		if ve.kind == .Shadowed_And_Unused {
 			error(e.token, "'%s' declared but not used, possibly shadows declaration at line %d", name, other.token.pos.line)
 		} else if vet_flags != {} {
@@ -1722,27 +1722,27 @@ check_scope_usage_internal :: proc(c: ^Checker, scope: ^Scope, vet_flags_param: 
 //   true if checking succeeded, false if failed
 check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^Decl_Info, type: ^Type, body: ^ast.Block_Stmt) -> bool {
 	// Early validation
-	// C++ Reference: check_decl.cpp check_proc_body:2117-2119
+	// C++ Reference: check_decl.cpp check_proc_body
 	if body == nil {
 		return false
 	}
 	// Note: body is already typed as ^ast.Block_Stmt, so type system guarantees it's a block
 
 	// Determine procedure name for error messages
-	// C++ Reference: check_decl.cpp check_proc_body:2122-2128
+	// C++ Reference: check_decl.cpp check_proc_body
 	proc_name := token.text if token.kind == .Ident else "(anonymous-procedure)"
 
 	// Create local context copy (allows modification without affecting caller)
-	// C++ Reference: check_decl.cpp check_proc_body:2130-2131
+	// C++ Reference: check_decl.cpp check_proc_body
 	new_ctx := ctx_^
 	ctx := &new_ctx
 
 	// Validate procedure type
-	// C++ Reference: check_decl.cpp check_proc_body:2133
+	// C++ Reference: check_decl.cpp check_proc_body
 	assert(type.kind == .Proc)
 
 	// Setup procedure checking context
-	// C++ Reference: check_decl.cpp check_proc_body:2135-2140
+	// C++ Reference: check_decl.cpp check_proc_body
 	ctx.scope = decl.scope
 	ctx.decl = decl
 	ctx.proc_name = proc_name
@@ -1751,13 +1751,13 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 	ctx.curr_proc_calling_convention = type.variant.(Type_Proc).calling_convention
 
 	// Link parent procedure for nested procs
-	// C++ Reference: check_decl.cpp check_proc_body:2142-2144
+	// C++ Reference: check_decl.cpp check_proc_body
 	if decl.parent != nil && decl.entity != nil && decl.parent.entity != nil {
 		decl.entity.parent_proc_decl = decl.parent
 	}
 
 	// Validate calling convention (disallow "none" in non-runtime packages)
-	// C++ Reference: check_decl.cpp check_proc_body:2146-2152
+	// C++ Reference: check_decl.cpp check_proc_body
 	//
 	// An empty `if ctx.pkg == nil {} else {}` sat here doing nothing at all -- left-over
 	// scaffolding from someone investigating whether pkg can be nil. Deleted (#587).
@@ -1777,7 +1777,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 	}
 
 	// Process 'using' parameters (expand struct fields into scope)
-	// C++ Reference: check_decl.cpp check_proc_body:2156-2210
+	// C++ Reference: check_decl.cpp check_proc_body
 	//
 	// This section handles procedure parameters marked with 'using'.
 	// For each 'using' parameter of struct type, we create a using variable
@@ -1788,11 +1788,11 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 	proc_type := type.variant.(Type_Proc)
 	if proc_type.param_count > 0 {
 		// Iterate over all parameters
-		// C++ Reference: check_decl.cpp check_proc_body:2161-2208
+		// C++ Reference: check_decl.cpp check_proc_body
 		params := proc_type.params.variant.(Type_Tuple)
 		for e in params.variables {
 			// Skip non-variables
-			// C++ Reference: check_decl.cpp check_proc_body:2164-2166
+			// C++ Reference: check_decl.cpp check_proc_body
 			if e == nil {
 				continue
 			}
@@ -1801,7 +1801,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 			}
 
 			// Check for unspecialized polymorphic types in parameters
-			// C++ Reference: check_decl.cpp check_proc_body:2167-2176
+			// C++ Reference: check_decl.cpp check_proc_body
 			is_poly := is_type_polymorphic(e.type)
 			if is_poly && is_type_polymorphic_record_unspecialized(e.type) {
 				type_str := type_to_string(e.type)
@@ -1815,34 +1815,34 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 			}
 
 			// Check if parameter has 'using' flag
-			// C++ Reference: check_decl.cpp check_proc_body:2178-2180
+			// C++ Reference: check_decl.cpp check_proc_body
 			if .Using not_in e.flags {
 				continue
 			}
 
 			// Using requires non-blank identifier
-			// C++ Reference: check_decl.cpp check_proc_body:2181-2184
+			// C++ Reference: check_decl.cpp check_proc_body
 			if is_blank_ident(e.token.text) {
 				error(e.token, "'using' a procedure parameter requires a non blank identifier")
 				break
 			}
 
 			// Determine if parameter is passed by value
-			// C++ Reference: check_decl.cpp check_proc_body:2186
+			// C++ Reference: check_decl.cpp check_proc_body
 			is_value := (.Value in e.flags) && !is_type_pointer(e.type)
 
 			// Get base struct type (deref pointers)
-			// C++ Reference: check_decl.cpp check_proc_body:2188
+			// C++ Reference: check_decl.cpp check_proc_body
 			t := base_type(type_deref(e.type))
 
 			// Using only works with struct types
-			// C++ Reference: check_decl.cpp check_proc_body:2189-2207
+			// C++ Reference: check_decl.cpp check_proc_body
 			if t.kind == .Struct {
 				struct_scope := t.variant.(Type_Struct).scope
 				assert(struct_scope != nil)
 
 				// Lock scope mutex for thread safety
-				// C++ Reference: check_decl.cpp check_proc_body:2192
+				// C++ Reference: check_decl.cpp check_proc_body
 				sync.rw_mutex_shared_lock(&struct_scope.mutex)
 				defer sync.rw_mutex_shared_unlock(&struct_scope.mutex)
 
@@ -1853,7 +1853,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 				// above already cites, because this note explains that block's iteration order. A second
 				// reference to an already-cited range always reads as a backwards jump. Do not "fix" it.
 				//
-				// C++ Reference: check_decl.cpp check_proc_body:2189-2205 (the old citation said 2086-2095, which
+				// C++ Reference: check_decl.cpp check_proc_body (the old citation said 2086-2095, which
 				// is dependency propagation between decl->deps and decl->parent->deps -- a drifted
 				// reference of the #134 family, found by grepping for alloc_entity_using_variable
 				// rather than trusting the line number):
@@ -1893,17 +1893,17 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 					}
 					if field.kind == .Variable {
 						// Allocate using variable entity
-						// C++ Reference: check_decl.cpp check_proc_body:2196
+						// C++ Reference: check_decl.cpp check_proc_body
 						uvar := alloc_entity_using_variable(e, field.token, field.type, nil)
 
 						// Propagate Value flag if needed
-						// C++ Reference: check_decl.cpp check_proc_body:2197
+						// C++ Reference: check_decl.cpp check_proc_body
 						if is_value {
 							uvar.flags += {.Value}
 						}
 
 						// Add to using entities list
-						// C++ Reference: check_decl.cpp check_proc_body:2199-2200
+						// C++ Reference: check_decl.cpp check_proc_body
 						puv := Proc_Using_Var {
 							e    = e,
 							uvar = uvar,
@@ -1913,7 +1913,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 				}
 			} else {
 				// Error: using only works with structs
-				// C++ Reference: check_decl.cpp check_proc_body:2205-2207
+				// C++ Reference: check_decl.cpp check_proc_body
 				error(e.token, "'using' can only be applied to variables of type struct")
 				break
 			}
@@ -1921,7 +1921,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 	}
 
 	// Insert using variables into procedure scope (first pass, check for conflicts)
-	// C++ Reference: check_decl.cpp check_proc_body:2212-2224
+	// C++ Reference: check_decl.cpp check_proc_body
 	// Thread-safe scope modification
 	{
 		sync.rw_mutex_lock(&ctx.scope.mutex)
@@ -1932,11 +1932,11 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 			uvar := puv.uvar
 
 			// Check for naming conflicts in scope
-			// C++ Reference: check_decl.cpp check_proc_body:2216
+			// C++ Reference: check_decl.cpp check_proc_body
 			prev := scope_insert_no_mutex(ctx.scope, uvar)
 			if prev != nil {
 				// Error: namespace collision
-				// C++ Reference: check_decl.cpp check_proc_body:2217-2221
+				// C++ Reference: check_decl.cpp check_proc_body
 				error(e.token, "Namespace collision while 'using' procedure argument '%s' of: %s", e.token.text, prev.token.text)
 				error_line("%s != %s\n", uvar.token.text, prev.token.text)
 				break
@@ -1945,7 +1945,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 	}
 
 	// Evaluate where clauses
-	// C++ Reference: check_decl.cpp check_proc_body:2227
+	// C++ Reference: check_decl.cpp check_proc_body
 	where_clauses: []^ast.Expr = nil
 	if decl.proc_lit != nil {
 		where_clauses = decl.proc_lit.where_clauses
@@ -1955,50 +1955,50 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 	where_clause_ok := evaluate_where_clauses(ctx, nil, decl.scope, where_clauses, !sync.atomic_load_explicit(&decl.where_clauses_evaluated, .Relaxed))
 	if !where_clause_ok {
 		// Where clauses failed, don't check body
-		// C++ Reference: check_decl.cpp check_proc_body:2228-2230
+		// C++ Reference: check_decl.cpp check_proc_body
 		return false
 	}
 	// LEDGER #886: seq-cst store, matching C++'s plain `= true` on a std::atomic.
 	sync.atomic_store(&decl.where_clauses_evaluated, true)
 
 	// Open procedure body scope
-	// C++ Reference: check_decl.cpp check_proc_body:2233
+	// C++ Reference: check_decl.cpp check_proc_body
 	check_open_scope(ctx, body)
 	{
 		// Set scope's declaration info
-		// C++ Reference: check_decl.cpp check_proc_body:2235
+		// C++ Reference: check_decl.cpp check_proc_body
 		ctx.scope.decl_info = decl
 
 		// Insert using variables into body scope (second pass, no error checking)
-		// C++ Reference: check_decl.cpp check_proc_body:2237-2242
+		// C++ Reference: check_decl.cpp check_proc_body
 		for puv in using_entities {
 			uvar := puv.uvar
 			prev := scope_insert(ctx.scope, uvar)
 			_ = prev // Ignore conflicts (already checked above)
-			// C++ Reference: check_decl.cpp check_proc_body:2241: "Don't err here"
+			// C++ Reference: check_decl.cpp check_proc_body: "Don't err here"
 		}
 
 		// Sanity checks for procedure state
-		// C++ Reference: check_decl.cpp check_proc_body:2244-2249
+		// C++ Reference: check_decl.cpp check_proc_body
 		assert(decl.proc_checked_state != .Checked)
 		if decl.defer_use_checked {
 			assert(is_type_polymorphic(type, true))
 			// This should never happen in production
-			// C++ Reference: check_decl.cpp check_proc_body:2247
+			// C++ Reference: check_decl.cpp check_proc_body
 			error(token, "Defer Use Checked: %s", decl.entity.token.text)
 			assert(!decl.defer_use_checked)
 		}
 
 		// Check all statements in the procedure body
-		// C++ Reference: check_decl.cpp check_proc_body:2251
+		// C++ Reference: check_decl.cpp check_proc_body
 		check_stmt_list(ctx, body.stmts, {.Check_Scope_Decls})
 
 		// Mark defer use as checked
-		// C++ Reference: check_decl.cpp check_proc_body:2253
+		// C++ Reference: check_decl.cpp check_proc_body
 		decl.defer_use_checked = true
 
 		// Validate all value declarations have entities
-		// C++ Reference: check_decl.cpp check_proc_body:2255-2266
+		// C++ Reference: check_decl.cpp check_proc_body
 		// NOTE: In Odin, entities are stored in ast_entity_map, not on AST nodes
 		for stmt in body.stmts {
 			if stmt.derived != nil {
@@ -2008,7 +2008,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 						if ident, is_ident := name.derived.(^ast.Ident); is_ident {
 							if !is_blank_ident(ident.name) {
 								// Get entity directly from AST node
-								// C++ Reference: check_decl.cpp check_proc_body:2261 (name->Ident.entity)
+								// C++ Reference: check_decl.cpp check_proc_body (name->Ident.entity)
 								entity := cast(^Entity)cast(rawptr)ident.entity
 								assert(entity != nil, "Value declaration identifier must have entity")
 							}
@@ -2019,45 +2019,45 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 		}
 
 		// Validate return statements for procedures with results
-		// C++ Reference: check_decl.cpp check_proc_body:2268-2276
+		// C++ Reference: check_decl.cpp check_proc_body
 		if proc_type.result_count > 0 {
 			if !check_is_terminating(ctx, &body.node, "") {
 				if token.kind == .Ident {
 					error(body.close, "Missing return statement at the end of the procedure '%s'", token.text)
 				} else {
 					// Anonymous procedure (lambda)
-					// C++ Reference: check_decl.cpp check_proc_body:2273-2274
+					// C++ Reference: check_decl.cpp check_proc_body
 					error(body.close, "Missing return statement at the end of the procedure")
 				}
 			}
 		} else if proc_type.diverging {
 			// Validate diverging procedures have diverging call
-			// C++ Reference: check_decl.cpp check_proc_body:2277-2286
+			// C++ Reference: check_decl.cpp check_proc_body
 			if !check_is_terminating(ctx, &body.node, "") {
 				if token.kind == .Ident {
 					error(body.close, "Missing diverging call at the end of the procedure '%s'", token.text)
 				} else {
 					// Anonymous procedure (lambda)
-					// C++ Reference: check_decl.cpp check_proc_body:2282-2283
+					// C++ Reference: check_decl.cpp check_proc_body
 					error(body.close, "Missing diverging call at the end of the procedure")
 				}
 			}
 		}
 	}
 	// Close procedure body scope
-	// C++ Reference: check_decl.cpp check_proc_body:2289
+	// C++ Reference: check_decl.cpp check_proc_body
 	check_close_scope(ctx)
 
 	// Check for unused variables and shadowing
-	// C++ Reference: check_decl.cpp check_proc_body:2291
+	// C++ Reference: check_decl.cpp check_proc_body
 	check_scope_usage(ctx.checker, ctx.scope, check_vet_flags(&ctx.checker.info, &body.node))
 
 	// Propagate dependencies from nested proc to parent
-	// C++ Reference: check_decl.cpp check_proc_body:2293
+	// C++ Reference: check_decl.cpp check_proc_body
 	add_deps_from_child_to_parent(decl)
 
 	// Track variadic reuse optimization data
-	// C++ Reference: check_decl.cpp check_proc_body:2295-2302
+	// C++ Reference: check_decl.cpp check_proc_body
 	for vr in decl.variadic_reuses {
 		if vr.slice_type == nil do continue
 		assert(vr.slice_type.kind == .Slice, "variadic_reuse slice_type must be Slice")
@@ -2070,7 +2070,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 	}
 
 	// Success
-	// C++ Reference: check_decl.cpp check_proc_body:2304
+	// C++ Reference: check_decl.cpp check_proc_body
 	return true
 }
 
@@ -2298,7 +2298,7 @@ type_align_of :: proc(t: ^Type) -> int {
 		return type_align_of(enum_type.base_type)
 
 	case .Bit_Set:
-		// C++ Reference: types.cpp type_align_of_internal:4506-4517. The `underlying` branch was ported; the BIT-COUNT
+		// C++ Reference: types.cpp type_align_of_internal. The `underlying` branch was ported; the BIT-COUNT
 		// LADDER under it was replaced with a bare `return 8`, so every bit_set without an
 		// explicit backing type reported align 8 regardless of width.
 		//
@@ -2465,7 +2465,7 @@ init_procedures_cmp_generic :: proc(a_ptr, b_ptr: rawptr, user_data: rawptr) -> 
 	}
 
 	// Compare package order first
-	// C++ Reference: checker.cpp init_procedures_cmp:7462-7464 (if (x->pkg != y->pkg) { ... })
+	// C++ Reference: checker.cpp init_procedures_cmp (if (x->pkg != y->pkg) { ... })
 	// The previous citation here pointed ~360 lines earlier, into handle_raddbg_type_view --
 	// unrelated string parsing. Same systematic checker.cpp drift LEDGER 134 measured at
 	// +193..+334, now larger. Line numbers of the stale target are deliberately NOT repeated:
@@ -2615,15 +2615,15 @@ check_test_procedures :: proc(c: ^Checker) {
 	}
 
 	// Remove duplicates (sorted array, check neighbors only)
-	// C++ Reference: checker.cpp check_test_procedures:6725
-	// (the old citation said :6370, which is a GB_ASSERT inside find_entity_path -- wrong function.
+	// C++ Reference: checker.cpp check_test_procedures
+	// (An earlier citation here landed inside find_entity_path -- the wrong function.
 	// C++ spells the helper `remove_neighbouring_duplicate_entires_from_sorted_array`, with `entires`
 	// for `entries`; the port corrects the spelling deliberately, so the names differ by that typo.)
 	remove_neighbouring_duplicate_entries_from_sorted_array(&c.info.testing_procedures)
 }
 
 // check_unchecked_bodies detects procedures with unchecked bodies
-// C++ Reference: checker.cpp check_unchecked_bodies:6643-6675
+// C++ Reference: checker.cpp check_unchecked_bodies
 //
 // This is a sanity checker to ensure all procedure bodies have been checked.
 // It handles race conditions from multithreaded parsing where procedures might
@@ -2641,11 +2641,11 @@ check_unchecked_bodies :: proc(c: ^Checker) {
 	// whether procedures are queued to thread pool or processed directly
 
 	// Set global flag to false before starting
-	// C++ Reference: checker.cpp check_unchecked_bodies:6655
+	// C++ Reference: checker.cpp check_unchecked_bodies
 	sync.atomic_store(&global_procedure_body_in_worker_queue, false)
 
 	// Find all entities in the minimum dependency set and schedule them
-	// C++ Reference: checker.cpp check_unchecked_bodies:6657-6661
+	// C++ Reference: checker.cpp check_unchecked_bodies
 	for entity in c.info.entities {
 		if entity.min_dep_count > 0 {
 			// This entity is in the dependency graph, ensure its procedure is checked
@@ -2654,10 +2654,10 @@ check_unchecked_bodies :: proc(c: ^Checker) {
 	}
 
 	// Process all scheduled procedures
-	// C++ Reference: checker.cpp check_unchecked_bodies:6663-6671
+	// C++ Reference: checker.cpp check_unchecked_bodies
 	if !sync.atomic_load(&global_procedure_body_in_worker_queue) {
 		// Single-threaded mode: process directly
-		// C++ Reference: checker.cpp check_unchecked_bodies:6664-6668
+		// C++ Reference: checker.cpp check_unchecked_bodies
 		untyped := &check_procedure_bodies_worker_data[0].untyped
 		for i := 0; i < len(c.procs_to_check); i += 1 {
 			pi := c.procs_to_check[i]
@@ -2666,18 +2666,18 @@ check_unchecked_bodies :: proc(c: ^Checker) {
 		clear(&c.procs_to_check)
 	} else {
 		// Parallel mode: wait for workers
-		// C++ Reference: checker.cpp check_unchecked_bodies:6669-6671
+		// C++ Reference: checker.cpp check_unchecked_bodies
 		thread_pool_wait()
 	}
 
 	// Reset global flags
-	// C++ Reference: checker.cpp check_unchecked_bodies:6673-6674
+	// C++ Reference: checker.cpp check_unchecked_bodies
 	sync.atomic_store(&global_procedure_body_in_worker_queue, false)
 	sync.atomic_store(&global_after_checking_procedure_bodies, true)
 }
 
 // check_safety_all_procedures_for_unchecked performs safety validation
-// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked:6677-6703
+// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked
 //
 // This function is a debug/safety measure that checks all procedures in
 // the all_procedures_queue to ensure none were missed during checking.
@@ -2689,57 +2689,57 @@ check_unchecked_bodies :: proc(c: ^Checker) {
 // 3. Adds all procedures to the final all_procedures array
 check_safety_all_procedures_for_unchecked :: proc(c: ^Checker) {
 	// This is a debug-only function in C++
-	// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked:6678 (GB_ASSERT(DEBUG_CHECK_ALL_PROCEDURES))
+	// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked (GB_ASSERT(DEBUG_CHECK_ALL_PROCEDURES))
 	// In production builds, this is typically disabled
 	// We'll implement it for completeness but note it's for debugging
 
 	// Create untyped expression map for checking
-	// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked:6679
+	// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked
 	untyped: map[^ast.Expr]^Expr_Info
 	defer delete(untyped)
 
 	// Reserve space in all_procedures array based on queue count
-	// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked:6683
+	// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked
 	queue_count := queue.mpsc_count(&c.info.all_procedures_queue)
 	if queue_count > 0 {
 		reserve(&c.info.all_procedures, queue_count)
 	}
 
 	// Drain the all_procedures_queue and check each one
-	// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked:6685-6702
+	// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked
 	for {
 		pi, ok := queue.mpsc_dequeue(&c.info.all_procedures_queue)
 		if !ok do break
 
 		// Validate procedure info
-		// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked:6686-6687
+		// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked
 		assert(pi != nil)
 		assert(pi.decl != nil)
 
 		// Get entity and check state
-		// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked:6688-6690
+		// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked
 		e := pi.decl.entity
 		proc_checked_state := pi.decl.proc_checked_state
 		_ = proc_checked_state // Used for debugging in C++
 
 		// Check if procedure needs checking
-		// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked:6691-6699
+		// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked
 		if e != nil && !sync.atomic_load(&e.proc_body_checked) {
 			if .Used in e.flags {
 				// Debug output (commented in C++)
-				// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked:6693-6695
+				// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked
 				// debugf("%s :: %s\n", e.token.text, type_to_string(e.type))
 				// debugf("proc body unchecked\n")
 				// debugf("Checked State: %s\n\n", proc_checked_state)
 
 				// Check the procedure
-				// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked:6697
+				// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked
 				consume_proc_info(c, pi, &untyped)
 			}
 		}
 
 		// Add to all_procedures array
-		// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked:6701
+		// C++ Reference: checker.cpp check_safety_all_procedures_for_unchecked
 		append(&c.info.all_procedures, pi)
 	}
 }
@@ -2815,7 +2815,7 @@ check_update_dependency_tree_for_procedures :: proc(c: ^Checker) {
 		}
 
 		// Wait for all workers to complete
-		// C++ Reference: checker.cpp check_update_dependency_tree_for_procedures:7578
+		// C++ Reference: checker.cpp check_update_dependency_tree_for_procedures
 		thread_pool_wait()
 	} else {
 		// Sequential mode: process directly
@@ -2841,8 +2841,8 @@ check_update_dependency_tree_for_procedures :: proc(c: ^Checker) {
 
 // ======================================================================================
 // SCOPE USAGE VALIDATION
-// C++ Reference: checker.cpp check_scope_usage_file_worker:7590-7596,
-//                check_scope_usage_pkg_worker:7598-7603, check_all_scope_usages:7607-7618
+// C++ Reference: checker.cpp check_scope_usage_file_worker,
+//                check_scope_usage_pkg_worker, check_all_scope_usages
 // ======================================================================================
 
 // Scope_Check_Task holds data for a scope checking task
@@ -2858,7 +2858,7 @@ Scope_Check_Pkg_Task :: struct {
 }
 
 // scope_check_file_worker_proc is the thread pool worker wrapper for file scope checking
-// C++ Reference: checker.cpp check_scope_usage_file_worker:7590-7596
+// C++ Reference: checker.cpp check_scope_usage_file_worker
 scope_check_file_worker_proc :: proc(data: rawptr) -> int {
 	task := cast(^Scope_Check_File_Task)data
 	check_scope_usage_file_worker(task.c, task.f)
@@ -2866,7 +2866,7 @@ scope_check_file_worker_proc :: proc(data: rawptr) -> int {
 }
 
 // scope_check_pkg_worker_proc is the thread pool worker wrapper for package scope checking
-// C++ Reference: checker.cpp check_scope_usage_pkg_worker:7598-7603
+// C++ Reference: checker.cpp check_scope_usage_pkg_worker
 scope_check_pkg_worker_proc :: proc(data: rawptr) -> int {
 	task := cast(^Scope_Check_Pkg_Task)data
 	check_scope_usage_pkg_worker(task.c, task.pkg)
@@ -2874,17 +2874,17 @@ scope_check_pkg_worker_proc :: proc(data: rawptr) -> int {
 }
 
 // check_scope_usage_file_worker is the worker thread entry point for file scope checking
-// C++ Reference: checker.cpp check_scope_usage_file_worker:7590-7596
+// C++ Reference: checker.cpp check_scope_usage_file_worker
 //
 // This function is called by worker threads (or sequentially) to check
 // a single file's scope for unused/shadowed variables.
 check_scope_usage_file_worker :: proc(c: ^Checker, f: ^ast.File) {
 	// Get file-specific vet flags
-	// C++ Reference: checker.cpp check_scope_usage_file_worker:7593
+	// C++ Reference: checker.cpp check_scope_usage_file_worker
 	vet_flags := ast_file_vet_flags(f)
 
 	// Check the file's scope
-	// C++ Reference: checker.cpp check_scope_usage_file_worker:7594
+	// C++ Reference: checker.cpp check_scope_usage_file_worker
 	// Note: C++ stores scope on AstFile, we track it in info.file_scopes map
 	file_scope, has_scope := c.info.file_scopes[f]
 	if has_scope {
@@ -2893,13 +2893,13 @@ check_scope_usage_file_worker :: proc(c: ^Checker, f: ^ast.File) {
 }
 
 // check_scope_usage_pkg_worker is the worker thread entry point for package scope checking
-// C++ Reference: checker.cpp check_scope_usage_pkg_worker:7598-7603
+// C++ Reference: checker.cpp check_scope_usage_pkg_worker
 //
 // This function is called by worker threads (or sequentially) to check
 // a single package's scope for unused/shadowed variables.
 check_scope_usage_pkg_worker :: proc(c: ^Checker, pkg: ^ast.Package) {
 	// Check package scope with per_entity mode
-	// C++ Reference: checker.cpp check_scope_usage_pkg_worker:7601
+	// C++ Reference: checker.cpp check_scope_usage_pkg_worker
 	// Note: vet_flags=0 for package scopes, per_entity=true
 	// Note: C++ stores scope on AstPackage, we track it in info.package_scopes map
 	pkg_scope, has_scope := c.info.package_scopes[pkg]
@@ -2909,7 +2909,7 @@ check_scope_usage_pkg_worker :: proc(c: ^Checker, pkg: ^ast.Package) {
 }
 
 // check_all_scope_usages checks all file and package scopes for issues
-// C++ Reference: checker.cpp check_all_scope_usages:7607-7618
+// C++ Reference: checker.cpp check_all_scope_usages
 //
 // This function iterates over all files and packages in the checker,
 // checking each scope for:
@@ -2917,7 +2917,7 @@ check_scope_usage_pkg_worker :: proc(c: ^Checker, pkg: ^ast.Package) {
 // - Shadowed declarations
 // - Large stack allocations
 // TWO PORT-ONLY SHAPES HERE, both deliberate and both verified against C++ while reading:
-//   * C++ has NO thread-count branch (checker.cpp check_all_scope_usages:7607-7618): it always adds tasks and then calls
+//   * C++ has NO thread-count branch (checker.cpp check_all_scope_usages): it always adds tasks and then calls
 //     thread_pool_wait(). The port's sequential path exists because global_thread_pool may be nil in
 //     a hosted session; with one thread the two are observationally identical, since C++'s pool would
 //     run the same tasks to completion inside thread_pool_wait().
@@ -2936,13 +2936,13 @@ check_all_scope_usages :: proc(c: ^Checker) {
 	// Sequential mode (single-threaded)
 	if thread_count == 1 {
 		// Check all file scopes
-		// C++ Reference: checker.cpp check_all_scope_usages:7608-7611
+		// C++ Reference: checker.cpp check_all_scope_usages
 		for file in sorted_files(c.info.files) {
 			check_scope_usage_file_worker(c, file)
 		}
 
 		// Check all package scopes
-		// C++ Reference: checker.cpp check_all_scope_usages:7612-7615
+		// C++ Reference: checker.cpp check_all_scope_usages
 		for pkg in sorted_packages(&c.info) {
 			check_scope_usage_pkg_worker(c, pkg)
 		}
@@ -2957,7 +2957,7 @@ check_all_scope_usages :: proc(c: ^Checker) {
 	defer delete(pkg_tasks)
 
 	// Submit file scope checking tasks
-	// C++ Reference: checker.cpp check_all_scope_usages:7608-7611
+	// C++ Reference: checker.cpp check_all_scope_usages
 	file_idx := 0
 	for file in sorted_files(c.info.files) {
 		file_tasks[file_idx] = Scope_Check_File_Task{c = c, f = file}
@@ -2966,7 +2966,7 @@ check_all_scope_usages :: proc(c: ^Checker) {
 	}
 
 	// Submit package scope checking tasks
-	// C++ Reference: checker.cpp check_all_scope_usages:7612-7615
+	// C++ Reference: checker.cpp check_all_scope_usages
 	pkg_idx := 0
 	for pkg in sorted_packages(&c.info) {
 		pkg_tasks[pkg_idx] = Scope_Check_Pkg_Task{c = c, pkg = pkg}
@@ -2975,7 +2975,7 @@ check_all_scope_usages :: proc(c: ^Checker) {
 	}
 
 	// Wait for all workers to complete
-	// C++ Reference: checker.cpp check_all_scope_usages:7617
+	// C++ Reference: checker.cpp check_all_scope_usages
 	thread_pool_wait()
 }
 

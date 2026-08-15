@@ -954,6 +954,11 @@ Builtin_Proc_Id :: enum {
 	// Additional core builtins
 	Concatenate,
 	Soa_Struct,
+	// #926: was MISSING ENTIRELY -- no enum member, no table entry, no dispatch arm. C++ declares
+	// it beside soa_struct (checker_builtin_procs.hpp), which is where it sits here too. Found by
+	// diffing all 295 builtin declarations between the two tables, not by any failing test: no
+	// generated cell exercises it.
+	Soa_Copy_From_Slice,
 	Procedure_Of,
 }
 
@@ -1191,6 +1196,17 @@ Type_Bit_Field :: struct {
 	node:         ^Node,
 	bit_sizes:    [dynamic]int, // TODO: u8 and i64 iirc
 	bit_offsets:  [dynamic]int,
+
+	// tags is the per-field TAG array, parallel to `fields` exactly as bit_sizes and bit_offsets
+	// are. C++ Reference: TypeBitField's `String *tags; /*count == fields.count*/`.
+	//
+	// #904: this field did not exist, and check_bit_field_type_expr never mentioned a tag, so
+	// every `bit_field` tag in the tree was PARSED AND DISCARDED -- `ast.Bit_Field_Field.tag`
+	// carries it and the parser fills it in, but the checker had nowhere to put it. Structs were
+	// never affected; Type_Struct has had `tags` all along. No diagnostic gate could see the gap
+	// (nothing diagnoses on tag content) and the model gate could not either until schema v4 put
+	// tags in the dump. LEDGER #899/#902/#904.
+	tags:         [dynamic]string,
 }
 
 Type_Simd_Vector :: struct {

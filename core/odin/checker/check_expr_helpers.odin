@@ -685,7 +685,7 @@ write_expr_to_string :: proc(builder: ^strings.Builder, node: ^ast.Node, shortha
 	case ^ast.Field_List:
 		// Decide whether to print `name: type` or just `type` for every field.
 		//
-		// C++ Reference: check_expr.cpp write_expr_to_string:13257-13273.
+		// C++ Reference: check_expr.cpp write_expr_to_string.
 		//
 		// The test on the first name MUST be `!is_blank_ident_node(...)`, not "is an Ident
 		// whose name is not _". The two agree on every ordinary name and INVERT on names that
@@ -893,7 +893,7 @@ check_matrix_type_hint :: proc(matrix_type: ^Type, type_hint: ^Type) -> ^Type {
 			xt_matrix := &xt.variant.(Type_Matrix)
 			th_matrix := &th.variant.(Type_Matrix)
 
-			// C++ Reference: check_expr.cpp check_matrix_type_hint:4215-4222 (merge ebac23eb0).
+			// C++ Reference: check_expr.cpp check_matrix_type_hint (merge ebac23eb0).
 			// TWO changes upstream, only one of which the port needed:
 			//   (a) `} if (` -> `} else if (` -- upstream's missing `else` meant the "ignore"
 			//       branch FELL THROUGH into the dimension test, so two matrices with different
@@ -1214,12 +1214,12 @@ exact_bit_set_all_set_mask :: proc(type: ^Type) -> Exact_Value {
 // Used in for-in loops and array literals with range indices
 // C++ Reference: check_expr.cpp:8578-8676
 check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x: ^Operand, y: ^Operand, inline_for_depth: ^Exact_Value, type_hint: ^Type = nil) -> bool {
-	// C++ Reference: check_expr.cpp check_call_parameter_mixture:8597-8599
+	// C++ Reference: check_expr.cpp check_call_parameter_mixture
 	if !is_ast_range(cast(^ast.Expr)node) {
 		return false
 	}
 
-	// C++ Reference: check_expr.cpp check_call_parameter_mixture:8601
+	// C++ Reference: check_expr.cpp check_call_parameter_mixture
 	expr := cast(^ast.Expr)node
 	binary_expr, ok := expr.derived.(^ast.Binary_Expr)
 	if !ok {
@@ -1227,7 +1227,7 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 	}
 
 	// Check left and right operands
-	// C++ Reference: check_expr.cpp check_call_parameter_mixture:8603-8610
+	// C++ Reference: check_expr.cpp check_call_parameter_mixture
 	check_expr_with_type_hint(ctx, x, binary_expr.left, type_hint)
 	if x.mode == .Invalid {
 		return false
@@ -1272,7 +1272,7 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 	type := x.type
 
 	// Validate type for range expressions
-	// C++ Reference: check_expr.cpp check_range:9297-9307
+	// C++ Reference: check_expr.cpp check_range
 	if is_for_loop {
 		if !is_type_integer(type) && !is_type_float(type) && !is_type_enum(type) {
 			error_token(binary_expr.op, "Only numerical types are allowed within interval expressions")
@@ -1286,7 +1286,7 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 	}
 
 	// If both operands are constant, validate range and compute depth
-	// C++ Reference: check_expr.cpp check_range:9309-9339
+	// C++ Reference: check_expr.cpp check_range
 	if x.mode == .Constant && y.mode == .Constant {
 		a := x.value
 		b := y.value
@@ -1294,7 +1294,7 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 		assert(are_types_identical(x.type, y.type))
 
 		// Determine comparison operator based on range type
-		// C++ Reference: check_expr.cpp check_range:9316-9322
+		// C++ Reference: check_expr.cpp check_range
 		op: tokenizer.Token_Kind
 		#partial switch binary_expr.op.kind {
 		case .Ellipsis:
@@ -1306,7 +1306,7 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 		case:
 			// UNREACHABLE IN BOTH IMPLEMENTATIONS, and left alone deliberately (#266: do not
 			// implement or "fix" unreachable branches). check_range's own entry guard is
-			// is_ast_range, which ends in is_token_range (C++ parser.cpp is_token_range:1694-1702) accepting
+			// is_ast_range, which ends in is_token_range (C++ parser.cpp is_token_range) accepting
 			// EXACTLY {Ellipsis, RangeFull, RangeHalf} -- the same three the port's
 			// is_ast_range accepts (check_stmt.odin:4649). No fourth operator can arrive here.
 			//
@@ -1320,7 +1320,7 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 		}
 
 		// Validate range ordering
-		// C++ Reference: check_expr.cpp check_range:9323-9328
+		// C++ Reference: check_expr.cpp check_range
 		valid_range := compare_exact_values(op, a, b)
 		if !valid_range {
 			error_token(binary_expr.op, "Invalid interval range")
@@ -1328,7 +1328,7 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 		}
 
 		// Compute inline_for_depth if requested (for constant folding)
-		// C++ Reference: check_expr.cpp check_range:9330-9335
+		// C++ Reference: check_expr.cpp check_range
 		//
 		// SHAPE DIVERGENCE, verified OBSERVATIONALLY IDENTICAL rather than assumed so. C++
 		// computes the depth UNCONDITIONALLY and makes only the STORE conditional:
@@ -1338,7 +1338,7 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 		// The port hoists the nil test around the whole computation. That is only safe because
 		// both operations are PURE: exact_value_sub and exact_value_increment_one emit no
 		// diagnostics and mutate no shared state in either implementation (checked in
-		// src/exact_value.cpp exact_value_sub:948 and :961, and in the port's own definitions). If either ever
+		// src/exact_value.cpp exact_value_sub and its sibling, and in the port's own definitions). If either ever
 		// gains a diagnostic -- an overflow report, say -- this guard would start SWALLOWING it
 		// and the computation must move back out.
 		if inline_for_depth != nil {
@@ -1349,13 +1349,13 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 			inline_for_depth^ = depth
 		}
 	} else if inline_for_depth != nil {
-		// C++ Reference: check_expr.cpp check_range:9336-9339
+		// C++ Reference: check_expr.cpp check_range
 		error_token(binary_expr.op, "Interval expressions must be constant")
 		return false
 	}
 
 	// Add type information to AST nodes
-	// C++ Reference: check_expr.cpp check_range:9341-9342
+	// C++ Reference: check_expr.cpp check_range
 	add_type_and_value(ctx, binary_expr.left, x.mode, x.type, x.value)
 	add_type_and_value(ctx, binary_expr.right, y.mode, y.type, y.value)
 
@@ -1364,11 +1364,11 @@ check_range :: proc(ctx: ^Checker_Context, node: ^ast.Node, is_for_loop: bool, x
 
 // ======================================================================================
 // DIRECTIVE HELPERS
-// C++ Reference: check_expr.cpp is_load_directive_call:140-152
+// C++ Reference: check_expr.cpp is_load_directive_call
 // ======================================================================================
 
 // is_load_directive_call checks if an expression is a #load directive call
-// C++ Reference: check_expr.cpp is_load_directive_call:140-152
+// C++ Reference: check_expr.cpp is_load_directive_call
 is_load_directive_call :: proc(call: ^ast.Expr) -> bool {
 	expr := unparen_expr(call)
 	if expr == nil {
@@ -1480,7 +1480,7 @@ check_assignment_error_suggestion :: proc(ctx: ^Checker_Context, operand: ^Opera
 	} else if is_type_u8_slice(src) && are_types_identical(dst, t_string) && operand.mode != .Constant {
 		error_line("\tSuggestion: The expression may be casted to %s\n", b)
 	} else if check_integer_exceed_suggestion(ctx, operand, target_type, max_bit_size) {
-		// C++ Reference: check_expr.cpp check_assignment_error_suggestion:2683. This arm was missing entirely, so an
+		// C++ Reference: check_expr.cpp check_assignment_error_suggestion. This arm was missing entirely, so an
 		// out-of-range integer constant got no explanation of what the bound actually is.
 		return
 	} else if is_expr_inferred_fixed_array(ctx.type_hint_expr) && is_type_array_like(target_type) && is_type_array_like(operand.type) {

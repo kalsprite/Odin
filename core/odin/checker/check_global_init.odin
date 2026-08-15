@@ -14,13 +14,13 @@ Architecture:
 - Detect and report circular dependencies using DFS path finding
 - Handle uninitialized variables and validation
 
-C++ Reference: checker.cpp calculate_global_init_order:6398-6465
-               checker.cpp find_entity_path:6349-6395, find_entity_path_tuple:6317-6347
+C++ Reference: checker.cpp calculate_global_init_order
+               checker.cpp find_entity_path, find_entity_path_tuple
                checker.cpp:55-105 (the entity_graph_node helpers: the struct is file-scope, then
-                                   entity_graph_node_set_add:66-68, entity_graph_node_cmp:85-97,
-                                   entity_graph_node_swap ending at :105 -- a RANGE SPANNING several
+                                   entity_graph_node_set_add, entity_graph_node_cmp,
+                                   and entity_graph_node_swap -- a RANGE SPANNING several
                                    functions plus a file-scope struct, so it stays deliberately bare)
-               checker.cpp check_all_global_entities:5316-5340
+               checker.cpp check_all_global_entities
 */
 
 
@@ -407,7 +407,7 @@ find_path_dfs :: proc(current: ^Entity, target: ^Entity, graph: map[^Entity]^Ent
 // C++ Reference: checker.cpp:6044-6110
 calculate_global_init_order :: proc(info: ^Checker_Info, allocator := context.allocator) -> []^Entity {
 	// Build dependency graph with procedure elimination
-	// C++ Reference: checker.cpp calculate_global_init_order:6405 (generate_entity_dependency_graph)
+	// C++ Reference: checker.cpp calculate_global_init_order (generate_entity_dependency_graph)
 	dep_graph := generate_entity_dependency_graph(info, context.temp_allocator)
 
 	// Build entity->node map for cycle detection
@@ -419,18 +419,18 @@ calculate_global_init_order :: proc(info: ^Checker_Info, allocator := context.al
 	}
 
 	// Topological sort using Kahn's algorithm with priority queue
-	// C++ Reference: checker.cpp calculate_global_init_order:6409-6454 (priority queue processing)
+	// C++ Reference: checker.cpp calculate_global_init_order (priority queue processing)
 	ordered := make([dynamic]^Entity, 0, len(nodes), allocator)
 	queue := make([dynamic]^Entity_Graph_Node, 0, len(nodes), allocator)
 	defer delete(queue)
 
 	// Deduplication set to prevent adding the same entity twice
-	// C++ Reference: checker.cpp calculate_global_init_order:6411-6412 (PtrSet<DeclInfo *> emitted)
+	// C++ Reference: checker.cpp calculate_global_init_order (PtrSet<DeclInfo *> emitted)
 	emitted := make(map[^Decl_Info]bool, len(nodes), allocator)
 	defer delete(emitted)
 
 	// Initialize priority queue with ALL nodes
-	// C++ Reference: checker.cpp calculate_global_init_order:6409 - priority_queue_create(dep_graph, ...)
+	// C++ Reference: checker.cpp calculate_global_init_order - priority_queue_create(dep_graph, ...)
 	// The priority queue will sort by (dep_count, order_in_src) to always process
 	// the node with smallest dependency count first
 	for node in dep_graph {
@@ -457,7 +457,7 @@ calculate_global_init_order :: proc(info: ^Checker_Info, allocator := context.al
 	// Process queue
 	for len(queue) > 0 {
 		// Sort queue to get node with smallest (dep_count, order_in_src)
-		// C++ Reference: checker.cpp calculate_global_init_order:6416 (priority_queue_pop)
+		// C++ Reference: checker.cpp calculate_global_init_order (priority_queue_pop)
 		sort_entity_graph_nodes(queue[:])
 
 		// Pop node with smallest priority
@@ -465,7 +465,7 @@ calculate_global_init_order :: proc(info: ^Checker_Info, allocator := context.al
 		ordered_remove(&queue, 0)
 
 		// Check for cycles during processing
-		// C++ Reference: checker.cpp calculate_global_init_order:6419-6432
+		// C++ Reference: checker.cpp calculate_global_init_order
 		if node.dep_count > 0 {
 			// Circular dependency detected
 			e := node.entity
@@ -477,7 +477,7 @@ calculate_global_init_order :: proc(info: ^Checker_Info, allocator := context.al
 		}
 
 		// Reduce dependency count for predecessor nodes
-		// C++ Reference: checker.cpp calculate_global_init_order:6434-6438
+		// C++ Reference: checker.cpp calculate_global_init_order
 		for pred_node in node.pred {
 			pred_node.dep_count -= 1
 			if pred_node.dep_count < 0 {
@@ -488,35 +488,35 @@ calculate_global_init_order :: proc(info: ^Checker_Info, allocator := context.al
 		}
 
 		// Filter: only add variables to the initialization order
-		// C++ Reference: checker.cpp calculate_global_init_order:6440-6453
+		// C++ Reference: checker.cpp calculate_global_init_order
 		e := node.entity
 		d := decl_info_of_entity(e)
 
 		// Only include Entity_Variable in the init order
-		// C++ Reference: checker.cpp calculate_global_init_order:6441-6443
+		// C++ Reference: checker.cpp calculate_global_init_order
 		if e.kind != .Variable {
 			continue
 		}
 
 		// IMPORTANT NOTE(bill, 2019-08-29): Just add it regardless of the ordering
 		// because it does not need any initialization other than zero
-		// C++ Reference: checker.cpp calculate_global_init_order:6444-6448
+		// C++ Reference: checker.cpp calculate_global_init_order
 		// (Original code had: if (!decl_info_has_init(d)) continue; - now commented out)
 
 		// Deduplicate: check if we've already emitted this decl
-		// C++ Reference: checker.cpp calculate_global_init_order:6449-6451 (ptr_set_update returns true if already exists)
+		// C++ Reference: checker.cpp calculate_global_init_order (ptr_set_update returns true if already exists)
 		if d in emitted {
 			continue
 		}
 		emitted[d] = true
 
 		// Add to ordered list
-		// C++ Reference: checker.cpp calculate_global_init_order:6453
+		// C++ Reference: checker.cpp calculate_global_init_order
 		append(&ordered, e)
 	}
 
 	// Debug output (disabled by default)
-	// C++ Reference: checker.cpp calculate_global_init_order:6456-6464
+	// C++ Reference: checker.cpp calculate_global_init_order
 	when false {
 		fmt.printf("Variable Initialization Order:\n")
 		for e in ordered {
@@ -529,7 +529,7 @@ calculate_global_init_order :: proc(info: ^Checker_Info, allocator := context.al
 }
 
 // report_circular_dependency reports a circular dependency error
-// C++ Reference: checker.cpp calculate_global_init_order:6423-6431
+// C++ Reference: checker.cpp calculate_global_init_order
 report_circular_dependency :: proc(start_entity: ^Entity, cycle_path: []^Entity) {
 	if len(cycle_path) == 0 {
 		return
@@ -551,24 +551,23 @@ report_circular_dependency :: proc(start_entity: ^Entity, cycle_path: []^Entity)
 
 // ======================================================================================
 // GLOBAL ENTITY CHECKING
-// C++ Reference: checker.cpp check_all_global_entities:5316-5340
-// (was :4938-4995, which resolves to check_collect_value_decl -- a declaration-collection routine,
-//  not this phase. The cited extent was 57 lines where the real function is 25, so the drift was
-//  never a shift; every anchor below is mapped by CONTENT.)
+// C++ Reference: checker.cpp check_all_global_entities
+// (An earlier citation here resolved to check_collect_value_decl -- a declaration-collection
+//  routine, not this phase -- so every anchor below is mapped by CONTENT rather than by position.)
 // ======================================================================================
 
 // check_single_global_entity checks a single global entity (on-demand checking)
-// C++ Reference: checker.cpp check_single_global_entity:5283-5314 (the port's is in type_info.odin)
+// C++ Reference: checker.cpp check_single_global_entity (the port's is in type_info.odin)
 //
 // check_single_global_entity is defined in type_info.odin
 
 // check_all_global_entities checks all global entities in initialization order
 // Main entry point for global entity type checking
-// C++ Reference: checker.cpp check_all_global_entities:5316-5340
+// C++ Reference: checker.cpp check_all_global_entities
 check_all_global_entities :: proc(ctx: ^Checker_Context) {
 	// NOTE: This must be single threaded (C++ line 4972-4975)
 	// Don't bother trying to parallelize
-	// C++ Reference: checker.cpp check_all_global_entities:5317
+	// C++ Reference: checker.cpp check_all_global_entities
 	// in_single_threaded_checker_stage.store(true, std::memory_order_relaxed)
 	set_single_threaded_checker_stage(true)
 
@@ -576,12 +575,12 @@ check_all_global_entities :: proc(ctx: ^Checker_Context) {
 	info := ctx.info
 
 	// Check entities in order
-	// C++ Reference: checker.cpp check_all_global_entities:5321-5337
+	// C++ Reference: checker.cpp check_all_global_entities
 	for entity in info.entities {
 		assert(entity != nil)
 
 		// Skip lazy entities (checked on demand)
-		// C++ Reference: checker.cpp check_all_global_entities:5324-5326
+		// C++ Reference: checker.cpp check_all_global_entities
 		if .Lazy in entity.flags {
 			continue
 		}
@@ -590,25 +589,25 @@ check_all_global_entities :: proc(ctx: ^Checker_Context) {
 		decl := entity.decl_info
 
 		// Check the entity
-		// C++ Reference: checker.cpp check_all_global_entities:5328
+		// C++ Reference: checker.cpp check_all_global_entities
 		check_single_global_entity(c, entity, decl)
 
 		// Complete SOA types and calculate type size/alignment
-		// C++ Reference: checker.cpp check_all_global_entities:5329-5336
+		// C++ Reference: checker.cpp check_all_global_entities
 		if entity.type != nil && is_type_typed(entity.type) {
 			// Complete SOA types if needed
-			// C++ Reference: checker.cpp check_all_global_entities:5330-5332
+			// C++ Reference: checker.cpp check_all_global_entities
 			drain_and_complete_soa_types(c)
 
 			// Ensure type size/alignment is calculated
-			// C++ Reference: checker.cpp check_all_global_entities:5334-5335
+			// C++ Reference: checker.cpp check_all_global_entities
 			_ = type_size_of(entity.type)
 			_ = type_align_of(entity.type)
 		}
 	}
 
 	// THE calculate_global_init_order CALL USED TO BE HERE, AND THAT WAS THE WRONG PHASE.
-	// C++ calls it exactly once, from check_parsed_files at checker.cpp check_parsed_files:7760 -- AFTER
+	// C++ calls it exactly once, from check_parsed_files at checker.cpp check_parsed_files -- AFTER
 	// check_procedure_bodies, check_deferred_procedures and check_objc_context_provider_procedures.
 	// Running it here computed the order from an entity dependency graph that predates every
 	// dependency discovered while checking bodies. It is now called from its C++ position in
@@ -617,29 +616,29 @@ check_all_global_entities :: proc(ctx: ^Checker_Context) {
 	// somewhere else and then called it here anyway.
 	//
 	// Note: init_preload is called from check_files after check_all_global_entities
-	// C++ Reference: checker.cpp check_parsed_files:7706 (the init_preload call site; the old
-	// citation said :7333, which is inside handle_raddbg_type_view -- I anchored it by guess and
-	// --check caught it in the same session)
+	// C++ Reference: checker.cpp check_parsed_files (the init_preload call site; the old
+	// citation landed inside handle_raddbg_type_view -- anchored by guess, and --check caught it
+	// in the same session)
 
 	// Exit single-threaded stage - enable parallel checking from this point
-	// C++ Reference: checker.cpp check_all_global_entities:5339
+	// C++ Reference: checker.cpp check_all_global_entities
 	// in_single_threaded_checker_stage.store(false, std::memory_order_relaxed)
 	set_single_threaded_checker_stage(false)
 }
 
 // store_global_init_order runs C++'s calculate_global_init_order and publishes the result.
 //
-// C++ Reference: checker.cpp calculate_global_init_order:6398-6465
+// C++ Reference: checker.cpp calculate_global_init_order
 //
 // SPLIT SHAPE, DELIBERATE: C++'s calculate_global_init_order appends DeclInfo straight into
-// info->variable_init_order (:6453). The port's returns []^Entity and this wrapper publishes it. The
+// info->variable_init_order. The port's returns []^Entity and this wrapper publishes it. The
 // dedup that matters happens INSIDE calculate_global_init_order, keyed on decl_info_of_entity, so
 // the two-step form cannot reintroduce duplicates.
 store_global_init_order :: proc(c: ^Checker) {
 	info := &c.info
 	init_order := calculate_global_init_order(info, c.allocator)
 
-	// C++ Reference: checker.cpp calculate_global_init_order:6453
+	// C++ Reference: checker.cpp calculate_global_init_order
 	clear(&info.variable_init_order)
 	for entity in init_order {
 		if decl := entity.decl_info; decl != nil {

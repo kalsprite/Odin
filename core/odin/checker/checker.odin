@@ -577,14 +577,14 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	// Data access
 	.Raw_Data = {name = "raw_data", arg_count = 1, variadic = false, kind = .Expr, pkg = .Builtin},
 	// Math operations
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:4161-4676
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	.Min = {name = "min", arg_count = 1, variadic = true, kind = .Expr, pkg = .Builtin},
 	.Max = {name = "max", arg_count = 1, variadic = true, kind = .Expr, pkg = .Builtin},
 	.Abs = {name = "abs", arg_count = 1, variadic = false, kind = .Expr, pkg = .Builtin},
 	.Clamp = {name = "clamp", arg_count = 3, variadic = false, kind = .Expr, pkg = .Builtin},
 
 	// Bit manipulation intrinsics
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:5610-5784
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	.Count_Ones = {name = "count_ones", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Count_Zeros = {name = "count_zeros", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Count_Trailing_Zeros = {name = "count_trailing_zeros", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -595,23 +595,23 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Byte_Swap = {name = "byte_swap", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Overflow-checking arithmetic
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:5785-5836
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	.Overflow_Add = {name = "overflow_add", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Overflow_Sub = {name = "overflow_sub", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Overflow_Mul = {name = "overflow_mul", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Saturating arithmetic
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:5837-5887
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	.Saturating_Add = {name = "saturating_add", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Saturating_Sub = {name = "saturating_sub", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Floating-point intrinsics
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:5888-5976
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	.Sqrt = {name = "sqrt", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Fused_Mul_Add = {name = "fused_mul_add", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Fixed-point arithmetic
-	// C++ Reference: check_builtin.cpp check_builtin_procedure:6541-6615
+	// C++ Reference: check_builtin.cpp check_builtin_procedure
 	.Fixed_Point_Mul = {name = "fixed_point_mul", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Fixed_Point_Div = {name = "fixed_point_div", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Fixed_Point_Mul_Sat = {name = "fixed_point_mul_sat", arg_count = 3, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -803,7 +803,10 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Type_Field_Bit_Offset = {name = "type_field_bit_offset", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Field_Bit_Size = {name = "type_field_bit_size", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Has_Field = {name = "type_has_field", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
-	.Type_Has_Shared_Fields = {name = "type_has_shared_fields", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	// #920: arg_count was 1; C++ checker_builtin_procs.hpp declares 2. The intrinsic compares TWO
+	// types, so with arity 1 every call was rejected as "Too many arguments" before the predicate
+	// ever ran -- 64 of 66 cells in the DSL sharedfields suite (#919).
+	.Type_Has_Shared_Fields = {name = "type_has_shared_fields", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Named = {name = "type_is_named", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_Cstring16 = {name = "type_is_cstring16", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 	.Type_Is_String16 = {name = "type_is_string16", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
@@ -892,8 +895,13 @@ builtin_proc_infos := [Builtin_Proc_Id]Builtin_Proc_Info {
 	.Has_Target_Feature = {name = "has_target_feature", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 
 	// Additional core builtins
-	.Concatenate = {name = "concatenate", arg_count = 1, variadic = true, kind = .Expr, pkg = .Intrinsics},
+	// #920: arg_count was 1; C++ declares 2 (still variadic). Found by comparing the WHOLE table
+	// rather than the one entry a failing cell pointed at.
+	.Concatenate = {name = "concatenate", arg_count = 2, variadic = true, kind = .Expr, pkg = .Intrinsics},
 	.Soa_Struct = {name = "soa_struct", arg_count = 2, variadic = false, kind = .Expr, pkg = .Intrinsics},
+	// #926: `Expr_Stmt` in C++ -- it is a STATEMENT, not an expression: it copies into the array
+	// and yields no value.
+	.Soa_Copy_From_Slice = {name = "soa_copy_from_slice", arg_count = 3, variadic = false, kind = .Stmt, pkg = .Intrinsics},
 	.Procedure_Of = {name = "procedure_of", arg_count = 1, variadic = false, kind = .Expr, pkg = .Intrinsics},
 }
 
@@ -1055,7 +1063,7 @@ Checker_Info :: struct {
 	// AST node to scope mapping - EXTERNAL MAP REQUIRED
 	// NOTE: For statement and type nodes (Block_Stmt, If_Stmt, Proc_Type, etc.)
 	// C++ stores scopes directly on nodes, but we need external map until type unification
-	// C++ Reference: checker.cpp add_scope:296-316, 317-339 (scope_of_node)
+	// C++ Reference: checker.cpp add_scope, 317-339 (scope_of_node)
 	// See scope.odin:430-463 for usage
 	ast_scope_map:                                map[rawptr]^Scope,
 	ast_scope_map_mutex:                          sync.RW_Mutex,

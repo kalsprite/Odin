@@ -149,9 +149,8 @@ t_untyped_uninit: ^Type
 t_untyped_quaternion: ^Type
 
 // Objective-C runtime types
-// C++ Reference: checker.cpp init_universal:1512-1524 (the `intrinsics types for objective-c stuff`
-// block: four struct type names at :1514-1517, their pointer aliases at :1519-1522, instancetype
-// at :1524). The old citation 1408-1419 was Odin_Sanitizer_Flags, an unrelated bit_set.
+// C++ Reference: checker.cpp init_universal (the `intrinsics types for objective-c stuff`
+// block: four struct type names, their pointer aliases, and instancetype).
 
 // C variadic types
 // C++ Reference: checker.cpp:1589-1590
@@ -160,7 +159,7 @@ t_untyped_quaternion: ^Type
 // C++ Reference: checker.cpp:1338
 
 // RTTI (Runtime Type Information) types
-// C++ Reference: checker.cpp init_core_type_info:3488-3499+ (t_type_info is resolved from the
+// C++ Reference: checker.cpp init_core_type_info+ (t_type_info is resolved from the
 // core Type_Info entity, not registered in the universe). The old citation 3253-3319 was
 // EntityGraphNode allocation in the dependency-graph walk -- a different phase entirely.
 
@@ -401,7 +400,7 @@ is_type_untyped :: proc(t: ^Type) -> bool {
 
 // is_type_typed checks if type is a concrete type
 is_type_typed :: proc(t: ^Type) -> bool {
-	// C++ Reference: types.cpp is_type_typed:1419-1426
+	// C++ Reference: types.cpp is_type_typed
 	//   t = base_type(t); if (t == nullptr) return false;
 	//   if (t->kind == Type_Basic) return (t->Basic.flags & BasicFlag_Untyped) == 0;
 	//   return true;
@@ -423,7 +422,7 @@ is_type_typed :: proc(t: ^Type) -> bool {
 }
 
 // is_type_boolean checks if type is a boolean
-// C++ Reference: types.cpp is_type_boolean:1304-1311
+// C++ Reference: types.cpp is_type_boolean
 is_type_boolean :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil || bt.kind != .Basic {
@@ -435,7 +434,7 @@ is_type_boolean :: proc(t: ^Type) -> bool {
 }
 
 // is_type_integer checks if type is an integer
-// C++ Reference: types.cpp is_type_integer:1312-1319
+// C++ Reference: types.cpp is_type_integer
 is_type_integer :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil || bt.kind != .Basic {
@@ -465,7 +464,7 @@ is_type_unsigned :: proc(t: ^Type) -> bool {
 }
 
 // is_type_float checks if type is a floating point
-// C++ Reference: types.cpp is_type_float:1481-1488
+// C++ Reference: types.cpp is_type_float
 is_type_float :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil || bt.kind != .Basic {
@@ -477,7 +476,7 @@ is_type_float :: proc(t: ^Type) -> bool {
 }
 
 // is_type_integer_or_float checks if type is a basic integer or float.
-// C++ Reference: types.cpp is_type_integer_or_float:1362-1370.
+// C++ Reference: types.cpp is_type_integer_or_float.
 // NOTE: this is NOT is_type_numeric -- C++ tests only (Integer|Float) on a BASIC type, with no
 // Complex/Quaternion and no Enum arm. Added for the check_builtin catch-up in LEDGER #798, where
 // substituting is_type_numeric would have widened the accepted set.
@@ -492,7 +491,7 @@ is_type_integer_or_float :: proc(t: ^Type) -> bool {
 }
 
 // is_type_complex checks if type is complex
-// C++ Reference: types.cpp is_type_complex:1489-1496
+// C++ Reference: types.cpp is_type_complex
 is_type_complex :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil || bt.kind != .Basic {
@@ -505,7 +504,7 @@ is_type_complex :: proc(t: ^Type) -> bool {
 
 // is_type_numeric checks if type is numeric
 // C++ Reference: types.cpp:2094-2098
-// C++ Reference: types.cpp is_type_numeric:1373-1386
+// C++ Reference: types.cpp is_type_numeric
 //
 // The Enum and Array arms are not decoration: `+` and `-` test
 // is_type_numeric on the operand type directly (check_expr.cpp:2182, 2197), so
@@ -546,7 +545,7 @@ is_type_string :: proc(t: ^Type) -> bool {
 }
 
 // is_type_pointer checks if type is a pointer
-// Ported from types.cpp is_type_pointer:1513-1520
+// Ported from types.cpp is_type_pointer
 // NOTE: this includes `rawptr`, which is a Basic type carrying Basic_Flag.Pointer,
 // not a Type_Pointer. C++ dispatches on the flag for exactly this reason.
 is_type_pointer :: proc(t: ^Type) -> bool {
@@ -606,7 +605,7 @@ is_type_typeid :: proc(t: ^Type) -> bool {
 }
 
 // is_type_quaternion checks if a type is a quaternion type
-// Ported from types.cpp is_type_quaternion:1497-1504
+// Ported from types.cpp is_type_quaternion
 is_type_quaternion :: proc(t: ^Type) -> bool {
 	ct := core_type(t)
 	if ct == nil {
@@ -620,7 +619,7 @@ is_type_quaternion :: proc(t: ^Type) -> bool {
 }
 
 // is_type_matrix checks if a type is a matrix type
-// Ported from types.cpp is_type_matrix:1578-1582
+// Ported from types.cpp is_type_matrix
 is_type_matrix :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {
@@ -630,7 +629,7 @@ is_type_matrix :: proc(t: ^Type) -> bool {
 }
 
 // is_type_fixed_capacity_dynamic_array reports whether a type is `[dynamic; N]T`.
-// C++ Reference: types.cpp is_type_fixed_capacity_dynamic_array:1731.
+// C++ Reference: types.cpp is_type_fixed_capacity_dynamic_array.
 is_type_fixed_capacity_dynamic_array :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {
@@ -640,7 +639,7 @@ is_type_fixed_capacity_dynamic_array :: proc(t: ^Type) -> bool {
 }
 
 // is_type_bit_set checks if a type is a bit_set type
-// C++ Reference: types.cpp is_type_bit_set:2020-2024
+// C++ Reference: types.cpp is_type_bit_set
 // (This header was STRANDED above a different procedure until #732 -- another procedure had
 //  been inserted between the doc comment and the definition it documents. Its citation was
 //  stale too and has been resolved BY NAME.)
@@ -653,7 +652,7 @@ is_type_bit_set :: proc(t: ^Type) -> bool {
 }
 
 // is_type_bit_field checks if a type is a bit_field type
-// Ported from types.cpp is_type_bit_field:2025-2029
+// Ported from types.cpp is_type_bit_field
 is_type_bit_field :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {
@@ -756,7 +755,7 @@ is_type_raw_union_constantable :: proc(t: ^Type) -> bool {
 // is_type_polymorphic is defined in check_equivalence.odin
 
 // type_get_polymorphic_parent retrieves the parent entity of a polymorphic type
-// C++ Reference: types.cpp type_get_polymorphic_parent:2394-2413
+// C++ Reference: types.cpp type_get_polymorphic_parent
 // Returns the parent type's entity and optionally the polymorphic parameters
 type_get_polymorphic_parent :: proc(t: ^Type, params: ^^Type = nil) -> ^Entity {
 	bt := base_type(t)
@@ -793,7 +792,7 @@ type_get_polymorphic_parent :: proc(t: ^Type, params: ^^Type = nil) -> ^Entity {
 }
 
 // is_type_polymorphic_record checks if type is a polymorphic struct or union
-// C++ Reference: types.cpp is_type_polymorphic_record:2415-2423
+// C++ Reference: types.cpp is_type_polymorphic_record
 is_type_polymorphic_record :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {
@@ -815,7 +814,7 @@ is_type_polymorphic_record :: proc(t: ^Type) -> bool {
 // polymorphic_record_parent_scope returns the scope a polymorphic record was
 // DECLARED in, which is where its field types must be looked up.
 //
-// C++ Reference: types.cpp polymorphic_record_parent_scope:2425-2435
+// C++ Reference: types.cpp polymorphic_record_parent_scope
 polymorphic_record_parent_scope :: proc(t: ^Type) -> ^Scope {
 	bt := base_type(t)
 	if bt != nil && is_type_polymorphic_record(bt) {
@@ -836,7 +835,7 @@ polymorphic_record_parent_scope :: proc(t: ^Type) -> ^Scope {
 }
 
 // is_type_polymorphic_record_specialized checks if polymorphic record has been specialized
-// C++ Reference: types.cpp is_type_polymorphic_record_specialized:2437-2445
+// C++ Reference: types.cpp is_type_polymorphic_record_specialized
 // (This header was STRANDED above a different procedure until #732 -- another procedure had
 //  been inserted between the doc comment and the definition it documents. Its citation was
 //  stale too and has been resolved BY NAME.)
@@ -859,7 +858,7 @@ is_type_polymorphic_record_specialized :: proc(t: ^Type) -> bool {
 }
 
 // is_type_polymorphic_record_unspecialized checks if polymorphic record is NOT specialized
-// C++ Reference: types.cpp is_type_polymorphic_record_unspecialized:2447-2455
+// C++ Reference: types.cpp is_type_polymorphic_record_unspecialized
 is_type_polymorphic_record_unspecialized :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {
@@ -925,13 +924,17 @@ is_type_multi_pointer :: proc(t: ^Type) -> bool {
 // is_type_soa_pointer is defined in check_type.odin
 
 // is_type_internally_pointer_like checks if a type behaves like a pointer internally
-// C++ Reference: types.cpp is_type_internally_pointer_like:1531-1533
+// C++ Reference: types.cpp is_type_internally_pointer_like
 is_type_internally_pointer_like :: proc(t: ^Type) -> bool {
-	return is_type_pointer(t) || is_type_multi_pointer(t) || is_type_cstring(t) || is_type_proc(t)
+	// #918: `is_type_cstring16` was missing. C++ types.cpp lists five terms; the port had four,
+	// so `intrinsics.type_is_internally_pointer_like(cstring16)` was false here and true on the
+	// oracle (#916).
+	return is_type_pointer(t) || is_type_multi_pointer(t) || is_type_cstring(t) ||
+	       is_type_cstring16(t) || is_type_proc(t)
 }
 
 // is_type_dereferenceable checks if a type can be dereferenced with ^
-// C++ Reference: types.cpp is_type_dereferenceable:2172-2177
+// C++ Reference: types.cpp is_type_dereferenceable
 is_type_dereferenceable :: proc(t: ^Type) -> bool {
 	if is_type_rawptr(t) {
 		return false
@@ -940,7 +943,7 @@ is_type_dereferenceable :: proc(t: ^Type) -> bool {
 }
 
 // is_type_uintptr checks if a type is uintptr
-// Ported from types.cpp is_type_uintptr:1540-1546
+// Ported from types.cpp is_type_uintptr
 is_type_uintptr :: proc(t: ^Type) -> bool {
 	if t == nil {
 		return false
@@ -968,7 +971,7 @@ is_type_u8 :: proc(t: ^Type) -> bool {
 
 // is_type_u16 checks if a type is u16
 // Helper function for pointer/slice predicates
-// Ported from types.cpp is_type_u16:1561-1567
+// Ported from types.cpp is_type_u16
 is_type_u16 :: proc(t: ^Type) -> bool {
 	if t == nil {
 		return false
@@ -981,7 +984,7 @@ is_type_u16 :: proc(t: ^Type) -> bool {
 }
 
 // is_type_u8_slice checks if a type is []u8
-// Ported from types.cpp is_type_u8_slice:1843-1850
+// Ported from types.cpp is_type_u8_slice
 is_type_u8_slice :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {
@@ -1009,7 +1012,7 @@ is_type_u16_slice :: proc(t: ^Type) -> bool {
 }
 
 // is_type_u8_ptr checks if a type is ^u8
-// Ported from types.cpp is_type_u8_ptr:1859-1866
+// Ported from types.cpp is_type_u8_ptr
 is_type_u8_ptr :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {
@@ -1037,7 +1040,7 @@ is_type_u16_ptr :: proc(t: ^Type) -> bool {
 }
 
 // is_type_u8_multi_ptr checks if a type is [^]u8
-// Ported from types.cpp is_type_u8_multi_ptr:1867-1874
+// Ported from types.cpp is_type_u8_multi_ptr
 is_type_u8_multi_ptr :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {
@@ -1051,7 +1054,7 @@ is_type_u8_multi_ptr :: proc(t: ^Type) -> bool {
 }
 
 // is_type_u16_multi_ptr checks if a type is [^]u16
-// Ported from types.cpp is_type_u16_multi_ptr:1908-1915
+// Ported from types.cpp is_type_u16_multi_ptr
 is_type_u16_multi_ptr :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil {
@@ -1089,7 +1092,10 @@ is_type_indexable :: proc(t: ^Type) -> bool {
 		basic := bt.variant.(Type_Basic)
 		// Reference: types.cpp:2216
 		return basic.kind == .String || basic.kind == .String16
-	case .Array, .Slice, .Dynamic_Array, .Map, .Multi_Pointer, .Enumerated_Array, .Matrix:
+	// #918: `.Fixed_Capacity_Dynamic_Array` was MISSING. C++ types.cpp is_type_indexable lists it
+	// alongside Array/Slice/DynamicArray/Map, so `[dynamic; 4]int` was indexable there and not
+	// here (#916).
+	case .Array, .Slice, .Dynamic_Array, .Fixed_Capacity_Dynamic_Array, .Map, .Multi_Pointer, .Enumerated_Array, .Matrix:
 		return true
 	}
 
@@ -1097,7 +1103,7 @@ is_type_indexable :: proc(t: ^Type) -> bool {
 }
 
 // is_type_sliceable checks if a type supports slicing operations (x[i:j])
-// C++ Reference: types.cpp is_type_sliceable:2376-2392
+// C++ Reference: types.cpp is_type_sliceable
 // Note: EnumeratedArray is NOT sliceable, Matrix is NOT sliceable (unlike indexable)
 is_type_sliceable :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
@@ -1111,7 +1117,9 @@ is_type_sliceable :: proc(t: ^Type) -> bool {
 		// String and String16 are sliceable
 		return basic.kind == .String || basic.kind == .String16
 
-	case .Array, .Slice, .Dynamic_Array:
+	// #918: as is_type_indexable above -- C++ is_type_sliceable lists
+	// Type_FixedCapacityDynamicArray and the port did not.
+	case .Array, .Slice, .Dynamic_Array, .Fixed_Capacity_Dynamic_Array:
 		return true
 
 	case .Enumerated_Array:
@@ -1128,7 +1136,7 @@ is_type_sliceable :: proc(t: ^Type) -> bool {
 
 // ============================================================================
 // Type Predicates - Tier 2 Infrastructure (Week 2 Group 1)
-// C++ Reference: types.cpp is_type_tuple:1535-1539, 1323-1330, 1451-1455, 1851-1855
+// C++ Reference: types.cpp is_type_tuple, 1323-1330, 1451-1455, 1851-1855
 // ============================================================================
 
 // is_type_slice is defined in check_builtin_simd.odin
@@ -1155,7 +1163,7 @@ is_type_tuple :: proc(t: ^Type) -> bool {
 // base_enum_type returns an enum's backing type, or the type unchanged if it is
 // not an enum.
 //
-// C++ Reference: types.cpp base_enum_type:976-983
+// C++ Reference: types.cpp base_enum_type
 base_enum_type :: proc(t: ^Type) -> ^Type {
 	bt := base_type(t)
 	if bt != nil && bt.kind == .Enum {
@@ -1167,7 +1175,7 @@ base_enum_type :: proc(t: ^Type) -> ^Type {
 
 // core_type unwraps named types, enums, and bit fields to get the core type
 // Unlike base_type which only unwraps Named, this also unwraps Enum and Bit_Field
-// C++ Reference: types.cpp core_type:985-1008
+// C++ Reference: types.cpp core_type
 // (This header was STRANDED above a different procedure until #732 -- another procedure had
 //  been inserted between the doc comment and the definition it documents. Its citation was
 //  stale too and has been resolved BY NAME.)
@@ -1235,7 +1243,7 @@ core_array_type :: proc(t: ^Type) -> ^Type {
 
 // Selection Infrastructure
 // These types and functions support selector expressions (x.y)
-// Reference: types.cpp core_array_type:1936-1949
+// Reference: types.cpp core_array_type
 
 // Selection represents a field/member access path
 // Used by selector expressions to track which field was selected
@@ -1391,7 +1399,7 @@ make_type_generic :: proc(scope: ^Scope, name: string, specialized: ^Type = nil,
 // default_type is defined in check_decl_helpers.odin
 
 // bit_set_to_int converts a bit_set type to its underlying integer type
-// C++ Reference: types.cpp bit_set_to_int:2305-2327
+// C++ Reference: types.cpp bit_set_to_int
 bit_set_to_int :: proc(t: ^Type) -> ^Type {
 	assert(is_type_bit_set(t), "bit_set_to_int: type must be a bit_set")
 
@@ -1443,7 +1451,7 @@ bit_set_to_int :: proc(t: ^Type) -> ^Type {
 // Type size and alignment
 
 // matrix_type_stride_in_bytes calculates the stride between matrix rows/columns in bytes
-// C++ Reference: types.cpp matrix_type_stride_in_bytes:1621-1651
+// C++ Reference: types.cpp matrix_type_stride_in_bytes
 matrix_type_stride_in_bytes :: proc(t: ^Type) -> int {
 	bt := base_type(t)
 	assert(bt.kind == .Matrix)
@@ -1482,7 +1490,7 @@ matrix_type_stride_in_bytes :: proc(t: ^Type) -> int {
 }
 
 // matrix_type_stride_in_elems calculates the stride between matrix rows/columns in elements
-// C++ Reference: types.cpp matrix_type_stride_in_elems:1653-1658
+// C++ Reference: types.cpp matrix_type_stride_in_elems
 matrix_type_stride_in_elems :: proc(t: ^Type) -> int {
 	bt := base_type(t)
 	assert(bt.kind == .Matrix)
@@ -1651,7 +1659,7 @@ type_size_of :: proc(t: ^Type) -> int {
 		return 4 * int(build_context.ptr_size)
 
 	case .Struct:
-		// C++ Reference: types.cpp type_size_of_internal:4786-4823 (type_size_of_internal, case Type_Struct)
+		// C++ Reference: types.cpp type_size_of_internal (type_size_of_internal, case Type_Struct)
 		// DRIFT REPAIR (#571): this block cited 4436-4474, which upstream motion moved into
 		// type_align_of_internal -- a different function entirely. Every citation in this arm was
 		// off by a uniform +350, i.e. one insertion above it, and nothing noticed for as long as it
@@ -1659,7 +1667,7 @@ type_size_of :: proc(t: ^Type) -> int {
 		struc := bt.variant.(Type_Struct)
 
 		// Handle raw_union case
-		// C++ Reference: types.cpp type_size_of_internal:4787-4800
+		// C++ Reference: types.cpp type_size_of_internal
 		if struc.is_raw_union {
 			count := len(struc.fields)
 			align := type_align_of(bt)
@@ -1689,7 +1697,7 @@ type_size_of :: proc(t: ^Type) -> int {
 		}
 
 		// Handle regular struct case
-		// C++ Reference: types.cpp type_size_of_internal:4801-4822
+		// C++ Reference: types.cpp type_size_of_internal
 		count := len(struc.fields)
 		if count == 0 {
 			return 0
@@ -1698,7 +1706,7 @@ type_size_of :: proc(t: ^Type) -> int {
 		align := type_align_of(bt)
 
 		// Calculate offset of last field + its size
-		// C++ Reference: types.cpp type_size_of_internal:4821
+		// C++ Reference: types.cpp type_size_of_internal
 		last_field_offset := type_offset_of(bt, i64(count - 1))
 		// See the note in the raw_union arm above: struct field types live on the variant,
 		// so read them through entity_type().
@@ -1706,12 +1714,12 @@ type_size_of :: proc(t: ^Type) -> int {
 		size := int(last_field_offset) + last_field_size
 
 		// Align final struct size to struct alignment
-		// C++ Reference: types.cpp type_size_of_internal:4822
+		// C++ Reference: types.cpp type_size_of_internal
 		result := size + align - 1
 		return result - (result % align)
 
 	case .Matrix:
-		// C++ Reference: types.cpp type_size_of_internal:4845-4852
+		// C++ Reference: types.cpp type_size_of_internal
 		mat := bt.variant.(Type_Matrix)
 		stride_in_bytes := matrix_type_stride_in_bytes(t)
 		if mat.is_row_major {
@@ -1776,7 +1784,7 @@ type_size_of :: proc(t: ^Type) -> int {
 			} else {
 				size = max_variant
 			}
-			// C++ Reference: types.cpp type_size_of_internal:4773 — record the block size BEFORE the tag is
+			// C++ Reference: types.cpp type_size_of_internal — record the block size BEFORE the tag is
 			// appended and before the final alignment. This is the tag's offset within
 			// the union, and it was never stored: `type_offset_of` (index -1) and
 			// `intrinsics.type_union_tag_offset` read the field, so every tagged union
@@ -1995,40 +2003,32 @@ is_type_simple_compare :: proc(t: ^Type) -> bool {
 		// 2. There's no padding between fields (C++ Reference: types.cpp:2665-2718)
 		struc := ct.variant.(Type_Struct)
 
-		// Packed structs have no padding
-		if struc.is_packed {
-			for field in struc.fields {
-				if field.kind == .Variable {
-					field_type := entity_type(field)
-					if field_type != nil && !is_type_simple_compare(field_type) {
-						return false
-					}
-				}
-			}
-			return true
-		}
-
-		// For non-packed structs, check for padding by comparing
-		// sum of field sizes vs total struct size
-		total_field_size := 0
+		// #918: THE PADDING CHECK WAS A PORT INVENTION AND IS GONE. C++ types.cpp is simply:
+		//
+		//     case Type_Struct:
+		//         if (t->Struct.is_simple) { return true; }
+		//         for_array(i, t->Struct.fields) {
+		//             if (!is_type_simple_compare(fields[i]->type)) { return false; }
+		//         }
+		//         return true;
+		//
+		// No padding is computed and no `is_packed` special case exists -- every field simple
+		// means simple. The invented "sum of field sizes vs type_size_of" test rejected any
+		// PADDED struct, which is how `struct{a: u8, b: int}` and `struct #raw_union {a: u8,
+		// b: bool}` came out false here and true on the oracle, across is_simple_compare,
+		// type_is_valid_map_key and the comparison predicate alike (#916 -- four cells, one
+		// invention).
+		//
+		// C++'s `Struct.is_simple` fast path has no port counterpart (the field does not exist);
+		// it is a cache for this same loop, so omitting it changes no answer.
 		for field in struc.fields {
 			if field.kind == .Variable {
 				field_type := entity_type(field)
-				if field_type != nil {
-					if !is_type_simple_compare(field_type) {
-						return false
-					}
-					total_field_size += type_size_of(field_type)
+				if field_type != nil && !is_type_simple_compare(field_type) {
+					return false
 				}
 			}
 		}
-
-		// If struct size != sum of field sizes, there's padding
-		struct_size := type_size_of(ct)
-		if struct_size != total_field_size {
-			return false // Has padding, can't use memcmp
-		}
-
 		return true
 
 	case .Union:
@@ -2122,7 +2122,7 @@ is_type_nearly_simple_compare :: proc(t: ^Type) -> bool {
 		return is_type_nearly_simple_compare(mat.elem)
 
 	case .Struct:
-		// C++ Reference: types.cpp is_type_nearly_simple_compare:2959-2961. A `#simple` struct is nearly-simple BY
+		// C++ Reference: types.cpp is_type_nearly_simple_compare. A `#simple` struct is nearly-simple BY
 		// DECLARATION and short-circuits before the per-field walk. This is not merely an
 		// optimisation: it is what lets a #simple struct nest inside another #simple struct
 		// whose own fields would otherwise be re-walked. The early-out could not exist until
@@ -2162,9 +2162,9 @@ is_type_nearly_simple_compare :: proc(t: ^Type) -> bool {
 
 // check_is_assignable_to_using_subtype checks if src can be assigned to dst through subtype relationships
 // Returns the nesting level (> 0) if assignable, 0 otherwise
-// C++ Reference: types.cpp type_size_of_internal:4666-4709
+// C++ Reference: types.cpp type_size_of_internal
 check_is_assignable_to_using_subtype :: proc(src_param: ^Type, dst: ^Type, level: int = 0, src_is_ptr_param: bool = false, allow_polymorphic: bool = false) -> int {
-	// C++ Reference: types.cpp check_is_assignable_to_using_subtype:5044-5048
+	// C++ Reference: types.cpp check_is_assignable_to_using_subtype
 	prev_src := src_param
 	src := type_deref(src_param)
 	src_is_ptr := src_is_ptr_param
@@ -2173,18 +2173,18 @@ check_is_assignable_to_using_subtype :: proc(src_param: ^Type, dst: ^Type, level
 	}
 	src = base_type(src)
 
-	// C++ Reference: types.cpp check_is_assignable_to_using_subtype:5051-5053
+	// C++ Reference: types.cpp check_is_assignable_to_using_subtype
 	if !is_type_struct(src) {
 		return 0
 	}
 
-	// C++ Reference: types.cpp check_is_assignable_to_using_subtype:5055
+	// C++ Reference: types.cpp check_is_assignable_to_using_subtype
 	dst_is_polymorphic := is_type_polymorphic(dst)
 
-	// C++ Reference: types.cpp check_is_assignable_to_using_subtype:5057-5083
+	// C++ Reference: types.cpp check_is_assignable_to_using_subtype
 	struct_type := src.variant.(Type_Struct)
 	for field in struct_type.fields {
-		// C++ Reference: types.cpp check_is_assignable_to_using_subtype:5059-5061, and entity.cpp:92
+		// C++ Reference: types.cpp check_is_assignable_to_using_subtype, and entity.cpp:92
 		//     EntityFlags_IsSubtype = EntityFlag_Using|EntityFlag_Subtype
 		// C++ tests `f->flags & EntityFlags_IsSubtype`, i.e. EITHER bit — it is a MASK,
 		// not a required pair. The port required BOTH flags to be present, so a plain
@@ -2209,7 +2209,7 @@ check_is_assignable_to_using_subtype :: proc(src_param: ^Type, dst: ^Type, level
 		// why it looked like a call-site problem rather than a field-type problem.
 		field_type := entity_type(field)
 
-		// C++ Reference: types.cpp check_is_assignable_to_using_subtype:5062-5069
+		// C++ Reference: types.cpp check_is_assignable_to_using_subtype
 		// Special handling for polymorphic types
 		if allow_polymorphic && dst_is_polymorphic {
 			fb := base_type(type_deref(field_type))
@@ -2221,19 +2221,19 @@ check_is_assignable_to_using_subtype :: proc(src_param: ^Type, dst: ^Type, level
 			}
 		}
 
-		// C++ Reference: types.cpp check_is_assignable_to_using_subtype:5071-5073
+		// C++ Reference: types.cpp check_is_assignable_to_using_subtype
 		if are_types_identical(field_type, dst) {
 			return level + 1
 		}
 
-		// C++ Reference: types.cpp check_is_assignable_to_using_subtype:5074-5078
+		// C++ Reference: types.cpp check_is_assignable_to_using_subtype
 		if src_is_ptr && is_type_pointer(dst) {
 			if are_types_identical(field_type, type_deref(dst)) {
 				return level + 1
 			}
 		}
 
-		// C++ Reference: types.cpp check_is_assignable_to_using_subtype:5079-5082
+		// C++ Reference: types.cpp check_is_assignable_to_using_subtype
 		// Recursively check nested fields
 		nested_level := check_is_assignable_to_using_subtype(field_type, dst, level + 1, src_is_ptr, allow_polymorphic)
 		if nested_level > 0 {
@@ -2241,12 +2241,12 @@ check_is_assignable_to_using_subtype :: proc(src_param: ^Type, dst: ^Type, level
 		}
 	}
 
-	// C++ Reference: types.cpp check_is_assignable_to_using_subtype:5085
+	// C++ Reference: types.cpp check_is_assignable_to_using_subtype
 	return 0
 }
 
 // is_type_subtype_of checks if src is a subtype of dst
-// C++ Reference: types.cpp type_size_of_internal:4711-4717
+// C++ Reference: types.cpp type_size_of_internal
 is_type_subtype_of :: proc(src: ^Type, dst: ^Type) -> bool {
 	// C++ Reference: types.cpp:4712-4713
 	if are_types_identical(src, dst) {
@@ -2270,7 +2270,7 @@ is_type_subtype_of_and_allow_polymorphic :: proc(src: ^Type, dst: ^Type) -> bool
 }
 
 // is_type_load_safe checks if type is safe to load from memory
-// C++ Reference: types.cpp is_type_load_safe:3005-3040
+// C++ Reference: types.cpp is_type_load_safe
 is_type_load_safe :: proc(t: ^Type) -> bool {
 	// Check if type is safe to load from arbitrary memory.
 	// The old citation 2776-2821 was is_type_comparable -- a different predicate entirely.
@@ -2288,7 +2288,7 @@ is_type_load_safe :: proc(t: ^Type) -> bool {
 	// Basic types that ARE load safe
 	case .Basic:
 		basic := ct.variant.(Type_Basic)
-		// C++ Reference: types.cpp is_type_load_safe:3010
+		// C++ Reference: types.cpp is_type_load_safe
 		//     return (type->Basic.flags & (BasicFlag_Boolean|BasicFlag_Numeric|BasicFlag_Rune)) != 0;
 		// where BasicFlag_Numeric = Integer|Float|Complex|QUATERNION (types.cpp:118).
 		//
@@ -2375,14 +2375,16 @@ is_type_ordered :: proc(t: ^Type) -> bool {
 		return false
 	}
 
-	bt := base_type(t)
-	// C++ nil-guards after reducing (types.cpp, e.g. is_type_enum:
-	//     t = base_type(t); if (t == nullptr) { return false; }
-	// base_type(nil) returns nil here, so the deref below would fault.
+	// #918: CORE_type, not base_type. C++ reduces with core_type here, which unwraps Named, Enum
+	// AND Bit_Field, so a bit_field is judged by its BACKING type. With base_type a bit_field
+	// stopped at Type_Bit_Field and fell through to false -- measured as
+	// `intrinsics.type_is_ordered(BF)` accepted by the oracle and rejected here (#916).
+	// The port's `.Enum` arm went with it: core_type already unwrapped the enum, so the arm was
+	// unreachable, and C++ has none for the same reason.
+	bt := core_type(t)
 	if bt == nil {
 		return false
 	}
-
 
 	#partial switch bt.kind {
 	case .Basic:
@@ -2393,9 +2395,6 @@ is_type_ordered :: proc(t: ^Type) -> bool {
 
 	case .Pointer, .Multi_Pointer:
 		return true // Pointers are ordered
-
-	case .Enum:
-		return true // Enums are ordered
 
 	case:
 		return false
@@ -2408,10 +2407,10 @@ is_type_ordered :: proc(t: ^Type) -> bool {
 // types.cpp -- straddled function boundaries and named neither this section's procedures
 // nor anything endianness-related; 1939-1972 is core_array_type/base_complex_elem_type
 // and 2038-2046 is is_type_union_maybe_pointer. #726):
-//   types.cpp is_type_endian_big:2082-2098        types.cpp is_type_endian_little:2099-2115
-//   types.cpp is_type_endian_platform:2117-2128   types.cpp is_type_endian_specific:2133-2170
-//   types.cpp types_have_same_internal_endian:2130-2132
-//   types.cpp is_type_different_to_arch_endianness:2181-2189
+//   types.cpp is_type_endian_big        types.cpp is_type_endian_little
+//   types.cpp is_type_endian_platform   types.cpp is_type_endian_specific
+//   types.cpp types_have_same_internal_endian
+//   types.cpp is_type_different_to_arch_endianness
 // `get_basic_kind_endianness` below has NO C++ counterpart of any name -- it is a port-only
 // helper factoring out the BasicFlag_EndianLittle/Big tests C++ writes inline. Stated here so
 // nobody hunts for one (#153).
@@ -2435,7 +2434,7 @@ get_basic_kind_endianness :: proc(kind: Basic_Kind) -> Endianness {
 }
 
 // is_type_endian_specific checks if a type is an endian-specific variant
-// C++ Reference: types.cpp is_type_endian_specific:2133-2170
+// C++ Reference: types.cpp is_type_endian_specific
 is_type_endian_specific :: proc(t: ^Type) -> bool {
 	if t == nil {
 		return false
@@ -2506,7 +2505,7 @@ is_type_endian_platform :: proc(t: ^Type) -> bool {
 }
 
 // is_type_endian_little checks if a type is little-endian
-// C++ Reference: types.cpp is_type_endian_little:2099-2115
+// C++ Reference: types.cpp is_type_endian_little
 is_type_endian_little :: proc(t: ^Type) -> bool {
 	if t == nil {
 		return false
@@ -2557,7 +2556,7 @@ is_type_endian_little :: proc(t: ^Type) -> bool {
 }
 
 // is_type_endian_big checks if a type is big-endian
-// C++ Reference: types.cpp is_type_endian_big:2082-2098
+// C++ Reference: types.cpp is_type_endian_big
 is_type_endian_big :: proc(t: ^Type) -> bool {
 	if t == nil {
 		return false
@@ -2619,7 +2618,7 @@ Type_Endian_Kind :: enum {
 }
 
 // type_endian_kind_of returns the endianness a type SPECIFIES, or Platform if it specifies none.
-// C++ Reference: types.cpp type_endian_kind_of:2066-2079.
+// C++ Reference: types.cpp type_endian_kind_of.
 type_endian_kind_of :: proc(t: ^Type) -> Type_Endian_Kind {
 	ct := core_type(t)
 	if ct == nil {
@@ -2639,7 +2638,7 @@ type_endian_kind_of :: proc(t: ^Type) -> Type_Endian_Kind {
 	return .Platform
 }
 
-// types_have_same_internal_endian is C++'s one-liner at types.cpp types_have_same_internal_endian:2130-2132: it compares the
+// types_have_same_internal_endian is C++'s one-liner at types.cpp types_have_same_internal_endian: it compares the
 // is_type_endian_little ANSWER for each, so two platform-endian types agree, and a platform type
 // agrees with an explicit type only when the target happens to match.
 types_have_same_internal_endian :: proc(a, b: ^Type) -> bool {
@@ -2691,7 +2690,7 @@ is_type_constant_type :: proc(t: ^Type) -> bool {
 			return true
 		}
 
-		// C++ Reference: types.cpp is_type_constant_type:1465 - (t->Basic.flags & BasicFlag_ConstantType) != 0
+		// C++ Reference: types.cpp is_type_constant_type - (t->Basic.flags & BasicFlag_ConstantType) != 0
 		// BasicFlag_ConstantType = Boolean | Numeric | String | Pointer | Rune
 		return (basic.flags & BASIC_FLAG_CONSTANT_TYPE) != {}
 
@@ -2718,13 +2717,13 @@ is_type_constant_type :: proc(t: ^Type) -> bool {
 		return is_type_constant_type(enum_arr.elem)
 
 	case .Simd_Vector:
-		// C++ Reference: types.cpp is_type_constant_type:1475-1476. Missing from the port entirely, together with
+		// C++ Reference: types.cpp is_type_constant_type. Missing from the port entirely, together with
 		// the Matrix arm below.
 		simd := ct.variant.(Type_Simd_Vector)
 		return is_type_constant_type(simd.elem)
 
 	case .Matrix:
-		// C++ Reference: types.cpp is_type_constant_type:1477-1478. Its absence made is_type_constant_type(matrix)
+		// C++ Reference: types.cpp is_type_constant_type. Its absence made is_type_constant_type(matrix)
 		// FALSE where C++ says TRUE, which sent check_cast_internal down its non-constant
 		// branch: `M2f32(1)` stayed an INTEGER 1 instead of being re-expressed as the float
 		// 1.0 that the f32 element demands. That is what every MATRIX*_IDENTITY in
@@ -2895,7 +2894,7 @@ init_map_internal_debug_types :: proc(type: ^Type) {
 }
 
 // alloc_type_proc creates a procedure type
-// C++ Reference: types.cpp alloc_type_proc:1223-1246
+// C++ Reference: types.cpp alloc_type_proc
 // The previous citation began ~555 lines earlier, in a block of gb_global Type * declarations.
 alloc_type_proc :: proc(scope: ^Scope, params: ^Type, results: ^Type, param_count: int, result_count: int, variadic := false, calling_convention := Calling_Convention.Odin) -> ^Type {
 	// Variadic validation (C++ Reference: types.cpp:1157-1167)
@@ -2947,7 +2946,7 @@ alloc_type_array :: proc(elem: ^Type, count: i64, generic_count: ^Type = nil) ->
 }
 
 // alloc_type_enumerated_array creates an enumerated array type
-// C++ Reference: types.cpp alloc_type_enumerated_array:1110-1126
+// C++ Reference: types.cpp alloc_type_enumerated_array
 alloc_type_enumerated_array :: proc(elem: ^Type, index: ^Type, min_value: ^Exact_Value, max_value: ^Exact_Value, count: i64, op: tokenizer.Token_Kind) -> ^Type {
 	t := new(Type)
 	t.kind = .Enumerated_Array
@@ -3028,7 +3027,7 @@ alloc_type_simd_vector :: proc(count: i64, elem: ^Type, generic_count: ^Type = n
 // type_unsigned_equivalent returns the unsigned integer type of the same size as
 // `t`, recursing through #simd vectors element-wise.
 //
-// C++ Reference: types.cpp type_unsigned_equivalent:1755-1775
+// C++ Reference: types.cpp type_unsigned_equivalent
 type_unsigned_equivalent :: proc(t: ^Type) -> ^Type {
 	original_type := t
 	bt := base_type(t)
@@ -3104,7 +3103,7 @@ determine_swizzle_array_type :: proc(original_type: ^Type, type_hint: ^Type, new
 }
 
 // alloc_type_matrix creates a matrix type
-// C++ Reference: types.cpp alloc_type_matrix:1090-1107
+// C++ Reference: types.cpp alloc_type_matrix
 alloc_type_matrix :: proc(elem: ^Type, row_count: i64, column_count: i64, generic_row_count: ^Type, generic_column_count: ^Type, is_row_major: bool) -> ^Type {
 	// C++ Reference: types.cpp:1039-1048
 	// If generic dimensions are specified, include them in the type
@@ -3149,7 +3148,7 @@ lookup_field :: proc(c: ^Checker, type: ^Type, field_name: string, is_type: bool
 // lookup_field_with_selection recursively looks up a field in a type
 // Handles struct fields, enum values, union variants, and 'using' fields
 // lookup_field_with_selection finds a field by name in a type and returns the selection path
-// C++ Reference: types.cpp lookup_field_with_selection:3761-4200 (lookup_field_with_selection)
+// C++ Reference: types.cpp lookup_field_with_selection (lookup_field_with_selection)
 // The previous citation began ~250 lines earlier, at an unrelated predicate
 // (union_variant_index_types_equal). The definition is at 3756; 3698 is only the forward decl.
 lookup_field_with_selection :: proc(c: ^Checker, type_: ^Type, field_name: string, is_type: bool, sel: Selection, allow_blank_ident := false) -> Selection {
@@ -3253,7 +3252,7 @@ lookup_field_with_selection :: proc(c: ^Checker, type_: ^Type, field_name: strin
 	} else {
 		// Handle value-level access (value.field syntax)
 
-		// C++ Reference: types.cpp lookup_field_with_selection:4123-4144. Dynamic arrays and maps expose a built-in
+		// C++ Reference: types.cpp lookup_field_with_selection. Dynamic arrays and maps expose a built-in
 		// `allocator` field — index 3 in Raw_Dynamic_Array, index 2 in Raw_Map. The port
 		// had neither, so `d.allocator` on a [dynamic]T reported "has no field 'allocator'"
 		// (662 instances across the sweep) and took the surrounding code with it:
@@ -3562,7 +3561,7 @@ lookup_field_with_selection :: proc(c: ^Checker, type_: ^Type, field_name: strin
 			}
 		} else if type.kind == .Array {
 			// SINGLE-component access on an array / #simd vector: v.x, v.r, and friends.
-			// C++ Reference: types.cpp lookup_field_with_selection:4160-4188, via the _ARRAY_FIELD_CASE macro (4147-4157).
+			// C++ Reference: types.cpp lookup_field_with_selection, via the _ARRAY_FIELD_CASE macro (4147-4157).
 			//
 			// THIS IS WHY `&v.x` MUST WORK. C++ resolves a one-character component HERE, as an
 			// ordinary indexed field, so the operand stays a plain lvalue. Its swizzle path is
@@ -3577,7 +3576,7 @@ lookup_field_with_selection :: proc(c: ^Checker, type_: ^Type, field_name: strin
 			// the names whose index is < count. The map + `idx < count` test below is that same
 			// predicate written directly.
 			// ARRAY ONLY, deliberately. C++'s lookup_field has a SimdVector arm too
-			// (types.cpp lookup_field_with_selection:4174-4188), but it is UNREACHABLE from a selector: check_selector bails on
+			// (types.cpp lookup_field_with_selection), but it is UNREACHABLE from a selector: check_selector bails on
 			// `is_type_simd_vector` before any lookup (check_expr.cpp:5994-6002) and always errors.
 			// The port has no such early bail, so mirroring C++'s arm here did not mirror C++'s
 			// behaviour -- it HUNG the checker on `v.x` for `v: #simd[4]f32` (pre-#364 binary: one
@@ -3643,7 +3642,7 @@ is_type_u8_array :: proc(t: ^Type) -> bool {
 }
 
 // is_type_rune_array checks if type is [N]rune
-// C++ Reference: types.cpp is_type_rune_array:1875-1882
+// C++ Reference: types.cpp is_type_rune_array
 is_type_rune_array :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil || bt.kind != .Array {
@@ -3657,7 +3656,7 @@ is_type_rune_array :: proc(t: ^Type) -> bool {
 
 // set_union_variant_block_size caches the offset of a union's tag — i.e. the size of the
 // variant block, before the tag is appended and before final alignment.
-// C++ Reference: types.cpp:4766 and :4773.
+// C++ Reference: types.cpp, both arms.
 set_union_variant_block_size :: proc(u_param: ^Type, block_size: i64) {
 	u := base_type(u_param)
 	if u == nil || u.kind != .Union {
@@ -3669,7 +3668,7 @@ set_union_variant_block_size :: proc(u_param: ^Type, block_size: i64) {
 }
 
 // union_tag_size calculates the size of a union's tag field
-// C++ Reference: types.cpp union_tag_size:3546-3584
+// C++ Reference: types.cpp union_tag_size
 //
 // The tag size is determined by:
 // 1. Minimum size needed to represent all variants (1, 2, 4, or 8 bytes)
@@ -3775,7 +3774,7 @@ is_type_string16 :: proc(t: ^Type) -> bool {
 }
 
 // is_type_cstring16 checks if type is cstring16 (wide C string)
-// C++ Reference: types.cpp is_type_cstring16:1411-1418
+// C++ Reference: types.cpp is_type_cstring16
 is_type_cstring16 :: proc(t: ^Type) -> bool {
 	bt := base_type(t)
 	if bt == nil || bt.kind != .Basic {
@@ -4057,7 +4056,7 @@ type_offset_of :: proc(t: ^Type, index: i64) -> i64 {
 		}
 
 	case .Fixed_Capacity_Dynamic_Array:
-		// C++ Reference: types.cpp type_offset_of:4942-4957.
+		// C++ Reference: types.cpp type_offset_of.
 		//
 		//     case 0:  return 0;                     // data
 		//     case 1: {                              // len
@@ -4113,7 +4112,7 @@ type_offset_of :: proc(t: ^Type, index: i64) -> i64 {
 }
 
 // type_offset_of_from_selection calculates total offset by following a Selection path
-// C++ Reference: types.cpp type_offset_of_from_selection:4981 (the old 4611-4665 was
+// C++ Reference: types.cpp type_offset_of_from_selection (the old 4611-4665 was
 // type_size_of_internal, a different function)
 //
 // The Selection contains an index path (e.g., [0, 2] for field 0, then subfield 2).
@@ -4127,7 +4126,7 @@ type_offset_of :: proc(t: ^Type, index: i64) -> i64 {
 //
 // Note: sel.indirect must be false (cannot calculate offset through pointers)
 type_offset_of_from_selection :: proc(c: ^Checker, type: ^Type, sel: Selection) -> i64 {
-	// C++ Reference: types.cpp type_offset_of_from_selection:4982
+	// C++ Reference: types.cpp type_offset_of_from_selection
 	assert(sel.indirect == false, "Cannot calculate offset with indirect selection (pointer dereference)")
 
 	t := type
@@ -4272,7 +4271,7 @@ alloc_type_struct :: proc(c: ^Checker) -> ^Type {
 	set_base_type(t, t)
 
 	// Initialize wait groups for multi-threaded field resolution
-	// C++ Reference: check_type.cpp check_struct_type:665, 681
+	// C++ Reference: check_type.cpp check_struct_type, 681
 	// The wait groups start with count=1, and wait_group_done() is called
 	// when processing completes. This allows other threads to wait on field availability.
 	st := &t.variant.(Type_Struct)
@@ -4284,7 +4283,7 @@ alloc_type_struct :: proc(c: ^Checker) -> ^Type {
 
 // alloc_type_struct_complete allocates a struct type that is ALREADY complete.
 //
-// C++ Reference: src/types.cpp alloc_type_struct_complete:1164-1169 --
+// C++ Reference: src/types.cpp alloc_type_struct_complete --
 //     Type *t = alloc_type(Type_Struct);
 //     wait_signal_set(&t->Struct.fields_wait_signal);
 //     wait_signal_set(&t->Struct.polymorphic_wait_signal);
@@ -4314,7 +4313,7 @@ alloc_type_struct_complete :: proc() -> ^Type {
 }
 
 // alloc_type_union allocates a union type
-// C++ Reference: types.cpp alloc_type_union:1172-1175
+// C++ Reference: types.cpp alloc_type_union
 alloc_type_union :: proc(c: ^Checker) -> ^Type {
 	_ = c
 	t := alloc_type(Type_Union)
@@ -4329,7 +4328,7 @@ alloc_type_union :: proc(c: ^Checker) -> ^Type {
 }
 
 // alloc_type_enum allocates an enum type
-// C++ Reference: types.cpp alloc_type_enum:1177-1182
+// C++ Reference: types.cpp alloc_type_enum
 alloc_type_enum :: proc(c: ^Checker = nil) -> ^Type {
 	_ = c
 	t := alloc_type(Type_Enum)
@@ -4338,7 +4337,7 @@ alloc_type_enum :: proc(c: ^Checker = nil) -> ^Type {
 }
 
 // alloc_type_bit_field allocates a bit field type
-// C++ Reference: types.cpp alloc_type_bit_field:1184-1187
+// C++ Reference: types.cpp alloc_type_bit_field
 alloc_type_bit_field :: proc(c: ^Checker) -> ^Type {
 	_ = c
 	t := alloc_type(Type_Bit_Field)
@@ -4351,7 +4350,7 @@ alloc_type_bit_field :: proc(c: ^Checker) -> ^Type {
 // alloc_type_named is defined in check_decl_helpers.odin
 
 // alloc_type_pointer_to_multi_pointer converts a pointer type to multi-pointer
-// C++ Reference: types.cpp alloc_type_pointer_to_multi_pointer:1054-1063
+// C++ Reference: types.cpp alloc_type_pointer_to_multi_pointer
 alloc_type_pointer_to_multi_pointer :: proc(c: ^Checker, ptr_type: ^Type) -> ^Type {
 	_ = c
 	if ptr, ok := ptr_type.variant.(Type_Pointer); ok {
@@ -4418,7 +4417,7 @@ alloc_type_proc_from_types :: proc(
 	variadic: bool,
 	calling_convention := Calling_Convention.Odin,
 ) -> ^Type {
-	// must_be_tuple=true on BOTH, exactly as C++ does (types.cpp alloc_type_proc_from_types:5200 for the params, :5204 for the
+	// must_be_tuple=true on BOTH, exactly as C++ does (types.cpp alloc_type_proc_from_types for the params, and again for the
 	// results after its `results->kind != Type_Tuple` test -- which is the same wrap, expressed as
 	// a guard because C++ receives a single Type* rather than a slice).
 	param_tuple := alloc_type_tuple_from_field_types(c, params, true)
@@ -4433,7 +4432,35 @@ alloc_type_proc_from_types :: proc(
 
 // is_type_named checks if a type is a named type wrapper
 // C++ Reference: checker.cpp:2112-2115
+// C++ Reference: types.cpp is_type_named --
+//
+//     if (t == nullptr)      { return false; }
+//     if (t->kind == Type_Basic) { return true; }
+//     return t->kind == Type_Named;
+//
+// #917: the port had ONLY the `Type_Named` line. Two arms were missing.
+//
+// **A BASIC TYPE IS NAMED.** That reads oddly -- `int` is not a `Type_Named` wrapper -- but it is
+// what the reference says and it is load-bearing: `intrinsics.type_is_named(int)` is TRUE on the
+// oracle and was FALSE here, along with the same answer for every other basic type. Measured over
+// the rule_engine cell corpus (#916): 23 of the 40 divergences in that suite were this one line,
+// one cell per basic type -- bool, string, rune, typeid, cstring, f32, complex*, quaternion*,
+// rawptr, u8, uint, i32le, u16be and the rest.
+//
+// The nil guard matters more here than in C++: `t.variant` on a nil `^Type` dereferences nil, so
+// the port CRASHED where the reference returns false.
+//
+// NOT AN INTRINSIC-ONLY FIX -- there is a live caller at check_expr.odin's matrix binary path
+// ("prefer a NAMED type if only y has one"), which is why this change takes the full gate suite
+// rather than a probe. C++ has a THIRD caller the port lacks entirely, the "Illegal use of an
+// unnamed polymorphic record" diagnostic; that is a separate gap, recorded not fixed here.
 is_type_named :: proc(t: ^Type) -> bool {
+	if t == nil {
+		return false
+	}
+	if _, is_basic := t.variant.(Type_Basic); is_basic {
+		return true
+	}
 	_, ok := t.variant.(Type_Named)
 	return ok
 }
@@ -4476,14 +4503,14 @@ is_type_integer_like :: proc(t: ^Type) -> bool {
 // is_type_array_like reports whether a type is a fixed-length array — either
 // `[N]T` or an enumerated array `[E]T`.
 //
-// C++ Reference: types.cpp is_type_array_like:1918-1920, `is_type_array(t) || is_type_enumerated_array(t)`.
+// C++ Reference: types.cpp is_type_array_like, `is_type_array(t) || is_type_enumerated_array(t)`.
 // This deliberately does NOT include slices, dynamic arrays or strings: its two call
 // sites (check_stmt.cpp:2652 and check_builtin.cpp:3922) both rely on the operand
 // having a fixed count. The port previously accepted those three as well, which made
 // `check_unsafe_return` report taking the address of an element of a local slice —
 // something C++ permits, since the backing storage is not on the stack.
 //
-// Both C++ predicates nil-guard after `base_type` (types.cpp is_type_array:1570); the port's version
+// Both C++ predicates nil-guard after `base_type` (types.cpp is_type_array); the port's version
 // dereferenced `bt.variant` unconditionally and segfaulted on an entity whose type had
 // not been resolved.
 is_type_array_like :: proc(t: ^Type) -> bool {
@@ -4499,12 +4526,16 @@ is_type_array_like :: proc(t: ^Type) -> bool {
 }
 
 // is_type_ordered_numeric checks if a type supports ordered comparison
-// C++ Reference: types.cpp is_type_ordered_numeric:1448-1456
+// C++ Reference: types.cpp is_type_ordered_numeric
 is_type_ordered_numeric :: proc(t: ^Type) -> bool {
-	bt := base_type(t)
-	// C++ nil-guards after reducing (types.cpp, e.g. is_type_enum:
-	//     t = base_type(t); if (t == nullptr) { return false; }
-	// base_type(nil) returns nil here, so the deref below would fault.
+	// #918: TWO divergences in one procedure, and they pointed in OPPOSITE directions.
+	//
+	// C++ is `t = core_type(t); switch { case Type_Basic: return flags & OrderedNumeric; } return
+	// false;` -- Basic and nothing else. The port used base_type AND carried `Type_Pointer,
+	// Type_Multi_Pointer -> true`, which belong to is_type_ordered and were evidently copied
+	// across. Measured (#916): base_type made BF/BF2/E reject where the oracle accepts, and the
+	// pointer arms made ^int / #simd pointers accept where the oracle REJECTS.
+	bt := core_type(t)
 	if bt == nil {
 		return false
 	}
@@ -4514,8 +4545,6 @@ is_type_ordered_numeric :: proc(t: ^Type) -> bool {
 		// Check using BASIC_FLAG_ORDERED_NUMERIC composite flag
 		// ORDERED_NUMERIC = Integer | Float | Rune
 		return (v.flags & BASIC_FLAG_ORDERED_NUMERIC) != {}
-	case Type_Pointer, Type_Multi_Pointer:
-		return true
 	}
 	return false
 }
@@ -4535,7 +4564,7 @@ is_type_ordered_numeric :: proc(t: ^Type) -> bool {
 // nil representation as the tag, needing no separate tag at all — `union { ^int }` is
 // 8 bytes, not 16.
 //
-// C++ Reference: types.cpp is_type_union_maybe_pointer:2036-2044 — exactly ONE variant, which must be
+// C++ Reference: types.cpp is_type_union_maybe_pointer — exactly ONE variant, which must be
 // `is_type_internally_pointer_like` (pointer, multi-pointer, cstring, cstring16 or proc).
 //
 // The port previously required TWO variants and looked for an `untyped nil` among them.
@@ -4557,7 +4586,7 @@ is_type_union_maybe_pointer :: proc(t: ^Type) -> bool {
 }
 
 // is_type_valid_for_keys checks if a type can be used as a map key
-// C++ Reference: types.cpp is_type_valid_for_keys:2265-2274
+// C++ Reference: types.cpp is_type_valid_for_keys
 //
 // NOTE: this used to hand-roll a structural walk (Basic-except-typeid, pointer, enum, array-of-valid,
 // struct-of-valid, everything else false). C++ asks three much simpler questions, and the two disagree
@@ -4578,7 +4607,7 @@ is_type_valid_for_keys :: proc(t: ^Type) -> bool {
 }
 
 // is_type_valid_bit_set_elem checks if a type can be a bit_set element
-// C++ Reference: types.cpp is_type_valid_bit_set_elem:2276-2285
+// C++ Reference: types.cpp is_type_valid_bit_set_elem
 is_type_valid_bit_set_elem :: proc(t: ^Type) -> bool {
 	if is_type_enum(t) {
 		return true
@@ -4594,7 +4623,7 @@ is_type_valid_bit_set_elem :: proc(t: ^Type) -> bool {
 // (A stale citation -- 2291-2307, into checker.cpp -- stood here until #726. SUPERSEDED
 //  LEFTOVER: the correct reference is on the very next line. Same shape as the one in
 //  is_type_union_maybe_pointer above.)
-// C++ Reference: types.cpp is_type_valid_vector_elem:2329-2352.
+// C++ Reference: types.cpp is_type_valid_vector_elem.
 //
 // The port previously hand-rolled this as a raw Basic_Kind RANGE test,
 // `(kind >= .I8 && kind <= .F64) || (kind >= .Complex32 && kind <= .Quaternion256)`,
@@ -4641,7 +4670,7 @@ is_type_valid_vector_elem :: proc(t: ^Type) -> bool {
 }
 
 // is_type_valid_for_matrix_elems checks if a type can be a matrix element
-// C++ Reference: types.cpp is_type_valid_for_matrix_elems:1707-1721
+// C++ Reference: types.cpp is_type_valid_for_matrix_elems
 //
 // NOTE: this was correct all along but check_matrix_type_expr never called it - it hand-rolled
 // `!is_type_integer && !is_type_float && !is_type_complex && !is_type_quaternion` instead, which both
@@ -4743,7 +4772,7 @@ type_math_rank :: proc(t: ^Type) -> int {
 }
 
 // is_valid_bit_field_backing_type checks if a type can back a bit_field
-// C++ Reference: types.cpp is_valid_bit_field_backing_type:2288-2303
+// C++ Reference: types.cpp is_valid_bit_field_backing_type
 is_valid_bit_field_backing_type :: proc(t: ^Type) -> bool {
 	if t == nil {
 		return false
@@ -4775,7 +4804,7 @@ is_valid_bit_field_backing_type :: proc(t: ^Type) -> bool {
 // They were hand-written Basic_Kind mapping tables carrying the vague citation
 // "C++ Reference: check_builtin.cpp (type_integer_to_signed intrinsic)" -- no line, the #266
 // pattern. C++ has no such helpers: both intrinsics map by ENUM ADJACENCY,
-// `&basic_types[bt->Basic.kind +/- 1]` (check_builtin.cpp:6946 and :6990), after gating the
+// `&basic_types[bt->Basic.kind +/- 1]` (check_builtin.cpp, both directions), after gating the
 // operand on kind/signedness/untypedness. The tables diverged from that in four ways (already-
 // correct signedness returned unchanged where C++ ERRORS, every endian variant returned unchanged
 // under a stale "endian type globals may not exist" comment, Uintptr mapped to int where C++

@@ -78,7 +78,7 @@ import "core:odin/ast"
 DUMP_MODEL_SCHEMA :: "pkg,name,kind,size,align,state,flags,poly,value,cflags,fidx,fgidx,bitsize," +
 	"tls,link,linkpfx,linksfx,linksec,foreign,export,global,static,rodata,optmode,entrypoint," +
 	"memcpylike,anon,nosanaddr,nosanmem,instr,branchloc,objcimpl,objcclsmethod,objcsel,objcclass," +
-	"alias,mangled,group,builtin,deprecated,warning,tidepn,type,pos"
+	"alias,mangled,group,builtin,deprecated,warning,tidepn,tags,type,pos"
 
 // dump_model_norm lowercases and strips underscores. EVERY enum-valued column goes through it,
 // because the two implementations spell the same enum differently everywhere, not just in flags:
@@ -142,6 +142,28 @@ dump_model_kv_str :: proc(sb: ^strings.Builder, key: string, val: string) {
 		return
 	}
 	dump_model_kv(sb, key, val)
+}
+
+// dump_model_emit_tags writes the `tags=` field for a struct or bit_field, or nothing when every
+// tag is empty. See the call site for why this is emitted on the type-declaring entity and why it
+// is safe to compare across implementations. SCHEMA v4.
+@(private="file")
+dump_model_emit_tags :: proc(sb: ^strings.Builder, tags: []string) {
+	if len(tags) == 0 {
+		return
+	}
+	any_set := false
+	for t in tags {
+		if len(t) != 0 {
+			any_set = true
+			break
+		}
+	}
+	if !any_set {
+		return
+	}
+	joined := strings.join(tags, "\x1f", context.temp_allocator)
+	dump_model_kv(sb, "tags", joined)
 }
 
 @(private="file")
@@ -297,14 +319,55 @@ dump_model_entity_line :: proc(sb: ^strings.Builder, e: ^ast.Entity, root: strin
 	// call site that registers a dependency on one side and not the other moves the number.
 	//
 	// This is the ONLY differential coverage of the 51 add_type_info_type call sites, and of the
-	// min-dep consumer wired in #638. It is NOT gated yet: modeldiff carries it in STATE_IGNORED
-	// until a --repeat floor is measured, because its inputs touch the machinery that makes
-	// #468/#469 ungateable, and a column whose floor is unknown must not silently become a gate.
+	// min-dep consumer wired in #638.
+	//
+	// STALENESS CORRECTED (#901): this said "It is NOT gated yet: modeldiff carries it in
+	// STATE_IGNORED until a --repeat floor is measured". That was true when written and has been
+	// false since #701 -- `modeldiff.py` now has `STATE_IGNORED = {"type"}` and nothing else, so
+	// tidepn reaches state_packages/state_entities and IS a gate. The caution was right at the
+	// time: the floor was measured first, and only then was it promoted.
 	if e.decl_info != nil {
 		sync.rw_mutex_shared_lock(&e.decl_info.type_info_deps_mutex)
 		n := len(e.decl_info.type_info_deps)
 		sync.rw_mutex_shared_unlock(&e.decl_info.type_info_deps_mutex)
 		dump_model_kv_int(sb, "tidepn", i64(n))
+	}
+
+	// tags = the per-field TAG array of a struct or bit_field, joined with US (0x1f). SCHEMA v4.
+	//
+	// EMITTED ON THE TYPE-DECLARING ENTITY, not on the field entities, because that is where the
+	// data lives on BOTH sides: C++ keeps `String *tags` on TypeStruct/TypeBitField with
+	// `count == fields.count`, and so does this port. A field entity has no back-pointer to its
+	// owning type, so a per-field emission would need a reverse map built for the dump alone.
+	//
+	// UNLIKE `type=` BELOW, THIS IS SAFE TO COMPARE ACROSS IMPLEMENTATIONS: a tag is a literal
+	// taken from source, not something rendered by a type printer, so there is no independent
+	// spelling to diverge. That is the whole reason it can be a gate at all.
+	//
+	// The joined form preserves POSITION, which matters: an empty slot means "this field has no
+	// tag", and a tag landing on the wrong field is exactly the kind of off-by-one this is meant to
+	// catch. 0x1f is used as the separator because dump_model_sanitise escapes \t, \n and \r --
+	// the three bytes that would break the column structure -- and leaves 0x1f alone.
+	//
+	// Omitted entirely when every tag is empty, which is almost every struct in the tree; that
+	// keeps the dump small and makes the common case agree trivially rather than by comparison.
+	//
+	// This exists to make LEDGER #899 measurable: the port drops bit_field tags on the floor
+	// (Type_Bit_Field has no tags field at all), and the port's unquote_string lacks C++'s
+	// `has_carriage_return` argument, so a raw-string tag keeps CRs the reference strips. Both are
+	// invisible to every diagnostic gate, and were invisible to this one until v4.
+	if e.type != nil {
+		if bt := base_type(e.type); bt != nil {
+			#partial switch v in bt.variant {
+			case Type_Struct:
+				dump_model_emit_tags(sb, v.tags[:])
+			case Type_Bit_Field:
+				// #904: only reachable since Type_Bit_Field gained a `tags` field. Before that
+				// the port parsed bit_field tags and discarded them, and this arm would have had
+				// nothing to read.
+				dump_model_emit_tags(sb, v.tags[:])
+			}
+		}
 	}
 
 	// type= is emitted for GROUPING within one side (it separates "N copies of one type" from "N
@@ -314,7 +377,7 @@ dump_model_entity_line :: proc(sb: ^strings.Builder, e: ^ast.Entity, root: strin
 
 	// LEDGER #421. A polymorphic instantiation is created by whichever call site demands it first
 	// and stamped with THAT site's position; under parallel body checking the winner varies (e.g.
-	// datetime's `divmod` at :204 in four runs and :388 in one). That is call-site churn, not a
+	// datetime's `divmod` at two different call sites across runs). That is call-site churn, not a
 	// semantic difference, so instantiations get a canonical marker instead of a position.
 	if is_inst {
 		dump_model_kv(sb, "pos", "<instantiation>")
@@ -398,7 +461,7 @@ dump_model :: proc(c: ^Checker, path: string) -> bool {
 	// SCHEMA LINE. Both implementations emit this and modeldiff REFUSES to compare dumps whose
 	// schema lines disagree. This is the enforcement a shared binary struct would have given:
 	// a field silently dropped on one side becomes a loud refusal instead of a silent agreement.
-	fmt.sbprintf(&sb, "## schema v3 %s\n", DUMP_MODEL_SCHEMA)
+	fmt.sbprintf(&sb, "## schema v4 %s\n", DUMP_MODEL_SCHEMA)
 	fmt.sbprintf(&sb, "## insertion-order entities=%d\n", len(info.entities))
 	for e in info.entities {
 		strings.write_string(&sb, "ins\t")

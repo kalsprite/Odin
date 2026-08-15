@@ -42,7 +42,7 @@ base_array_type :: proc(t: ^Type) -> ^Type {
 // base_any_array_type returns the element type of ANY array-like type, including the ones
 // base_array_type deliberately excludes: slice, dynamic array and fixed-capacity dynamic array.
 // C++ keeps both functions and they are not interchangeable.
-// C++ Reference: types.cpp base_any_array_type:1816-1834
+// C++ Reference: types.cpp base_any_array_type
 base_any_array_type :: proc(t: ^Type) -> ^Type {
 	bt := base_type(t)
 	if bt == nil {
@@ -649,7 +649,7 @@ check_builtin_simd_extract :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 		return false
 	}
 
-	// C++ (check_builtin.cpp:1298 for extract, :1324 for replace) gates this on MAX_COUNT < 0 --
+	// C++ (check_builtin.cpp -- the extract and replace arms) gates this on MAX_COUNT < 0 --
 	// the VECTOR's element count -- not on `value`, which stays -1 whenever the index is not a
 	// constant. C++ therefore ACCEPTS a runtime index and this message survives only to report a
 	// malformed vector. Testing `value < 0` made every non-constant index an error, a real
@@ -698,7 +698,7 @@ check_builtin_simd_replace :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 		return false
 	}
 
-	// C++ (check_builtin.cpp:1298 for extract, :1324 for replace) gates this on MAX_COUNT < 0 --
+	// C++ (check_builtin.cpp -- the extract and replace arms) gates this on MAX_COUNT < 0 --
 	// the VECTOR's element count -- not on `value`, which stays -1 whenever the index is not a
 	// constant. C++ therefore ACCEPTS a runtime index and this message survives only to report a
 	// malformed vector. Testing `value < 0` made every non-constant index an error, a real

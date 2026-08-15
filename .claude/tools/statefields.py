@@ -32,10 +32,16 @@ for i, p in enumerate(pkgs, 1):
     for f in (rp, pp):
         if os.path.exists(f): os.remove(f)
     env = dict(os.environ, ODIN_ROOT=REPO, ODIN_DUMP_MODEL=rp)
+    # #900: the PORT arm needs ODIN_ROOT too. It never had `env=` -- it relied on `cwd=REPO`
+    # making the checker's cwd walk-up succeed, and #898 removed that walk-up because it made a
+    # LIBRARY's answer depend on the caller's working directory. The reference arm has always
+    # passed ODIN_ROOT explicitly; the port arm was asymmetric and nobody noticed, because the
+    # one gate that would have caught it (modelsweep) was itself out of service on a stale ref.
+    port_env = dict(os.environ, ODIN_ROOT=REPO)
     subprocess.run([ref, "check", p, "-no-entry-point", "-thread-count:1"], env=env,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=REPO)
     subprocess.run([port, p, f"-dump-model:{pp}", "-no-threads"],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=REPO)
+                   env=port_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=REPO)
     if not os.path.exists(rp) or not os.path.exists(pp):
         skipped.append(p); continue
     a, fa, sa = modeldiff.read_dump(rp)

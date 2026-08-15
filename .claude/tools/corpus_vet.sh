@@ -11,6 +11,11 @@
 # The oracle invocation mirrors parity_vet.sh exactly: `odin check <p> -vet -no-entry-point`.
 # Compares TEXTS, not counts (#363: agreeing counts hid four swapped messages in fb2).
 set -u
+# #898: the checker library no longer walks up from CWD to find `base/runtime` -- the root
+# must be given to it. The harness conforms to the library, not the other way round, so the
+# repo root is exported here (self-locating, and respects an ODIN_ROOT already in the env).
+export ODIN_ROOT="${ODIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
 PORT="${1:-}"
 ROOT="${2:-/home/kalsprite/dev/odin/.claude/probes}"
 [ -z "$PORT" ] || [ ! -x "$PORT" ] && { echo "usage: corpus_vet.sh <VET_PORT_BIN> [PROBE_ROOT]" >&2; exit 2; }

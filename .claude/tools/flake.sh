@@ -16,6 +16,12 @@
 # that concurrent sweeps push slow packages past their timeout; a TIMEOUT here would be
 # reported as a difference and manufacture a false flake.
 set -o pipefail
+# #906: the checker library no longer walks up from CWD to find `base/runtime` (#898 removed it,
+# because a LIBRARY's answer must not depend on the caller's working directory). Tools that only
+# `cd` into the repo were relying on that walk-up BY ACCIDENT and now report "Undeclared name:
+# append" -- runtime never loaded. The harness conforms to the library: export the root.
+export ODIN_ROOT="${ODIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+
 BIN="$1"; RUNS="${2:-3}"; OUT="${3:-/tmp/claude-1000/-home-kalsprite-dev-odin/5ae0f352-0d85-4f59-825d-514e4ce56a75/scratchpad}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

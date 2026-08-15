@@ -7,8 +7,8 @@ This module provides deep cloning of AST nodes for polymorphic procedure instant
 Each polymorphic procedure specialization needs its own AST tree copy to avoid sharing
 cached entity bindings and type information.
 
-C++ Reference: parser.cpp clone_ast:198-526, plus the two clone_ast_array OVERLOADS
-at parser.cpp:177-186 and :187-196 -- say which overload (#169)
+C++ Reference: parser.cpp clone_ast, plus the two clone_ast_array OVERLOADS
+at parser.cpp's two overloads -- say which overload (#169)
 */
 
 import "core:odin/ast"
@@ -754,7 +754,7 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 
 	case ^ast.Matrix_Index_Expr:
 		// `m[i, j]`
-		// C++ Reference: parser.cpp clone_ast:251-255 - clones expr, row_index, column_index.
+		// C++ Reference: parser.cpp clone_ast - clones expr, row_index, column_index.
 		//
 		// Reachable as soon as polymorphic matrix procedures can be declared: instantiating
 		// `proc(m: $T/matrix[$R, $C]$E)` clones the body, and any m[i, j] in it lands here.
@@ -769,7 +769,7 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 		return n
 
 	case ^ast.Relative_Type:
-		// C++ Reference: parser.cpp clone_ast:441-444 - clones tag and type.
+		// C++ Reference: parser.cpp clone_ast - clones tag and type.
 		n := new(ast.Relative_Type)
 		n^ = variant^
 		n.node.expr_base.tav = {}
@@ -781,7 +781,7 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 
 	case ^ast.Fixed_Capacity_Dynamic_Array_Type:
 		// `[dynamic; N]T`
-		// C++ Reference: parser.cpp clone_ast:461-464 - clones elem, capacity AND tag.
+		// C++ Reference: parser.cpp clone_ast - clones elem, capacity AND tag.
 		//
 		// Without this case clone_ast_node hit its "unhandled AST variant" panic, so ANY attempt to
 		// instantiate a polymorphic procedure whose signature mentions [dynamic; $N]$E aborted the

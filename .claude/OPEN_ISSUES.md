@@ -19601,3 +19601,1559 @@ future reader who finds only the reversal would think the earlier author careles
 GATES: #97 green (ast/parser/checker). Corpus/parity/crosstarget NOT re-run -- comment-only change in
 a single procedure's comment block, and the #50 `code()` test class covers exactly this. Oracle
 untouched. **`git diff --stat core/odin/` unchanged in file count.**
+
+## #892 -- THE STRIP (Jon: "i made a commit - lets strip them all"). 1864 anchored citations
+## de-numbered. BOTH CITATION TOOLS ARE NOW SILENT BY DESIGN. 2383 bare citations CANNOT be stripped
+## the same way and are LEFT UNTOUCHED, awaiting a second decision.
+
+**JON COMMITTED FIRST, so there is a rollback point that is not my backup.** Backups taken anyway
+(#59): `$S/pre892_backup/{checker,ast,parser,tokenizer}/` + per-file manifest
+`$S/pre892_manifest.md5` = `74be56d1a61da88a54c4cbce1c6a3ce7` (99 files).
+
+**"ALL" TURNED OUT TO BE TWO POPULATIONS, AND ONLY ONE OF THEM HAS A FUNCTION NAME.**
+`citefn --report` before the strip:
+```
+already anchored     1864   DRIFTED 152      <- file.cpp fn:NNN   -> STRIPPED, name survives
+bare citations       2204                    <- file.cpp:NNN      -> NO NAME TO FALL BACK ON
+     resolvable        1320
+     outside-any-function  429   (file-scope tables, enum bodies, macro blocks)
+     range-spans-functions 403   (a range crossing two functions)
+     range-end-outside      52
+plus ast 35 / parser 125 / tokenizer 19, ALL bare
+```
+**Stripping a bare citation does not leave "fn name is enough as a ref" -- it leaves
+`// C++ Reference: check_expr.cpp`, a pointer at a 13,631-line file.** That is not a weaker
+reference, it is no reference. So the strip was applied to the 1864 ONLY, and the 2383 bare ones are
+untouched pending Jon's answer to the fork recorded at the bottom of this entry.
+
+**METHOD, and the detection pass EARNED ITS KEEP.** One-off transformer `$S/strip_cites.py` (a
+one-off, NOT an instrument -- #178), regex `file.(cpp|hpp) +fn:NNN[-NNN]` -> `file.(cpp|hpp) fn`,
+applied ONLY inside comment spans. **Ran `--detect` FIRST to prove every one of the 1864 sits inside
+a comment before writing a single byte. It reported TWO outside comments** --
+`check_type.odin:4350` and `name_canonicalization.odin:174`. **Both were in fact inside `//`
+comments; the fault was MY SCANNER: it did not know Odin RUNE LITERALS, so an earlier
+`quote: byte = '"'` flipped it into a fake in-string state that swallowed the rest of the file.**
+Taught it rune literals, re-ran: `outside_comment=0`. **Had I trusted the first pass and hand-waved
+the two, I would have shipped a scanner that was wrong about string state across 36 files.**
+
+**RESULT: `files_changed=36 replaced=1864`.**
+
+**VERIFICATION -- THREE INDEPENDENT CHECKS, AND THE FIRST ONE'S HARNESS WAS BROKEN:**
+1. **#50 `code()` test: 0 bytes.** First run reported `total_diff_bytes=289704 files_with_code_diff=40`
+   and **that was MY TEST HARNESS, NOT THE EDIT** -- it used `find` and recursed into `tests/` and
+   `docs/`, which neither the backup (`cp dir/*.odin`) nor the strip script (`glob dir/*.odin`) ever
+   touched, so it diffed 40 real files against nonexistent backups. Corrected to the actual edited
+   set: **`files_compared=59 total_diff_bytes=0 files_with_code_diff=0`.**
+   **RULE 63'S TENTH HIT, and again it was a filter I wrote myself.**
+2. **`md5sum -c` against the manifest: 63 OK, 36 FAILED, and ZERO of the failures outside the four
+   top-level dirs** -- i.e. exactly the intended set changed and nothing else.
+3. **#97 GATE GREEN ON ALL FOUR: AST-RC=0 TOKENIZER-RC=0 PARSER-RC=0 CHECKER-RC=0.**
+
+**CORPUS/PARITY DELIBERATELY NOT RUN, AND THIS IS NOT LAZINESS.** Those gates test a BUILT BINARY,
+and the current harness (`$S/tst_890`/`$S/tvet_890`) predates this edit -- running them would pass
+and prove nothing about the change. For a comment-only edit the conclusive evidence is the `code()`
+test at 0 bytes plus `odin check`, which is exactly how #676/#682 handled the same class. Machine was
+idle (31.7 free cores) and the oracle hash is correct (`d653ac0...`), so this was a choice, not a
+constraint.
+
+**>>>>>> THE TOOLS ARE NOW SILENT. MEASURED, NOT PREDICTED: <<<<<<**
+```
+citefn  --check   already anchored 0   DRIFTED 0     (was 1864 / 152)
+citemono          groups_with_inversions=0  total_inversions=0   (was 67 / 270)
+```
+**`citefn.py` and `citemono.py` have no other input than numbered citations, so both are now
+vacuous.** `--check` returning `drifted=0` no longer means "the citations are honest", it means
+"there is nothing left to check" -- **a future reader must not quote it as a green gate.** This is
+the intended consequence of the ruling, stated here so it cannot be mistaken for an achievement.
+The `citefn_triaged.txt` scoping machinery and `--apply` are likewise dead letters.
+
+**THE COUNTER-ARGUMENT, FOR THE RECORD, BECAUSE THE TOOL ITSELF MADE IT.** `citefn.py`'s header
+argues against exactly this: *"the line number carries information the name does not.
+check_call_arguments_internal is ~400 lines; this session used the distinction between :6798 (the
+empty-variadic dummy) and :6835 (the default fill) to port #579 B correctly."* **That is a real cost
+with a worked example, and it is now paid.** Against it stands #891's measurement -- `drifted=0`
+(#682) -> `drifted=152` (#891) from upstream churn alone -- which says the precision was decaying
+into confident wrongness anyway. **Jon has the call and made it; recording the cost so nobody
+re-litigates it from half the evidence.**
+
+**>>>>>> OPEN FOR JON -- THE SECOND HALF, WHICH THE FIRST DECISION DOES NOT SETTLE <<<<<<**
+**2383 bare `file.cpp:NNN` citations remain.** Three options, none free:
+ 1. **LEAVE THEM (my recommendation).** They keep a precise pointer that decays; the number is at
+    least re-derivable by reading the code near it. Costs nothing today.
+ 2. **ANCHOR THEN STRIP.** Only **1320 of 2204 are resolvable at all**; the other 884 point at
+    file-scope tables, enum bodies, macro blocks or two-function ranges and **can never have a
+    function name**. Worse, `citefn --apply` resolves line->function against TODAY'S `src/`, so any
+    citation that has ALREADY drifted gets a WRONG name made permanent -- the tool's own header calls
+    this "the sharpest edge in the tool" and gives a worked example. **The measured drift rate on the
+    triaged, anchored population was 152/1864 = 8%; these 1320 are UNTRIAGED, so likely worse.**
+    ~100-250 permanent false claims, and once the number is gone it cannot be re-derived. **DO NOT.**
+ 3. **STRIP ANYWAY** -> `// C++ Reference: check_expr.cpp`. Honest (it claims nothing false) but the
+    reference is gone. Defensible if the position is that these comments should carry PROSE, not
+    coordinates.
+**Also unhandled: 81 naked `:NNNN` references** in checker comments with no file at all (e.g.
+"-- :6879 on failure"), which no regex can strip safely without reading each one.
+
+**RULE 132 (NEW): A ONE-OFF TRANSFORMER GETS A DETECTION PASS BEFORE IT GETS WRITE ACCESS,** and
+when the detection pass flags something, the FIRST hypothesis is that the DETECTOR is wrong. Both
+flags here were the scanner, and finding that out cost one `sed` -- finding it out after 36 files
+would have cost the tree.
+**RULE 133 (NEW): WHEN A SWEEP KILLS A GATE, WRITE DOWN THAT THE GATE IS DEAD IN THE SAME BREATH.**
+`drifted=0` now means "nothing to check" and reads identically to the healthiest state the tool ever
+reported.
+
+GATES: #97 green x4. `code()` 0 bytes / 59 files. manifest 36 FAILED = 36 intended. Oracle
+`d653ac0cdb834e2c56d2de1b0ddf5a28` unchanged. citefn/citemono vacuous BY DESIGN.
+
+## #893 -- #633 CONSOLIDATED AND CLOSED (Jon: "consolidate seems like right choice, closer to cpp
+## the bettr"). One literal-conversion rule now, not two. 47 of 49 A/B cases BYTE-IDENTICAL; the
+## two that moved are both TOKENIZER-REJECTED, and one of them moved TOWARD C++.
+
+**THE TASK AS FILED WAS EXECUTABLE AGAIN, and I had to correct MY OWN inversion to see it.** #742
+told Jon "#633 is inverted, the faithful port is the unfaithful one" on TWO grounds. Re-derived from
+source this tick (#209), **BOTH ARE GONE**:
+ 1. **wrong integer-treatment condition -- FIXED BY #764.** `exact_value_float_from_string` now reads
+    `!contains(".") && !contains("-")`, verbatim C++ `exact_value.cpp:363`. It got fixed because
+    #591 Stage B gave it its FIRST LIVE CALLER (`build_settings.odin`, the `-define:` path) --
+    exactly what #763 predicted would happen.
+ 2. **"no string unquoting" -- NEVER A DEFECT.** C++'s own converter does not unquote either:
+    `case Token_String: return exact_value_string(string);`. `parser.cpp` calls `unquote_string`
+    BEFORE calling it. **The port's dead copy was byte-faithful; what I measured was an INPUT
+    CONTRACT mismatch, not a bug.** The #742 measurement was sound and my reading of it was wrong.
+**REFUTED PREMISE 134: "A MEASURED DIVERGENCE BETWEEN TWO IMPLEMENTATIONS LOCATES THE DEFECT IN ONE
+OF THEM." It can instead mean they take DIFFERENT INPUTS.** Check the callers before assigning
+blame -- one level up, same shape as the refuted premise at #883.
+
+**THE ARGUMENT THAT DECIDED IT (and it is a fact, not a preference): the same rule was fixed TWICE,
+INDEPENDENTLY, and neither fix crossed over.** #632 fixed the float-overflow rule in the live copy;
+#764 fixed the integer-treatment rule in the dead copy. Two ticks, two bugs, two copies, zero
+crossover. That is the duplication cost landing in the record.
+
+### WHAT LANDED -- C++'S OWN SPLIT, RESTORED
+
+C++ divides the work and the port now does too:
+ * **PROLOGUE** `parse_exact_value_from_token` (check_expr.odin) -- unquotes Rune and String, then
+   delegates. Mirrors `parser.cpp exact_value_from_token`.
+ * **CONVERTER** `exact_value_from_basic_literal` (exact_value.odin) -- owns the conversion rule for
+   every kind. **It had ZERO callers for its whole life; it now has the only one.**
+ * `.Ident` (`true`/`false`/`nil`) stays in the prologue and is flagged as a PORT ADDITION: C++
+   resolves those as UNIVERSE ENTITIES via `init_universal`, never as literals, so C++'s
+   converter has no arm for them and must not grow one.
+
+**`unquote_string` was made a faithful port of `string.cpp` in the process** (backup
+`$S/pre893_check_expr.odin` = `137f008b55623b95aa431ff995011c83`):
+ * **it now returns an `ok` flag.** It used to signal failure by RETURNING ITS INPUT UNCHANGED,
+   which a caller cannot branch on -- unusable as a delegation guard.
+ * **it now accepts the RUNE delimiter.** C++ calls this ONE function for `Token_Rune` and
+   `Token_String` both; the port had a separate hand-rolled rune arm.
+ * **the leftover-tail rejection is now where C++ puts it** (`if (quote == '\'' && s.len != 0)
+   return 0`), which is what makes a multi-character rune literal invalid on both sides.
+ * **the raw-byte rule is documented at both ends**: `r < 0x80 || !multiple_bytes` writes a RAW
+   BYTE, which is why `'\xff'` must read back through the converter's `len == 1` PLAIN CAST as rune
+   0xFF and not U+FFFD. That asymmetry is load-bearing and now says so at both sites.
+
+**THE LEDGER COMMENTARY WAS MIGRATED, NOT DROPPED.** The old fused arms carried the #167 (big-int
+substitution: `x: int = 100000000000000000000` compiled as 7766279631452241920), #368 (underscore
+separators, reimplemented `big_int_from_string`) and #632 (imaginary components DISCARDED, so
+`real(3i)` was 3 and `imag(3i)` was 0) write-ups. Those record defects that were LIVE and got fixed;
+they moved onto the converter arms in `exact_value.odin`, where the rule now lives.
+
+### THE A/B, WHICH IS THE POINT (`$S/n742`, extended #742 -> 49 cases)
+
+**The old probe compared LIVE vs DEAD inside ONE binary. Consolidation makes that comparison
+VACUOUS** -- the live one now IS the dead one (same shape as citefn after #892). So the probe was
+rewritten to print the LIVE value on every case, and the real test is **OLD BINARY vs NEW BINARY**:
+`$S/n742_pre.txt` vs `$S/n742_post.txt`. Added rune, raw-string, `\x`, underscore-separator,
+malformed and `.Ident` cases -- the seams the original 26 did not cover.
+
+**RESULT: 47 of 49 IDENTICAL. Exactly two moved, and I predicted both before running it:**
+```
+0h3C0   live 0    -> 4.743e-321     (3 hex digits: not 4/8/16)
+''      live nil  -> 65533          (empty rune literal)
+```
+**BOTH ARE UNREACHABLE, VERIFIED AGAINST THE ORACLE RATHER THAN ASSUMED:**
+ * `X :: 0h3C0` -> `Syntax Error: Invalid hexadecimal float, expected 4, 8, or 16 digits, got 3`
+ * `X :: ''`    -> `Syntax Error: Invalid rune literal`
+The tokenizer rejects both before any exact value is built -- **which is exactly what C++'s
+commented-out `GB_PANIC` says ("should have been caught by the tokenizer"), so #764's reasoning is
+confirmed by measurement.** `0h3C0` additionally moved TOWARD C++: the new value is C++'s
+`transmute` fallthrough.
+**ONE HONEST RESIDUAL: `''` now yields U+FFFD where C++ yields -1**, because Odin's
+`utf8.decode_rune` returns `RUNE_ERROR` where C++'s `utf8_decode` leaves `GB_RUNE_INVALID`. Dead
+input, recorded not fixed -- chasing a sentinel through unreachable territory is not parity work.
+
+### GATES -- ALL FOUR AT BASELINE ON `$S/tst_893` / `$S/tvet_893`
+```
+corpus       FULL-MATCH=332 members=332 missing=0 excluded=14
+parity       packages=323 compared=323 excluded=0 count=1 text=0 attrib=2
+parity_vet   packages=323 compared=323 excluded=0 count=1 text=0 attrib=2
+crosstarget  members=9 match=9 differ=0 unmeasured=0 excluded=2
+```
+count=1 = #582 (`core/rexcode/isa/x86/tools`), attrib=2 = #341. #97 green x4. Oracle
+`d653ac0cdb834e2c56d2de1b0ddf5a28`. Machine idle (31.6 free cores) for all of it.
+
+### TWO THINGS FOUND ON THE WAY, RECORDED NOT FIXED
+
+1. **`check_type.odin` DISCARDS the new `ok` flag on a struct tag, and C++ DOES NOT.** C++ reports
+   an invalid struct tag; the port silently accepts one. Kept behaviour identical here on purpose
+   (out of #633's scope), flagged AT THE SITE, and it needs its own oracle A/B.
+2. **`parse_escape_rune` (check_expr.odin) has ZERO callers -- AND IT ALREADY DID before this tick**
+   (confirmed against `$S/pre893_check_expr.odin`, 0 hits). So it was not orphaned by the
+   consolidation; it is a PRE-EXISTING dead helper duplicating a rule that lives in `unquote_char`.
+   **Same shape as #633 itself.** Not deleted on my own judgment -- exported symbol, public package
+   (#868).
+
+**RULE 135 (NEW): WHEN TWO IMPLEMENTATIONS OF ONE RULE DISAGREE, CHECK WHETHER THEY TAKE THE SAME
+INPUT BEFORE DECIDING WHICH IS WRONG.** #742 cost a reversed recommendation to Jon on exactly this.
+**RULE 136 (NEW): A CONSOLIDATION'S A/B MUST BE OLD-BINARY vs NEW-BINARY.** Comparing the two copies
+inside one binary goes vacuous the instant the consolidation lands and would have reported success
+for any behaviour whatsoever.
+
+**#633/#742 CLOSED. Todolist #436 done.**
+
+## #894 -- THE UPSTREAM QUEUE, RE-DERIVED FROM THE DIRECTORY. TWO OF THE THREE WERE ALREADY WRITTEN
+## UP AND MY OWN GLOB HID THEM. #636 CLOSED BY CONVERGENCE, #582 IS FIXED IN THIS CHECKOUT.
+
+**RULE 63'S ELEVENTH HIT, AND IT WAS A FILTER I WROTE *AND ANNOTATED TASKS WITH*.** I told Jon that
+#635/#639/#641 "need write-ups before you file", having "verified" it by searching for
+`UPSTREAM-UNFILED-*.md`. **Reports that already have an upstream issue number are named
+`UPSTREAM-<N>-*.md`.** `ls COMPILER_ISSUES/` shows:
+```
+UPSTREAM-635-quaternion-constant-comparison-panics.md            <- ALREADY WRITTEN
+UPSTREAM-641-type-integer-to-unsigned-rune-returns-f16.md        <- ALREADY WRITTEN
+UPSTREAM-642-jmag-kmag-reject-every-untyped-constant-quaternion.md
+UPSTREAM-646-real-imag-absorb-the-conversions-type.md
+```
+Both read end to end (#119): complete, filing-ready, with 5/5 reproductions and controls. **Two of
+the four I did not even know existed.** The lesson is the one #881 already taught and I re-learned
+with a different glob: **`ls` THE DIRECTORY, DO NOT PATTERN-MATCH YOUR OWN NAMING ASSUMPTION.**
+
+### #639 WRITTEN UP -- the only one that was genuinely missing
+`COMPILER_ISSUES/UPSTREAM-639-diagnostics-at-end-of-line-render-the-wrong-source-line.md`.
+**RE-REPRODUCED BEFORE WRITING (the other two reports set that standard): 5/5, byte-identical output
+across runs, THREE shapes**, all `odin check` on a 2-3 line file:
+```
+A :: 0h123 / B :: A   oracle prints (2:11) and renders LINE 3 (`B :: A`, caret col 1); port renders LINE 2
+A :: 0x    / B :: 1   same shape, different tokenizer error -- and the SAME FILE carries a correct
+                      (2:6) diagnostic as a CONTROL, so it is the position, not the file
+A :: 0h123 (EOF)      oracle prints `( empty line )` -- NO SOURCE AT ALL for a real error
+```
+**MECHANISM RE-VERIFIED IN CURRENT `src/`, not quoted from the old entry:**
+`parser.cpp get_file_line_as_string` picks the rendered line from **`pos.offset`** (`isize offset =
+pos.offset;`) while the printed `(line:column)` comes from `pos.line`/`pos.column`. For these
+tokenizer errors offset is ONE PAST the newline. Three independent confirmations: the caret lands at
+column 1 of the next line (`offset - line_start == 0`); the file-final case falls into
+`error.cpp`'s `( empty line )` branch because `line_end == end` immediately; and the function
+**already guards the adjacent case** (`if (offset > 0 && *line_start == '\n') line_start -= 1;`),
+which fires when the offset is ON a newline and not when it is past one.
+**The port does NOT reproduce it and is self-consistent. If upstream fixes the RENDER side, the two
+converge with NO port change** -- stated in the report so the cheap fix is the obvious one.
+
+### >>>>>> #636 IS CLOSED, AND NOT BY ME: THE ORACLE MOVED <<<<<<
+Task #438 said "PREMISE NOW IN DOUBT -- re-measure before acting". **Re-measured, 3/3 deterministic,
+and the premise is REFUTED:**
+```
+s16len   #assert(len(S) == 5) on `S: string16 : "héllo"`   ORACLE rc=0   PORT rc=0   BOTH PASS
+```
+The recorded premise was *"`#assert(len(S) == 5)` fails on BOTH the port and the pre-#7268 oracle --
+both compute 6"*. **Both now compute 5 (UTF-16 code units).** The port got there at #751; the oracle
+is now post-#7268 for constant representation. **The divergence #636 was staged to catch never
+happened -- it resolved itself before the merge-day checklist was ever run.**
+
+**AND #582 IS FIXED IN THIS CHECKOUT.** Both repros, which used to abort:
+```
+m582/a  S :: "hello"; S[3:1]          oracle rc=1 (clean "Invalid slice indices: [3 > 1]"), NOT rc=132
+m582/b  S: string16 : "hello"; S[0:2] oracle rc=0, silent -- the GB_ASSERT is gone
+```
+Message text matches the port exactly on m582/a. **The ledger line "This checkout predates #7268" is
+now STALE** -- `./odin` is 2026-08-13 20:00, newer than the newest `src/` file (2026-08-12 18:41),
+and `md5sum ./odin` is still `d653ac0cdb834e2c56d2de1b0ddf5a28`, so this is Jon's rebuild of an
+advanced tree, not a stale binary. **#110 again: "predates the merge" was a claim with a date.**
+
+### #887's FILED REPORT WAS STALE IN ITS PORT NOTE -- CORRECTED BEFORE JON FILES IT
+Re-ran the `#exists` repro because #636's outcome bears directly on it. **It still reproduces exactly
+as filed** -- oracle fails `#exists(B)` (string16) and `#exists(C)` (cstring16), passes the `A`
+(string) and `D` (cstring) controls in the same compilation. **The cause analysis is CONFIRMED by
+#636's result**: the oracle really is holding UTF-16 code units and handing them to the path lookup.
+**But the report's "Note for the self-hosted checker port" said the port emits a DIAGNOSTIC here.
+That was true of an intermediate state and is FALSE NOW** -- #888 replaced the guard with a decode,
+so the port passes all four assertions and prints nothing. Corrected in place, with the superseded
+behaviour kept visible so the two are not confused. **A report handed to an upstream maintainer with
+a stale claim about the reporter's own compiler is worse than no report.**
+
+**RULE 137 (NEW): BEFORE HANDING OFF A FILED REPORT, RE-RUN ITS REPRO *AND* RE-READ ITS CLAIMS ABOUT
+YOUR OWN SIDE.** The repro was fine; the sentence about the port had decayed under a fix I made
+myself six ticks earlier.
+**RULE 138 (NEW): A "MERGED BUT NOT PULLED" NOTE EXPIRES THE NEXT TIME ANYONE TOUCHES THE TREE.**
+#636 spent its whole life as a staged prediction of a divergence that had already been resolved.
+
+**Todolist: #437, #441, #442, #438 all CLOSED.** Remaining: **#461 (#805) only, barred by #706.**
+
+GATES: none re-run -- no source changed this tick (one new report, one report corrected, both in
+`COMPILER_ISSUES/`, which is not compiled). Oracle `d653ac0cdb834e2c56d2de1b0ddf5a28`.
+
+## #895 -- #805 LANDED (Jon lifted the #706 bar for exactly these 7 lines). The invention is gone,
+## the probe matches the oracle byte-for-byte, and the battery turned up a SEPARATE live defect.
+
+**THE BAR WAS LIFTED NARROWLY AND I STAYED INSIDE IT.** `check_get_params` is #706's cluster A
+(EDITING BARRED). Jon lifted it for `check_type.odin` lines 5154-5160 ONLY. Nothing else in the
+procedure was touched. Backup `$S/pre895_check_type.odin` = `c26a64f770a9612388d8db933f2510c8`.
+
+### WHY THE DELETION WAS SAFE, ESTABLISHED BEFORE THE EDIT, NOT AFTER
+
+1. **The message inventory settles the faithfulness question.** `"Invalid parameter value"` exists in
+   C++ **exactly once** -- `src/check_type.cpp:460`, inside `check_record_polymorphic_params`
+   (`allow_caller_location=false`, permits only Constant/Nil). The port had **two** emitters:
+   `check_type.odin:1693` (a faithful transcription of that block) and `:5158` (the invention, in
+   the PROCEDURE-parameter path where C++ has no such block).
+2. **THE INVENTION'S ORIGIN IS NOW OBVIOUS: it is C++'s polymorphic-record block COPY-PASTED** --
+   error, `param_value = {}` reset and all -- into a path C++ leaves alone. It was then widened
+   twice as false positives surfaced (`.Value` had to be admitted because it fired on every
+   `allocator := context.allocator` default in core) until the allow-list held all five non-Invalid
+   kinds. **That is why widening it again would have been a third coat of paint.**
+3. **The default arm could only ever catch ONE kind.** Both enums have exactly six members
+   (Invalid, Constant, Nil, Location, Expression, Value) and the allow-list held all five
+   non-Invalid ones, so `case:` == `.Invalid` and nothing else.
+4. **The dropped reset is UNOBSERVABLE.** It assigned `.Invalid` to something already `.Invalid`,
+   and every downstream consumer guards on kind first: `:5194` switches on it, `:5249` and `:5700`
+   both test `kind != .Invalid`. A stale `ast_value` can never be read.
+5. **C++'s two REAL restrictions were never in that switch and are both already implemented** --
+   the `is_type_polymorphic` block (`:5193-5207`, = C++ `check_get_params`'s own polymorphic-guarded
+   switch) and the poly-name block (`:5249`). **I briefly flagged the old record as WRONG on this
+   and it was I who was early**: C++ *does* have a kind switch in `check_get_params`, but it is
+   `if (is_type_polymorphic(type))`-guarded with a different message, and the port implements it
+   separately. The record's CONCLUSION held and is now better supported than when filed.
+
+### ACCEPTANCE MET -- THE PROBE, WHICH IS THE ONLY POSITIVE EVIDENCE
+```
+oracle          (2:21) Default parameter cannot be ---   (3:18) Parameter 'x' ... is missing
+port BEFORE     (2:20) Invalid parameter value  +  both of the above      <- 3 diagnostics
+port AFTER      (2:21) Default parameter cannot be ---   (3:18) Parameter 'x' ... is missing
+```
+**AFTER == ORACLE, byte-for-byte.** Stated in advance and it held: the gates CANNOT confirm this
+(parity is `text=0` across 323 packages, so nothing in core reaches `:5158`) -- they can only fail to
+contradict it. Treating a green gate as evidence here would have been exactly the #706 trap.
+
+### THE BATTERY (`$S/b895`, 7 cases) -- and it found something ELSE
+```
+c1 (---)                 oracle=1 before=2 AFTER=1  ok      <- the fix
+c2 non-constant call     oracle=2 before=2 AFTER=2  ok
+c3 context.allocator     oracle=0 before=3 AFTER=3  *** DIFFERS, BEFORE AND AFTER ALIKE ***
+c4 global var default    oracle=0 before=0 AFTER=0  ok
+c5 poly name w/ default  oracle=1 before=1 AFTER=1  ok
+c6 #caller_location      oracle=1 before=1 AFTER=1  ok
+c7 poly proc default nil oracle=0 before=0 AFTER=0  ok
+```
+**c3 is IDENTICAL before and after, so it is not this change** -- and chasing it down showed it has
+nothing to do with parameter defaults at all:
+```
+package p
+main :: proc() { a := context.allocator; _ = a }     <- a BODY, not a default
+  oracle: silent      port: "Cannot use a selector expression on nil-value expression"
+core/mem (imports base:runtime, uses the idiom 3+ times):   port: 0 errors
+```
+**THE PORT CANNOT RESOLVE `context` IN A PACKAGE THAT DOES NOT PULL IN `base:runtime`; the oracle
+always has runtime loaded.** Filed separately. **NO GATE CAN SEE IT** -- every package in corpus and
+in the 323-package parity set transitively loads runtime, which is precisely why it survived this
+long. Same blind-spot shape as #601 and #881.
+
+### GATES -- ALL FOUR AT BASELINE ON `$S/tst_895` / `$S/tvet_895`
+```
+corpus       FULL-MATCH=332 members=332 missing=0 excluded=14
+parity       packages=323 compared=323 excluded=0 count=1 text=0 attrib=2
+parity_vet   packages=323 compared=323 excluded=0 count=1 text=0 attrib=2
+crosstarget  members=9 match=9 differ=0 unmeasured=0 excluded=2
+```
+#97 green x4. Oracle `d653ac0cdb834e2c56d2de1b0ddf5a28`.
+**RULE 111 APPLIED RATHER THAN QUOTED:** free cores fell to ~4 against parity's 6-wide fan-out
+(four `odin` at ~250% -- Jon's work; oracle hash and `src/` mtime both unchanged, the five-second
+check from #874-#881), so **both parity runs were throttled with `PARITY_JOBS=3`** instead of
+contending. Same numbers, no contention.
+
+**RULE 139 (NEW): WHEN A MESSAGE APPEARS TWICE IN THE PORT AND ONCE IN C++, THE EXTRA ONE IS THE
+DEFECT AND THE INVENTORY IS THE PROOF.** One `grep src/` answered a question that had been open since
+#805 and had already survived two rounds of widening.
+**RULE 140 (NEW): A BATTERY BUILT TO VALIDATE ONE FIX IS THE CHEAPEST PLACE TO FIND THE NEXT BUG --
+BUT ONLY IF EVERY CASE IS RUN BEFORE *AND* AFTER.** c3 differing in both columns is what proved it
+was not mine and made it worth chasing rather than reverting.
+
+**#805 CLOSED. Todolist #461 done -- the list is EMPTY.**
+
+## #896 -- THE TWO `COMPILER_ISSUES` DIRECTORIES ARE NOW ONE (Jon: "the one in odin folder sb
+## deprecated; top level one only"). CANONICAL PATH: `/home/kalsprite/dev/COMPILER_ISSUES/`.
+
+**THERE WERE TWO, WITH DISJOINT CONTENTS, AND I TRIPPED OVER IT MYSELF THIS SESSION.** Reading
+`#887`/`#890` by ABSOLUTE path landed in `/home/kalsprite/dev/COMPILER_ISSUES/`; `ls COMPILER_ISSUES/`
+from the repo root landed in `/home/kalsprite/dev/odin/COMPILER_ISSUES/`. **Same name, different
+directory, and nothing in either one said so.** That is also how #894's `UPSTREAM-UNFILED-*` glob
+managed to "prove" #635/#641 unfiled while they sat one directory away.
+
+**CONSOLIDATED, five files moved by EXPLICIT NAME (#29 -- never a glob on this folder):**
+```
+UPSTREAM-635-quaternion-constant-comparison-panics.md              857a959555fd01a9297ec3f4f0eacbec
+UPSTREAM-639-diagnostics-at-end-of-line-render-the-wrong-source-line.md  587e6461cb9a134af36867b84b5254ee
+UPSTREAM-641-type-integer-to-unsigned-rune-returns-f16.md          e90a12011428a0b438ffcc66ac892e4c
+UPSTREAM-642-jmag-kmag-reject-every-untyped-constant-quaternion.md aca4c2bb940251c3d12f56522318099b
+UPSTREAM-646-real-imag-absorb-the-conversions-type.md              4bd3409b180c2e9a3b606d4aea6149da
+```
+**Collision-checked BEFORE the move (all five ABSENT at the destination), `mv -n`, then hashes
+RE-VERIFIED at the destination -- all five identical.** Source directory then confirmed empty by
+`find -mindepth 1` (0 entries, dotfiles included) before `rmdir`. `dev/COMPILER_ISSUES/` now holds
+41 entries plus `CHECKER_ISSUES/`, `defer/` and `done/`.
+
+**>>>>>> FOR JON: THIS IS A DELETION OF *TRACKED* FILES, AND IT IS UNCOMMITTED. <<<<<<**
+The session-start snapshot showed `?? COMPILER_ISSUES/` (untracked), but **your commit this session
+tracked them**, so `git status` now reads:
+```
+ D COMPILER_ISSUES/UPSTREAM-635-...md      D COMPILER_ISSUES/UPSTREAM-642-...md
+ D COMPILER_ISSUES/UPSTREAM-641-...md      D COMPILER_ISSUES/UPSTREAM-646-...md
+```
+**All four are in HEAD and therefore recoverable** (`git ls-tree HEAD COMPILER_ISSUES/` lists them).
+#639 was created after the commit, was never tracked, and exists only at the new location -- its
+hash was verified there, which is the only reason its move is safe. **Committing the deletion is
+Jon's call; I do not commit (standing rule).**
+
+**PATH REFERENCES NOT REWRITTEN, DELIBERATELY.** ~5 ledger lines and one line in
+`citemono_dispositioned.txt` say bare `COMPILER_ISSUES/...`. With the duplicate gone that spelling is
+now UNAMBIGUOUS -- it can only mean the top-level directory -- so rewriting them would be churn.
+**This entry is the canonical statement: `COMPILER_ISSUES/` == `/home/kalsprite/dev/COMPILER_ISSUES/`,
+and it is NOT inside the odin repo.**
+
+**RULE 141 (NEW): TWO DIRECTORIES WITH THE SAME BASENAME ON DIFFERENT PATHS WILL EVENTUALLY BE
+CONFUSED -- AND A RELATIVE `ls` IS THE MOMENT IT HAPPENS.** #894's false "not yet filed" and this
+tick's momentary "I filed it in the wrong place" were the same root cause, one directory apart.
+
+## #897 -- THE OVER-REJECTION INVESTIGATED. MY OWN ONE-HOUR-OLD REPORT WAS WRONG: THE TRIGGER IS
+## `ODIN_ROOT`, NOT THE MISSING `import "base:runtime"`. A TEXTBOOK CONFOUND.
+
+**WHAT I FILED AT #895:** *"`context` does not resolve in a package that does not import
+`base:runtime`."* **REFUTED THIS TICK BY VARYING THE TWO CANDIDATES INDEPENDENTLY --
+something I never did when I filed it:**
+```
+cwd          ODIN_ROOT                      port
+/tmp/...     unset                          ERROR   "Cannot use a selector expression on nil-value expression"
+/tmp/...     =/home/kalsprite/dev/odin      silent
+inside tree  unset                          silent
+```
+**THE SAME FILE PASSES OR FAILS DEPENDING ONLY ON WHERE IT IS CHECKED FROM. The import is
+irrelevant.** My evidence for the import theory was `core/mem` (imports runtime -> 0 errors) against
+probes in `/tmp` (no import -> errors). **`core/mem` IS INSIDE THE ODIN TREE and I ran it from
+there.** The two explanations were perfectly correlated across every case I had, and I picked the
+wrong one. Two extra runs separated them.
+**REFUTED PREMISE 142: "A CONTROL THAT BEHAVES DIFFERENTLY ISOLATES THE VARIABLE I CHANGED." It
+isolates the variable(s) that differ -- and `core/mem` differed from a /tmp probe in TWO ways.**
+
+### CAUSE, LOCATED ON BOTH SIDES
+Both compilers seed `base:runtime` unconditionally ahead of the root package (C++ `parse_packages`
+`try_add_import_path(..., Package_Runtime)`; port `load_package_with_dependencies`). Both need
+`ODIN_ROOT` to find it. **THEY DISCOVER IT DIFFERENTLY:**
+ * **C++ `build_settings.cpp odin_root_dir`:** env var, else `internal_odin_root_dir()` = **the
+   EXECUTABLE'S OWN PATH** (`/proc/self/exe`, `GetModuleFileNameW`, `_NSGetExecutablePath`). Works
+   from ANY cwd. On failure: `compiler_error("Unable to find The 'base:runtime' package. Is the
+   ODIN_ROOT set up correctly?")`.
+ * **Port `init_odin_root_from_env`:** env var, else **WALK UP FROM CWD** looking for `base/runtime`,
+   depth 10. On failure: **nothing is reported.** The seed is skipped, `info.runtime_package` stays
+   nil, `find_core_type("Context")` returns nil, `init_core_context` takes its early return leaving
+   `t_context` nil, and the `context` implicit yields a nil-typed operand.
+
+**EVERY STEP IN THAT CHAIN IS A DELIBERATE, DOCUMENTED DEGRADATION** (`checker_lifecycle.odin`:
+*"Every consumer of info.runtime_package tolerates nil for that reason"*). Nothing misbehaves in
+isolation. **The defect is what the chain ADDS UP TO.**
+
+### THE DEFECT IS THE SILENCE, NOT THE HEURISTIC -- AND THAT MATTERS FOR THE FIX
+**The port CANNOT copy C++ here:** `/proc/self/exe` is the HOST APPLICATION'S path for a library,
+and this checker is a library that must not exit its host (#12). A cwd walk-up is a defensible
+heuristic. What is not defensible is that its failure is **indistinguishable from a user error in
+the source**: C++ names the environment problem and stops; the port says
+`Cannot use a selector expression on nil-value expression` about a perfectly valid line and lets a
+poisoned type cascade into a second error. **A user has no path from that message to "set
+ODIN_ROOT".**
+**PROPOSED FIX: RETURN the condition, per #591 Stage B's established contract for this library
+("errors are RETURNED, never printed and never fatal" -- only the caller knows if it is fatal).** One
+signal at the seed site replaces an unbounded family of downstream nonsense diagnostics, of which
+`context` is merely the first anyone noticed. **Widening the walk-up does NOT fix this** -- any
+heuristic can fail, and the failure mode is the problem.
+
+### GATE BLINDNESS IS STRUCTURAL, AND SO IS THE PROBE THAT WOULD CATCH IT
+Every gate package is checked **from inside the Odin tree**, so the walk-up always succeeds and no
+gate ever enters the failing configuration. corpus 332, parity/parity_vet text=0 across 323,
+crosstarget 9/9 -- **all green with this live.** Same shape as #601 and #881.
+**A REGRESSION PROBE MUST RUN FROM OUTSIDE THE TREE WITH ODIN_ROOT UNSET, WHICH NO HARNESS DOES --
+and a corpus member could not, since corpus members run from within the tree and would score this as
+PASSING.** Recorded in the report before anyone tries to add one.
+
+**Report and `CHECKER_ISSUES/INDEX.md` both CORRECTED IN PLACE**, with the confound written into
+both so it is not re-derived. Filed under its original (now misleading) filename deliberately --
+renaming would break the #895 ledger reference; the misnomer is called out in the first line of the
+file and in the index entry.
+
+**RULE 143 (NEW): TWO EXPLANATIONS THAT AGREE ON EVERY CASE YOU HAVE ARE ONE UNTESTED EXPERIMENT
+APART.** Before filing a cause, name the competing explanation and find the input that separates
+them. Here it cost two runs after the fact and a corrected report.
+**RULE 144 (NEW): "EVERY CONSUMER TOLERATES NIL" IS A DESIGN DECISION THAT NEEDS A REPORTING SITE.**
+Tolerating a missing precondition everywhere means no single place ever says it was missing.
+
+GATES: none re-run -- no compiled source changed (one report rewritten, one index entry, one
+scratch probe dir removed). Oracle `d653ac0cdb834e2c56d2de1b0ddf5a28`.
+
+## #898 -- #897 FIXED, AND JON'S RULING IS THE DESIGN PRINCIPLE THAT DECIDED IT:
+## "test harnesses conform to lib not other way around."
+
+**MY RECOMMENDATION AT #897 WAS WRONG AND JON OVERRULED IT CORRECTLY.** I proposed keeping the cwd
+walk-up "because removing it costs gate churn for little gain". **That is precisely backwards: the
+walk-up existed SO TESTS COULD RUN WITHOUT SETTING ODIN_ROOT** -- its own comment says so -- which is
+the library shaped by its harnesses. I had weighed harness convenience as a cost against library
+correctness. **REFUTED PREMISE 145: "COST TO THE HARNESSES IS A COST TO THE PROJECT." It is a cost to
+the HARNESSES, and they are the ones that must move.**
+
+### WHAT LANDED (backup `$S/pre898_package_resolver.odin` = `c43dff489d49e7c4b05b0bccd3b9e4fe`)
+
+1. **`Session_Options.odin_root`.** The caller states the root, exactly as it already states
+   `no_entry_point`, for the reason that struct's own comment gives: *"The caller is the only party
+   that knows... so the checker cannot infer it and must be told."* Applied with the same
+   save/set/restore the struct already uses -- ODIN_ROOT is a process-lifetime global, so two
+   consecutive checks with different roots must not leak into each other.
+2. **THE CWD WALK-UP IS DELETED.** A library's answer must not depend on the caller's working
+   directory: the SAME FILE passed from inside the tree and failed from `/tmp`.
+3. **`Package_Check_Result.odin_root_not_found`.** The failure is REPORTED. Modelled on the existing
+   `limit_reached`, whose comment makes the identical argument -- *"The C++ compiler expresses this
+   by calling exit(1); as a library we cannot, so it is surfaced here instead."*
+4. **The env var stays as a fallback** -- an Odin-wide convention the reference honours too, not a
+   harness accommodation. **C++'s third mechanism (root from `/proc/self/exe`) remains unavailable
+   to a library: that path belongs to the HOST application.**
+
+### THE HARNESSES CONFORMED, AS INSTRUCTED
+Five gate scripts (`corpus.sh`, `corpus_vet.sh`, `parity.sh`, `parity_vet.sh`, `crosstarget.sh`) now
+`export ODIN_ROOT` self-locatingly, and **`cmpfull.py` passes it explicitly instead of relying on
+`cwd=REPO` to make the removed walk-up succeed BY ACCIDENT** -- which is what it had been doing all
+along without anyone writing it down. Backups in `$S/pre898_tools/`. Insert placement was verified by
+eye afterwards, because a regex insert can land inside a comment block (it did not).
+
+### MEASURED -- the same three-row table, now with the right answers
+```
+cwd          ODIN_ROOT   port
+/tmp/...     unset       error + odin_root_not_found SET      (was: error, SILENT precondition)
+/tmp/...     set         silent                                (unchanged)
+inside tree  unset       error                                 (was: SILENT SUCCESS via the walk-up)
+```
+**Row 3 flipping is the fix, not a regression** -- the tree is no longer a hidden input.
+
+### GATES -- ALL FOUR BACK AT BASELINE ON `$S/tst_898` / `$S/tvet_898`
+```
+corpus       FULL-MATCH=332 members=332 missing=0 excluded=14
+parity       packages=323 compared=323 excluded=0 count=1 text=0 attrib=2
+parity_vet   packages=323 compared=323 excluded=0 count=1 text=0 attrib=2
+crosstarget  members=9 match=9 differ=0 unmeasured=0 excluded=2
+```
+#97 green x4 (ast, tokenizer, parser, checker). Oracle `d653ac0cdb834e2c56d2de1b0ddf5a28`.
+**That the gates returned to baseline is NOT evidence the fix works** -- they could not see the
+defect and cannot see the fix. It is evidence the harness conformance is complete. The three-row
+table is the evidence.
+
+**REPORT RETIRED to `CHECKER_ISSUES/done/` (51), INDEX header corrected to `0 OPEN` AND VERIFIED BY
+`ls` (1 file = INDEX itself, done/ = 51).** The report keeps its now-misleading filename and its full
+original diagnosis, including the confound, because that history is the useful part.
+
+**RULE 146 (NEW): A FALLBACK THAT EXISTS FOR THE TEST SUITE IS A DESIGN DEFECT WEARING A
+CONVENIENCE.** Ask what the mechanism is FOR; if the answer names the harness, it does not belong in
+the library.
+**RULE 147 (NEW): WHEN A GATE CANNOT SEE A DEFECT, IT CANNOT SEE THE FIX EITHER -- SAY SO IN THE SAME
+BREATH AS THE GREEN NUMBERS.** Otherwise "all four at baseline" reads as verification of the change
+when it only verifies the absence of collateral damage.
+
+## #899 -- FOLLOWED UP #893's DEFERRED STRUCT-TAG ITEM. The `ok` flag turned out to be the LEAST
+## interesting thing at that site; the finding is that `bit_field` TAGS ARE DROPPED ENTIRELY.
+
+**THE DEFERRED ITEM, RESOLVED AS "PROBABLY UNREACHABLE, NOT REPRODUCED."** #893 recorded that the
+port discards `unquote_string`'s new `ok` flag on a struct tag where C++ errors. Measured: **the
+guard looks unreachable from a well-formed token.** The tokenizer validates string literals before
+the checker sees them, and the obvious candidate `"\q"` is rejected by BOTH tokenizers as
+`Unknown escape sequence` (2 diagnostics, identical on both sides) and never reaches the checker.
+C++'s arm is therefore NOT reproduced on speculation.
+**AND MY #893 COMMENT NAMED THE WRONG MESSAGE** -- it said C++ reports `"Invalid struct tag"`; C++
+reports **`"Invalid string literal"`** (`check_type.cpp`, both tag sites). Corrected in place.
+
+**>>>>>> THE REAL FINDING: C++ MODELS `bit_field` TAGS AND THE PORT HAS NOWHERE TO PUT THEM <<<<<<**
+```
+C++  TypeBitField:      fields, TAGS (count == fields.count), bit_sizes, bit_offsets
+port Type_Bit_Field:    fields, names, backing_type, node, bit_sizes, bit_offsets     <- NO tags
+```
+`check_bit_field_type` fills them in C++ with the same unquote-and-validate structs get; the port's
+`check_bit_field_type_expr` **never mentions `tag`** -- grepping its whole body returns nothing.
+**THE DATA IS DISCARDED, NOT MISSED: `ast.Bit_Field_Field.tag` EXISTS and the parser fills it.**
+The loss is at the checker. **Structs are fine** -- the port models those (`st.tags`); it is
+specifically the bit_field arm that has no destination.
+
+**A THIRD ITEM AT THE SAME SITE, AFFECTING STRUCTS TOO.** C++ passes a FOURTH argument the port's
+`unquote_string` does not have: `unquote_string(alloc, &tag, 0, tag.text[0] == '`')`, whose last
+parameter is `has_carriage_return`. A RAW-STRING tag routes through `strip_carriage_return`; the
+port's version has no such parameter and no such step, so a raw-string tag keeps its CRs. **That is a
+tag VALUE difference on the struct path as well, and it has been live the whole time.**
+
+### WHY NONE OF THIS IS MEASURABLE HERE, STATED BEFORE ANY FIX
+**Nothing in either compiler diagnoses on tag CONTENT.** corpus, parity, parity_vet and crosstarget
+all compare DIAGNOSTICS, so **all four are green with this gap live and will stay green when it is
+closed** -- they cannot distinguish the two states. The difference lives in the TYPE MODEL, which is
+`modelsweep`'s territory, and **modelsweep is out of service on a stale reference (#871, awaiting
+Jon)**. So this is a reading finding with **no observation**, and **rule 80 applies to any fix: it
+would owe one.** Recorded rather than landed for exactly that reason -- plus the fix adds a field to
+`Type_Bit_Field`, and `core/odin/ast` is a PUBLIC package (#868). An addition is not what #868 bars,
+but it is still a public type changing shape and should land deliberately, not folded into a
+follow-up.
+
+**FILED:** `CHECKER_ISSUES/CHECKER-bit-field-tags-are-dropped-by-the-checker.md`, carrying all three
+items and the proposed fix. **INDEX updated to 1 OPEN and VERIFIED BY `ls`** (`*.md` = 2: INDEX plus
+the one issue; `done/` = 51).
+
+**#97 GATE GREEN x4** on the comment correction (comment-only still gates). No behaviour changed this
+tick. Oracle `d653ac0cdb834e2c56d2de1b0ddf5a28`.
+
+**RULE 148 (NEW): WHEN A DEFERRED ITEM COMES BACK, RE-READ THE WHOLE SITE, NOT THE ITEM.** The `ok`
+flag I had queued was the least interesting of the three things wrong at that call -- a missing model
+field and a missing argument were sitting beside it, and neither was in the note I left myself.
+
+## #900 -- MODELSWEEP RESTORED AND RE-BASELINED (Jon: "yes build it and do it"). #871 CLOSED.
+## THREE problems, and the stale binary was only the FIRST. **I ALSO BROKE THE PORT ARM AT #898.**
+
+### THE NEW BASELINE -- the first trustworthy modelsweep number since the #7268 merge
+```
+MODELSWEEP-DONE packages=323 compared=323 excluded=0
+  layout_packages=0 layout_entities=0   state_packages=0 state_entities=0
+  schema_mismatch=0  presence_packages=0 presence_entities=0  unpairable=0
+  multiplicity_packages=13   model_match_packages=310        (310 + 13 = 323)
+```
+**EVERY GATED COLUMN IS 0.** `multiplicity_packages=13` is the UNGATED #468 column and is NOT a
+result (#107) -- it was 15 at #740. **REF: `$S/odin_ref_model3` (built THIS TICK from CURRENT src).
+PORT: `$S/tst_898`.** The old `layout 0/0` I had been carrying was new-port vs pre-merge-C++ and is
+now retired.
+
+### PROBLEM 1: the stale reference (what #871 was about)
+`build_ref.sh` needs a PATCHED src tree -- the `ODIN_DUMP_MODEL` instrument is NOT in the repo. Found
+it in `$S/ref2/src/main.cpp`. **Verified PURELY ADDITIVE before trusting it: two hunks, both `a`,
+ZERO removed or changed lines -- and `main.cpp` is NOT among the 14 files that moved since Aug 10**,
+so ref2's copy was exactly current-plus-instrument. Copied onto a fresh copy of today's `src/`,
+built in ~38s. The script verifies the oracle checksum itself: `d653ac0...` unchanged.
+
+### PROBLEM 2: I BROKE THE PORT ARM AT #898, AND THE DARK GATE IS WHY NOBODY NOTICED
+First full run: **`MODELSWEEP-ABORTED`, 323/323 EXCLUDED, 0 compared** -- the tool refusing to report
+a false green, exactly as #475 designed it to.
+**ALL FOUR python model tools invoke the REFERENCE with `env=env` (carrying ODIN_ROOT) and the PORT
+with NO `env=` AT ALL.** The port arm relied on `cwd=REPO` making the cwd walk-up succeed -- **the
+walk-up I deleted at #898.** My harness-conformance sweep covered five shell scripts and
+`cmpfull.py` and MISSED THIS ENTIRE CLASS (`modeldiff.py`, `flagsdiff.py`, `statefields.py`,
+`schemacov.py`). Fixed in all four (`port_env`), backups `$S/pre900_tools_*.py`, all four re-parsed.
+**>>> THE LESSON IS NOT THE MISSED FILES, IT IS THAT A DARK GATE HID AN INCOMPLETE CHANGE. <<<**
+#898 reported "all four gates at baseline" and that was TRUE and MISLEADING: the fifth consumer was
+already out of service, so the one instrument that would have failed immediately could not.
+**RULE 149 (NEW): A GATE THAT IS OUT OF SERVICE IS NOT NEUTRAL -- IT IS A HOLE THE NEXT CHANGE FALLS
+INTO. Restore it BEFORE the change, or list its consumers by hand.**
+**AND MY FIRST GUESS WAS WRONG:** I assumed ODIN_ROOT and patched it; the sweep STILL excluded 323.
+The fix was necessary and not sufficient, which I only learned by running `modeldiff.py` directly
+instead of re-guessing (#5's discipline).
+
+### PROBLEM 3: SCHEMA v2 vs v3 -- the actual blocker, which the rebuild ALONE WOULD NEVER HAVE FIXED
+```
+ref : ## schema v2 ...,deprecated,warning,type,pos
+port: ## schema v3 ...,deprecated,warning,tidepn,type,pos
+```
+**The port had advanced to v3 and the C++ instrument was never updated.** `tidepn` =
+`|DeclInfo::type_info_deps|`, a COUNT (not the type identities -- identities would have to compare as
+printer-dependent strings, which is why `type=` is already excluded). modeldiff REFUSES to compare
+across schemas by design, which is why this surfaced as a clean-looking mass exclusion rather than a
+wrong number -- **the "neither side can silently drop a field" property working exactly as intended.**
+Extended the instrument to v3: field list, version string, and the emission guarded on
+`decl_info != nullptr`, **the SAME condition the port uses** -- per-entity field sets must agree, not
+merely the header. `TypeSet::count` under `rw_mutex_shared_lock`, mirroring `check_decl.cpp:2097`.
+
+### >>>>>> AND IT DOES **NOT** SETTLE #899. I WAS WRONG TO SAY IT WOULD. <<<<<<
+I told Jon #871 was "blocking real work" and named #899's two items as the work. **Now that the gate
+is live, the dump schema turns out to carry NO TAG FIELD AT ALL** -- v3 is
+`pkg,name,kind,size,align,state,flags,...,tidepn,type,pos`, and `dump_model.odin` emits no `tag`
+anywhere. **So bit_field tags and the `has_carriage_return` difference remain UNOBSERVABLE even with
+modelsweep restored.** The claim was plausible and unchecked: I reasoned "tags are model state,
+modelsweep compares the model" without reading the schema.
+**REFUTED PREMISE 150: "THE MODEL GATE COMPARES THE MODEL." It compares the FIELDS ITS SCHEMA NAMES,
+which is a deliberate subset -- type strings are excluded on purpose, and tags were simply never
+added.**
+**THE PATH IS NOW OPEN, THOUGH, AND IT IS THE SAME MOVE I JUST MADE TWICE:** extend both dumps to a
+schema v4 carrying tags, then #899 becomes measurable on both sides. That is a real task with a
+known shape, no longer a blocked one.
+
+GATES: modelsweep restored and re-baselined (above). corpus/parity/parity_vet/crosstarget unaffected
+this tick -- no port source changed (four python tools + the scratchpad instrument only). Oracle
+`d653ac0cdb834e2c56d2de1b0ddf5a28` verified before and after both builds. **#871 CLOSED.**
+
+### #900 CORRECTION (same tick, found by reading `batch_gates.sh` after writing the entry)
+
+**"THE C++ INSTRUMENT WAS NEVER UPDATED TO v3" IS FALSE. IT WAS. I BUILT FROM THE WRONG TREE.**
+`batch_gates.sh:43-44` says plainly that `odin_ref_model2` is used *because* the port emits v3 and
+`odin_ref_model` is still v2. Measured: **`odin_ref_model2` (the Aug-10 binary) emits `## schema
+v3`.** Its source is **`$S/ref/src/main.cpp` (v3)**. I copied from **`$S/ref2/src/main.cpp` (v2)** --
+**PICKED BY NAME SIMILARITY, which is the SAME failure mode as #871's own rule-63 hit** (there I
+nearly used `odin_ref` instead of `odin_ref_model2` for the same reason). **Third instance in this
+family: eleven `odin_ref*`-ish artifacts exist and the names do not order by recency or by schema.**
+
+**WHAT THIS DOES AND DOES NOT CHANGE:**
+* **The new baseline STANDS.** `ref4` = CURRENT `src/` + a v3 instrument, which is what #871 asked
+  for. `odin_ref_model2` was v3 but its SOURCE is Aug-10 vintage -- still 14 files stale, still the
+  thing that needed replacing. The rebuild was necessary; my reason for it was half wrong.
+* **My hand-derived v3 is SEMANTICALLY IDENTICAL to the canonical one** -- same schema line, same
+  `if (e->decl_info != nullptr)` guard, same `cast(i64)...type_info_deps.count`, same key. Verified
+  by diff, not assumed.
+* **ONE DIFFERENCE, and mine is the safer side:** I take `rw_mutex_shared_lock` around the read
+  (mirroring `check_decl.cpp:2097`); the canonical version reads `.count` unlocked. Inert under
+  modeldiff's pinned `-thread-count:1`, a latent race without it. **Kept deliberately.**
+* **THE CHEAPER PATH EXISTED AND I MISSED IT:** copy `$S/ref/src/main.cpp` onto current `src/` and
+  build. That is one `cp` instead of deriving a patch by hand from `checker.hpp` and
+  `dump_model.odin`. It worked, but it was avoidable work.
+
+**FOR THE NEXT REBUILD:** `$S/ref4/src/main.cpp` is now the newest instrument (current src + LOCKED
+v3) and is the one to copy forward. `$S/ref/src/main.cpp` is the canonical-but-unlocked v3;
+`$S/ref2/src/main.cpp` is **v2 and must not be used**.
+**`batch_gates.sh:48` still passes `$S/odin_ref_model2` and should be repointed to
+`$S/odin_ref_model3`** -- otherwise the rotation silently goes back to the stale-source reference.
+
+**RULE 151 (NEW): WHEN SEVERAL ARTIFACTS SHARE A STEM, IDENTIFY THE ONE YOU WANT BY A PROPERTY YOU
+MEASURE (schema line, mtime, hash), NEVER BY THE NAME.** `ref` vs `ref2` vs `ref3` vs `refsrc` differ
+by schema version, and the highest number is the OLDEST schema.
+
+## #902/#903/#904 -- TASKS 462-464 DONE. SCHEMA v4 CARRIES TAGS, AND IT PAID FOR ITSELF WITHIN THE
+## HOUR: BOTH #899 ITEMS WENT FROM "READING FINDING, NO OBSERVATION" TO MEASURED BEFORE/AFTER.
+
+### #901/#902 -- batch_gates.sh repointed, TWICE, and the second time is the lesson
+`batch_gates.sh:63` passed `$S/odin_ref_model2` (v3 schema, but Aug-10 source -- the #871
+staleness). Repointed to `odin_ref_model3`... and then **v4 immediately obsoleted that**, so it went
+to `odin_ref_model4` and now `odin_ref_model5`. **THE REFERENCE MUST BE REBUILT WHENEVER THE PORT'S
+DUMP SCHEMA CHANGES.** That is the standing cost of this gate having TWO implementations of one
+format, and it is written into the script so the next person meets it as a comment rather than as a
+mass SCHEMA-MISMATCH. **RULE 152 (NEW): A FORMAT WITH TWO IMPLEMENTATIONS HAS A REBUILD OBLIGATION;
+NAME IT AT THE CALL SITE, NOT IN A LEDGER ENTRY NOBODY WILL GREP.**
+**A LIVE CONTRADICTION FOUND ON THE WAY:** `batch_gates.sh` said `tidepn` was GATED as of #692 while
+`dump_model.odin` said it was NOT gated and sat in STATE_IGNORED. **The tool settles it:
+`STATE_IGNORED = {"type"}` and nothing else, so tidepn IS gated (#701).** The dump_model comment was
+stale and is corrected. **This also strengthens #900 retroactively: `state_entities=0` across 323
+packages means my hand-re-derived tidepn instrument agreed with the port EVERYWHERE** -- far better
+evidence than the source diff I had relied on.
+
+### #902 -- SCHEMA v4: `tags`, on BOTH sides
+Emitted on the TYPE-DECLARING entity, not per field, because that is where the data lives on both
+sides (`String *tags` with `count == fields.count`); a field entity has no back-pointer to its owner.
+Joined with **US (0x1f), POSITION-PRESERVING** -- an empty slot means "no tag", so a tag landing on
+the wrong field is a difference rather than a coincidence. Both sanitisers escape `\t`/`\n`/`\r` and
+leave 0x1f alone, which is what makes the separator safe **and what makes CRs visible**.
+**UNLIKE `type=`, THIS IS SAFE TO COMPARE ACROSS IMPLEMENTATIONS** -- a tag is a source literal, not
+something a type printer renders. That is the whole reason it can be a gate.
+Omitted when every tag is empty (almost every struct), so the common case agrees trivially rather
+than by comparison, and the dump stays small.
+
+### #903 -- THE MISSING FOURTH ARGUMENT, now MEASURED then FIXED
+```
+probe: a struct tag that is a RAW string spanning a CRLF line
+REF          tags=line1\nline2^_plain
+PORT BEFORE  tags=line1\r\nline2^_plain
+PORT AFTER   tags=line1\nline2^_plain     <- matches
+```
+`unquote_string` gained C++'s `has_carriage_return` and a `strip_carriage_return` helper. **All three
+call sites now pass what their C++ counterparts pass:** struct tags and string literals pass
+`text[0] == '`'`, the RUNE arm passes nothing (a rune literal cannot be a raw string, and
+`parser.cpp` passes no fourth argument there either).
+
+### #904 -- bit_field TAGS WERE PARSED AND DISCARDED. Now modelled, and GATED.
+`Type_Bit_Field` gained `tags: [dynamic]string`, parallel to `bit_sizes`/`bit_offsets` and allocated
+the same way; **no new teardown obligation, since none of the three -- nor `Type_Struct.tags` -- is
+individually freed.** Populated in `check_bit_field_type_expr` from `ast_field.tag.text` exactly as
+C++ does, **one entry per field, tagged or not, because the array is POSITIONAL.**
+```
+REF          tags=bf:"a"^_   AND   tags=st:"x"
+PORT BEFORE  tags=st:"x"     ONLY        <- the bit_field tag never existed
+PORT AFTER   both                        <- matches
+```
+Both dumps gained a bit_field arm, so this is now **covered by a gate rather than by a note in a
+file.** `core/odin/ast` is a public package (#868); this is an ADDITION and Jon authorised the work.
+
+### GATES -- ALL FIVE, on `$S/tst_904` / `$S/tvet_904` / ref `$S/odin_ref_model5`
+```
+#97          ast / tokenizer / parser / checker  ALL RC=0
+corpus       FULL-MATCH=332 members=332 missing=0 excluded=14
+parity       323/323 excluded=0 count=1 text=0 attrib=2
+parity_vet   323/323 excluded=0 count=1 text=0 attrib=2
+crosstarget  members=9 match=9 differ=0 unmeasured=0 excluded=2
+modelsweep   323/323 compared=323 excluded=0  layout=0/0 state=0/0 presence=0/0
+             schema_mismatch=0 unpairable=0   multiplicity=17 model_match=306
+```
+Oracle `d653ac0cdb834e2c56d2de1b0ddf5a28` verified across THREE instrumented builds.
+**HONEST NOTE ON `multiplicity`: it moved 13 -> 12 -> 17 across the three sweeps.** It is the UNGATED
+#468 column and #539 recorded NINE packages moving between MULTIPLICITY and MODEL-MATCH on two runs
+of IDENTICAL binaries, so 5 is inside the documented band -- **but n=1 cannot separate noise from
+effect (rule 96), and `MODELSWEEP_QUIET=1` suppressed the per-package names, so I cannot even check
+whether the sets overlap.** Tags are inert metadata and a causal link to instantiation multiplicity
+is implausible, which is NOT the same as measured. `--repeat=N` is the way to settle it if anyone
+needs it settled. **Every GATED column is 0.**
+
+**RULE 153 (NEW): AN INSTRUMENT BUILT TO MAKE ONE FINDING MEASURABLE SHOULD BE POINTED AT THAT
+FINDING THE SAME DAY.** v4 existed for #899; both halves were measured, fixed and gated within the
+hour. A gate extension whose motivating finding is never re-measured is just a bigger dump.
+
+## #905 -- TASK 465 ANSWERED, AND THE ANSWER IS **NO**: `wclean` MUST NOT BE A CORPUS MEMBER.
+## The measurement says so, and the reason generalises the #635 hygiene rule.
+
+**THE TASK WAS "add wclean as a corpus member (the #890 regression test)", and the honest outcome is
+a refusal WITH DATA, not a completion.** #890 deferred it saying it "needs its own before/after to
+prove it would have caught this". It was measured, and the before/after is only half the question.
+
+**MEASURED 2026-08-14, 20 runs per binary, counting duplicated diagnostic tails:**
+```
+PRE-FIX  port ($S/tst_889b)   6/20 duplicated
+POST-FIX port ($S/tst_904)    0/20
+ORACLE   (./odin, 30 runs)    1/30 duplicated      <- THE DECIDING NUMBER
+```
+The fix holds (6/20 -> 0/20, consistent with #890's 4/20 -> 0/30). **But the ORACLE has the same
+race and it is UNFIXED UPSTREAM** (filed as `UPSTREAM-UNFILED-where-clause-continuation-rendered-
+twice.md`, where it was 1/10; 1/30 here, same order).
+
+**SO A CORPUS MEMBER WOULD MANUFACTURE FALSE REGRESSIONS.** corpus.sh compares oracle output against
+port output ONCE, against a fixed expectation. On roughly one run in thirty the ORACLE duplicates and
+the port does not, and the comparator reports FULL-DIFFER **with nothing wrong in the port** -- a
+false alarm indistinguishable from a real one, in the gate whose whole value is that a difference
+means something.
+
+**THIS IS #635's PROBE-HYGIENE RULE, GENERALISED FROM CRASHES TO NONDETERMINISM.** #635 established
+that a probe which CRASHES the oracle is UNMEASURABLE rather than a finding, and must stay out of the
+corpus because it would score as a difference for reasons unrelated to the port. **A probe the oracle
+answers DIFFERENTLY RUN TO RUN is the same thing with a lower failure rate -- which makes it worse,
+not better: a 100% failure is noticed and excluded on day one, a 3% failure gets chased.**
+
+**RECORDED AS A DOCUMENTED EXCLUSION rather than dropped**, which is what that mechanism is for
+("an excluded probe is an UNMEASURED probe, not a clean one -- the exclusions are printed"). Entry
+carries the full measurement so nobody re-derives it. **Written SINGLE-QUOTED** per the block's own
+warning: a double-quoted element command-substitutes backticks at construction time, and this reason
+names an Odin type with them.
+
+**PROBE MOVED OUT OF THE SCRATCHPAD to `.claude/probes/wclean`** (md5 verified identical). It had
+been sitting in `$S`, which `reap_scratch.sh` can clear -- the #890 note said "probe kept" and it was
+one reap away from not being.
+
+**THE RIGHT INSTRUMENT, NAMED BUT NOT BUILT (#178):** a PORT-ONLY REPEAT CHECK, on `flake.sh`'s
+reasoning -- *"parity compares PORT vs ORACLE and so cannot distinguish 'the port disagrees with the
+reference' from 'the port disagrees with itself'"*. **The property worth protecting here is that the
+PORT never duplicates; comparing against the oracle compares against the side that is WRONG.**
+flake.sh operates over the package list via sweep_det.sh rather than over probe directories, so
+pointing it at a probe dir is a design change and not mine to make unilaterally.
+
+**BASELINE CHANGE, INTENTIONAL:** corpus `excluded=14 -> 15`. `FULL-MATCH=332 members=332 missing=0`
+all unchanged. **Quote the new number from here on.**
+
+**RULE 154 (NEW): A REGRESSION TEST MUST BE ABLE TO FAIL *ONLY* FOR THE REASON IT NAMES.** Before
+adding one, measure the OTHER side too -- a test that fires when the reference misbehaves is not a
+regression test, it is a coin flip with a changelog.
+
+## #906 -- #898 BROKE NINE MORE TOOLS AND I ONLY FOUND THEM BY ENUMERATING CONSUMERS BY HAND.
+## Rule 149 said to do exactly that; #900 was the warning and this is the rest of the damage.
+
+**#898 removed the checker library's cwd walk-up. I then "conformed the harnesses" -- five shell
+scripts plus `cmpfull.py` -- and reported all four gates green. #900 found a SEVENTH consumer
+(the four python model tools' PORT arm). This tick found NINE MORE.** Six of fifteen was my first
+answer; the real number is fifteen.
+
+**FOUND BY AUDITING EVERY TOOL, NOT BY WAITING FOR ONE TO FAIL:**
+```
+for each .claude/tools/*.{sh,py}: does it invoke a binary?  does it mention ODIN_ROOT?
+  -> 9 tools invoked one with NO ODIN_ROOT AT ALL:
+     doccmp.sh docflag.sh dumpdet.sh entrypoint.sh flake.sh modelcmp.sh probe.sh sweep_det.sh
+     blockcmp.py
+```
+**They were all relying on the walk-up BY ACCIDENT**: most do `cd /home/kalsprite/dev/odin` (or
+`cwd=REPO`), which put the working directory inside the tree, which made the walk-up succeed. None of
+them said so; it was never a design, just a coincidence that held.
+
+**CONFIRMED LIVE, NOT INFERRED, before patching anything** -- `probe.sh` on the corpus member `an1`:
+```
+oracle  Error: No procedures or ambiguous call for procedure group 'append'
+port    Error: Undeclared name: append          <- base:runtime never loaded
+```
+**`append` is a runtime builtin, so "Undeclared name: append" is the #897 signature exactly.** The
+same probe passed under `corpus.sh` at the same moment, because that script exports ODIN_ROOT -- a
+clean A/B on the one variable. After the fix `probe.sh` reports `an1 MATCH`.
+
+**ALL NINE PATCHED** with the same self-locating export (backups `$S/pre906_tools/`), all eight shell
+tools `bash -n` clean, `blockcmp.py` re-parsed. **Spot-checked two beyond the one that proved the
+bug:** `modelcmp.sh` -> `probes=151 mismatches=0`, `entrypoint.sh` -> `members=5 ok=5 bad=0`.
+**FINAL AUDIT RE-RUN: zero tools now invoke a binary without ODIN_ROOT.**
+
+### WHY THIS MATTERED MORE THAN IT LOOKS
+**Nothing in the gate suite would ever have told me.** corpus / parity / parity_vet / crosstarget /
+modelsweep were ALL GREEN throughout, because those five were the ones I had already fixed. The nine
+broken tools are the ones run BY HAND during investigation -- probe.sh, modelcmp.sh, blockcmp.py --
+so the failure mode was: **the next time I reached for a probe, it would have lied to me**, and it
+would have lied in the most expensive direction, showing a port defect ("Undeclared name") that does
+not exist. #283 and #285 are in probe.sh's own header as the two ticks lost to exactly that class.
+
+**RULE 155 (NEW): WHEN A SHARED PRECONDITION CHANGES, ENUMERATE THE CONSUMERS MECHANICALLY -- grep
+for who invokes the thing, not for who you remember.** I "conformed the harnesses" three times
+(#898, #900, #906) and only the third pass was a search rather than a recollection. The first two
+were confident and wrong, and the gates could not correct either one.
+**RULE 156 (NEW): A TOOL USED ONLY DURING INVESTIGATION HAS NO GATE WATCHING IT.** Gate coverage
+protects the gates; hand-run instruments are protected by nothing, so they must be checked
+DELIBERATELY after any change to what they depend on.
+
+GATES: unchanged this tick -- tool-only edits, no port source touched. `probe.sh`, `modelcmp.sh` and
+`entrypoint.sh` re-run as the consumer gate for their own change. Oracle
+`d653ac0cdb834e2c56d2de1b0ddf5a28`.
+
+## #907 -- THE MULTIPLICITY QUESTION SETTLED BY MEASUREMENT. `gated_moved=0`: the restored gate is
+## DETERMINISTIC. And the tool's own instruction was the one I had just violated.
+
+**I left #904 saying "n=1 cannot separate noise from effect (rule 96)" about multiplicity moving
+13 -> 12 -> 17. `--repeat=3` with IDENTICAL binaries answers it:**
+```
+=== GATED (must be deterministic) ===
+  layout_packages 0   layout_entities 0   state_packages 0   state_entities 0
+  schema_mismatch 0   presence_packages 0  presence_entities 0
+=== UNGATED (range is the noise floor -- never quote one value alone) ===
+  unpairable             0..0     (spread 0)
+  multiplicity_packages  10..14   (spread 4)
+  model_match_packages   309..313 (spread 4)
+MODELSWEEP-REPEAT-DONE runs=3 gated_moved=0
+```
+
+**THE ANSWER THAT MATTERS IS `gated_moved=0`.** Every column the gate actually gates is byte-stable
+across three full sweeps of the same binaries. **The restored modelsweep is trustworthy**; that is
+what #871 was asking and it is now measured rather than asserted.
+
+**ON THE 17.** Two of my three observations (13, 12) sit inside the measured 10..14; **the 17 does
+not.** That is NOT evidence of an effect: a THREE-run range is a lower bound on the spread, and #539
+recorded NINE packages moving between two runs of identical binaries -- a band more than twice as
+wide as the one measured here. n=3 bounds the middle, not the tail. Tags are inert metadata with no
+path to instantiation multiplicity, and nothing is gated on the column.
+**THE HONEST FORM IS THE RANGE, AND THE TOOL SAYS SO IN ITS OWN OUTPUT: "range is the noise floor --
+never quote one value alone." I had quoted `multiplicity=17` as a baseline line three ticks running.**
+The instruction was printed under my nose each time.
+
+**BASELINE CONVENTION CORRECTED -- quote modelsweep as:**
+```
+modelsweep  323/323 compared=323 excluded=0
+            GATED: layout 0/0, state 0/0, presence 0/0, schema_mismatch 0, unpairable 0
+            UNGATED: multiplicity 10..14 (noise floor, 3 runs, identical binaries -- #907)
+```
+**Never a single multiplicity number.** If one must be cited, cite it as "within/outside 10..14" and
+say how many runs produced the band.
+
+**RULE 157 (NEW): AN UNGATED COUNTER HAS NO VALUE, ONLY A RANGE -- AND THE RANGE HAS A SAMPLE SIZE
+ATTACHED.** Quoting one sample of a noisy column in a baseline list makes it look gated, and the next
+reader will treat a move as a finding.
+**RULE 158 (NEW): WHEN A TOOL PRINTS AN INSTRUCTION ABOUT HOW TO READ ITS OWN OUTPUT, READ IT.**
+"never quote one value alone" was in every sweep I ran, including the ones where I quoted one value
+alone.
+
+## #908 -- #892's STRIP WAS INCOMPLETE IN **THREE** WAYS. 45 more citations de-numbered.
+## My own census was wrong three times in one conversation, each time because of a regex I wrote.
+
+**#892 reported "1864 stripped, anchored=0, done". All three parts of that were true of the pattern
+I used and false of the tree.** Re-derived by measurement:
+```
+form                                 #892 said   ACTUALLY
+anchored lowercase file.cpp fn:NNN   1864 -> 0   correct
+anchored UPPERCASE file.cpp Sym:NNN  (unseen)    6    <- regex required [a-z_] as the first char
+file-less          fn:NNN            (unseen)    39   <- regex required a file.(cpp|hpp) prefix
+bare               file.cpp:NNN      2383        2374 <- drifted as later ticks edited comments
+naked              :NNNN             81          169  <- my #892 regex was too narrow
+```
+**C++ symbols are frequently CamelCase** (`BuildFlag_Define`, `TypeInfoFlag`,
+`MicroarchFeatureList`), so requiring a lowercase first character silently exempted an entire naming
+convention. **And a citation does not need a file to be a citation** -- `check_type_decl:559` names a
+function perfectly well, which is exactly the form Jon's rule targets.
+**RULE 63'S TWELFTH HIT, and the pattern is now unmistakable: every miscount this conversation has
+produced came from a FILTER I WROTE and then treated as the territory** (#881 an INDEX header, #894
+an `UPSTREAM-UNFILED-*` glob, #900 a name-similarity pick, #906 a remembered consumer list, and now
+three regexes).
+
+**45 SITES DE-NUMBERED** (39 file-less + 6 uppercase-anchored; one pattern covers both, since
+stripping the number after a symbol works whether or not a file precedes it). `check_type_decl:559`
+-> `check_type_decl`; `main.cpp BuildFlag_Define:1156-1205` -> `main.cpp BuildFlag_Define`.
+Backups `$S/pre908_backup/`.
+
+**THE ONE FALSE POSITIVE WAS FOUND BY DETECTION, NOT BY DAMAGE.** `-max-error-count:200` in
+`error.odin` is a COMPILER FLAG, not a citation, and `count` is long enough to match. A
+`(?<![-.\w])` lookbehind excludes it (and simultaneously protects the 2374 bare `file.cpp:NNN`,
+whose `cpp` is preceded by a dot). **Verified intact after the run, by diffing the backup rather
+than by trusting the guard** -- and my first grep landed on a DIFFERENT occurrence two lines away and
+briefly looked like damage. Checking the actual line is what settled it.
+
+**VERIFICATION:** detection pass reported **0 matches outside comments** before anything was written;
+**#50 `code()` test = 0 bytes across all 59 files**; **#97 gate green x4**.
+
+**A HAZARD WORTH RECORDING:** the strip reused `#892`'s scanner via `from strip_cites import
+comment_spans`, and **importing that module RE-RAN its top-level apply pass** (`STRIP-APPLY
+anchored_matches=0 ... replaced=0` appears in the output). Harmless only because #892 had already
+converged to zero matches. **A one-off script with executable top-level code is a landmine the moment
+anyone imports it for its helpers.**
+
+**STATE, and the two remaining populations are DIFFERENT KINDS OF WORK:**
+ * **2374 bare `file.cpp:NNN`** -- still JON'S DECISION (#892's fork, unchanged): stripping leaves
+   `// C++ Reference: check_expr.cpp`, a pointer at a 13,631-line file. Anchoring first would
+   launder drifted citations into permanently wrong names.
+ * **169 naked `:NNNN`** -- MINE, and manual. Sampled `type_info.odin`: **most are DECORATION on a
+   claim the prose already makes** -- "C++ resolves this entity at :3504-3507 and only THEN asserts
+   ... at :3509" states the ordering in words, so the numbers carry nothing. Several blocks are
+   worse than decoration: they are META-COMMENTARY about citation drift (`#690 wrote ':2279-2295',
+   off by 8`) describing corrections to numbers that #892 deleted.
+
+**RULE 159 (NEW): A REGEX OVER SOURCE IS A HYPOTHESIS ABOUT NAMING CONVENTIONS.** Before quoting its
+count as a census, sample what it EXCLUDES -- one look at `[A-Z]` symbols or at a missing file prefix
+would have caught all three gaps on the day.
+
+## #909 -- THE NAKED `:NNNN` SWEEP, 37 of 169 DONE. And the verification harness lied again --
+## in the OPPOSITE direction this time, reporting a code change where there was none.
+
+**TWO FILES CLEARED: `type_info.odin` 20 -> 0, `check_files.odin` 17 -> 0.** Backups
+`$S/pre909_type_info.odin`, `$S/pre909_check_files.odin`. Remaining **132**, of which **13 sit inside
+`check_get_params` and are NOT MINE TO TOUCH** (#706 cluster A; Jon lifted the bar for seven lines at
+#895 and nothing wider).
+
+### THE FINDING THAT MADE THIS CHEAP: THE NUMBERS WERE ALREADY REDUNDANT
+Sampling before editing showed the naked refs are **decoration on a claim the prose already makes**:
+```
+"C++ resolves this entity at :3504-3507 and only THEN asserts `tis->fields.count == 5` at :3509."
+```
+**The ordering IS the claim, and "and only THEN" states it.** Deleting both numbers loses nothing.
+Same shape throughout: `the Union arm (:2690-2700) has no such loop` names the arm; `:212 is the
+exported_entity_queue above it` names the field; `it gates the collision panic at :7882` names the
+panic. `check_files.odin`'s fifteen were step markers -- `// C++ :7385-7387 -- StringMap<AstPackage
+*> pkgs, keyed by package NAME` -- inside a procedure whose DOC HEADER already cites
+`checker.cpp check_unique_package_names`, so `// C++ -- <description>` says everything the number did.
+
+**A WORSE CLASS, NOW GONE: CITATION ARCHAEOLOGY.** Several blocks documented corrections to numbers
+that #892 has since deleted -- *"#690 wrote `:2279-2295`, off by 8"*, *"the old numbers
+2297-2533/2303/2532 were stale AND named the wrong enclosing function"*. **Notes about the drift of
+citations that no longer exist.** Kept the disposition, dropped the archaeology.
+
+### THE HARNESS ERROR, AND IT IS THE MIRROR OF #892's
+The `code()` test reported **24 bytes changed** on `type_info.odin` -- a comment-only edit. **It was
+the HARNESS, again, and this time it cried wolf instead of staying silent.** The stripper removes
+from `//` to end-of-line and leaves the line's LEADING INDENT behind, so every comment line I MERGED
+removed a `\t\n` from the "code". The diff was one lone tab and one empty line.
+**WHY IT NEVER APPEARED BEFORE:** #892 and #908 were pure in-line substitutions that never changed
+the comment LINE COUNT, so the artifact was zero by luck, not by correctness. Comparing on non-blank
+lines gives **0 bytes**, and that is now the right form of the test.
+**RULE 160 (NEW): A VERIFIER THAT HAS ONLY EVER RETURNED THE ANSWER YOU EXPECTED IS UNTESTED.**
+#892's code() test passed three times before today and was wrong the whole time for any edit that
+adds or removes a comment line -- I just had not made one.
+
+**GATES: #97 green x4. `code()` (non-blank) = 0 bytes on both files.** No behaviour touched.
+
+**REMAINING 132, and the biggest are the ones with the most history:** check_type.odin 39 (13 barred,
+26 workable), check_expr.odin 18, check_builtin.odin 13, name_canonicalization.odin 11,
+check_stmt.odin 10, check_proc_group.odin 10, then a long tail of 2-6.
+
+### #910 -- naked-ref sweep continued: 169 -> 101. Four files cleared.
+
+`check_expr.odin` 18 -> 0, `check_builtin.odin` 13 -> 0 (backups `$S/pre910_*`), on top of #909's
+`type_info.odin` and `check_files.odin`. **68 of 169 done; 101 remain, 13 of them inside
+`check_get_params` and untouchable (#706).**
+
+**A THIRD SHAPE, and it is the one worth naming.** #909 found decoration and archaeology; these two
+files added **PAIRED references where the second is naked and BOTH are already annotated**:
+```
+check_builtin.cpp:6049-6052 (mem_copy) and :6097-6100 (mem_zero)
+   ->  check_builtin.cpp mem_copy and mem_zero
+```
+**The parenthetical WAS the function name all along** -- the numbers were carrying nothing the line
+did not already say twice. Same for `type_proc_parameter_type`/`type_proc_return_type` and the two
+endianness arms.
+
+**A CORRESPONDENCE TABLE, rewritten rather than gutted** (`check_expr.odin`, the deferred-call
+writer/reader enumeration). Its VALUE is the count -- one writer, two readers, on both sides -- and
+that survives naming: `reader C++ / port check_binary_expr TWO sites each, on be->left and
+be->right`. **A table of coordinates became a table of claims.**
+
+**ONE ANCHOR MISMATCH CAUGHT BY THE ASSERT, NOT BY THE DIFF.** A replacement was written with three
+tabs where the file has two; the script asserts before writing, so **nothing was written and the md5
+still matched the backup**. Fixed and re-run. That is the fourth time today an exact-match guard has
+been the thing standing between a bad assumption and a mangled file.
+
+**VERIFICATION each file: `code()` (non-blank) = 0 bytes, #97 green x4.**
+
+REMAINING: name_canonicalization.odin 11, check_stmt.odin 10, check_proc_group.odin 10,
+check_type.odin 26 workable (+13 barred), types.odin 6, check_compound_lit.odin 5, and a tail of 2-4.
+
+### #911/#912/#913 -- naked-ref sweep: 169 -> 39. **Every file except `check_type.odin` is CLEAR.**
+
+Cleared since #910: `name_canonicalization.odin` 11, `check_stmt.odin` 10, `check_proc_group.odin`
+10, `types.odin` 6, `check_compound_lit.odin` 5, `check_global_init.odin` 4, `check_decl.odin` 4,
+`scope.odin` 2, `dump_model.odin` 2, `check_proc.odin` 2, `check_builtin_simd.odin` 2, plus one each
+in `entity_helpers`, `check_expr_helpers`, `ast_clone` and `parser/parser.odin`.
+**130 of 169 done. The remaining 39 are ALL in `check_type.odin`: 13 inside `check_get_params`
+(barred, #706) and 26 workable.**
+
+**THE #881 GOTO TABLE SURVIVED THE TREATMENT, which is the test that mattered.** That table is what
+found the canonical-name doubling:
+```
+before:  :657  Builtin scope              -> goto write_base_name        (six numbered arms)
+after:   Builtin scope                    -> goto write_base_name
+```
+**The arms were always identified by their DESCRIPTIONS -- "Builtin scope", "parent decl_info",
+"file scope", "Builtin scope, inner", "TypeName", "anything else" -- and the inner/outer Builtin
+pair is disambiguated by the word "inner", not by 657 vs 686.** The table still supports the
+argument it was written for.
+
+**MORE ARCHAEOLOGY REMOVED, and this class is consistently the worst:** *"The old citation 1408-1419
+was Odin_Sanitizer_Flags, an unrelated bit_set"*, *"the old citation said :7333, which is inside
+handle_raddbg_type_view -- I anchored it by guess"*, *"the old citation said :6370, which is a
+GB_ASSERT inside find_entity_path -- wrong function"*. **Three notes recording that a NUMBER was
+once wrong, all describing numbers that no longer exist.** The useful half -- *anchored by CONTENT,
+not by position* -- is kept in each.
+
+**TWO MORE ANCHOR MISMATCHES, both caught by the assert before any write** (a missing leading tab,
+and a pair I had omitted from the substitution list). In one the script aborted mid-dictionary, so
+three files were left completely untouched and had to be re-run -- **verified by re-counting rather
+than assumed, which is how the omission surfaced at all.**
+
+**VERIFICATION: `code()` (non-blank) = 0 bytes across all 12 files in the batch; #97 green x4.**
+
+## #914 -- THE NAKED-REF SWEEP IS DONE: 169 -> 18, and **all 18 remaining are inside
+## `check_get_params`**, which I am not allowed to edit. Every file in the tree is otherwise clear.
+
+`check_type.odin` 39 -> 18. **151 of 169 rewritten across 16 files.** Backup
+`$S/pre914_check_type.odin`.
+
+**THE BAR WAS RESPECTED AND THE RESPECT WAS MEASURED, not asserted:** `diff` of the
+`check_get_params` body (lines 4976-5881) before and after = **0 bytes**. The 18 survivors are 13
+comment lines inside that procedure, and they stay until Jon says otherwise -- **the same rule that
+kept me out of it at #895, where he lifted the bar for seven lines and nothing wider.**
+
+**FOUR SHAPES IN TOTAL, and knowing them is what made 151 sites tractable:**
+ 1. **DECORATION** on a claim the prose already makes -- *"resolves the element type at :3139 and
+    runs is_type_valid_for_matrix_elems at :3141, AFTER all three count diagnostics (row minimum
+    :3113, column minimum :3123, total maximum :3133)"*. Five numbers; the sentence names every one
+    of the five things and states the ordering.
+ 2. **ARCHAEOLOGY** -- notes recording that a number was once wrong, describing numbers #892 deleted.
+    *"WAS cited :1429-1436 -- anchored but WRONG BY CONTENT: 1429 is `case Type_Basic`."* The useful
+    half (anchored by CONTENT) is kept everywhere; the coordinates are gone.
+ 3. **ANNOTATED PAIRS** -- `check_builtin.cpp:6049-6052 (mem_copy) and :6097-6100 (mem_zero)`. The
+    parenthetical was the function name all along.
+ 4. **TABLES** whose value is the ENUMERATION, not the coordinates -- #881's six-arm goto table and
+    check_expr's writer/reader table both survived naming intact, because the arms and the readers
+    were always identified by description.
+
+**THE LAST ANCHOR FAILURE OF THE SWEEP, and it is the same lesson a fifth time:** a "pair" I asserted
+appeared twice appeared once -- the two sites differ by ONE TAB of indentation. Assert fired, nothing
+was written, count still read 39. **Every one of the five near-misses today was caught by an
+exact-match guard, never by a diff afterwards.**
+
+**GATES: `code()` (non-blank) = 0 bytes; #97 checker RC=0; corpus `FULL-MATCH=332 members=332
+missing=0 excluded=15`; crosstarget `9/9 differ=0`.** Oracle `d653ac0cdb834e2c56d2de1b0ddf5a28`,
+29.6 free cores.
+
+**CITATION STATE, COMPLETE:**
+```
+anchored file.cpp fn:NNN      0     (stripped #892, completed #908)
+file-less fn:NNN              0     (#908)
+naked :NNNN                  18     ALL inside check_get_params -- BLOCKED, not pending
+bare file.cpp:NNN          2374     JON'S DECISION, unchanged since #892
+```
+
+## #915 -- SINGLE-FILE PACKAGES (`-file`) IMPLEMENTED IN THE LIBRARY, at Jon's direction, to unlock
+## the rule_engine divergence hunt. **My first fix was half a fix, and Jon caught the verification
+## gap in the other half.**
+
+**WHY THE LIBRARY AND NOT THE HARNESS.** `collect_package_for_target` is the ONE place that globs
+`<dir>/*.odin`, so teaching it that a `.odin` FILE path means a one-file package gives
+`check_package_from_path`, `session_check_package` and the loader's dependency walk the feature at
+once. **The harness alternative -- assembling a file list and bypassing the loader -- is the thing
+`checker_lifecycle.odin` explicitly warns produces a checker with NO RUNTIME PACKAGE AT ALL**, which
+is #897's failure mode rebuilt on purpose. Single-file-ness is a property of the PATH, not a flag:
+a caller handing this a file can mean nothing else.
+
+**THE BUG MY OWN FIX INTRODUCED.** `pkg.fullpath` stays the FILE (it is the package's identity; two
+single-file packages in one directory must not collide in the loader's `loaded` set), so relative
+imports need the file's DIRECTORY as their base. I fixed that in the LOADER and missed the CHECKER:
+`lookup_imported_package` resolves the same import against `importer.fullpath`. **Two sites resolving
+one import from one package, disagreeing -- the loader fetched `./sub` and the checker then could
+not find it, surfacing as `Unable to find package: ./sub` on an import that is plainly there.**
+Fixed by putting the rule in ONE helper, `package_base_dir`, with that failure mode written at its
+definition. **Audited for other package-fullpath-as-directory uses: exactly those two exist; the
+`file.fullpath` sites already take `filepath.dir`.**
+
+**>>>>>> JON CAUGHT A VERIFICATION GAP, AND HE WAS RIGHT TO EVEN THOUGH HIS PREMISE WAS WRONG <<<<<<**
+He asked: *"iirc -file doesnt read any other imports, does it?"* **It does** -- measured. But my
+"negative control" for import binding was `grep -c Error`, and **`Unable to find package: ./sub` and
+`'Missing' is not declared by 'sub'` are BOTH exactly one error.** The count was consistent with the
+import working AND with it being ignored entirely. **I was about to ship "the import actually BINDS"
+on evidence that could not distinguish the two.** Re-done by reading, then by byte-comparing:
+```
+oracle  n2.odin(3:23) Error: 'Missing' is not declared by 'sub'
+port    n2.odin(3:23) Error: 'Missing' is not declared by 'sub'      diff -> IDENTICAL
+```
+`'X' is not declared by 'sub'` is a lookup INSIDE the resolved package, which is what proves the
+scope was loaded and bound.
+**RULE 161 (NEW): A CONTROL THAT COUNTS IS NOT A CONTROL IF BOTH OUTCOMES HAVE THE SAME COUNT.**
+Every diagnostic count of 1 looks alike. Compare the TEXT, or pick an input whose two explanations
+differ in arity.
+**RULE 162 (NEW): "IIRC" FROM JON IS A PROMPT TO MEASURE, NOT A FACT TO ACCEPT OR TO CONTRADICT.**
+His recollection was wrong and the question was still the most valuable thing said this tick.
+
+**SEMANTICS, NOW ESTABLISHED ON BOTH SIDES:** `-file` restricts which files form THE PACKAGE BEING
+CHECKED; imports are still loaded normally.
+```
+sibling exclusion   clean file alone   oracle silent   port silent
+                    whole directory    oracle 1 err    port 1 err     (the sibling IS read)
+import loading      sub.Value          oracle 0        port 0
+                    sub.Missing        BYTE-IDENTICAL diagnostics
+```
+
+**GATES (loader change -- high blast radius, full suite run):** corpus `FULL-MATCH=332 members=332
+missing=0 excluded=15`; crosstarget `9/9 differ=0`; parity `323/323 count=1 text=0 attrib=2`;
+parity_vet `323/323 count=1 text=0 attrib=2`; #97 green x4. modelsweep in flight.
+**RULE 111 BROKEN BY ME THIS TICK, RECORDED:** parity was launched un-throttled at **2.0 free
+cores** against a 6-wide fan-out. The numbers came out right, which is luck, not vindication.
+
+**NEXT: the rule_engine pilot is unblocked.** `grade.py observe --binary <bin>` over one ~2,900-cell
+suite, twice, then diff the manifests -- 16,249 generated cells is a population the 323-package
+parity gate cannot reach by construction.
+
+## #916 -- THE rule_engine PIVOT WORKS. **40 DIVERGENCES IN THE FIRST 2,928 CELLS**, none of which
+## any of the five gates can see. Jon's suggestion, and it paid off inside one tick.
+
+**METHOD, and it required NO changes to rule_engine** (another agent's live tree -- files touched an
+hour before I read it). `grade.py` already has the mode: *"observe -- ignore expectations, record what
+the compiler actually does... you seed from the reference compiler, then a human triages the
+divergences."* Run `observe` twice with `--binary`, diff the two `observed.tsv`.
+
+**THE BRIDGE IS A WRAPPER, NOT AN ADAPTER** (`$S/portwrap.sh`). `grade.py` does
+`import adapter_odin as adapter` at module scope, so a sibling adapter needs a change to their code;
+a wrapper needs none. It bridges two shape differences, **and the second would have silently ruined
+the entire run:**
+ 1. ARGUMENT SHAPE -- the adapter invokes `<bin> check <file> -file -no-entry-point`; the harness
+    treats unrecognised `-flags` as PHANTOM PACKAGES, so the oracle-only vocabulary is dropped.
+ 2. **EXIT STATUS -- the oracle exits 1 on errors; THE HARNESS ALWAYS EXITS 0.** The adapter reads
+    accept/reject FROM EXIT STATUS. Unmapped, every cell grades "accept" and **every rejecting cell
+    of 2,486 appears as a divergence.** Mapped from the harness's own `errors=N` summary.
+
+**RESULT over `experiments/205-boolean-arm/results-typepred`, 2,928 cells:**
+```
+oracle   442 accept / 2486 reject      2m27s
+port     407 accept / 2521 reject      1m04s
+DIVERGENT CELLS: 40     (37 accept->reject, 3 reject->accept)
+```
+**BOTH DIRECTIONS HAND-VERIFIED against the oracle, outside the harness** -- a one-directional check
+would not have distinguished a real divergence from a wrapper polarity bug:
+```
+#assert(intrinsics.type_is_named(int))            oracle ACCEPTS   port fails the assertion
+#assert(intrinsics.type_is_ordered_numeric(^int)) oracle FAILS it  port ACCEPTS
+```
+
+**GROUPED -- 40 cells are far fewer than 40 bugs:**
+```
+23  is_named            ALL basic types (int, bool, string, rune, typeid, cstring, f32,
+                        complex*, quaternion*, rawptr, u8, uint, i32le, u16be, ...)  -> ONE rule
+ 6  is_ordered_numeric  BF/BF2/E accept->reject; pint/spf32/spint reject->accept  -> BOTH directions
+ 2  is_sliceable        FCDA, FCDA2   (fixed-capacity dynamic array)
+ 2  is_indexable        FCDA, FCDA2
+ 2  is_simple_compare   RU2 (#raw_union), SPAD (padded struct)
+ 2  isord               BF, BF2
+ 1  is_valid_map_key    RU2
+ 1  iscmp               RU2
+ 1  is_internally_pointer_like   cstring16
+```
+**`type_is_named` over basic types is almost certainly ONE defect worth 23 cells** -- C++ counts a
+Basic type as named; the port evidently only counts `Type_Named`.
+
+**WHY NO GATE COULD SEE ANY OF IT.** corpus, parity, parity_vet, crosstarget compare DIAGNOSTICS over
+REAL packages; modelsweep compares the MODEL over the same 323. **Nothing in `core` calls
+`intrinsics.type_is_named` on `int`.** The rule engine generates the CROSS PRODUCT -- every
+(predicate x type) cell, including the ones no real program contains -- which is exactly the
+population every gate-blind defect this session hid in (#601, #881, #897, #899).
+**RULE 163 (NEW): A GATE OVER REAL CODE MEASURES WHAT REAL CODE DOES. A GENERATED CROSS PRODUCT
+MEASURES THE LANGUAGE.** They are different populations and the second is where a port diverges.
+
+**COST: 3m31s of compute for 40 findings, against 16,249 cells total available** -- this suite is 18%
+of the corpus, so the pilot is 18% of one sweep of one experiment's worth of generated tests.
+
+**NEXT: triage the 40 into defects** (start with `type_is_named`, 23 cells and one rule), then decide
+whether to sweep the remaining 13,321 cells. **Findings are UNFILED and UNTRIAGED as of this entry --
+"40 divergences" is a count of CELLS, not of defects, and the two must not be conflated.**
+
+## #917/#918 -- THE PILOT'S 40 DIVERGENCES BURNED DOWN TO **ZERO**. Six defects, all in `types.odin`,
+## all in type PREDICATES, none of which any gate could see. Jon: "fix all these before re-run."
+
+```
+40  divergent cells  (baseline, #916)
+17  after is_type_named            (#917)
+ 0  after the remaining five       (#918)      2,928 / 2,928 cells agree with the oracle
+```
+
+| defect | cells | what was wrong |
+|---|---|---|
+| `is_type_named` | 23 | no `Type_Basic` arm, no nil guard. **A BASIC TYPE IS NAMED** in C++ |
+| `is_type_ordered_numeric` | 6 | `base_type` -> `core_type` **AND** pointer arms C++ lacks |
+| `is_type_simple_compare` | 4 | an **INVENTED padding check** rejecting every padded struct |
+| `is_type_indexable`/`is_type_sliceable` | 4 | missing `Fixed_Capacity_Dynamic_Array` |
+| `is_type_ordered` | 2 | `base_type` -> `core_type` |
+| `is_type_internally_pointer_like` | 1 | missing `is_type_cstring16` |
+
+**TWO OF THESE ARE WORTH REMEMBERING AS SHAPES.**
+ * **`is_type_ordered_numeric` DIVERGED IN BOTH DIRECTIONS AT ONCE.** `base_type` instead of
+   `core_type` made bit_fields and enums UNDER-accept; stray `Type_Pointer, Type_Multi_Pointer` arms
+   -- which belong to `is_type_ordered` and were plainly copied across -- made `^int` and simd
+   pointers OVER-accept. A one-directional probe would have found half of it and "fixed" the
+   function into still being wrong.
+ * **`is_type_simple_compare`'s padding test was PURE INVENTION.** C++ is "every field simple =>
+   simple", with no padding computed and no `is_packed` special case. The port summed field sizes
+   and compared against `type_size_of`, so ANY padded struct was rejected -- which is why
+   `struct{a: u8, b: int}` and `struct #raw_union {a: u8, b: bool}` failed across THREE predicates
+   (is_simple_compare, type_is_valid_map_key, the comparison predicate). **Four cells, one
+   invention, three symptoms** -- the #882/#805 shape again.
+ * `core_type` vs `base_type` twice in one file is a **class**, not a coincidence: `core_type`
+   unwraps Named -> Enum -> Bit_Field, `base_type` only Named. **Any predicate C++ opens with
+   `core_type(t)` and the port opens with `base_type(t)` is wrong for enums and bit_fields.**
+   Worth a sweep of its own.
+
+**ALSO FOUND, RECORDED NOT FIXED:** C++ has a THIRD caller of `is_type_named` the port lacks
+entirely -- the `Illegal use of an unnamed polymorphic record` diagnostic. And the port's
+`Type_Struct` has no `is_simple` field (C++'s fast-path cache for the same loop; omitting it changes
+no answer).
+
+**GATES on the full batch:** corpus `FULL-MATCH=332 members=332 missing=0 excluded=15`; crosstarget
+`9/9 differ=0`; parity `323/323 count=1 text=0 attrib=2`; #97 green x4. parity_vet + a `--repeat=3`
+modelsweep in flight.
+**HONEST FLAG: #917's single-run modelsweep reported `multiplicity=18`, OUTSIDE the 10..14 floor
+measured at #907.** Every GATED column was 0. multiplicity is ungated and its floor came from three
+runs -- which bounds the middle, not the tail (#539 saw NINE packages move on identical binaries) --
+so 18 is not evidence of an effect. **It is also not to be waved through, which is why #918 re-runs
+it with `--repeat=3` rather than quoting one number** (rule 157, and the tool prints the instruction
+itself).
+
+**RULE 164 (NEW): A GENERATED CELL CORPUS TURNS "IS THE PORT RIGHT?" INTO A COUNTDOWN.** 40 -> 17 ->
+0 in one sitting, each step measured, because the population was fixed and exhaustive. No amount of
+reading C++ produces that; no gate over real packages contains those inputs.
+
+## #919 -- **JON RETIRES THE GATE SUITE.** "i think its exceeded its usefulness, the dsl otoh, has a
+## lot of novel test cases." The numbers back him, and I should have raised it first.
+
+**THE ACCOUNTING, from this session's own ledger:**
+```
+gate          cost/run              runs   TIMES IT MOVED   defects found
+corpus        7s                    ~10          0                0
+crosstarget   0.7s                  ~8           0                0
+parity(+vet)  ~35s idle, min loaded ~12          0                0
+modelsweep    ~7min (x3 on repeat)  ~6           0                0
+```
+**`FULL-MATCH=332` appears 29 times in this session and no other value ever.** Every other gate is
+the same story. **Zero movements, zero findings, across roughly fifteen runs and ten substantive
+source changes.**
+
+**WHAT ACTUALLY FOUND THE TEN DEFECTS:** reading C++ against the port (#891/#893/#895/#899), two
+hand-written probes (#881/#897), and **the DSL cell corpus -- six defects in a 3.5-minute sweep
+(#916-#918)**.
+
+**AND EVERY ONE OF THEM WAS INVISIBLE TO THE GATES BY CONSTRUCTION.** The gates compare diagnostics
+over 323 REAL packages. `intrinsics.type_is_named(int)` was wrong for the entire life of the port
+and no gate could ever have said so, because nothing in `core` asks that question. Same for
+`type_is_ordered(BF)`, `is_type_simple_compare` on a padded struct, `#exists` on a string16 path,
+`context` without ODIN_ROOT, and bit_field tags.
+
+**THE SYNTHESIS THAT MAKES THE RETIREMENT SAFE: THE CELL CORPUS SUBSUMES THE GATES IN BOTH ROLES.**
+Sweeping cells before and after a change is a REGRESSION check AND a DISCOVERY instrument, over a
+population that actually discriminates. The gates only ever did the first, and never once
+discriminated. **A regression check that has never failed is not evidence of safety; it is evidence
+of the wrong population.**
+
+**MY ERROR, NAMED:** I ran the suite ~15 times, then spent 20 minutes re-measuring the noise floor of
+an UNGATED column (`multiplicity`) that gates nothing -- and killed that job only when Jon asked what
+was running. **I had all the data to reach his conclusion three ticks earlier and did not look at
+it.** Rule 81's lesson at a larger scale: a status line I produce every tick stops being read, and
+that includes by me.
+
+**CAMPAIGN LAUNCHED (#919):** `$S/sweep_cells.sh` over **86 materialised suites, ~11,700 cells**,
+largest first. Each suite is COPIED to the scratchpad -- `grade.py observe` writes `observed.tsv`
+into the suite directory and rule_engine is another agent's LIVE tree. "error" rows (timeout/crash)
+are counted separately and NEVER as divergences: the adapter distinguishes them on purpose, and
+conflating them is exactly how machine load manufactures findings.
+**219 manifests exist but only 86 have materialised cells** (37,575 rows in one suite against 16,249
+`.odin` files tree-wide) -- the rest would need the emitter re-run, which is a separate decision.
+
+**RULE 165 (NEW): A GATE THAT HAS NEVER MOVED IS A HYPOTHESIS ABOUT ITS POPULATION, NOT A GUARANTEE
+ABOUT THE CODE.** Count its movements per run and its findings per hour before defending its cost.
+
+## #920/#921/#922 -- DSL sweep round 2: **139 -> 66 -> (verifying)**. Three more defects, and the
+## most valuable one was found by auditing a TABLE rather than by chasing the cell that failed.
+
+**THE SWEEP (`$S/sweep_cells.sh`, 83 suites, 13,146 cells) found 139 divergences in FOUR pockets --
+78 of 83 suites were clean.** Concentration is the signal: a predicate wrong almost everywhere it is
+asked is one rule, not many.
+
+### #920 -- THE BUILTIN TABLE AUDIT. One failing cell, three findings.
+`type_has_shared_fields` failed with "Too many arguments, expected 1, got 2". Instead of fixing that
+entry I diffed **all 295 builtin declarations** between `src/checker_builtin_procs.hpp` and the
+port's table:
+```
+294 compared   2 ARITY MISMATCHES   type_has_shared_fields (1 vs 2), concatenate (1 vs 2)
+               1 MISSING ENTIRELY   soa_copy_from_slice  (C++ argc=3, Expr_Stmt)
+```
+**`concatenate` and `soa_copy_from_slice` had NO failing cell pointing at them.** The corpus found
+one; the table audit found the other two. `soa_copy_from_slice` is still missing -- recorded, not
+implemented, and no cell exercises it.
+
+### #921 -- TWO INTRINSICS THAT WERE WRONG IN EVERY PART
+**`type_has_shared_fields` (64 cells)** -- arity 1 where C++ takes 2, demanded a **UNION** where C++
+demands a **STRUCT**, and returned a hardcoded `false` under the note *"Odin's Type_Union does not
+have shared_fields"* -- which is TRUE and IRRELEVANT, because the intrinsic is about structs.
+Replaced with C++'s actual algorithm (every field of arg1 present in arg0 by name AND identical
+type, directional). **THE WRONG RESULT HAD NEVER BEEN OBSERVED BECAUSE THE ARITY CHECK REJECTED
+EVERY CALL FIRST -- one bug hiding behind another.**
+**`type_is_variant_of` (9 cells)** -- ARGUMENT ROLES REVERSED. C++ requires args[0] to be the union
+and searches it for args[1]; the port demanded args[1] be the union, so the natural spelling
+`type_is_variant_of(U, bool)` was rejected outright. The message was invented too ("Second argument
+... must be a union type" against C++'s "Expected a union type for '%s'", anchored on the first
+operand).
+
+### #922 -- A FALSE JUSTIFICATION IN A COMMENT, WORTH 54 CELLS
+The port's bit-count handler said:
+> *"Constant evaluation for bit counting is deferred to runtime for simplicity, matching the C++
+> implementation pattern for reverse_bits"*
+
+**C++ defers EXACTLY ONE of the seven.** `reverse_bits` carries its own "make runtime only for the
+time being"; the other six -- count_ones, count_zeros, count_trailing_zeros, count_leading_zeros,
+count_trailing_ones, count_leading_ones -- are CONSTANT-FOLDED. **The port took the single exception
+and generalised it into the rule**, so `#assert(count_leading_ones(u16(0xFFFF)) == 16)` failed with
+"is not a constant boolean". Folding implemented for the six; `reverse_bits` stays runtime-only,
+now faithfully rather than accidentally. **The cells are `#assert(op(x) == N)`, so ACCEPTANCE IS THE
+VALUE CHECK** -- a wrong count would still fail.
+**This is the #91 class (a comment asserting what the code does not support) and squarely what
+CLAUDE.md forbids: "do not implement 'simplified' versions of functions."**
+
+### PROCESS FAILURE, RECORDED
+**A Bash tool timeout ends the WAIT, not the WORK.** I reported the first re-sweep as killed by the
+10-minute cap; it was still running, I relaunched, and **two sweeps raced over one output directory
+that each `rm -rf`s at start** -- results from that window were discarded unread. Then the cleanup
+bit twice: `pkill -f "sweep_cells.sh"` MATCHED ITS OWN COMMAND LINE and killed my shell (exit 144),
+and `pgrep -c` counted `setsid`/`nohup` wrappers so "3 processes" looked like three sweeps until I
+checked parent PIDs.
+**RULE 166 (NEW): A TIMED-OUT FOREGROUND COMMAND IS STILL RUNNING. Confirm death by PID before
+relaunching anything that writes to a shared path.**
+**RULE 167 (NEW): `pkill -f` AND `pgrep -f` MATCH THE COMMAND LINE THAT INVOKES THEM.** Kill by PID,
+and exclude `$$`.
+**The other agent's `grade.py grade --binary odin-snapshot` run was NOT touched** -- my patterns only
+ever matched `observe` mode. Verified before and after.
+
+## #923/#924 -- THE LAST TWO POCKETS. And the second is the most consequential defect of the
+## session: **the port silently accepted OUT-OF-RANGE INTEGER CONSTANTS in ordinary code.**
+
+### #923 -- `type_field_index_of` never checked that the field exists (3 cells)
+C++ uses `lookup_field` and errors `'%s' has no field named '%s'` (plus a did-you-mean and an
+"embedded via a pointer" arm). **The port scanned DIRECT fields only and, on a miss, left
+`field_index = -1` and RETURNED IT AS A CONSTANT** -- `type_field_index_of(A, "z")` on a struct with
+no `z` was accepted, value -1, no diagnostic. Now uses `lookup_field` with both C++ error arms, which
+also closes a gap NO CELL MEASURED: the hand-rolled scan could not see a field reached through an
+embedded/`using` member.
+
+### #924 -- **A DELIBERATE BUG-COMPATIBILITY THAT UPSTREAM HAD ALREADY FIXED** (9 cells)
+The signed range check carried a long, confident note:
+> *"That conversion WRAPS, so C++ accepts anything in [2^63, 2^64-1] for a signed 64-bit type...
+> `x: int = 18446744073709551615` compiles and becomes -1. That is an upstream bug (LEDGER 264, task
+> #166), reproduced here because the port's job is to agree with the compiler... **If it is fixed
+> upstream, fix it here in the same change.**"*
+
+**IT HAS BEEN FIXED UPSTREAM, AND C++'S OWN COMMENT NOW DESCRIBES THE BUG THE PORT WAS EMULATING:**
+```cpp
+// NOTE: the check below is a magnitude test (mp_count_bits() <= 64),
+// big_int_to_i64 would wrap u64 max to -1 and pass for any signed type.
+// Compare magnitudes instead
+```
+**MEASURED BEFORE TOUCHING ANYTHING** -- the comment's own example is the falsifying input:
+```
+x: int     = 18446744073709551615   oracle REJECTS   port ACCEPTED
+x: i64     = 9223372036854775808    oracle REJECTS   port ACCEPTED
+x: int     = 9223372036854775807    oracle accepts   port accepted     (control)
+```
+**THE UNSIGNED ARM WAS WORSE: it had NO WIDTH GUARD AT ALL.** `big.int_get_u64` truncates silently
+past 64 bits -- which the signed arm's own comment already documented -- so
+`x: uintptr = 18446744073709551616` extracted as **0**, compared `0 <= umax`, and was accepted.
+Three more cells.
+**AND `x: i128 = 4.0` WAS REJECTED** because the 128-bit path demanded a BigInt while the integral-
+float arm produces only an i64; a value that fits 64 bits trivially fits 128, so it is promoted.
+
+**THIS ONE IS NOT AN INTRINSIC CURIOSITY.** Every other defect this session lived in
+`intrinsics.*`, which real code rarely calls. **This is ordinary assignment checking** -- any
+out-of-range integer literal in any program -- and the port accepted it silently. No gate saw it:
+`core` contains no out-of-range constants, because `core` compiles.
+
+**RULE 168 (NEW): A "BUG-COMPATIBLE WITH UPSTREAM" COMMENT IS A CLAIM WITH AN EXPIRY DATE.** It
+names a behaviour in someone else's tree that they are actively fixing. This one even said "fix it
+here in the same change" -- and the way it was found was not by re-reading the note but by a
+generated cell asking the question the note was about. **Re-measure every bug-compatibility claim
+against the oracle before trusting it; the note cannot know when it went stale.**
+
+VERIFIED, oracle vs port, after the fix: `int=2^64-1` REJECT/REJECT, `i64=2^63` REJECT/REJECT,
+`uintptr=2^64` REJECT/REJECT, `int=2^63-1` accept/accept, `u64=2^64-1` accept/accept,
+`i128=4.0` accept/accept, `i128=4.5` REJECT/REJECT.
+
+## #925 -- THE THREE `error` ROWS WERE ALL **ORACLE CRASHES**, AND BOTH WERE ALREADY FILED.
+## I wrote two duplicate reports before checking the directory. Rule 63, thirteenth hit.
+
+**All three non-verdict rows were on the ORACLE side, not the port.** Two distinct defects, both
+`GB_ASSERT` -> SIGILL (rc=132), both reproduced **5/5** from minimal files I reduced to 5 and 4 lines:
+```
+src/check_type.cpp(1521)     t_tuple->variables.count == s_tuple->variables.count
+   #assert(intrinsics.type_is_specialization_of(Poly, Poly2))   -- differing parapoly arities
+   (both argument orders crash; that is the third row)
+
+src/check_builtin.cpp(7533)  is_type_union_maybe_pointer(u)
+   intrinsics.type_union_tag_offset(U0)  where  U0 :: union{}
+```
+**THE PORT SURVIVES BOTH** -- it answers `false` for the first (an ordinary failed `#assert`) and
+accepts the second. It has no assertion at either point.
+
+**>>>>>> AND THEN I WROTE TWO REPORTS THAT ALREADY EXISTED. <<<<<<**
+`UPSTREAM-UNFILED-specialization-of-unrelated-generics-assert.md` and
+`UPSTREAM-UNFILED-type-union-tag-offset-aborts-on-empty-union.md`, both filed **2026-08-10**, both
+covering exactly these defects, both already noting the port's behaviour. **I wrote 3KB of duplicate
+each and only saw them when `ls` printed my new file next to the old one.** Duplicates deleted.
+**RULE 63'S THIRTEENTH HIT, and the same shape as #894's:** I searched my MEMORY of what was filed
+instead of the DIRECTORY, in a folder I had personally listed twice this session.
+**RULE 169 (NEW): BEFORE WRITING A REPORT, `ls` THE REPORT DIRECTORY AND GREP IT FOR THE ASSERTION
+TEXT.** The crash message is the natural key and it is stable; the file name is not.
+
+**WHAT WAS ACTUALLY WORTH ADDING, and it is small:** both reports cite line numbers that have
+DRIFTED -- `check_type.cpp:1520` is now **1521**, `check_builtin.cpp:7471` is now **7533** (62 lines).
+Appended a dated re-verification note to each recording the drift, the 5/5 re-measurement, and that
+**the assertion TEXT is the stable anchor while the line number is not** -- which is Jon's #892
+ruling arriving from the other direction, in someone else's file.
+
+**AND THE SECOND FINDING IS THE METHOD:** both crashes were found by grading a GENERATED CELL CORPUS,
+independently of the hand-probing that found them in August. `union{}` and a mismatched-arity generic
+pair are ORDINARY MEMBERS of a cross-product universe, not inputs anyone thought to try. **3 of
+13,146 cells failed to produce a verdict, and two of the three were real upstream crashes.**
+
+## #926 -- `soa_copy_from_slice` IMPLEMENTED. The builtin that no test asked for.
+
+**IT WAS MISSING ENTIRELY** -- no enum member, no table entry, no dispatch arm, no check procedure.
+Calling `intrinsics.soa_copy_from_slice(...)` produced **"Undeclared name"**. Added in all four
+places, positioned beside `soa_struct` exactly as C++ places it.
+
+**NO GENERATED CELL EXERCISES IT.** It was found by #920's diff of all 295 builtin declarations
+between `src/checker_builtin_procs.hpp` and the port's table -- the same audit that caught
+`concatenate`'s arity. **The cell corpus is exhaustive over the axes its specs name; it is silent
+about a builtin nobody wrote a judgment for.** Two different instruments, two different blind spots:
+the corpus finds wrong ANSWERS, the table diff finds missing QUESTIONS.
+
+**TWO C++ QUIRKS REPRODUCED VERBATIM** rather than quietly improved:
+ * the second and third errors anchor on `array_ptr.expr`, NOT on the offending argument;
+ * the offset message passes its format arguments as (type, builtin_name) against a
+   `"%s ... '%.*s'"` format, so it reads with the operands swapped.
+**A silently nicer diagnostic is still a divergence** -- and one no gate would ever have flagged,
+because the port would simply have been "better".
+
+**VERIFIED against the oracle on three inputs, and by MESSAGE not by count** (the #925 lesson):
+```
+ok (valid call)                        oracle 0 / port 0
+bad: array by value, not pointer       oracle 1 / port 1   diagnostics BYTE-IDENTICAL
+bad: slice of the wrong element type    oracle 1 / port 1   diagnostics BYTE-IDENTICAL
+```
+
+**ORDINAL-SHIFT RISK CHECKED, NOT ASSUMED.** Inserting an enum member mid-list shifts every later
+`Builtin_Proc_Id`. `dump_model` emits `builtin_proc_infos[v.id].name` -- the NAME -- and nothing in
+the checker persists the id numerically, so the shift is invisible to the model comparison and to
+everything else. `core/odin/ast` is a public package (#868); this is an ADDITION, and C++'s own
+ordering is the one being matched.
+
+**REGRESSION CHECK IS THE CELL CORPUS NOW, NOT THE GATES (#919).** Sweep running.

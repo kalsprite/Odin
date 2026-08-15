@@ -577,7 +577,7 @@ add_entity_and_decl_info :: proc(ctx: ^Checker_Context, identifier: ^ast.Node, e
 
 	#partial switch ident in identifier.derived {
 	case ^ast.Ident:
-		// C++ Reference: checker.cpp add_entity_and_decl_info:2219 - GB_ASSERT(identifier->Ident.token.string == e->token.string)
+		// C++ Reference: checker.cpp add_entity_and_decl_info - GB_ASSERT(identifier->Ident.token.string == e->token.string)
 		assert(ident.name == e.token.text)
 
 	case:
@@ -607,7 +607,7 @@ add_entity_and_decl_info :: proc(ctx: ^Checker_Context, identifier: ^ast.Node, e
 			pkg := scope.file.pkg
 			assert(ctx.pkg == pkg, "Package mismatch in exported entity handling")
 
-			// C++ Reference: checker.cpp add_entity_and_decl_info:2229-2245
+			// C++ Reference: checker.cpp add_entity_and_decl_info
 			//
 			// NOTE: an exported file-scope entity is ONLY enqueued - it is
 			// deliberately NOT added to the file scope. C++'s
@@ -776,7 +776,7 @@ add_package_dependency :: proc(ctx: ^Checker_Context, package_name: string, name
 	add_dependency(ctx.info, ctx.decl, entity)
 }
 
-// try_to_add_package_dependency is C++'s TOLERANT variant (checker.cpp try_to_add_package_dependency:969). The difference from
+// try_to_add_package_dependency is C++'s TOLERANT variant (checker.cpp try_to_add_package_dependency). The difference from
 // add_package_dependency is exactly one thing: a missing entity is a SILENT RETURN here and a
 // GB_ASSERT_MSG abort there. It also has no `required` parameter.
 //
@@ -799,7 +799,7 @@ try_to_add_package_dependency :: proc(ctx: ^Checker_Context, package_name: strin
 		return
 	}
 	entity := scope_lookup(pkg_scope, name)
-	// C++ :975 -- `if (e == nullptr) { return; }`. THIS is the defining difference.
+	// C++ -- `if (e == nullptr) { return; }`. THIS is the defining difference.
 	if entity == nil {
 		return
 	}
@@ -819,7 +819,7 @@ try_to_add_package_dependency :: proc(ctx: ^Checker_Context, package_name: strin
 // (STRANDED above a different procedure until #734 -- another procedure was inserted between
 //  this doc comment and the definition it documents.)
 add_map_get_dependencies :: proc(ctx: ^Checker_Context) {
-	// No decl guard: C++ has none here (check_expr.cpp add_map_get_dependencies:321), and add_package_dependency
+	// No decl guard: C++ has none here (check_expr.cpp add_map_get_dependencies), and add_package_dependency
 	// already handles a nil decl.
 	if build_context.dynamic_map_calls {
 		add_package_dependency(ctx, "runtime", "__dynamic_map_get")
@@ -830,7 +830,7 @@ add_map_get_dependencies :: proc(ctx: ^Checker_Context) {
 }
 
 // add_map_set_dependencies adds runtime dependencies for map write operations
-// C++ Reference: check_expr.cpp add_map_set_dependencies:330-343
+// C++ Reference: check_expr.cpp add_map_set_dependencies
 //
 // __dynamic_map_reserve does NOT belong here -- it is add_map_reserve_dependencies' job (below).
 // The port had it folded in, which is why a roster audit keyed on NAMES could not see the defect:
@@ -838,7 +838,7 @@ add_map_get_dependencies :: proc(ctx: ^Checker_Context) {
 add_map_set_dependencies :: proc(ctx: ^Checker_Context) {
 	init_core_source_code_location(ctx.checker)
 
-	// C++ ALSO builds t_map_set_proc here (check_expr.cpp add_map_set_dependencies:333-336). DELIBERATELY NOT PORTED:
+	// C++ ALSO builds t_map_set_proc here (check_expr.cpp add_map_set_dependencies). DELIBERATELY NOT PORTED:
 	// it has exactly ONE reader in all of src/ -- llvm_backend.cpp:837, lb_create_dummy_procedure
 	// -- so it is backend-only state written by the checker for the backend's later use. The port
 	// has no LLVM backend, and allocating a proc type nothing reads would be invented state that
@@ -856,7 +856,7 @@ add_map_set_dependencies :: proc(ctx: ^Checker_Context) {
 }
 
 // add_map_reserve_dependencies is C++'s THIRD map helper, which the port never had.
-// C++ Reference: check_expr.cpp add_map_reserve_dependencies:346-349. Unconditional -- no dynamic_map_calls branch.
+// C++ Reference: check_expr.cpp add_map_reserve_dependencies. Unconditional -- no dynamic_map_calls branch.
 add_map_reserve_dependencies :: proc(ctx: ^Checker_Context) {
 	init_core_source_code_location(ctx.checker)
 	add_package_dependency(ctx, "runtime", "__dynamic_map_reserve")
@@ -1236,7 +1236,7 @@ pop_scope :: proc(ctx: ^Checker_Context, prev: ^Scope) {
 
 // get_runtime_package returns the base:runtime package, or nil if it was not loaded.
 //
-// C++ Reference: checker.cpp get_runtime_package:899-915 (get_runtime_package). The C++ version looks the package
+// C++ Reference: checker.cpp get_runtime_package (get_runtime_package). The C++ version looks the package
 // up by path and GB_ASSERTs it is present, which it can do because parse_packages seeds
 // base:runtime unconditionally before any checking starts (src/parser.cpp:7067) - a compiler
 // run with no runtime package is a compiler bug there.
@@ -1621,7 +1621,7 @@ init_core_context :: proc(c: ^Checker) {
 }
 
 // init_core_map_type initializes the cached map-internal types from core:runtime
-// C++ Reference: checker.cpp init_core_map_type:3612-3624
+// C++ Reference: checker.cpp init_core_map_type
 //
 // These globals back the `intrinsics.type_map_info` / `intrinsics.type_map_cell_info` builtins
 // and the map runtime layout. Nothing in the port initialised them, so they stayed nil after
