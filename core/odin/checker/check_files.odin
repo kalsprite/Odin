@@ -243,8 +243,45 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// enqueues rather than writing the array directly.
 	check_merge_queues_into_arrays(c)
 
+	// LEDGER #885, closing #774 cluster 2. THESE TWO WERE MOVED HERE from ~120 lines later.
+	//
+	// C++ Reference: checker.cpp check_parsed_files -- TIME_SECTION("check for type cycles") at
+	// 7747 and TIME_SECTION("check for inline cycles") at 7750. Both run immediately after
+	// TIME_SECTION("add basic type information") (7728, `add_basic_type_information` above) and
+	// immediately BEFORE TIME_SECTION("check deferred procedures") (7753, directly below).
+	//
+	// The port ran them ~11 phases later, under a "Phase 7: Validation" header citing
+	// `checker.cpp:7364-7427` -- a layout vintage in which `check_parsed_files` lived around
+	// 7343-7463. In CURRENT C++ eleven phases sit between inline cycles (7750) and entry point
+	// (7789), so that grouping corresponds to no C++ block at all. Same stale-vintage citation
+	// family as cluster 1's "C++ line 7377"; #774's bisect dated the whole tail as port-side
+	// (oldest revision carrying today's order: 01258d481, 2025-09-10).
+	//
+	// WHY THIS IS THE RISKIER HALF, and why it was split from cluster 1: cluster 1 appended two
+	// calls at the END of the driver, where nothing downstream could observe the move. This one
+	// changes what has ALREADY RUN when `check_deferred_procedures` starts -- the cycle checks now
+	// precede it rather than follow it. That is the #111 shape (file-scope `#assert` drained
+	// before exports permanently cached wrong sizes, -18,226 diagnostics), which is why it got its
+	// own before/after rather than riding along.
+	//
+	// MEASURED: full gate set run immediately before and after this move, unchanged. As with
+	// cluster 1 that establishes NO REGRESSION, not correctness -- but unlike cluster 1 these two
+	// phases DO emit diagnostics (illegal cyclic type declarations, recursive `#force_inline`
+	// procedures), so the corpus and both parity sweeps genuinely exercise them. That is stronger
+	// evidence than cluster 1 had, where the governed output (the type-info table) has no reader
+	// in this port at all.
+
+	// Check for illegal cyclic type declarations
+	// C++ Reference: checker.cpp:7747
+	check_for_type_cycles(c)
+
+	// Check for recursive inline procedures
+	// C++ Reference: checker.cpp:7750
+	check_for_inline_cycles(c)
+
 	// Check deferred procedures (procedures with defer statements)
-	// C++ line 7373: check_deferred_procedures(c)
+	// C++ Reference: checker.cpp:7753 -- TIME_SECTION("check deferred procedures"), immediately
+	// after the two cycle checks above.
 	check_deferred_procedures(c)
 
 	// Validate @(objc_context_provider) procedure signatures.
@@ -338,13 +375,13 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 
 	check_merge_queues_into_arrays(c)
 
-	// Sort init/fini procedures by priority
-	// C++ line 7377: check_sort_init_and_fini_procedures(c)
-	check_sort_init_and_fini_procedures(c)
-
-	// Report intrinsics.__entry_point calls made in a program that has no entry point.
-	// C++ Reference: checker.cpp check_parsed_files:7900-7909
-	check_intrinsics_entry_point_usage(c)
+	// LEDGER #883. `check_sort_init_and_fini_procedures` and `check_intrinsics_entry_point_usage`
+	// USED TO RUN HERE and have been MOVED TO THE TAIL, after
+	// `finalize_minimum_dependency_type_info`. C++ runs them at 7905/7909, i.e. AFTER the type-info
+	// array (7851); here they ran ~9 phases early, ahead of test procedures, entry point, unique
+	// package names, instrumentation and the type-info array. The old citation on the first one read
+	// "C++ line 7377", a stale vintage -- see #774 for the bisect that dated it.
+	// Do not move them back; the comment at the new site records why.
 
 	// Check test procedures
 	// C++ line 7400: check_test_procedures(c)
@@ -358,13 +395,11 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// C++ Reference: checker.cpp:7364-7427
 	// =========================================================================
 
-	// Check for illegal cyclic type declarations
-	// C++ Reference: checker.cpp:7400
-	check_for_type_cycles(c)
-
-	// Check for recursive inline procedures
-	// C++ Reference: checker.cpp:7403
-	check_for_inline_cycles(c)
+	// LEDGER #885. `check_for_type_cycles` / `check_for_inline_cycles` USED TO RUN HERE and have
+	// been MOVED UP, to immediately after `add_basic_type_information` and before
+	// `check_deferred_procedures` -- C++ 7747/7750, between 7728 and 7753. This closes #774
+	// cluster 2. The "Phase 7: Validation" header above and its `checker.cpp:7364-7427` citation
+	// were a stale vintage that corresponds to no block in current C++.
 
 	// Validate unique package names
 	// C++ Reference: check_parsed_files, `bool package_names_are_unique = check_unique_package_names(c);`
@@ -435,6 +470,47 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// reported (:7882). Reachability of the panic is NOT established in either implementation --
 	// it needs two distinct types whose canonical hashes collide (#169/#174 discipline).
 	finalize_minimum_dependency_type_info(c, package_names_are_unique)
+
+	// LEDGER #883, closing #774 cluster 1. THESE TWO WERE MOVED HERE from ~90 lines earlier.
+	//
+	// C++ Reference: checker.cpp check_parsed_files -- TIME_SECTION("sort init and fini procedures")
+	// at 7905 and the `intrinsics.__entry_point` usage report at 7909. Both run AFTER
+	// TIME_SECTION("initialize and check for collisions in type info array") (7851), which is
+	// `finalize_minimum_dependency_type_info` immediately above. Only `collate` (7920) and `finish`
+	// (7926) follow them.
+	//
+	// THE COMMENT ON `finalize_minimum_dependency_type_info` ABOVE ALREADY DESCRIBED THIS ORDER and
+	// the file violated it -- it says C++ runs that block "immediately before TIME_SECTION('sort init
+	// and fini procedures') (:7905). That is the position here." It was not the position: both calls
+	// sat ~90 lines earlier, ahead of test procedures, entry point, unique package names,
+	// instrumentation AND the type-info array. A site documenting the intended order while the file
+	// violates it is what settled #774 as a port-side ordering choice rather than upstream churn.
+	//
+	// THE DIVERGENCE WAS DATED, not assumed. Comparing the ORDER of C++'s TIME_SECTION *names* (line
+	// numbers stripped -- the name order IS the phase order and is immune to numbering drift), walked
+	// back from HEAD until the signature changes:
+	//     OLDEST rev carrying TODAY'S order: 01258d481 (2025-09-10), check_procedure_bodies @ 7295
+	//     boundary is genuine: 938104071 (2025-09-01, @7103) DIFFERS
+	// The port's tail cites a layout with check_procedure_bodies at ~7343, which is AFTER 7295, and
+	// the line number grows monotonically across every sampled revision (7103 -> 7295 -> 7343 ->
+	// 7373 -> 7715). So the port's tail was written against a C++ that ALREADY had today's order.
+	// No residual window; the ordering was port-side.
+	//
+	// NOT OBSERVABLE BY ANY GATE HERE, and that is stated rather than glossed: what this ordering
+	// governs is the type-info table, whose only readers are `type_info_index` /
+	// `type_info_index_pair` -- ZERO CALLERS in this port (C++'s real caller is `lb_type_info_index`
+	// in the LLVM backend, out of scope). The full gate set was run before and after and is
+	// unchanged, which establishes NO REGRESSION, not correctness of the new order. The argument for
+	// the move is faithfulness to C++'s sequence plus the self-contradicting comment above; #111
+	// (file-scope #assert drained before exports, -18,226 diagnostics) is the standing reminder that
+	// phase order can matter enormously even when a green gate says nothing.
+	//
+	// #774 CLUSTER 2 IS DELIBERATELY NOT DONE HERE: hoisting `check_for_type_cycles` /
+	// `check_for_inline_cycles` above `check_deferred_procedures` (C++ 7747/7750 vs the port's
+	// current position ~11 phases later) is a larger reordering across the middle of the driver and
+	// is judged separately.
+	check_sort_init_and_fini_procedures(c)
+	check_intrinsics_entry_point_usage(c)
 
 	// =========================================================================
 	// Return Result

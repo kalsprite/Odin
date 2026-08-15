@@ -1898,6 +1898,14 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 		}
 	}
 
+	// C++ Reference: check_decl.cpp check_type_decl:524
+	// `e->deprecated_message = ac.deprecated_message;`
+	// C++ guards this with `if (decl != nullptr)`, which is the condition under
+	// which effective_ac is non-nil here.
+	if effective_ac != nil {
+		e.deprecated_message = effective_ac.deprecated_message
+	}
+
 	// C++ Reference: check_decl.cpp check_type_decl:506-515
 	// Process explicit type annotation if provided
 	if type_expr != nil {

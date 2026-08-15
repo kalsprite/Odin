@@ -1689,6 +1689,35 @@ exact_value_string16 :: proc(s: Exact_Value_String16) -> Exact_Value {
 // runtime value. Upstream fixed it by converting at the point the constant is checked against
 // its target type. Before this, the port had NO converter at all -- check_expr.odin's
 // array-comparison arm worked around the absence by counting units inline rather than encoding.
+// string16_to_string decodes a UTF-16 constant back to UTF-8.
+//
+// LEDGER #888. The REVERSE of string_to_string16 below, and it had no counterpart anywhere in the
+// checker -- which is why `#exists` could only diagnose a string16 path, never resolve one.
+//
+// THIS IS DELIBERATELY AHEAD OF THE REFERENCE COMPILER. C++ reads `o.value.value_string` directly
+// (check_builtin.cpp, the `#exists` arm), so with a UTF-16 constant it hands UTF-16 code units to
+// the path lookup and gets a silent `false` for a file that exists --
+// `COMPILER_ISSUES/UPSTREAM-UNFILED-exists-silently-false-for-string16-constants.md`, reproduced
+// with `string`/`cstring` controls passing in the same compilation. Decoding is the convergent
+// behaviour: it is option (1) of that report, so when upstream fixes it the two sides meet here
+// rather than the port having to move again.
+//
+// BOUND: 3 bytes of UTF-8 per UTF-16 code unit is always sufficient. A BMP unit encodes to at most
+// 3 bytes; a surrogate PAIR is 2 units and encodes to 4, i.e. 2 per unit. So `len*3` never
+// under-allocates and one allocation suffices, mirroring the forward direction's argument.
+//
+// `utf16.decode_to_utf8` substitutes U+FFFD for an unpaired surrogate rather than failing, so a
+// malformed constant yields a replacement character in the path and the lookup simply misses --
+// no crash, and no silent success.
+string16_to_string :: proc(v: Exact_Value_String16, allocator := context.allocator) -> string {
+	if v.len == 0 || v.text == nil {
+		return ""
+	}
+	buf := make([]byte, v.len * 3, allocator)
+	n := utf16.decode_to_utf8(buf, v.text[:v.len])
+	return string(buf[:n])
+}
+
 string_to_string16 :: proc(s: string) -> Exact_Value_String16 {
 	if len(s) == 0 {
 		return Exact_Value_String16{text = nil, len = 0}

@@ -386,6 +386,24 @@ Collect_Entities_Task :: struct {
 	file_scope: ^Scope,
 }
 
+// Collect_Entity_Worker_Data mirrors C++'s CollectEntityWorkerData (checker.cpp:6104-6110):
+// one entry per thread-pool thread, each owning an `untyped` map that the worker hands to its
+// Checker_Context. Same shape as check_proc.odin's Check_Procedure_Body_Worker_Data, which is the
+// BODY phase's already-written copy of this pattern.
+//
+// LEDGER #857. C++ holds the ctx here too and reuses it across files via reset_checker_context;
+// the port keeps its per-task `make_checker_context` unchanged, because switching to a reused
+// context is a separate behavioural change with nothing observable riding on it. Only the map is
+// per-worker here, which is the part that has an effect.
+Collect_Entity_Worker_Data :: struct {
+	c:       ^Checker,
+	untyped: map[^ast.Expr]^Expr_Info,
+}
+
+// Allocated by check_collect_entities_all for the threaded path only, and torn down by it.
+// Indexed by current_thread_index(), so each worker touches its own entry and no lock is needed.
+collect_entity_worker_data: []Collect_Entity_Worker_Data
+
 // check_collect_entities_all_worker_proc is the worker task for parallel entity collection
 // C++ Reference: checker.cpp:5770-5775
 check_collect_entities_all_worker_proc :: proc(task: rawptr) -> int {
@@ -400,6 +418,16 @@ check_collect_entities_all_worker_proc :: proc(task: rawptr) -> int {
 	ctx.pkg = t.file.pkg
 	ctx.scope = t.file_scope
 	ctx.collect_delayed_decls = true // Enable delayed declaration collection for file-level directives
+
+	// C++ Reference: checker.cpp:6088-6091 -- the worker's own untyped map, handed to the context
+	// so that check_set_expr_info takes the ctx.untyped branch instead of the shared,
+	// mutex-guarded info.global_untyped. LEDGER #857. The bounds guard is not defensive
+	// decoration: this array is allocated only on the threaded path, and a worker index outside
+	// it must fall back rather than trap.
+	thread_idx := current_thread_index()
+	if collect_entity_worker_data != nil && 0 <= thread_idx && thread_idx < len(collect_entity_worker_data) {
+		ctx.untyped = &collect_entity_worker_data[thread_idx].untyped
+	}
 
 	// Collect entities from file declarations
 	check_collect_entities(&ctx, t.file.decls[:])
@@ -428,6 +456,29 @@ check_collect_entities_all :: proc(c: ^Checker) {
 		// Allocate tasks array
 		tasks := make([]Collect_Entities_Task, file_count, c.allocator)
 		defer delete(tasks)
+
+		// C++ Reference: checker.cpp check_collect_entities_all:6104-6110. One worker entry per
+		// pool thread (the pool's count already includes the main thread). C++ takes these from
+		// the permanent allocator and never frees them; the port must, or every checker run leaks
+		// one map per thread -- see LEDGER #649 for what unfreed per-run allocations cost here.
+		worker_count := 1
+		if global_thread_pool != nil {
+			worker_count = global_thread_pool.thread_count
+		}
+		collect_entity_worker_data = make([]Collect_Entity_Worker_Data, worker_count, c.allocator)
+		for i in 0 ..< worker_count {
+			collect_entity_worker_data[i].c = c
+			collect_entity_worker_data[i].untyped = make(map[^ast.Expr]^Expr_Info)
+		}
+		defer {
+			// Every map is already empty: add_untyped_expressions clears it at the end of each
+			// task (checker.cpp:6853). Deleting after thread_pool_wait, never before.
+			for i in 0 ..< worker_count {
+				delete(collect_entity_worker_data[i].untyped)
+			}
+			delete(collect_entity_worker_data)
+			collect_entity_worker_data = nil
+		}
 
 		// Set up tasks for each file
 		task_idx := 0
@@ -469,7 +520,12 @@ check_collect_entities_all :: proc(c: ^Checker) {
 		// C++ line 5803: thread_pool_wait()
 		thread_pool_wait()
 	} else {
-		// Single-threaded fallback
+		// Single-threaded fallback. One map for the whole loop, not one per file:
+		// add_untyped_expressions clears it at the end of every iteration, so reusing it is
+		// exactly what the per-worker map does on the threaded path. LEDGER #857.
+		untyped := make(map[^ast.Expr]^Expr_Info)
+		defer delete(untyped)
+
 		for file in sorted_files(c.info.files) {
 			// Create checker context for this file
 			ctx := make_checker_context(c)
@@ -477,6 +533,7 @@ check_collect_entities_all :: proc(c: ^Checker) {
 
 			ctx.file = file
 			ctx.pkg = file.pkg
+			ctx.untyped = &untyped
 			ctx.collect_delayed_decls = true // Enable delayed declaration collection for file-level directives
 
 			file_scope := c.info.file_scopes[file]
@@ -1610,11 +1667,18 @@ process_all_delayed_decls :: proc(ctx: ^Checker_Context, file: ^ast.File) {
 // Draining twice is safe: process_delayed_foreign_block_decls clears the queue, so the first
 // drain leaves nothing behind and this pass sees only what collect_file_decls added.
 check_delayed_foreign_blocks_all :: proc(c: ^Checker) {
+	// LEDGER #857: this loop's add_untyped_expressions call had nothing to drain, because
+	// ctx.untyped was nil. C++ threads a map through the equivalent passes
+	// (check_export_entities_in_pkg takes one as its third parameter, checker.cpp:6119).
+	untyped := make(map[^ast.Expr]^Expr_Info)
+	defer delete(untyped)
+
 	for file in sorted_files(c.info.files) {
 		ctx := make_checker_context(c)
 		defer destroy_checker_context(&ctx)
 		ctx.file = file
 		ctx.pkg = file.pkg
+		ctx.untyped = &untyped
 		ctx.collect_delayed_decls = true
 		if file_scope := c.info.file_scopes[file]; file_scope != nil {
 			ctx.scope = file_scope
@@ -1630,11 +1694,16 @@ check_delayed_foreign_blocks_all :: proc(c: ^Checker) {
 // (STRANDED above a different procedure until #734 -- another procedure was inserted between
 //  this doc comment and the definition it documents.)
 check_delayed_expressions_all :: proc(c: ^Checker) {
+	// LEDGER #857, as check_delayed_foreign_blocks_all above.
+	untyped := make(map[^ast.Expr]^Expr_Info)
+	defer delete(untyped)
+
 	for file in sorted_files(c.info.files) {
 		ctx := make_checker_context(c)
 		defer destroy_checker_context(&ctx)
 		ctx.file = file
 		ctx.pkg = file.pkg
+		ctx.untyped = &untyped
 		if file_scope := c.info.file_scopes[file]; file_scope != nil {
 			ctx.scope = file_scope
 		}

@@ -12,8 +12,8 @@ import "core:odin/ast"
 import "core:sync"
 
 // Single-threaded checker stage optimization
-// When true, scope operations skip mutex locking for performance during initialization
-// Set to true during initialization, false when parallel checking begins
+// When true, scope operations skip mutex locking -- valid ONLY inside the one region C++
+// marks single threaded. It is NOT "true during initialization": see LEDGER #855 below.
 // C++ Reference: checker.cpp:383 (std::atomic<bool> in_single_threaded_checker_stage)
 //
 // C++ Transition Points:
@@ -29,8 +29,28 @@ import "core:sync"
 // Set to true at start, false at end to enable parallel procedure checking
 //
 // NOTE: Uses atomic operations for thread safety when tests run in parallel
+//
+// LEDGER #855. The INITIAL VALUE must be false, not true. C++ declares this as
+//     gb_global std::atomic<bool> in_single_threaded_checker_stage;   // checker.cpp:388
+// with no initialiser, so it is zero-initialised to FALSE, and the only writes are the
+// true/false pair bracketing check_all_global_entities (checker.cpp:5317 / 5339).
+//
+// The port started it at `true`, which is not a harmless default: check_files runs
+// check_collect_entities_all -- a THREAD-POOL phase -- at check_files.odin:98, long before
+// check_all_global_entities at :152. With the flag stuck true for that whole window every
+// `locked := !in_single_threaded_checker_stage()` guard in the checker evaluated to
+// locked=false, so the parallel collect phase ran with EVERY conditional mutex skipped:
+// scope.odin's three scope guards, entity_helpers.odin's add_dependency, type_info.odin's
+// type-info guard, and all three global_untyped guards in check_expr.odin.
+//
+// Found by #850's crash: enabling check_set_expr_info's first writer made concurrent collect
+// workers grow c.info.global_untyped with no lock held, which aborts inside glibc
+// ("double free or corruption") once two threads resize the same map. Confirmed by coredump
+// backtrace -- check_collect_entities_all_worker_proc -> check_expr_base -> add_untyped ->
+// check_set_expr_info -> map_grow -> heap_free -> abort -- and by the flag's own history:
+// the guarded writes had zero callers until then, which is why nothing had tripped over it.
 @(private = "file")
-_in_single_threaded_checker_stage: bool = true
+_in_single_threaded_checker_stage: bool = false
 
 // Thread-safe getter for in_single_threaded_checker_stage
 in_single_threaded_checker_stage :: #force_inline proc() -> bool {

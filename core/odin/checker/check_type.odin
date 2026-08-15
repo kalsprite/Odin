@@ -16,6 +16,14 @@ import "core:odin/tokenizer"
 import "core:strings"
 import "core:sync"
 
+// Matrix dimension bounds. C++ Reference: check_type.cpp -- these are GLOBALS there, and as of
+// merge ebac23eb0 check_expr.cpp's check_binary_matrix reads MATRIX_ELEMENT_COUNT_MAX as well.
+// They were previously declared local to check_matrix_type_expr, which no other file could see.
+// C++ check_type.cpp check_matrix_type:3113-3136 checks only a MINIMUM per dimension and then
+// bounds row_count*column_count by MAX. LEDGER #798.
+MATRIX_ELEMENT_COUNT_MIN :: 1
+MATRIX_ELEMENT_COUNT_MAX :: 64
+
 // check_type_internal is the main dispatcher for type checking
 // Returns false if the type is invalid
 check_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^Type, named_type: ^Type) -> bool {
@@ -862,6 +870,32 @@ check_array_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^T
 			assert(bt.kind == .Enum)
 
 			enum_info := bt.variant.(Type_Enum)
+
+			// C++ Reference: check_type.cpp check_array_type_internal:3491-3506 (merge ebac23eb0),
+			// verbatim rationale:
+			//   "the length is `max - min + 1`, computed exactly and then narrowed to an i64. a
+			//    wide enough enumeration wraps & nothing tests downstream; reject here"
+			// C++ tests `len.value_integer.used > 1` -- a LIMB count. That is NOT portable: this
+			// port's core:math/big uses 60-bit digits where the reference BigInt does not, so a
+			// literal `used > 1` would reject values in [2^60, 2^64) that C++ accepts. The port
+			// already settled this exact question for `#align` at check_type.odin:1474-1489, which
+			// documents `used > 1` as meaning "too large to fit in i64" and tests it with
+			// int_get_i128 against the i64 bounds. Same idiom reused here. LEDGER #798.
+			if len(enum_info.fields) > 0 {
+				span := exact_value_sub(enum_info.max_value, enum_info.min_value)
+				length := exact_value_add(span, exact_value_i64(1))
+				if bi, is_big := length.(big.Int); is_big {
+					temp_bi := bi
+					v128, get_err := big.int_get_i128(&temp_bi)
+					if get_err != nil || v128 > i128(max(i64)) || v128 < i128(min(i64)) {
+						str, _ := big.int_itoa_string(&temp_bi, 10, false, context.temp_allocator)
+						error_node(e, "Enumerated array length too large, %s", str)
+						type^ = t_invalid
+						return
+					}
+				}
+			}
+
 			// For enum-indexed arrays, use the enum's min/max values
 			t := alloc_type_enumerated_array(elem, index, &enum_info.min_value, &enum_info.max_value, i64(len(enum_info.fields)), .Ellipsis)
 
@@ -1193,7 +1227,18 @@ check_struct_type :: proc(ctx: ^Checker_Context, struct_type: ^Type, node: ^ast.
 
 	// Process alignment attributes
 	// Helper macro equivalent for checking alignment attributes
-	check_align := proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, align_expr: ^ast.Expr, align_value: ^i64, attr_name: string, st: ^Type_Struct) -> bool {
+	// RETURNS `abort` -- true means the CALLER must return from check_struct_type immediately.
+	//
+	// C++ Reference: check_type.cpp:728-737, the ST_ALIGN macro. Because it is a MACRO, its
+	// `return;` on the '#packed' conflict returns from check_struct_type itself, so C++ reports
+	// the FIRST conflicting directive and stops. The port turned the macro body into this nested
+	// proc, which cannot return from its caller; the `return false` it produced was DISCARDED at
+	// all three call sites, so the port reported EVERY conflicting directive.
+	// `struct #packed #min_field_align(2) #align(4)` gave oracle 1 error, port 2. LEDGER #787.
+	//
+	// The result therefore means "abort", NOT "assigned": C++ does not return when
+	// check_custom_align fails, it just leaves custom_##_name unassigned and carries on.
+	check_align := proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, align_expr: ^ast.Expr, align_value: ^i64, attr_name: string, st: ^Type_Struct) -> (abort: bool) {
 		if align_expr == nil {
 			return false
 		}
@@ -1201,26 +1246,42 @@ check_struct_type :: proc(ctx: ^Checker_Context, struct_type: ^Type, node: ^ast.
 		if st.is_packed {
 			// C++ Reference: check_type.cpp check_struct_type:686
 			error(align_expr, "'#%s' cannot be applied with '#packed'", attr_name)
-			return false
+			return true
 		}
 
 		align := i64(1)
 		if check_custom_align(ctx, align_expr, &align, attr_name) {
 			align_value^ = align
-			return true
 		}
 
 		return false
 	}
 
+	// C++ Reference: check_type.cpp:739-741, ST_ALIGN(min_field_align)/(max_field_align)/(align).
+	// The order is C++'s, so the FIRST directive conflicting with '#packed' is the one reported.
+	//
+	// The `pop_scope` before each early return is NOT in C++ and is NOT a divergence: C++'s macro
+	// returns from a function that never pushed this scope, whereas the port pushed one at
+	// check_type.odin:1154 and pops it at the tail. Returning without popping would leave the
+	// scope stack unbalanced for every later declaration in the file. LEDGER #787.
+
 	// Check #min_field_align
-	check_align(ctx, node, node.min_field_align, &st.custom_min_field_align, "min_field_align", st)
+	if check_align(ctx, node, node.min_field_align, &st.custom_min_field_align, "min_field_align", st) {
+		pop_scope(ctx, prev_scope)
+		return
+	}
 
 	// Check #max_field_align
-	check_align(ctx, node, node.max_field_align, &st.custom_max_field_align, "max_field_align", st)
+	if check_align(ctx, node, node.max_field_align, &st.custom_max_field_align, "max_field_align", st) {
+		pop_scope(ctx, prev_scope)
+		return
+	}
 
 	// Check #align
-	check_align(ctx, node, node.align, &st.custom_align, "align", st)
+	if check_align(ctx, node, node.align, &st.custom_align, "align", st) {
+		pop_scope(ctx, prev_scope)
+		return
+	}
 
 	// Validate alignment coherence
 	// C++ Reference: check_type.cpp (alignment validation section)
@@ -1233,7 +1294,20 @@ check_struct_type :: proc(ctx: ^Checker_Context, struct_type: ^Type, node: ^ast.
 	}
 
 	if st.custom_max_field_align != 0 && st.custom_min_field_align > st.custom_max_field_align {
-		error(node.min_field_align, "#min_field_align(%d) is defined to be greater than #max_field_align(%d)", st.custom_min_field_align, st.custom_max_field_align)
+		// ANCHOR IS `node.align`, NOT `node.min_field_align`, and that is DELIBERATE.
+		// C++ Reference: check_type.cpp:756 -- all THREE coherence errors pass `st->align`.
+		// It reads like an upstream copy-paste, but it is load-bearing in two ways and the port
+		// diverged on both by "correcting" it to the obvious anchor:
+		//   1. Same anchor => print_all_errors MERGES these three into ONE (LEDGER #578). With
+		//      min_field_align as the anchor this error sat at a DIFFERENT position, survived the
+		//      merge, and the port emitted a spurious SECOND error.
+		//      `struct #align(8) #min_field_align(16) #max_field_align(4)` -- oracle 1, port 2.
+		//   2. When `#align` is ABSENT, `st->align` is nullptr and C++ emits a POSITIONLESS
+		//      "Error: ..." with no file, line or source snippet. The port printed a full
+		//      position. `struct #min_field_align(8) #max_field_align(4)` -- oracle bare, port
+		//      anchored at 2:29.
+		// Reproduced as-is. LEDGER #787, battery cases g and h.
+		error(node.align, "#min_field_align(%d) is defined to be greater than #max_field_align(%d)", st.custom_min_field_align, st.custom_max_field_align)
 
 		// Sort the values to keep code consistent
 		a := min(st.custom_min_field_align, st.custom_max_field_align)
@@ -3870,8 +3944,10 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	// C++ check_type.cpp check_matrix_type:3113-3136 checks only a MINIMUM per dimension and then bounds
 	// row_count*column_count by MAX. The port previously capped each dimension at 16 and
 	// the total at 16, rejecting valid types such as matrix[8, 8]T.
-	MATRIX_ELEMENT_COUNT_MIN :: 1
-	MATRIX_ELEMENT_COUNT_MAX :: 64
+	// NOTE: both constants are now declared at PACKAGE scope (see the top of this file) rather
+	// than locally. C++ has them as globals and, as of merge ebac23eb0, check_expr.cpp's
+	// check_binary_matrix references MATRIX_ELEMENT_COUNT_MAX too -- a local would not be
+	// visible there. LEDGER #798.
 
 	// Create the matrix type
 	matrix_type := alloc_type(Type_Matrix)
@@ -3987,8 +4063,18 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 	// Validate total element count (row * column)
 	// C++ check_type.cpp check_matrix_type:3128-3131 - the single maximum, applied to row*column.
 	if generic_row == nil && generic_column == nil {
-		total_elements := row_count * column_count
-		if total_elements > MATRIX_ELEMENT_COUNT_MAX {
+		// C++ Reference: check_type.cpp check_matrix_type:3134-3147 (merge ebac23eb0). Upstream
+		// rewrote this guard to be OVERFLOW-SAFE and split the message in two. Its own comment:
+		//   "row_count*column_count can overflow and wrap back under the limit, so test the
+		//    dimensions first; each is at least MATRIX_ELEMENT_COUNT_MIN. Either one exceeding
+		//    the maximum means the product does too"
+		// The port tested only the product, so a pair of dimensions whose product wrapped negative
+		// (or back under the cap) passed the guard entirely. LEDGER #798.
+		// The product is INLINE, not hoisted: `||` short-circuits, so `row_count*column_count` is
+		// only evaluated once both dimensions are known to be within range -- which is precisely
+		// what makes it safe to multiply. Hoisting it above the guard would reintroduce the
+		// overflow this change exists to prevent.
+		if row_count > MATRIX_ELEMENT_COUNT_MAX || column_count > MATRIX_ELEMENT_COUNT_MAX || row_count*column_count > MATRIX_ELEMENT_COUNT_MAX {
 			// C++ Reference: check_type.cpp check_matrix_type:3133-3136 --
 			//     error(node, "Matrix types are limited to a maximum of %d elements, got %lld", ...)
 			// The anchor is the MATRIX TYPE NODE, not the column-count expression. `matrix[9, 9]f32`
@@ -3997,7 +4083,16 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 			// The comment that used to stand here asserted the opposite and cited it as settled --
 			// it was wrong against the C++ line it names, and nothing pinned it (there is no m88
 			// corpus member). Probes p676e/p676f. LEDGER #676, INSTRUMENT-MISREPORT #49.
-			error_node(&mt.node, "Matrix types are limited to a maximum of %d elements, got %d", MATRIX_ELEMENT_COUNT_MAX, total_elements)
+			// C++ Reference: check_type.cpp:3141-3146 (merge ebac23eb0). TWO forms now, and the
+			// choice is whether the product is printable without overflowing. Upstream's comment:
+			//   "the element count is only printable when the multiply cannot overflow, which is
+			//    exactly the case the dimension test above catches"
+			// Both forms name the dimensions; only the safe one appends the product.
+			if row_count != 0 && column_count > max(i64) / row_count {
+				error_node(&mt.node, "Matrix types are limited to a maximum of %d elements, got %d by %d", MATRIX_ELEMENT_COUNT_MAX, row_count, column_count)
+			} else {
+				error_node(&mt.node, "Matrix types are limited to a maximum of %d elements, got %d by %d (%d elements)", MATRIX_ELEMENT_COUNT_MAX, row_count, column_count, row_count*column_count)
+			}
 			// C++ REPORTS AND CONTINUES -- check_type.cpp check_matrix_type:3133-3136 is a bare
 			// `if { error(); }` with no bail, and the matrix type is built normally afterwards.
 			// The port's `type^ = t_invalid; set_base_type(...); return false` was invented, and it
@@ -4709,13 +4804,40 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 		return param_value
 	}
 
-	// Check the default value expression
-	// Reference: check_type.cpp:1691-1699
-	if in_type != nil {
-		check_expr_with_type_hint(ctx, &o, expr, in_type)
-		check_assignment(ctx, &o, in_type, "parameter value")
+	// Check the default value expression.
+	//
+	// C++ Reference: check_type.cpp handle_parameter_value:1768-1778, transcribed exactly:
+	//     expr = unparen_expr(expr);
+	//     if (expr && expr->kind == Ast_Uninit) { error(expr, "Default parameter cannot be ---"); }
+	//     else if (in_type) { check_expr_with_type_hint(...); }
+	//     else              { check_expr(...); }
+	//     if (in_type) { check_assignment(ctx, &o, in_type, str_lit("parameter value")); }
+	//
+	// THE `---` BRANCH LIVES HERE, NOT AT THE Undef ARM OF check_expr. It short-circuits, so a
+	// default parameter never reaches that arm -- which is what lets that arm carry the GLOBAL
+	// message. The port had no branch here at all and fell through to check_expr, so one shared
+	// site served both callers and a package-level `y: int = ---` was told it was a "default
+	// parameter". LEDGER #804.
+	//
+	// `check_assignment` is deliberately a SEPARATE `if in_type != nil` AFTER the three-way, not
+	// nested in the middle branch: C++ still calls it on the `---` path, with `o` left in its
+	// zero state (mode .Invalid), where check_assignment returns early. Reproduced as-is.
+	// RENAMED, not assigned and not shadowed. C++ writes `expr = unparen_expr(expr)`, and every
+	// LATER use in the function sees the unparenthesised node. Odin forbids assigning to a
+	// parameter, and `-vet` forbids shadowing one, so the unparenthesised value gets its own name
+	// and EVERY subsequent reference below uses it -- that is what reproduces C++'s reach. Using
+	// the raw `expr` past this point would silently diverge for any parenthesised default, e.g.
+	// `x: int = (---)`.
+	pexpr := unparen_expr(expr)
+	if _, is_undef := pexpr.derived.(^ast.Undef); pexpr != nil && is_undef {
+		error(pexpr, "Default parameter cannot be ---")
+	} else if in_type != nil {
+		check_expr_with_type_hint(ctx, &o, pexpr, in_type)
 	} else {
-		check_expr(ctx, &o, expr)
+		check_expr(ctx, &o, pexpr)
+	}
+	if in_type != nil {
+		check_assignment(ctx, &o, in_type, "parameter value")
 	}
 
 	// Determine parameter value kind based on the operand
@@ -4728,9 +4850,9 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 
 		// Handle procedure literals as default parameters
 		// C++ Reference: check_type.cpp:1705-1707
-		if _, is_proc_lit := expr.derived.(^ast.Proc_Lit); is_proc_lit {
+		if _, is_proc_lit := pexpr.derived.(^ast.Proc_Lit); is_proc_lit {
 			param_value.kind = .Constant
-			param_value.value = exact_value_procedure(cast(^ast.Expr)expr)
+			param_value.value = exact_value_procedure(cast(^ast.Expr)pexpr)
 		} else {
 			entity := entity_of_node(ctx.info, o.expr)
 			if entity != nil {
@@ -4745,11 +4867,11 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 					param_value.proc_entity = entity
 				} else if .Param in entity.flags {
 					// Cannot use another parameter as default
-					error(expr, "Default parameter cannot be another parameter")
+					error(pexpr, "Default parameter cannot be another parameter")
 				} else {
 					// Store as runtime value (for global variables, etc.)
 					param_value.kind = .Value
-					param_value.ast_value = cast(^ast.Expr)expr
+					param_value.ast_value = cast(^ast.Expr)pexpr
 				}
 			} else if allow_caller_location && o.mode == .Context {
 				// C++ Reference: check_type.cpp handle_parameter_value:1807-1809.
@@ -4770,7 +4892,7 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 				// and the ORDER matters -- placing it later would let the o.value test claim
 				// the operand first.
 				param_value.kind = .Value
-				param_value.ast_value = cast(^ast.Expr)expr
+				param_value.ast_value = cast(^ast.Expr)pexpr
 			} else if o.value != nil {
 				// Has an exact value even though not constant mode
 				param_value.kind = .Constant
@@ -4780,7 +4902,7 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 				// not a type. LEDGER #149.
 				expr_str := expr_to_string(o.expr)
 				defer delete(expr_str)
-				error(expr, "Default parameter must be a constant, got %s", expr_str)
+				error(pexpr, "Default parameter must be a constant, got %s", expr_str)
 			}
 		}
 	} else {

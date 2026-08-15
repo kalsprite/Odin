@@ -1564,12 +1564,28 @@ print_error_values :: proc(values: ^[dynamic]Error_Value) {
 				lines_skipped := 0
 				pos := 0
 
-				// Skip default_lines_to_skip lines
+				// Skip default_lines_to_skip lines.
+				// C++ Reference: src/error.cpp:915-921. C++ splits on '\n' and BREAKS as soon as
+				// the split yields a ZERO-LENGTH line. string_split_iterator (src/string.cpp:276)
+				// returns len 0 in two cases: exhausted (pos unchanged), and a genuinely EMPTY
+				// line (str[start] == '\n', pos advances by exactly 1). The exhausted case is
+				// already covered by `pos < len(msg)`; the empty-line case is the divergence --
+				// without the break the loop keeps skipping, `addition` comes out SHORTER, and
+				// less continuation text gets merged than C++ merges.
 				for lines_skipped < default_lines_to_skip && pos < len(msg) {
 					if msg[pos] == '\n' {
-						lines_skipped += 1
+						// Zero-length line: consume just this newline and stop skipping.
+						pos += 1
+						break
 					}
-					pos += 1
+					// Non-empty line: advance past it and its terminating newline.
+					for pos < len(msg) && msg[pos] != '\n' {
+						pos += 1
+					}
+					if pos < len(msg) {
+						pos += 1
+					}
+					lines_skipped += 1
 				}
 
 				// Extract the remaining text after skipping the default lines

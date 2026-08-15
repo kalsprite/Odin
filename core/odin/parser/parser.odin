@@ -1619,7 +1619,23 @@ parse_case_clause :: proc(p: ^Parser, is_type_switch: bool) -> ^ast.Case_Clause 
 
 	stmts := parse_stmt_list(p)
 
-	cc := ast.new(ast.Case_Clause, tok.pos, end_pos(p.prev_tok))
+	// C++ Reference: parser_pos.cpp:238-244. ast_end_token(CaseClause) is a
+	// THREE-WAY rule, not a fallback to the `case` token:
+	//     if (stmts.count)     return ast_end_token(stmts[count-1]);
+	//     else if (list.count) return ast_end_token(list[count-1]);
+	//     return CaseClause.token;
+	// The port passed `end_pos(p.prev_tok)` unconditionally, which for an empty
+	// `case:` is the COLON -- one token too far. That widened the caret on every
+	// CLAUSE-anchored diagnostic from `^~~^` (case) to `^~~~^` (case:), in BOTH
+	// type and value switches. Diagnostics anchored on a case EXPRESSION (the
+	// duplicate-case pair) were never affected. LEDGER #803.
+	cc_end := end_pos(tok)
+	if len(stmts) > 0 {
+		cc_end = stmts[len(stmts)-1].end
+	} else if len(list) > 0 {
+		cc_end = list[len(list)-1].end
+	}
+	cc := ast.new(ast.Case_Clause, tok.pos, cc_end)
 	cc.list = list
 	cc.terminator = terminator
 	cc.body = stmts

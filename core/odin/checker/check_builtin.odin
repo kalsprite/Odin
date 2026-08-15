@@ -1909,33 +1909,80 @@ check_builtin_objc_super :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		}
 	}
 
-	// First argument should already be checked - must be a pointer to ObjC object
-	if !is_type_pointer(operand.type) {
-		error_node(operand.expr, "'%s' expected a pointer to an Objective-C object", builtin_name)
+	// LEDGER #832. C++ Reference: check_builtin.cpp:698-716.
+	//
+	// C++ has ONE guard here -- `!is_type_objc_ptr_to_object(objc_obj)` -- and types.cpp:5162-5168
+	// expands it to exactly three conjuncts:
+	//
+	//     Type *elem = type_deref(t);
+	//     return elem != t && elem->kind == Type_Named && is_type_objc_object(elem);
+	//
+	// The port had those checks as three SEPARATE guards with three SEPARATE messages, two of
+	// which ("expected a named type derived from objc_object", "expected a type with the
+	// @(objc_class=<string>) attribute") exist nowhere in C++. Collapsed to C++'s single message,
+	// including the `, but got '%s' of type %s` clause the port dropped.
+	//
+	// AND THE THIRD CONJUNCT WAS THE WRONG PREDICATE. I first wrote this comment claiming all
+	// three port guards were C++'s three conjuncts; the probe refuted it in one run. The port's
+	// third guard was `has_type_got_objc_class_attribute`, which is C++ types.cpp:4727-4729 -- a
+	// DIFFERENT function that only asks whether the named type carries @(objc_class=...).
+	// C++'s conjunct is `is_type_objc_object`, types.cpp:5158-5160, which asks whether the type is
+	// ASSIGNABLE TO t_objc_object -- i.e. actually derived from it. The port already had an exact
+	// translation of that (types.odin `is_type_objc_object`), and objc_super simply called the
+	// wrong one. A `@(objc_class)` struct NOT derived from objc_object was therefore ACCEPTED by
+	// the port and rejected by C++: an UNDER-REJECTION, not merely a message divergence.
+	//
+	// ORDER MATTERS and is now C++'s: the objc-pointer test fires FIRST, the value-or-variable
+	// test SECOND. The port previously ran two more type guards before the mode test, so a
+	// non-variable of a wrong type reported the type problem where C++ reports it too, but a
+	// non-variable of the RIGHT type was reachable only after three guards instead of one.
+	//
+	// `elem != t` is C++'s pointer test; type_deref returns its argument unchanged for a
+	// non-pointer. The nil guard is port-side only -- C++ cannot reach here with a null type.
+	objc_obj := operand.type
+	obj_type: ^Type
+	if objc_obj != nil {
+		obj_type = type_deref(objc_obj)
+	}
+	if obj_type == nil || obj_type == objc_obj || obj_type.kind != .Named || !is_type_objc_object(ctx.checker, obj_type) {
+		// NOTE: expr_to_string / type_to_string results are deliberately NOT deleted (#142).
+		expr_str := expr_to_string(operand.expr)
+		type_str := type_to_string(objc_obj)
+		error_node(operand.expr, "'%s' expected a pointer to an Objective-C object, but got '%s' of type %s", builtin_name, expr_str, type_str)
 		return false
 	}
 
-	obj_type := type_deref(operand.type)
-	if obj_type.kind != .Named {
-		error_node(operand.expr, "'%s' expected a named type derived from objc_object", builtin_name)
-		return false
-	}
-
-	if !has_type_got_objc_class_attribute(obj_type) {
-		error_node(operand.expr, "'%s' expected a type with the @(objc_class=<string>) attribute", builtin_name)
-		return false
-	}
-
+	// C++ Reference: check_builtin.cpp:708-716. Note the trailing period, and that C++ names the
+	// EXPRESSION and its TYPE -- the port's text was "'%s' expression must be a value or variable"
+	// with neither.
 	if operand.mode != .Value && operand.mode != .Variable {
-		error_node(operand.expr, "'%s' expression must be a value or variable", builtin_name)
+		expr_str := expr_to_string(operand.expr)
+		type_str := type_to_string(operand.type)
+		error_node(operand.expr, "'%s' expression '%s', of type %s, must be a value or variable.", builtin_name, expr_str, type_str)
 		return false
 	}
 
 	// Track the original type BEFORE it is transformed to the superclass, because
 	// objc_msgSendSuper2 must start its search on the subclass, not the superclass.
 	// C++ Reference: check_builtin.cpp:723 -- `call->tav.objc_super_target = obj_type;`
-	if call != nil && call.expr != nil {
-		call.expr.tav.objc_super_target = obj_type
+	//
+	// LEDGER #829. This wrote `call.expr.tav`, which is the CALLEE's tav -- `ast.Call_Expr` is
+	// `{ using node: Expr, inlining, tailing, expr: ^Expr, open, args, ... }`, so `.expr` is the
+	// procedure being called, not the call. The `using node: Expr` means `call.tav` already IS
+	// the call node's tav and is the exact translation of C++'s `call->tav`.
+	//
+	// The READER is what proves it: both implementations read
+	// `unparen_expr(args[0]).tav.objc_super_target` (here in check_builtin_objc_send; C++
+	// check_builtin.cpp:259, check_expr.cpp:8798, llvm_backend_utility.cpp:3049). In
+	// `objc_send(..., objc_super(x), ...)` that `args[0]` IS this call node. Writing to the
+	// callee put the marker where nothing looks, so objc_msgSendSuper2 / _stret were never
+	// added to the dependency roster for a call routed through objc_super().
+	//
+	// depnames.py did not catch this and structurally cannot: it compares add_package_dependency
+	// CALL SITES between the two SOURCE trees, so it sees the port's objc_msgSendSuper2 call site
+	// and reports missing=0. The site exists; it just never executed.
+	if call != nil {
+		call.tav.objc_super_target = obj_type
 	}
 
 	// Look up the superclass type via objc_superclass attribute
@@ -3302,7 +3349,9 @@ check_builtin_clamp :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast
 // - #assert: Compile-time assertion
 // - #panic: Compile-time panic
 //
-// Note: #load directive is handled separately in check_load_directive (check_expr.odin)
+// Note: the `#load` arm below DELEGATES to check_load_directive (check_expr.odin), exactly as
+// C++'s check_builtin_procedure_directive:2483-2484 does. Before #884 this header was FALSE: an
+// inline ~77-line reimplementation lived here and the two copies had drifted (#793).
 check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Node, type_hint: ^Type) -> bool {
 	// C++ Reference: check_builtin.cpp:2089-2175
 
@@ -3401,7 +3450,33 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
-		original_path, is_str := o.value.(string)
+		// LEDGER #888 (Jon: "decode; we'll match both sides so might as well pre-empt").
+		//
+		// A `string16`/`cstring16` constant carries `Exact_Value_String16`, not `string`, because
+		// `check_representable_as_constant` re-expresses it (check_expr.odin, #636/#7268). DECODE it
+		// rather than diagnosing: the path the user wrote is recoverable, so recover it.
+		//
+		// THIS IS AHEAD OF THE ORACLE, DELIBERATELY. C++ reads `value_string` directly and hands
+		// UTF-16 code units to the path lookup, so it answers `false` for a file that EXISTS, with no
+		// diagnostic -- measured, with `string`/`cstring` controls passing in the same compilation:
+		//     COMPILER_ISSUES/UPSTREAM-UNFILED-exists-silently-false-for-string16-constants.md
+		// That report's preferred fix is exactly this decode, so the two sides CONVERGE here rather
+		// than the port having to move again when it lands. Until then `#exists` on a string16
+		// constant is a KNOWN, INTENTIONAL divergence: port correct, oracle silently wrong.
+		//
+		// The remaining `else` is unreachable for the five string basic kinds (the guard above admits
+		// only those, and each carries either `string` or `Exact_Value_String16`), but it is kept
+		// rather than asserted -- same trade as the sibling guards, a diagnostic instead of an abort.
+		original_path: string
+		is_str := true
+		#partial switch v in o.value {
+		case string:
+			original_path = v
+		case Exact_Value_String16:
+			original_path = string16_to_string(v)
+		case:
+			is_str = false
+		}
 		if !is_str {
 			error(call_expr.args[0], "'#exists' expected a constant string for file path")
 			return false
@@ -3667,7 +3742,10 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2670-2675. This check was absent entirely, so a
 		// non-constant or non-string argument fell through to a bare "Compile time panic"
 		// instead of being rejected.
-		if !is_type_string(msg_op.type) && msg_op.mode != .Constant {
+		// C++ Reference: check_builtin.cpp:2690 (merge ebac23eb0). Upstream was `&&` and is now
+		// `||` -- with `&&` the guard only fired when the argument was BOTH non-string AND
+		// non-constant, so a non-constant string (or a constant non-string) fell through.
+		if !is_type_string(msg_op.type) || msg_op.mode != .Constant {
 			arg_str := expr_to_string(call_expr.args[0])
 			defer delete(arg_str)
 			error(call_expr, "'%s' is not a constant string", arg_str)
@@ -3693,80 +3771,30 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		return true
 	}
 
-	// Check for #load directive
+	// LEDGER #884, closing #793. THIS WAS A ~77-LINE REIMPLEMENTATION and is now C++'s two-line
+	// dispatch. C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2483-2484 --
+	//
+	//     } else if (name == "load") {
+	//         return check_load_directive(c, operand, call, type_hint, true) == LoadDirective_Success;
+	//
+	// C++ has ONE `check_load_directive` with TWO callers: this one (err_on_not_found = true) and
+	// the `or_else` edge case in check_expr.cpp (false). The port had TWO IMPLEMENTATIONS, one per
+	// caller, and they had already drifted in FOUR independent places, in BOTH directions -- which
+	// is why no "is this dead code?" sweep could find it: both copies were live.
+	//
+	// The consolidation took the correct half from each, so neither copy survives unchanged:
+	//   * arity anchors (`close` for got-0, `args[0]` otherwise)  -- both were right by #794
+	//   * the two type guards with C++'s two distinct messages    -- both were right
+	//   * operand type/mode set BEFORE the load, surviving a NotFound return (C++ 2179/2197)
+	//                                                             -- from the SURVIVING copy
+	//   * `cache_load_file_directive` as the load mechanism (C++ 2224)
+	//                                                             -- from THIS copy, the one deleted
+	//   * `Directive_Was_False` -- moved DOWN into the helper, where C++ sets it (2034/2115/2121/2127)
+	//
+	// That last one is why the flag is not written here any more: setting it in this arm left the
+	// `or_else` path without it entirely. The helper now sets it for both callers.
 	if name == "load" {
-		// #load(path, [type]) - load file contents at compile time
-		// C++ Reference: check_builtin.cpp:1820-1880
-		// C++ Reference: check_builtin.cpp check_load_directive:2152-2160. C++ SPLITS the arity
-		// report by count: got-0 has no argument to point at, so it anchors on the closing paren,
-		// but any other count anchors on args[0]. The port used `close` for both, so `#load(a,b,c)`
-		// reported at the paren instead of the first argument. LEDGER #670.
-		if len(call_expr.args) < 1 || len(call_expr.args) > 2 {
-			if len(call_expr.args) == 0 {
-				error(call_expr.close, "'#load' expects 1 or 2 arguments, got 0")
-			} else {
-				error(call_expr.args[0], "'#load' expects 1 or 2 arguments, got %d", len(call_expr.args))
-			}
-			return false
-		}
-
-		// C++ Reference: check_builtin.cpp check_load_directive:2162-2176. TWO separate guards
-		// with two different messages, and the second NAMES THE TYPE. The port had fused them
-		// into one condition behind a single invented message ("first argument must be a constant
-		// string (file path)"), so `#load(1)` reported that instead of C++'s
-		// "'#load' expected a constant string, got untyped integer". LEDGER #670.
-		path_op: Operand
-		check_expr(ctx, &path_op, call_expr.args[0])
-		if path_op.mode != .Constant {
-			error(call_expr.args[0], "'#load' expected a constant string argument")
-			return false
-		}
-		if !is_type_string(path_op.type) {
-			error(call_expr.args[0], "'#load' expected a constant string, got %s", type_to_string(path_op.type))
-			return false
-		}
-
-		// C++ asserts here instead (`GB_ASSERT(o.value.kind == ExactValue_String)`), so this
-		// diagnostic has no C++ counterpart -- the same shape as #669's third `#exists` guard, and
-		// kept for the same reason: it is the difference between a diagnostic and an abort, and
-		// #7268 may change which exact-value variant a string constant carries. Re-test with #669.
-		original_path, is_str := path_op.value.(string)
-		if !is_str {
-			error(call_expr.args[0], "'#load' expected a constant string for file path")
-			return false
-		}
-
-		// Determine result type (default is []u8)
-		result_type := t_u8_slice
-		if len(call_expr.args) == 1 {
-			if type_hint != nil && is_valid_type_for_load(type_hint) {
-				result_type = type_hint
-			}
-		} else if len(call_expr.args) == 2 {
-			load_type := check_type(ctx, call_expr.args[1])
-			if load_type != nil {
-				if is_valid_type_for_load(load_type) {
-					result_type = load_type
-				} else {
-					// C++ Reference: check_builtin.cpp:2191. Note the comma after "string" and the
-					// ", got %s" clause -- both were missing here (a #149-family truncation).
-					error(call_expr.args[1], "'#load' invalid type, expected a string, or slice of simple types, got %s", type_to_string(load_type))
-				}
-			}
-		}
-
-		// Load the file
-		cache, load_ok := cache_load_file_directive(ctx, call, original_path, true, .Contents)
-		if load_ok && cache != nil {
-			operand.type = result_type
-			operand.mode = .Constant
-			operand.value = string(cache.data)
-			return true
-		}
-
-		// File not found - set directive was false flag
-		call.state_flags += {.Directive_Was_False}
-		return false
+		return check_load_directive(ctx, operand, call, type_hint, true) == .Success
 	}
 
 	// C++ Reference: check_builtin.cpp check_builtin_procedure_directive:2487-2534. #load_hash had NO handler at all, so the
@@ -4024,6 +4052,14 @@ cache_load_file_directive :: proc(
 			if err_on_not_found {
 				error_node(call, "Failed to '#load' file: %s; cannot determine base directory", original_path)
 			}
+			// LEDGER #884: C++ sets StateFlag_DirectiveWasFalse HERE, inside this helper
+			// (check_builtin.cpp:2034 for the path failure, 2115/2121/2127 for the three file-error
+			// cases) -- NOT in check_load_directive, whose #load dispatch at 2483 is a bare
+			// `return check_load_directive(...) == LoadDirective_Success`. The port set it in the
+			// INLINE #load arm instead, which meant the `or_else` path -- served by the other copy --
+			// never got the flag at all. Setting it at the helper's failure returns fixes both callers
+			// at once and matches C++'s level.
+			call.state_flags += {.Directive_Was_False}
 			return nil, false
 		}
 		// C++ Reference: parser.cpp:6684-6692 (dir_from_path) + determine_path_from_string.
@@ -4056,6 +4092,9 @@ cache_load_file_directive :: proc(
 				pn, bn := load_directive_proc_and_name(call)
 				report_load_file_error(pn, cache.file_error, path, bn)
 			}
+			// LEDGER #884: see the note at the base-directory failure above -- C++ sets the flag
+			// inside this helper, at every failure return, not in its callers.
+			call.state_flags += {.Directive_Was_False}
 			return cache, false
 		}
 	}
@@ -4106,6 +4145,8 @@ cache_load_file_directive :: proc(
 			pn, bn := load_directive_proc_and_name(call)
 			report_load_file_error(pn, cache.file_error, path, bn)
 		}
+		// LEDGER #884: as above -- C++ 2115/2121/2127 set the flag on each file-error case.
+		call.state_flags += {.Directive_Was_False}
 		return cache, false
 	}
 
@@ -5601,6 +5642,13 @@ check_builtin_type_proc_type_at_index :: proc(ctx: ^Checker_Context, operand: ^O
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp:7819-7822 (type_proc_parameter_type) and :7883-7886
+	// (type_proc_return_type), merge ebac23eb0. LEDGER #798.
+	convert_to_typed(ctx, &op, t_int)
+	if op.mode == .Invalid {
+		return false
+	}
+
 	index := exact_value_to_i64(op.value)
 	if index < 0 {
 		error_node(op.expr, "Expected a non-negative integer for the index of procedure parameter value, got %d", index)
@@ -5700,6 +5748,12 @@ check_builtin_type_polymorphic_record_parameter_value :: proc(ctx: ^Checker_Cont
 	check_expr(ctx, &op, call.args[1])
 	if op.mode != .Constant || !is_type_integer(op.type) {
 		error_node(op.expr, "Expected a constant integer for the index of record parameter value")
+		return false
+	}
+
+	// C++ Reference: check_builtin.cpp:7982-7985 (merge ebac23eb0). LEDGER #798.
+	convert_to_typed(ctx, &op, t_int)
+	if op.mode == .Invalid {
 		return false
 	}
 
@@ -5965,6 +6019,16 @@ check_builtin_byte_swap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		error_node(x.expr, "Values passed to 'byte_swap' must be an integer-like type (integer, boolean, enum, bit_set) or float, got %s", type_to_string(x.type))
 	}
 
+	// C++ Reference: check_builtin.cpp:5793-5800 (merge ebac23eb0), verbatim rationale:
+	//   "An untyped constant is integer-like, so it reaches the size check below, and
+	//    `type_size_of` asserts on a type that has no size. no-op on typed types"
+	// This one guards an ASSERT, not just a narrowing -- without it `byte_swap` of an untyped
+	// constant can abort the checker. LEDGER #798.
+	convert_to_typed(ctx, &x, default_type(x.type))
+	if x.mode == .Invalid {
+		return false
+	}
+
 	sz := type_size_of(x.type)
 	if sz < 2 {
 		error_node(x.expr, "Type passed to 'byte_swap' must be at least 2 bytes, got size of %d", sz)
@@ -6024,7 +6088,10 @@ check_builtin_overflow_arith :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 	if is_type_different_to_arch_endianness(ct) {
 		if basic, ok := ct.variant.(Type_Basic); ok {
 			if .Endian_Little in basic.flags || .Endian_Big in basic.flags {
-				error_node(x.expr, "Expected an integer which does not specify the explicit endianness for '%s', got %s", builtin_name, type_to_string(x.type))
+				// C++ Reference: check_builtin.cpp:5846 and :5897 (merge ebac23eb0) -- reworded
+				// from "an integer which does not specify the explicit endianness" to name the
+				// requirement positively. LEDGER #798.
+				error_node(x.expr, "Expected an integer type of the same platform endianness for '%s', got %s", builtin_name, type_to_string(x.type))
 				return false
 			}
 		}
@@ -6079,7 +6146,10 @@ check_builtin_saturating_arith :: proc(ctx: ^Checker_Context, operand: ^Operand,
 	if is_type_different_to_arch_endianness(ct) {
 		if basic, ok := ct.variant.(Type_Basic); ok {
 			if .Endian_Little in basic.flags || .Endian_Big in basic.flags {
-				error_node(x.expr, "Expected an integer which does not specify the explicit endianness for '%s', got %s", builtin_name, type_to_string(x.type))
+				// C++ Reference: check_builtin.cpp:5846 and :5897 (merge ebac23eb0) -- reworded
+				// from "an integer which does not specify the explicit endianness" to name the
+				// requirement positively. LEDGER #798.
+				error_node(x.expr, "Expected an integer type of the same platform endianness for '%s', got %s", builtin_name, type_to_string(x.type))
 				return false
 			}
 		}
@@ -6113,7 +6183,8 @@ check_builtin_sqrt :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.
 	if is_type_different_to_arch_endianness(elem) {
 		if basic, ok := elem.variant.(Type_Basic); ok {
 			if .Endian_Little in basic.flags || .Endian_Big in basic.flags {
-				error_node(x.expr, "Expected a float which does not specify the explicit endianness for 'sqrt', got %s", type_to_string(x.type))
+				// C++ Reference: check_builtin.cpp:5934 (merge ebac23eb0). LEDGER #798.
+				error_node(x.expr, "Expected a float type of the same platform endianness for 'sqrt', got %s", type_to_string(x.type))
 				return false
 			}
 		}
@@ -6188,7 +6259,8 @@ check_builtin_fused_mul_add :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 	if is_type_different_to_arch_endianness(elem) {
 		if basic, ok := elem.variant.(Type_Basic); ok {
 			if .Endian_Little in basic.flags || .Endian_Big in basic.flags {
-				error_node(x.expr, "Expected a float which does not specify the explicit endianness for 'fused_mul_add', got %s", type_to_string(x.type))
+				// C++ Reference: check_builtin.cpp:5983 (merge ebac23eb0). LEDGER #798.
+				error_node(x.expr, "Expected a float type of the same platform endianness for 'fused_mul_add', got %s", type_to_string(x.type))
 				return false
 			}
 		}
@@ -6255,6 +6327,12 @@ check_builtin_fixed_point :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 	}
 	if z.mode != .Constant || !is_type_integer(z.type) {
 		error_node(z.expr, "Expected a constant integer for the scale in '%s'", builtin_name)
+		return false
+	}
+
+	// C++ Reference: check_builtin.cpp:6631-6634 (merge ebac23eb0). LEDGER #798.
+	convert_to_typed(ctx, &z, t_int)
+	if z.mode == .Invalid {
 		return false
 	}
 
@@ -6424,6 +6502,14 @@ check_builtin_mem_copy :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp:6049-6052 (mem_copy) and :6097-6100 (mem_zero), merge
+	// ebac23eb0. Narrow the constant from BigInt to a type BEFORE exact_value_to_i64, which
+	// cannot represent an arbitrary-width value. LEDGER #798.
+	convert_to_typed(ctx, &length, t_int)
+	if length.mode == .Invalid {
+		return false
+	}
+
 	if length.mode == .Constant {
 		n := exact_value_to_i64(length.value)
 		if n < 0 {
@@ -6466,6 +6552,14 @@ check_builtin_mem_zero :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^
 	}
 	if !is_type_integer(length.type) {
 		error_node(length.expr, "Expected an integer value for the number of bytes for '%s', got %s", builtin_name, type_to_string(length.type))
+		return false
+	}
+
+	// C++ Reference: check_builtin.cpp:6049-6052 (mem_copy) and :6097-6100 (mem_zero), merge
+	// ebac23eb0. Narrow the constant from BigInt to a type BEFORE exact_value_to_i64, which
+	// cannot represent an arbitrary-width value. LEDGER #798.
+	convert_to_typed(ctx, &length, t_int)
+	if length.mode == .Invalid {
 		return false
 	}
 
@@ -6651,6 +6745,13 @@ check_builtin_prefetch :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp:6763-6766 (merge ebac23eb0) -- placed AFTER the guard
+	// above, before exact_value_to_i64. LEDGER #798.
+	convert_to_typed(ctx, &y, t_int)
+	if y.mode == .Invalid {
+		return false
+	}
+
 	locality := exact_value_to_i64(y.value)
 	if !(0 <= locality && locality <= 3) {
 		error_node(y.expr, "Second argument to '%s' representing the locality must be an integer in the range 0..=3", builtin_name)
@@ -6676,8 +6777,11 @@ check_builtin_is_package_imported :: proc(ctx: ^Checker_Context, operand: ^Opera
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp:5081-5082. The polarity here was already `||` (upstream
+	// only corrected its own `&&` in merge ebac23eb0), but the TEXT and ANCHOR were invented:
+	// C++ reports "Expected a constant string for '%.*s'" on args[0], not on x.expr. LEDGER #798.
 	if x.mode != .Constant || !is_type_string(x.type) {
-		error_node(x.expr, "Argument to '%s' must be a constant string", builtin_name)
+		error_node(call.args[0], "Expected a constant string for '%s'", builtin_name)
 		return false
 	}
 
@@ -7212,14 +7316,15 @@ check_builtin_outer_product :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 		return false
 	}
 
-	// Both arguments must be arrays (vectors)
-	if !is_type_array(x.type) {
-		error_node(x.expr, "First argument to '%s' must be an array (vector) type, got '%s'", builtin_name, type_to_string(x.type))
-		return false
-	}
-
-	if !is_type_array(y.type) {
-		error_node(y.expr, "Second argument to '%s' must be an array (vector) type, got '%s'", builtin_name, type_to_string(y.type))
+	// C++ Reference: check_builtin.cpp:4951-4959 (merge ebac23eb0). C++ has ONE guard, not two,
+	// and reports on the CALL with both type names in a single message. The port had split it
+	// into two bespoke per-argument diagnostics -- different text, different anchor, and a
+	// different COUNT when both arguments are wrong. Upstream's `&&` -> `||` now makes the
+	// acceptance rule agree with the port's; the reporting still had to be collapsed. LEDGER #798.
+	if !is_type_array(x.type) || !is_type_array(y.type) {
+		s1 := type_to_string(x.type)
+		s2 := type_to_string(y.type)
+		error_node(call, "'%s' expects only arrays, got %s and %s", builtin_name, s1, s2)
 		return false
 	}
 
@@ -7305,13 +7410,15 @@ check_builtin_constant_rounding :: proc(ctx: ^Checker_Context, operand: ^Operand
 		return false
 	}
 
-	if x.mode != .Constant {
-		error_node(x.expr, "Argument to '%s' must be a constant", builtin_name)
-		return false
-	}
-
-	if !is_type_float(x.type) && !is_type_untyped(x.type) {
-		error_node(x.expr, "Argument to '%s' must be a floating-point constant, got '%s'", builtin_name, type_to_string(x.type))
+	// C++ Reference: check_builtin.cpp:5160-5162 (merge ebac23eb0). ONE guard, and it accepts
+	// INTEGER OR FLOAT:
+	//     if (!is_type_integer_or_float(o.type) || o.mode != Addressing_Constant) {
+	//         error(ce->args[0], "Expected a constant number for '%.*s'", LIT(builtin_name));
+	// The port had split this into two bespoke diagnostics AND narrowed the second to
+	// float-or-untyped, which OVER-REJECTED a constant integer argument that the reference
+	// compiler accepts. Collapsed and widened. LEDGER #798.
+	if !is_type_integer_or_float(x.type) || x.mode != .Constant {
+		error_node(call.args[0], "Expected a constant number for '%s'", builtin_name)
 		return false
 	}
 
@@ -7358,10 +7465,11 @@ check_builtin_constant_log2 :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp:5119. The condition really is `&&`, so a
-	// constant of any numeric kind is accepted; mirrored verbatim rather than
-	// tightened, since tightening it here would reject code the real compiler builds.
-	if !is_type_integer(x.type) && x.mode != .Constant {
+	// C++ Reference: check_builtin.cpp:5139 (merge ebac23eb0). This WAS `&&` upstream, and the
+	// port mirrored it deliberately on the grounds that tightening it would reject code the real
+	// compiler builds. Upstream has now tightened it to `||`, so that premise is dead: a
+	// non-integer constant, or a non-constant integer, is rejected here as it is there.
+	if !is_type_integer(x.type) || x.mode != .Constant {
 		error_node(call.args[0], "Expected a constant integer for '%s'", builtin_name)
 		return false
 	}
@@ -8808,6 +8916,7 @@ check_builtin_type_field_bit :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 
 	bit_offset: i64 = 0
 	bit_size: i64 = 0
+	found := false
 	for f, i in bf.fields {
 		if f == nil || .Bit_Field_Field not_in f.flags {
 			continue
@@ -8819,8 +8928,19 @@ check_builtin_type_field_bit :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 			if i < len(bf.bit_sizes) {
 				bit_size = i64(bf.bit_sizes[i])
 			}
+			found = true
 			break
 		}
+	}
+
+	// C++ Reference: check_builtin.cpp:7382-7389 (merge ebac23eb0), verbatim rationale:
+	//   "A missing field would otherwise return 0, which is also the correct offset of the
+	//    first declared field, so the caller has nothing to test for."
+	// Without this the port returns a SILENTLY WRONG 0 for an unknown field name -- there was no
+	// diagnostic and no way to distinguish it from a legitimate first-field offset. LEDGER #798.
+	if !found {
+		error_node(call.args[1], "'%s' is not a field of type %s", field_name, type_to_string(type))
+		return false
 	}
 
 	value: i64 = 0

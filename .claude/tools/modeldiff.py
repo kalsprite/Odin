@@ -423,7 +423,24 @@ def main():
                   "  ".join(f"{f}={n}" for f, n in per_field.most_common()))
         for k, v in sorted(state.items())[:10]:
             pkg, nm, kind, fld, va, vb = k
-            print(f"     STATE x{v} {pkg}.{nm} ({kind}) {fld}: ref={va[:44]} port={vb[:44]}")
+            # #807: this line used to print `ref={va[:44]} port={vb[:44]}` -- it truncated the TAIL,
+            # which is the one place the values are guaranteed to be EQUAL. core/testing's two
+            # entities printed as
+            #     ref=customlinkagestrong|customlinkname|procbodyc port=customlinkagestrong|...|procbodyc
+            # i.e. TWO IDENTICAL STRINGS for a pair this comparator had just classified as DIFFERENT,
+            # because len("customlinkagestrong|customlinkname|procbodyc") == 44 EXACTLY and the real
+            # divergence sits at char 45+. That reads as a comparator false positive and is not one.
+            # Elide the COMMON PREFIX instead, so the differing region is always on screen. A value
+            # that is a strict PREFIX of the other is a real and distinguishable case (one side has an
+            # extra sorted flag), so it gets an explicit marker rather than printing as empty.
+            i = 0
+            while i < len(va) and i < len(vb) and va[i] == vb[i]:
+                i += 1
+            head = f"...[{i} common]" if i > 8 else ""
+            ta, tb = va[i:], vb[i:]
+            sa = head + (ta[:60] if ta else "<ENDS HERE>")
+            sb = head + (tb[:60] if tb else "<ENDS HERE>")
+            print(f"     STATE x{v} {pkg}.{nm} ({kind}) {fld}: ref={sa} port={sb}")
         for k, v in sorted(ea.items())[:6]: print(f"     REF-ONLY  x{v} {k}")
         for k, v in sorted(eb.items())[:6]: print(f"     PORT-ONLY x{v} {k}")
         for (nm, kind, s, al, rpkg, ppkg), v in sorted(attrib.items())[:6]:

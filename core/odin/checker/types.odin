@@ -476,6 +476,21 @@ is_type_float :: proc(t: ^Type) -> bool {
 	return .Float in basic.flags
 }
 
+// is_type_integer_or_float checks if type is a basic integer or float.
+// C++ Reference: types.cpp is_type_integer_or_float:1362-1370.
+// NOTE: this is NOT is_type_numeric -- C++ tests only (Integer|Float) on a BASIC type, with no
+// Complex/Quaternion and no Enum arm. Added for the check_builtin catch-up in LEDGER #798, where
+// substituting is_type_numeric would have widened the accepted set.
+is_type_integer_or_float :: proc(t: ^Type) -> bool {
+	bt := base_type(t)
+	if bt == nil || bt.kind != .Basic {
+		return false
+	}
+
+	basic := bt.variant.(Type_Basic)
+	return .Integer in basic.flags || .Float in basic.flags
+}
+
 // is_type_complex checks if type is complex
 // C++ Reference: types.cpp is_type_complex:1489-1496
 is_type_complex :: proc(t: ^Type) -> bool {
@@ -1879,6 +1894,14 @@ is_type_comparable :: proc(t: ^Type) -> bool {
 		if struc.soa_kind != .None {
 			return false
 		}
+		// An unspecialized polymorphic record has no values to compare.
+		// C++ Reference: types.cpp is_type_comparable Type_Struct arm — this guard sits
+		// BETWEEN the soa_kind test and the is_raw_union test, so a raw union that is also
+		// an unspecialized polymorphic record takes THIS branch, not is_type_simple_compare.
+		// LEDGER #800.
+		if is_type_polymorphic_record_unspecialized(bt) {
+			return false
+		}
 		// Raw unions delegate to is_type_simple_compare
 		if struc.is_raw_union {
 			return is_type_simple_compare(bt)
@@ -2427,8 +2450,12 @@ is_type_endian_specific :: proc(t: ^Type) -> bool {
 	// Handle BitSet by checking its backing integer type
 	// C++ Reference: types.cpp:1993-1995
 	if ct.kind == .Bit_Set {
-		ct = bit_set_to_int(t)
-		return is_type_endian_specific(t)
+		// C++ Reference: types.cpp is_type_endian_specific — `t = bit_set_to_int(t); return
+		// is_type_endian_specific(t);` recurses on the REASSIGNED value. The port assigned the
+		// reduction to `ct` and then recursed on the ORIGINAL `t`, so the bit_set never reduced
+		// and the call recursed forever — a stack overflow, i.e. SIG11. Latent until #800 gave
+		// is_type_different_to_arch_endianness a call to this on every type. LEDGER #802.
+		return is_type_endian_specific(bit_set_to_int(ct))
 	}
 
 	// Check if Basic type is endian-specific
@@ -2523,9 +2550,10 @@ is_type_endian_little :: proc(t: ^Type) -> bool {
 		return is_type_endian_little(t_uintptr)
 	}
 
-	// Other types default to platform endianness
-	// C++ Reference: types.cpp:1971
-	return build_context.endian_kind == .Little
+	// A type with no endianness is neither little nor big.
+	// C++ Reference: types.cpp is_type_endian_little tail. Same upstream change as the
+	// is_type_endian_big tail above. LEDGER #800.
+	return false
 }
 
 // is_type_endian_big checks if a type is big-endian
@@ -2573,9 +2601,12 @@ is_type_endian_big :: proc(t: ^Type) -> bool {
 		return is_type_endian_big(t_uintptr)
 	}
 
-	// Other types default to platform endianness
-	// C++ Reference: types.cpp:1954
-	return build_context.endian_kind == .Big
+	// A type with no endianness is neither little nor big.
+	// C++ Reference: types.cpp is_type_endian_big tail. Upstream USED to return
+	// `build_context.endian_kind == TargetEndian_Big` here, making every non-endian type
+	// (structs, slices, procs) report as big-endian on a big-endian target. It now returns
+	// false unconditionally. LEDGER #800.
+	return false
 }
 
 // Type_Endian_Kind mirrors C++'s TypeEndianKind (types.cpp:2060-2064). Distinct from
@@ -2618,6 +2649,14 @@ types_have_same_internal_endian :: proc(a, b: ^Type) -> bool {
 // is_type_different_to_arch_endianness checks if type endianness differs from target architecture
 // C++ Reference: types.cpp:2038-2046
 is_type_different_to_arch_endianness :: proc(t: ^Type) -> bool {
+	// A type with no endianness never needs swapping.
+	// C++ Reference: types.cpp is_type_different_to_arch_endianness, guard added upstream.
+	// Without it this returned TRUE for non-endian types on a big-endian target, because
+	// the two tails above used to report platform endianness. LEDGER #800.
+	if !is_type_endian_specific(t) {
+		return false
+	}
+
 	// C++ implementation checks against build_context.endian_kind
 	#partial switch build_context.endian_kind {
 	case .Little:
@@ -3869,13 +3908,39 @@ type_offset_of :: proc(t: ^Type, index: i64) -> i64 {
 
 		// Calculate aligned offsets for all fields up to and including target index
 		// This matches the logic in type_set_offsets_of from types.cpp
+		//
+		// C++ Reference: types.cpp:4545-4592, type_set_offsets_of. It takes
+		// min_field_align/max_field_align as PARAMETERS and clamps EVERY field's alignment:
+		//     if (min_field_align == 0) { min_field_align = 1; }
+		//     i64 align = gb_max(type_align_of_internal(t, &path), min_field_align);
+		//     if (max_field_align != 0) { align = gb_min(align, max_field_align); }
+		// The port applied NO clamp at all, so `#min_field_align` and `#max_field_align` were
+		// both inert for OFFSETS. #113 wired the directives into type_align_of only, which is
+		// the WHOLE-STRUCT alignment (types.cpp:4506-4511) -- a different computation that
+		// happens to read the same two fields. That is why this survived #112 and #113.
+		// Repro: `S :: struct #min_field_align(8) { a: u8, b: u8 }` -- oracle offset_of(S,b)==8,
+		// port gave 1. Mirror case with #max_field_align(2) capping a u64 from 8 to 2. LEDGER #801.
+		min_field_align := struc.custom_min_field_align
+		if min_field_align == 0 {
+			min_field_align = 1
+		}
+		max_field_align := struc.custom_max_field_align
+
+		clamp_field_align :: proc(align, min_field_align, max_field_align: i64) -> i64 {
+			a := max(align, min_field_align)
+			if max_field_align != 0 {
+				a = min(a, max_field_align)
+			}
+			return a
+		}
+
 		curr_offset: i64 = 0
 
 		for i in 0 ..< index {
 			if field := struc.fields[i]; field.kind == .Variable {
 				// Get field alignment and size
 				ft := entity_type(field)
-				field_align := i64(type_align_of(ft))
+				field_align := clamp_field_align(i64(type_align_of(ft)), min_field_align, max_field_align)
 				field_size := i64(type_size_of(ft))
 
 				// Align current offset to field's alignment requirement
@@ -3891,7 +3956,7 @@ type_offset_of :: proc(t: ^Type, index: i64) -> i64 {
 
 		// Now align to the target field's alignment to get its actual offset
 		if field := struc.fields[index]; field.kind == .Variable {
-			target_align := i64(type_align_of(entity_type(field)))
+			target_align := clamp_field_align(i64(type_align_of(entity_type(field))), min_field_align, max_field_align)
 			if target_align > 0 {
 				curr_offset = (curr_offset + target_align - 1) - ((curr_offset + target_align - 1) % target_align)
 			}

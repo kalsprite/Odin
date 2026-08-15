@@ -1950,13 +1950,16 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 	if decl.proc_lit != nil {
 		where_clauses = decl.proc_lit.where_clauses
 	}
-	where_clause_ok := evaluate_where_clauses(ctx, nil, decl.scope, where_clauses, !decl.where_clauses_evaluated)
+	// LEDGER #886: RELAXED load, matching C++ check_decl.cpp:2227
+	// `!decl->where_clauses_evaluated.load(std::memory_order_relaxed)`.
+	where_clause_ok := evaluate_where_clauses(ctx, nil, decl.scope, where_clauses, !sync.atomic_load_explicit(&decl.where_clauses_evaluated, .Relaxed))
 	if !where_clause_ok {
 		// Where clauses failed, don't check body
 		// C++ Reference: check_decl.cpp check_proc_body:2228-2230
 		return false
 	}
-	decl.where_clauses_evaluated = true
+	// LEDGER #886: seq-cst store, matching C++'s plain `= true` on a std::atomic.
+	sync.atomic_store(&decl.where_clauses_evaluated, true)
 
 	// Open procedure body scope
 	// C++ Reference: check_decl.cpp check_proc_body:2233
@@ -2269,7 +2272,11 @@ type_align_of :: proc(t: ^Type) -> int {
 		if struc.custom_min_field_align > 0 {
 			max_align = max(max_align, int(struc.custom_min_field_align))
 		}
-		if struc.custom_max_field_align != 0 && struc.custom_max_field_align > struc.custom_min_field_align {
+		// C++ Reference: types.cpp type_align_of_internal, Type_Struct arm. Upstream DROPPED
+		// the `> custom_min_field_align` conjunct: #max_field_align now caps the alignment
+		// whenever it is set, even when it is <= #min_field_align. Previously a struct with
+		// `#min_field_align(8) #max_field_align(4)` ignored the cap entirely. LEDGER #800.
+		if struc.custom_max_field_align != 0 {
 			max_align = min(max_align, int(struc.custom_max_field_align))
 		}
 		return max_align

@@ -18,6 +18,7 @@ and so does the oracle, which is why they survive normalisation rather than bein
 decoration.
 """
 import re, subprocess, sys, os
+import concurrent.futures
 
 DIAG = re.compile(r"^(?P<path>[^()]+)\((?P<line>\d+):(?P<col>\d+)\)\s+(?P<kind>Error|Warning|Syntax Error|Note):\s?(?P<msg>.*)$")
 # A diagnostic line with no file(line:col) prefix at all.
@@ -130,16 +131,89 @@ def compare(port_bin, probe):
     return "FULL-DIFFER", len(o), delta
 
 
+# LEDGER #866 -- #594 STEP 3: BOUNDED FAN-OUT, the last of the three tools named in that task.
+#
+# THE PRECONDITION #765 LEFT OPEN, NOW ANSWERED BY OBSERVATION RATHER THAN INFERENCE.
+# #765 read this file and found no scratch path anywhere -- both compilers' output is held in local
+# variables -- but flagged ONE caveat it did not test: `compare()` invokes the oracle as
+# `odin build <probe> -out:/dev/null`, a FIXED path shared by every probe, and whether `odin build`
+# also writes SIBLING INTERMEDIATES next to `-out:` was never checked. A shared intermediate is
+# exactly the silent cross-contamination that #765's blocker 1 describes.
+#
+# It does write them, and NOT next to `-out:`: watched with inotify, one successful build creates
+# ~17 object files in /tmp named `null-<package>-<hex>.o` -- `null` from the `-out:` basename, and
+# critically including `runtime-*` entries that EVERY Odin build produces. On the shared name alone
+# these would collide between any two concurrent builds.
+#
+# They do not collide, because the hex is an ASLR-randomised address, measured varying per run:
+#     null-runtime-core-7f8f3d687ee8.o / -7f3972e76058.o / -7f6f7a2c5418.o
+# Two concurrent builds are two processes with independent ASLR, so they cannot share a name.
+#
+# Two negative results that were NOT sufficient evidence, recorded so they are not repeated:
+#   * a post-hoc `find` sees nothing -- the intermediates are deleted at the end of the build, so
+#     the window in which they could collide has already closed by the time you look;
+#   * `find / -xdev` misses them outright -- /tmp is a SEPARATE tmpfs, which is where they live.
+# Only watching DURING the run answers this question.
+#
+# A FAILING build never reaches code emission and writes no intermediates at all, so testing this
+# on an error probe (which is most of the corpus) also proves nothing. It was tested on a probe
+# that compiles cleanly.
+#
+# WIDTH. Deliberately modest, and NOT chosen to saturate the machine: `user+sys` for a serial sweep
+# is ~4x its wall time, so both compilers are already threaded and W workers do not use W cores.
+# #649 is the other reason -- that was a tmpfs exhaustion (58.7 GB of 94 GB), and fanning out
+# multiplies the SIMULTANEOUS intermediate footprint.
+CMPFULL_JOBS = int(os.environ.get("CMPFULL_JOBS", "6"))
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__); sys.exit(2)
     port_bin, probes = sys.argv[1], sys.argv[2:]
     tally = {}
-    for probe in probes:
+
+    # Results are collected into a list INDEXED BY POSITION and printed after the join, so output
+    # stays in list order. That is not cosmetic: two sweeps being line-comparable is the technique
+    # that caught every regression in this batch, and interleaved parallel output would destroy it.
+    results = [None] * len(probes)
+    todo = []
+    for i, probe in enumerate(probes):
         if not os.path.isdir(probe):
-            print("%-34s MISSING-DIR" % os.path.basename(probe)); tally["MISSING"] = tally.get("MISSING", 0) + 1
+            results[i] = ("MISSING", None)
+        else:
+            todo.append(i)
+
+    if CMPFULL_JOBS > 1 and len(todo) > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=CMPFULL_JOBS) as ex:
+            # subprocess.run releases the GIL while waiting, so threads (not processes) are the
+            # right primitive here -- no pickling, and the tally stays in one address space.
+            futs = {ex.submit(compare, port_bin, probes[i]): i for i in todo}
+            for f in concurrent.futures.as_completed(futs):
+                results[futs[f]] = ("OK", f.result())
+    else:
+        for i in todo:
+            results[i] = ("OK", compare(port_bin, probes[i]))
+
+    # RETRY THE DEAD, SEQUENTIALLY (the #766 lesson, carried over verbatim in spirit).
+    # A death under concurrency is not admissible evidence: contention can manufacture a timeout,
+    # and a spurious ORACLE-CRASHED/PORT-CRASHED is scored as a NON-MATCH, which makes this tool
+    # exit 4 and turns corpus.sh red for a reason that is not a port defect. So any probe that died
+    # during the parallel pass is re-run ALONE before its verdict is believed. Only a second death
+    # counts. This costs two extra compiler runs per genuine crash and nothing at all otherwise.
+    if CMPFULL_JOBS > 1:
+        for i in todo:
+            if results[i][1][0] in ("ORACLE-CRASHED", "PORT-CRASHED"):
+                print("RETRY  %-34s died under fan-out; re-running alone"
+                      % os.path.basename(probes[i]), file=sys.stderr)
+                results[i] = ("OK", compare(port_bin, probes[i]))
+
+    for i, probe in enumerate(probes):
+        kind, payload = results[i]
+        if kind == "MISSING":
+            print("%-34s MISSING-DIR" % os.path.basename(probe))
+            tally["MISSING"] = tally.get("MISSING", 0) + 1
             continue
-        verdict, n, delta = compare(port_bin, probe)
+        verdict, n, delta = payload
         tally[verdict] = tally.get(verdict, 0) + 1
         print("%-34s lines=%-4d %s" % (os.path.basename(probe), n, verdict))
         for d in delta:

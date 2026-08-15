@@ -895,11 +895,145 @@ CORPUS=(
   # 6/6 stable FULL-MATCH, and the WHY is established, not just the agreement (#146). It gates the
   # signature-Note branches, which nothing else in the corpus does.
   p_ppp
+  # #787 struct alignment-directive coherence. Four probes, each pinning a distinct path that the
+  # ORIGINAL filed repro did not reach -- two of them found a SECOND defect the filing never named.
+  #   stalign1  #packed + #min_field_align + #align  -- the filed repro. C++ ST_ALIGN is a MACRO
+  #             whose `return;` leaves check_struct_type, so the FIRST conflict is reported and the
+  #             rest are not. Port had it as a nested proc whose result was discarded: 1 vs 2 errors.
+  #   stalign2  #packed + #align only -- same abort, reached from the THIRD ST_ALIGN invocation
+  #             rather than the first. Pins that all three call sites propagate, not just one.
+  #   stalign3  #min_field_align > #max_field_align with NO #align -- C++ anchors this error on
+  #             st->align, which here is nullptr, so it emits a POSITIONLESS "Error:" with no file,
+  #             line or source snippet. The port had anchored it on min_field_align and printed a
+  #             full position. Do NOT "fix" the bare Error: line; it is what the reference prints.
+  #   stalign4  #align + #min_field_align + #max_field_align, all three coherence blocks true.
+  #             Same anchor => print_all_errors MERGES them into ONE (#578). The port's divergent
+  #             anchor escaped the merge and emitted a spurious second error.
+  # All four FULL-MATCH. stalign3/stalign4 gate the SAME single line, from opposite directions.
+  stalign1 stalign2 stalign3 stalign4
+
+  # #803/#806 -- SWITCH CLAUSE ANCHORS. Two defects the same battery found.
+  #   #803 Case_Clause end was `end_pos(p.prev_tok)` unconditionally. C++
+  #        (parser_pos.cpp:238-244) is a THREE-WAY rule: last STATEMENT's end, else last LIST
+  #        expression's end, else the `case` token. For an empty `case:` the port's version is
+  #        the COLON, so every CLAUSE-anchored caret rendered `^~~~^` for the oracle's `^~~^`.
+  #   swend1  type switch, duplicate `case:`   -- branch 3 (empty clause)
+  #   swend2  value switch, duplicate `case:`  -- branch 3, the half the filed note never tested
+  #   swend3  duplicate default with a MULTI-statement body -- branch 1; catches an implementation
+  #           that takes the FIRST statement's end rather than the last.
+  #   #806 The duplicate-VALUE-case emitter used error_node + error_line, so its
+  #        "previous case at" continuation printed AFTER the source snippet. C++
+  #        (check_expr.cpp:9673-9677) embeds it in the format string, so it prints BEFORE.
+  #   swend4  duplicate value case -- gates the ORDER of the four output lines, which is
+  #           invisible to any check that only counts or sorts them.
+  # NOTE: swend4 is also a #803 CONTROL. It is anchored on the case EXPRESSION, not the clause,
+  # so it MATCHED both before and after the parser change -- that is what bounded #803's blast
+  # radius to clause-anchored diagnostics rather than "every switch diagnostic" as filed.
+  swend1 swend2 swend3 swend4
+
+  # #801 -- #min_field_align / #max_field_align were inert for OFFSETS.
+  # C++ type_set_offsets_of (types.cpp:4545-4592) takes both as PARAMETERS and clamps EVERY
+  # field: `align = gb_max(type_align_of_internal(t), min_field_align)` then, if max != 0,
+  # `align = gb_min(align, max_field_align)`. The port clamped NOTHING.
+  # WHY IT SURVIVED #112 AND #113: #113 wired these two directives into type_align_of, which is
+  # the WHOLE-STRUCT alignment (types.cpp:4506-4511) -- a different computation that happens to
+  # read the same two fields. "Wired up" was true of one consumer and false of the other.
+  #   offalign1  #min_field_align raises a u8 field's offset 1 -> 8 (and size 2 -> 16)
+  #   offalign2  #max_field_align CAPS a u64 field's offset 8 -> 2
+  #   offalign3  BOTH directives at once, three fields deep -- catches a clamp applied in the
+  #              wrong order, which offalign1/2 alone cannot distinguish
+  #   offalign4  NESTED: the inner struct's directive must govern the inner layout only, and
+  #              must NOT leak into the outer struct's field offsets
+  # All four assert exact offsets, so they emit ZERO lines when correct -- a silent probe here
+  # means the arithmetic agrees, not merely that both sides errored the same way.
+  # NOT ADDED, DELIBERATELY: a #packed + #min_field_align case. The oracle REJECTS that
+  # combination outright (a coherence error, see stalign*), so it would gate the diagnostic, not
+  # the layout. C++'s packed arm takes neither parameter.
+  offalign1 offalign2 offalign3 offalign4
+  # #815. @(deprecated) on a TYPE was silent in the port and warns twice in the oracle.
+  # The port assigned e.deprecated_message in exactly ONE place tree-wide -- check_decl.odin,
+  # the PROCEDURE path -- while C++ also copies it in check_type_decl (check_decl.cpp:524).
+  # The attribute was collected and the warning emitter was a complete faithful port; ONLY the
+  # copy was missing, so the symptom was SILENCE rather than a wrong message. Nothing in the
+  # existing corpus put @(deprecated) on a type, which is exactly why 324 green probes AND two
+  # 323/323 parity sweeps all missed it -- a whole attribute path with zero coverage.
+  # It has a `main` because members are compared with `odin build`; `Foo` is used TWICE (return
+  # type and composite literal) so the probe pins BOTH warning positions, not just the count.
+  # This probe is EMPTY on the pre-fix checker and matches the oracle after, so it can fail.
+  p815type
+
+  # LEDGER #828. type_to_string rendered an INSTANTIATED polymorphic procedure without its
+  # bindings: `proc(i64, i64, f64) -> i64` where the reference prints `proc($T=i64, i64, f64) -> i64`.
+  # The port's Tuple arm ignored the parameter ENTITY KIND and collapsed C++'s four renderings
+  # (types.cpp:5573-5624) onto one. Nothing saw it: modeldiff.py does not compare the `type=`
+  # column, and no package in the corpus or in either parity sweep put an `#assert`/`#panic`
+  # inside an instantiated polymorphic body -- which is the diagnostic that prints such a
+  # signature, via the `Called within '<name>' :: <sig>` continuation.
+  # It has a `main` because members are compared with `odin build`, and it needs no flags, so
+  # unlike the #826 rtti probes it can live here rather than in crosstarget.sh.
+  # On the pre-fix checker the continuation line differs; after the fix it is byte-identical.
+  p828poly
+
+  # LEDGER #846. `e: os.Error = 0` -- a LIVE OVER-REJECTION until this tick: the reference accepts
+  # it, the port emitted "Cannot convert untyped value '0' to 'Error' from 'untyped integer'".
+  # C++'s convert_to_typed `case Type_Union:` opens with a transition-period carve-out (upstream's
+  # own words: "IMPORTANT NOTE HACK(bill) ... comparisons against `0` with the `os.Error` type")
+  # that was never ported.
+  # WHY NO GATE SAW IT: `core/os` is in the 323-package parity list, but the carve-out EXEMPTS
+  # package `os` itself (`c->pkg->name != "os"`), so it takes a DIFFERENT package assigning 0 to an
+  # os.Error -- which nothing in the corpus or the package list happened to do. #815 again.
+  # Needs no flags and has a `main`, so it belongs here rather than in crosstarget.sh. Note the
+  # carve-out is also gated on `!strict_style`, and corpus members run plain `odin build`, so this
+  # member exercises the ENABLED direction only.
+  p846oserr
+
+  # LEDGER #858. A pointer-subject type switch: `p: ^U; switch v in p`. C++
+  # (check_stmt.cpp:1586-1591) uses a nil SENTINEL in two steps -- clear on
+  # `list.count > 1 || saw_nil`, then `if (case_type == nullptr) case_type = type_deref(x.type)`
+  # -- so the multi-type clause AND the DEFAULT clause (empty list, so the count test never
+  # fires) both bind the DEREFERENCED subject type. #781 found the port had collapsed that to one
+  # condition seeded with `x.type`, binding `^U`; the fix landed but NOTHING EVER OBSERVED IT.
+  # This member is that missing observation. It has no diagnostics on either side today, and it
+  # CAN fail: if the deref regresses, the port rejects `y: U = v` while the oracle accepts it.
+  # Positive control (kept out of the corpus, at $S/p781neg): asserting `v: ^U` instead makes BOTH
+  # sides emit 2 errors, which is what proves this probe reads the binding rather than passing
+  # vacuously.
+  p781ptr
+
+  # LEDGER #859. `switch a.b in u { case int: ; case: ; case: }` -- a NON-IDENTIFIER lhs together
+  # with DUPLICATE DEFAULT CLAUSES. C++ (check_stmt.cpp:1475-1490) runs the whole case-clause loop,
+  # emitting "Multiple default clauses", and only THEN rejects the lhs, so BOTH diagnostics appear.
+  # #779 found the port returning before the loop and emitting only the identifier error; the fix
+  # (relocating the check below the loop) landed but NOTHING EVER OBSERVED IT. This member is that
+  # observation: 2 errors on each side, same order, same positions.
+  # It CAN fail: reinstating the early return drops the port to 1 error while the oracle keeps 2.
+  # Control (kept out of the corpus, $S/p779ctl): with ONE default clause both sides emit exactly 1,
+  # which is what proves the second error is the duplicate-default one and not an artefact.
+  # Reproduces an UPSTREAM ODDITY deliberately -- "Expected an identifier, got 'identifier'" -- because
+  # C++ reports the KIND OF RHS while positioning at rhs, though it is lhs that failed. Faithful.
+  p779dflt
+
+  # LEDGER #862. #796's two shapes, rebuilt after #860 found the originals had been DELETED despite
+  # a ledger entry recording them as "re-ran ... 4/4 byte-identical". C++ enters check_or_return_expr
+  # (check_expr.cpp:10185) and check_or_branch_expr (10268) through check_multi_expr_with_type_hint,
+  # whose validity switch emits error_operand_no_value / error_operand_not_expression and sets
+  # Addressing_Invalid; bare check_expr_base emits NEITHER. #796 filed both port sites as still using
+  # check_expr_base -- they do not, both call the helper -- but nothing observed it until now.
+  # orret: No_Value (`f() or_return`) + Type (`int or_return`) operands.
+  # orbr:  the same two under or_break / or_continue, which is the OTHER sibling.
+  # Both emit exactly 2 errors per side, byte-identical. They CAN fail: revert either entry call to
+  # check_expr_base and the port emits neither message while the oracle still emits both.
+  # Control (kept out of the corpus, $S/orctl): the same construct with a VALID operand
+  # (`ok() or_return` returning an enum) gives 0 errors on BOTH sides -- which is what makes the two
+  # errors attributable to the OPERAND KIND rather than to or_return itself.
+  orret
+  orbr
 )
 
 # --- Deliberate exclusions, each with the reason it is not a corpus member --------------------
 # name                reason
 EXCLUDED=(
+  'loadmiss|#860 UPSTREAM BACKEND CRASH: the ORACLE SEGFAULTS on this 6/6 under `odin build`, so cmpfull scores it ORACLE-CRASHED and it cannot be a member. `data := #load("missing-file") or_else panic(...)` followed by a type-sensitive USE (`x: []u8 = data`). THREE ingredients, each verified necessary: the file must be MISSING (so or_else takes the not-found path where the tail does o^ = y), the default must be DIVERGING (so y_is_diverging skips check_assignment), and the result must be USED at a type. Drop any one and the oracle exits 0 or 1. THE CRASH IS IN THE BACKEND, NOT THE CHECKER: `odin check` on the same input is clean 4/4 while `odin build` segfaults 4/4, and the coredump names lb_append_tuple_values (src/llvm_backend_stmt.cpp:2495) under lb_generate_procedure. THE PORT IS A CHECKER AND IS CORRECT HERE -- 0 diagnostics, agreeing with the oracle CHECKER. Kept on disk as the repro for Jon to file; nothing is owed on the port side. Related: #285 and objc_super, both upstream crashes the port survives.'
   'litdrift|#639 ONLY, as of 2026-08-10. Built during #633: 16 one-literal files probing the parser/checker literal rule. Two divergences were tangled here and both are now resolved. (1) The ORDERING divergence -- the oracle put the hard tokenizer aborts ahead of the per-literal errors -- was #650, FIXED, and is now gated by the `offprobe` member above; litdrift is no longer the repro for it. (2) What remains is entirely #639, an UPSTREAM rendering bug filed and not fixed: f13 (`L13 :: 0h123`) and f14 (`L14 :: 0h1234567`) put their diagnostic at end-of-line, where C++ prints "( empty line )" in place of the source line and omits the caret, while the port prints the real line and caret. Every MESSAGE, KIND and POSITION agrees on both sides -- verified 2026-08-10; the only difference cmpfull can see is that unpaired `<cont>` line, which survives normalisation precisely because C++ emits no caret under it. NOTHING in the port is wrong here, so this stays excluded rather than being made bug-compatible: unlike #650, the observable is decoration and not semantics. Re-check when #639 lands upstream; the probe dirs are kept because they are the repro.'
   # All five re-probed 2026-08-04 (LEDGER #378). probe.sh reports MATCH for four of them; cmpfull.py
   # reports FULL-DIFFER for the same four. cmpfull is right and probe.sh is the looser instrument --

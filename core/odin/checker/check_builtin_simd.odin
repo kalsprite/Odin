@@ -875,8 +875,18 @@ check_builtin_simd_extract_bits :: proc(ctx: ^Checker_Context, operand: ^Operand
 
 	num_elems := get_array_type_count(x.type)
 
+	// C++ Reference: check_builtin.cpp:1444-1450 (merge ebac23eb0), verbatim rationale:
+	//   "the range is taken from the lane count; it has to meet the same limit a written bit_set
+	//    does"
+	// Without this a wide enough #simd vector builds a bit_set whose upper bound exceeds the
+	// 128-bit maximum that a hand-written bit_set is held to. LEDGER #798.
+	if num_elems > 128 {
+		error(call.args[0], "'%s' would produce a bit_set of %d bits, exceeding the maximum of 128, got '%s'", builtin_name, num_elems, type_to_string(x.type))
+		return false
+	}
+
 	// Return a bit set type with range 0..<num_elems
-	// C++ Reference: check_builtin.cpp:1443-1446
+	// C++ Reference: check_builtin.cpp:1451-1454
 	result_type := alloc_type_bit_set()
 	// Cannot mutate variant fields directly - must create new struct
 	bit_set_data := Type_Bit_Set {
@@ -1390,8 +1400,17 @@ check_builtin_simd_x86_mm_shuffle :: proc(ctx: ^Checker_Context, operand: ^Opera
 			return false
 		}
 
+		// C++ Reference: check_builtin.cpp:1986 (merge ebac23eb0) -- the message gained a
+		// ", got '%s'" clause; the `xs` argument was already computed upstream but unused by the
+		// old format string. LEDGER #798 group C.
 		if !is_type_integer(x.type) || x.mode != .Constant {
-			error(call.args[i], "'%s' expected a constant integer", builtin_name)
+			error(call.args[i], "'%s' expected a constant integer, got '%s'", builtin_name, type_to_string(x.type))
+			return false
+		}
+
+		// C++ Reference: check_builtin.cpp:1992-1995 (merge ebac23eb0). LEDGER #798.
+		convert_to_typed(ctx, &x, t_int)
+		if x.mode == .Invalid {
 			return false
 		}
 
@@ -1501,6 +1520,13 @@ check_builtin_simd_sums_of_n :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 	arg_type := base_type(y.type)
 	if !is_type_integer(arg_type) || y.mode != .Constant {
 		error(call.args[1], "Indices to '%s' must be constant integers", builtin_name)
+		return false
+	}
+
+	// C++ Reference: check_builtin.cpp:1701-1704 (merge ebac23eb0). Narrow the constant from
+	// BigInt to a type BEFORE exact_value_to_i64. LEDGER #798.
+	convert_to_typed(ctx, &y, t_int)
+	if y.mode == .Invalid {
 		return false
 	}
 
@@ -1680,6 +1706,14 @@ check_builtin_simd_deinterleave :: proc(ctx: ^Checker_Context, operand: ^Operand
 	}
 	if _, is_integer := n.value.(big.Int); !is_integer {
 		error(call.args[1], "'%s' expected a constant integer divisible by the count of the #simd vector", builtin_name)
+		return false
+	}
+
+	// C++ Reference: check_builtin.cpp:1951-1954 (merge ebac23eb0). Upstream notes this one
+	// "also sets the return arity", so the narrowing is load-bearing beyond the i64 read.
+	// LEDGER #798.
+	convert_to_typed(ctx, &n, t_int)
+	if n.mode == .Invalid {
 		return false
 	}
 

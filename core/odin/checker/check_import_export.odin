@@ -900,11 +900,13 @@ set_ast_flag :: proc(ctx: ^Checker_Context, node: ^ast.Node, flag: State_Flag) {
 // bail, so pkg=nil). Measured on base/runtime: 23 entities flipping between 'runtime' and nil
 // across 8 runs, with every other field -- type, size, align, flags, position -- identical.
 //
-// The `untyped` parameter is C++'s third argument. It defaults to nil here because NO caller in
-// the port passes one yet: Checker_Context.untyped is read in 12 places (check_expr's untyped
-// cache among them) and written in none, so that cache has never operated. Wiring the callers is
-// a real behavioural change to a live subsystem and is deliberately left to its own task rather
-// than smuggled in with a determinism fix.
+// The `untyped` parameter is C++'s third argument. It still defaults to nil, but the claim that
+// used to stand here -- "NO caller in the port passes one yet ... that cache has never operated" --
+// is OUT OF DATE as of LEDGER #856/#857. check_set_expr_info now has a live writer (add_untyped,
+// via check_expr_base), and check_collect.odin's collect and delayed-decl passes now hand it a
+// real map. This particular procedure still has no caller that passes one, because the collect
+// worker sets ctx.untyped directly rather than going through a context reset; see #857 for why
+// that shape was kept.
 reset_checker_context :: proc(ctx: ^Checker_Context, file: ^ast.File, untyped: ^map[^ast.Expr]^Expr_Info = nil) {
 	// C++ guards the CONTEXT only. A nil file is a legitimate input that must still produce a
 	// well-formed context, which is precisely what the old early return got wrong.

@@ -2294,8 +2294,19 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 								// internals ("Int{used = 1, digit = [8192, 0, ...]}").
 								dup_str := expr_to_string(case_expr)
 								defer delete(dup_str)
-								error_node(case_expr, "Duplicate case '%s'", dup_str)
-								error_line("\tprevious case at %s", token_pos_to_string(entry.token.pos))
+								// ONE call with the continuation EMBEDDED, not error_node + error_line.
+								// C++ Reference: check_expr.cpp:9673-9677 builds it as a single format
+								// string, `"Duplicate case '%s'\n" "\tprevious case at %s"`, so the
+								// continuation is part of the MESSAGE and prints BEFORE the source
+								// snippet. `error_line` appends AFTER the snippet, which put the
+								// "previous case at" line in the wrong place:
+								//     oracle: Error / previous case at / source / caret
+								//     port:   Error / source / caret / previous case at
+								// The port's OTHER FOUR duplicate-case emitters (:48, :2064, :2103,
+								// :2149) already use the embedded form -- which is why the TYPE-switch
+								// duplicate matched all along and only this one drifted. LEDGER #806.
+								error_node(case_expr, "Duplicate case '%s'\n\tprevious case at %s",
+									dup_str, token_pos_to_string(entry.token.pos))
 								break
 							}
 						}
@@ -2495,11 +2506,8 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 	//   3. UPSTREAM ODDITY, reproduced deliberately: C++ reports the kind of RHS and
 	//      positions the error at RHS, even though it is LHS that failed the test. Almost
 	//      certainly a copy-paste slip, but it is what the oracle prints.
-	lhs_ident, is_ident := lhs.derived.(^ast.Ident)
-	if !is_ident {
-		error_node(rhs, "Expected an identifier, got '%s'", ast_kind_string(rhs))
-		return viral_flags
-	}
+	//   4. IT ALSO SITS AFTER THE MULTIPLE-DEFAULTS LOOP -- see the relocated block below.
+	//      That is #779, and it is why this check is NOT here any more.
 
 	// Validate #partial is only used with unions
 	if stmt.partial {
@@ -2530,6 +2538,22 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 		} else {
 			error_node(case_stmt, "Invalid AST - expected case clause")
 		}
+	}
+
+	// C++ Reference: check_stmt.cpp check_type_switch_stmt:1487-1490. RELOCATED HERE from before
+	// the `#partial` validation, because C++ runs the multiple-defaults loop (:1461-1485) FIRST and
+	// only then tests the identifier -- and that test RETURNS.
+	//
+	// The port had it earlier, so a type switch with a non-identifier tag AND duplicate defaults
+	// reported ONLY the identifier error and swallowed every "Multiple default clauses". C++ emits
+	// both. `switch a.b in u { case int: ; case: ; case: }` -- oracle 2 errors, port 1. LEDGER #779.
+	//
+	// See the note above for the three other deliberate properties of this check (position after
+	// the switch-kind validation, node KIND not node, and the upstream lhs/rhs slip).
+	lhs_ident, is_ident := lhs.derived.(^ast.Ident)
+	if !is_ident {
+		error_node(rhs, "Expected an identifier, got '%s'", ast_kind_string(rhs))
+		return viral_flags
 	}
 
 	// C++ lines 1457-1459: Track seen types for duplicate case type detection
@@ -2563,8 +2587,17 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 			continue
 		}
 
-		// Determine the case type for the tag variable
-		case_type := x.type // Default to original type
+		// Determine the case type for the tag variable.
+		//
+		// C++ Reference: check_stmt.cpp check_type_switch_stmt:1587-1592. THE SENTINEL IS nil,
+		// NOT `x.type`, and that is load-bearing: C++ ends the clause with
+		//     if (cc->list.count > 1 || saw_nil) { case_type = nullptr; }
+		//     if (case_type == nullptr)          { case_type = type_deref(x.type); }
+		// so EVERY non-narrowing clause -- multi-type, nil-bearing, AND the DEFAULT clause (whose
+		// list is empty, so the count test never fires and it arrives still nullptr) -- binds the
+		// DEREFERENCED subject type. The port seeded `x.type` here instead, which made the two
+		// conditions collapse into one and dropped the deref entirely. LEDGER #781.
+		case_type: ^Type = nil
 		saw_nil := false
 
 		// Check each case type expression
@@ -2657,9 +2690,34 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 				// AFTER them. The port emitted the note below the caret block and the oracle emits
 				// it above. C++ also has no ERROR_BLOCK() at this site -- with a single error call
 				// there is nothing to group -- so the port's begin/end_error_block pair is gone too.
+				// LEDGER #882, FOURTH correction at this site: the ANCHOR is `y.expr`, not
+				// `type_expr`. C++ passes ONE node to `error()` and it is the OPERAND's expr --
+				// the same node it renders with `expr_to_string` two lines up. The port had the
+				// citation right (see the quoted C++ above) and the code wrong: it took the
+				// message from `y.expr` and the anchor from `type_expr`, splitting across two
+				// nodes where C++ uses one.
+				//
+				// MEASURED, and it is why this was filed as one defect and is really two. Removing
+				// the invented `o.expr = node` in check_expr.odin's polymorphic-instantiation arm
+				// fixed the message text and left the caret untouched:
+				//     probe   switch v in x { case Foo(int): ...; case Foo(int): ... }
+				//     oracle  Duplicate type case 'Foo'       caret ^~^        (3 columns)
+				//     before  Duplicate type case 'Foo(int)'  caret ^~~~~~~^   (8 columns)
+				//     mid     Duplicate type case 'Foo'       caret ^~~~~~~^   <- message fixed only
+				//     after   Duplicate type case 'Foo'       caret ^~^
+				// The filed report asserted the message and the caret were "ONE defect with two
+				// symptoms", reasoning that caret width derives from the reported node so both had
+				// to follow from a single wrong node. That reasoning was sound but the premise was
+				// not: there were TWO wrong nodes, in two different files, and only the middle
+				// measurement could tell them apart.
+				//
+				// `type_expr` is the case-list entry (`Foo(int)`); `y.expr` is what checking it
+				// produced (`Foo`, once the instantiation arm stops widening it). For a plain
+				// `case f32:` the two coincide, which is why every non-polymorphic probe -- and so
+				// every corpus member -- agreed on this line before the fix.
 				expr_str := expr_to_string(y.expr)
 				defer delete(expr_str)
-				error_node(type_expr, "Duplicate type case '%s'\n\tprevious type case at %s",
+				error_node(y.expr, "Duplicate type case '%s'\n\tprevious type case at %s",
 					expr_str, token_pos_to_string(case_clause.case_pos))
 				break
 			}
@@ -2671,9 +2729,14 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 			}
 		}
 
-		// Multiple cases or nil means tag keeps original type
+		// C++ Reference: check_stmt.cpp:1587-1592, transcribed as its two separate steps.
+		// Keeping them separate is what makes the DEFAULT clause work: `len(list) > 1` is FALSE
+		// for an empty list, so the default clause is caught by the nil test below, not this one.
 		if len(case_clause.list) > 1 || saw_nil {
-			case_type = x.type
+			case_type = nil
+		}
+		if case_type == nil {
+			case_type = type_deref(x.type)
 		}
 
 		// C++ Reference: check_stmt.cpp check_type_switch_stmt:1593-1597. This is a SECOND
@@ -2682,23 +2745,23 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 		// per case CLAUSE, after the list has been walked.
 		//
 		// It is not a duplicate of the in-loop call, because the VALUE differs whenever the clause
-		// does not name exactly one type. C++ nulls `case_type` for a multi-type or nil-bearing
-		// clause and then falls back to `type_deref(x.type)` (:1590-1592), so such a clause
-		// registers the SWITCH SUBJECT's dereferenced type -- which the in-loop call never
-		// registers. The port's `case_type` follows the same flow but keeps `x.type` rather than
-		// nil as its sentinel, so the fallback is spelled as the explicit condition below.
+		// does not name exactly one type: such a clause registers the SWITCH SUBJECT's
+		// DEREFERENCED type, which the in-loop call never registers.
 		//
 		// The deref is deliberate and NOT applied to the single-type case: `case ^Foo:` registers
 		// `^Foo` in C++, and a blanket `type_deref` would wrongly reduce it to `Foo`.
 		//
 		// `!is_type_untyped` is C++'s guard at :1594. LEDGER #690.
+		//
+		// #781 COLLAPSED A DUPLICATE HERE. This block used to recompute the deref itself
+		// (`reg_type := case_type; if len(list) != 1 || saw_nil { reg_type = type_deref(x.type) }`)
+		// because the port's `case_type` did not carry it. That made the fallback rule exist in
+		// TWO places -- and only this copy was right, so the tag variable bound `^U` where C++
+		// binds `U`. `case_type` now carries the deref, exactly as C++'s does, and this block is
+		// C++:1593-1597 verbatim with no second copy of the rule to drift.
 		if switch_kind == .Any {
-			reg_type := case_type
-			if len(case_clause.list) != 1 || saw_nil {
-				reg_type = type_deref(x.type)
-			}
-			if !is_type_untyped(reg_type) {
-				add_type_info_type(ctx, reg_type)
+			if !is_type_untyped(case_type) {
+				add_type_info_type(ctx, case_type)
 			}
 		}
 

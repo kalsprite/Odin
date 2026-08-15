@@ -11,8 +11,6 @@ import "core:fmt"
 import "core:math/big"
 import "core:odin/ast"
 import "core:odin/tokenizer"
-import "core:os"
-import "core:path/filepath"
 import "core:slice"
 import "core:strings"
 import "core:sync"
@@ -68,7 +66,16 @@ check_load_directive :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^as
 	// Check argument count
 	if len(ce.args) != 1 && len(ce.args) != 2 {
 		if len(ce.args) == 0 {
-			error_node(call_node, "'#%s' expects 1 or 2 arguments, got 0", name)
+			// ANCHOR IS `ce.close`, THE CLOSING PAREN -- NOT the whole call.
+			// C++ Reference: check_builtin.cpp check_load_directive:2154, `error(ce->close, ...)`.
+			// With no arguments there is no `args[0]` to point at, so C++ points at `)`.
+			// This copy used `call_node`, which starts at `#load`, putting the caret ~6 columns
+			// early. The port's OTHER copy of this same function (check_builtin.odin:3709) had it
+			// RIGHT all along -- the drift is between the two copies, and only this one was wrong.
+			// `#load() or_else y` -- oracle 3:12, port was 3:6. LEDGER #793/#794.
+			// `error`, not `error_node`: `ce.close` is a Pos, not a ^Node. The other copy at
+			// check_builtin.odin:3709 already spelled it `error(call_expr.close, ...)`.
+			error(ce.close, "'#%s' expects 1 or 2 arguments, got 0", name)
 		} else {
 			error_node(ce.args[0], "'#%s' expects 1 or 2 arguments, got %d", name, len(ce.args))
 		}
@@ -118,45 +125,43 @@ check_load_directive :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^as
 		return .Not_Found
 	}
 
-	// Resolve path relative to source file
-	// C++ Reference: check_builtin.cpp:1845-1860
-	full_path := path_str
-	if ctx.file != nil && ctx.file.fullpath != "" && !filepath.is_abs(path_str) {
-		// Get directory of source file and join with relative path
-		src_dir := filepath.dir(ctx.file.fullpath)
-		joined, join_err := filepath.join({src_dir, path_str})
-		if join_err != nil {
-			if err_on_not_found {
-				error_node(arg, "'#%s' could not resolve path for '%s'", name, path_str)
-			}
-			return .Not_Found
-		}
-		full_path = joined
+	// LEDGER #884. THIS USED TO HAND-ROLL THE LOAD and it was the largest of #793's divergences --
+	// larger than the three that file recorded, and not among them.
+	//
+	// C++ Reference: check_builtin.cpp check_load_directive:2223-2228, the WHOLE tail:
+	//
+	//     LoadFileCache *cache = nullptr;
+	//     if (cache_load_file_directive(c, call, o.value.value_string, err_on_not_found, &cache,
+	//                                   LoadFileTier_Contents)) {
+	//         operand->value = exact_value_string(cache->data);
+	//         return LoadDirective_Success;
+	//     }
+	//     return LoadDirective_NotFound;
+	//
+	// What was here instead: `filepath.dir` + `filepath.join` to resolve the path by hand, then
+	// `os.read_entire_file`. Two consequences, neither of them cosmetic:
+	//
+	//   1. IT BYPASSED THE COMPILE-TIME FILE CACHE ENTIRELY. `cache_load_file_directive` exists so
+	//      that N `#load`s of one file read it once; this path read it every time. The port's OTHER
+	//      copy of this function (the inline `#load` arm in check_builtin.odin) called the cache
+	//      correctly all along -- so the two copies disagreed about the load MECHANISM, not merely
+	//      about messages, and #793's "delete the inline arm and delegate to this one" would have
+	//      kept the cache-bypassing half and discarded the faithful one.
+	//   2. It needed a port-only diagnostic, `"could not resolve path for '%s'"`, which existed
+	//      solely to report a `filepath.join` failure that C++ never performs and therefore never
+	//      reports. That message is now GONE, along with `"cannot load file"` -- the cache helper
+	//      owns both the path resolution and the error reporting, gated on `err_on_not_found`
+	//      exactly as C++ gates its own (2030-2035, 2110-2130).
+	//
+	// The operand ordering above is UNCHANGED and is the half this copy always had right: C++ sets
+	// `operand->type` (2179) and `operand->mode` (2197) BEFORE the cache call, so both survive a
+	// `NotFound` return. Only `operand.value` is set on success.
+	cache, load_ok := cache_load_file_directive(ctx, call_node, path_str, err_on_not_found, .Contents)
+	if load_ok && cache != nil {
+		operand.value = string(cache.data)
+		return .Success
 	}
-
-	// Try to read the file
-	// C++ Reference: check_builtin.cpp:1862-1875
-	// NOTE: the contents become a constant value on the operand, so they must be allocated
-	// persistently rather than in the temporary allocator.
-	data, read_err := os.read_entire_file(full_path, context.allocator)
-	if read_err != nil {
-		if err_on_not_found {
-			error_node(arg, "'#%s' cannot load file '%s'", name, path_str)
-		}
-		return .Not_Found
-	}
-
-	// Convert to appropriate type and set as constant value
-	// C++ Reference: check_builtin.cpp:1877-1880
-	if is_type_string(operand.type) {
-		operand.value = string(data)
-	} else {
-		// For []u8 or other slice types, store as raw bytes
-		// Note: The exact value representation depends on how constants are stored
-		operand.value = string(data)  // Store as string, will be reinterpreted at codegen
-	}
-
-	return .Success
+	return .Not_Found
 }
 
 // is_valid_type_for_load is defined in check_builtin.odin
@@ -1497,8 +1502,29 @@ check_binary_matrix :: proc(ctx: ^Checker_Context, node: ^ast.Node, x: ^Operand,
 					x.type = y.type
 				}
 			} else {
+				// C++ Reference: check_expr.cpp check_binary_matrix:4272-4288 (merge ebac23eb0).
+				// NEW overflow guard, with upstream's rationale verbatim:
+				//   "the result takes its rows from one operand and its columns from the other,
+				//    so it can be larger than either. Each dimension is at least
+				//    MATRIX_ELEMENT_COUNT_MIN, so testing them first keeps the product in range."
+				// Both operands can individually be within the element cap while their PRODUCT
+				// matrix is not -- nothing downstream tested for it. LEDGER #798.
+				row_count := x_rows
+				column_count := y_cols
+				if row_count > MATRIX_ELEMENT_COUNT_MAX ||
+				   column_count > MATRIX_ELEMENT_COUNT_MAX ||
+				   row_count*column_count > MATRIX_ELEMENT_COUNT_MAX {
+					error_node(x.expr, "Matrix multiplication result exceeds the maximum matrix element count, got %d, expected a maximum of %d", row_count*column_count, MATRIX_ELEMENT_COUNT_MAX)
+					x.mode = .Invalid
+					x.type = t_invalid
+					// false = error in this procedure's convention: every other failure path here
+					// is `return matrix_error(...)`, and matrix_error returns false; the success
+					// path falls through to `return true` at the end.
+					return false
+				}
+
 				is_row_major := x_mat.is_row_major && y_mat.is_row_major
-				x.type = alloc_type_matrix(x_elem, x_rows, y_cols, nil, nil, is_row_major)
+				x.type = alloc_type_matrix(x_elem, row_count, column_count, nil, nil, is_row_major)
 			}
 
 		case x_is_matrix && y_is_arr:
@@ -3080,6 +3106,42 @@ check_get_expr_info :: proc(ctx: ^Checker_Context, expr: ^ast.Expr) -> ^Expr_Inf
 	return nil
 }
 
+// add_untyped records an UNTYPED expression's provisional info so a later conversion can find it.
+// C++ Reference: checker.cpp add_untyped:1930-1945
+//
+// LEDGER #843/#850/#855/#856. Until this existed, check_set_expr_info had ZERO CALLERS: the whole
+// untyped-expression-info subsystem was written and inert. That is also why #855's missing lock had
+// never been tripped -- the writes it failed to guard were never executed.
+//
+// ONE DELIBERATE DIVERGENCE, and it is a guard, not a rule. C++'s third guard is
+//     compiler_error("add_untyped - invalid type: %s", type_to_string(type));
+// which is a HARD PROCESS ABORT. The port RETURNS instead, for two reasons:
+//   (a) it is unreachable from the sole call site: check_expr_base gates the call on
+//       is_type_untyped(o.type), and t_invalid's basic_flags_table row is `.Invalid = {}`, so
+//       is_type_untyped(t_invalid) is FALSE and a (.Constant, t_invalid) operand never arrives
+//       here at all;
+//   (b) LEDGER #12 -- this checker is a LIBRARY inside a host process. Turning an
+//       internal-consistency signal into a process abort is exactly the class that fix removed.
+// Everything else is line for line.
+add_untyped :: proc(ctx: ^Checker_Context, expr: ^ast.Node, mode: Addressing_Mode, type: ^Type, value: Exact_Value) {
+	if expr == nil {
+		return
+	}
+	if mode == .Invalid {
+		return
+	}
+	if mode == .Constant && type == t_invalid {
+		// C++ compiler_errors here; see (a)/(b) above.
+		return
+	}
+	if !is_type_untyped(type) {
+		return
+	}
+	// ast.Expr embeds ast.Node as its first field, so this is the same address; the map uses the
+	// pointer purely as an identity key and never reads through it as an Expr.
+	check_set_expr_info(ctx, cast(^ast.Expr)expr, mode, type, value)
+}
+
 // check_set_expr_info stores expression info in temporary untyped map
 // C++ Reference: checker.cpp check_set_expr_info
 // This stores temporary ExprInfo during untyped expression processing.
@@ -3157,8 +3219,14 @@ add_type_and_value :: proc(ctx: ^Checker_Context, expr: ^ast.Node, mode: Address
 	if mode == .Invalid {
 		return
 	}
-	// C++ checker validates constant mode has valid type
-	if mode == .Constant && type == nil {
+	// LEDGER #813. C++ Reference: checker.cpp add_type_and_value:1968-1970 --
+	//     if (mode == Addressing_Constant && type == t_invalid) { return; }
+	// The port tested `type == nil`, which is NOT the same predicate and diverged in BOTH
+	// directions: on (.Constant, t_invalid) C++ returned and the port wrote a tav; on
+	// (.Constant, nil) the port returned and C++ wrote one. The port HAS `t_invalid`, so
+	// there was never a reason to substitute. Do NOT "repair" this as `nil || t_invalid` --
+	// that is a third predicate matching neither implementation.
+	if mode == .Constant && type == t_invalid {
 		return
 	}
 
@@ -3186,31 +3254,61 @@ add_type_and_value :: proc(ctx: ^Checker_Context, expr: ^ast.Node, mode: Address
 	//   1. Mode is Constant or Invalid, OR
 	//   2. Mode is Value AND type is typeid, OR
 	//   3. Mode is Value AND type is proc
-	stored_value := value
-	if mode != .Constant && mode != .Invalid {
-		// For non-constant, non-invalid modes:
-		// Only store value if mode is Value AND type is typeid or proc
-		if mode != .Value || (final_type != nil && !is_type_typeid(final_type) && !is_type_proc(final_type)) {
-			stored_value = {} // Clear value
-		}
+	// LEDGER #833. C++ writes `tav.mode`, conditionally `tav.type`, and `tav.value` ONLY when one
+	// of those three arms fires. It never CLEARS value, and it never touches any other field of
+	// TypeAndValue. The port assigned a whole fresh struct, which did two things C++ does not:
+	//
+	//   (a) CLEARED `value` where C++ PRESERVES the previous one -- for `mode == .Value` with a
+	//       non-typeid non-proc type, all three C++ arms miss and the old value survives.
+	//   (b) ZEROED `objc_super_target` and `is_lhs`, neither of which C++ writes here.
+	//
+	// (b) made #829 item 1 DEAD. `check_builtin_objc_super` writes `call.tav.objc_super_target`,
+	// and then `check_expr_base`'s unconditional tail runs `add_type_and_value(ctx, node, ...)`
+	// on that SAME call node and wiped it. #832's crosstarget row could not see this: it compares
+	// DIAGNOSTICS, and this marker's only reader is the dependency roster.
+	should_store_value := mode == .Constant || mode == .Invalid
+	if !should_store_value && mode == .Value && final_type != nil {
+		should_store_value = is_type_typeid(final_type) || is_type_proc(final_type)
 	}
 
-	expr.tav = Type_And_Value {
-		type         = final_type,
-		mode         = mode,
-		is_lhs       = false, // Will be set appropriately by callers
-		is_bit_field = is_bit_field,
-		value        = stored_value,
+	expr.tav.mode = mode
+	expr.tav.type = final_type
+	// `is_bit_field` has no C++ counterpart in TypeAndValue (C++ keeps bit-field-ness on
+	// SelectorExpr/Selection), so C++ gives no rule for it. Writing it unconditionally preserves
+	// the port's existing behaviour; only the C++-governed fields change here.
+	expr.tav.is_bit_field = is_bit_field
+	if should_store_value {
+		expr.tav.value = value
 	}
 
-	// Propagate type/value through ALL parenthesis levels
-	// C++ Reference: checker.cpp:1792-1815
+	// Propagate type/value through the parenthesis levels.
+	// C++ Reference: checker.cpp add_type_and_value:1985-2007 (the `while (prev_expr != expr)` loop).
 	//
-	// CRITICAL: We must peel ONE paren level at a time and assign to each level.
-	// The old implementation used unparen_expr() which strips ALL parens at once,
-	// causing intermediate paren nodes to miss type/value assignments.
+	// LEDGER #836/#841. WHAT C++ ACTUALLY DOES, and why this loop's divergence is INERT.
 	//
-	// Example: (((x))) has 4 nodes to assign: (((x))), ((x)), (x), x
+	// C++ ends each iteration with `expr = unparen_expr(expr)`, and `unparen_expr`
+	// (parser.cpp:1944-1954) strips EVERY paren level at once. So for `(((x)))` C++'s loop writes
+	// exactly TWO nodes -- the outermost and `x` -- not four. This port peels ONE level per
+	// iteration and writes all four.
+	//
+	// That difference is REAL but has NO consequence, and the reason is that this loop is not what
+	// gives paren nodes their tav in EITHER implementation. `check_expr_base_internal`'s Paren_Expr
+	// arm is identical on both sides:
+	//
+	//     kind = check_expr_base(c, o, pe->expr, type_hint);   // RECURSES
+	//     node->viral_state_flags |= pe->expr->viral_state_flags;
+	//     o->expr = node;
+	//
+	// so `check_expr_base` descends through every level and its tail calls add_type_and_value on
+	// each node it returns through, with the same `o` and therefore the same (mode, type, value).
+	// Every paren level is populated in BOTH implementations by that recursion; the extra writes
+	// this loop performs are re-writing values that are already there and identical.
+	//
+	// DO NOT "align" this loop with C++. It would change nothing observable and only add risk.
+	// An earlier comment here claimed the opposite -- that C++'s unparen_expr behaviour was "the
+	// old implementation" and a bug that made intermediate nodes "miss" their assignments. That
+	// was wrong on both counts: it is C++'s current and deliberate behaviour, and nothing is
+	// missed either way.
 	current := expr
 	prev_expr: ^ast.Node = nil
 	for prev_expr != current {
@@ -3240,12 +3338,14 @@ add_type_and_value :: proc(ctx: ^Checker_Context, expr: ^ast.Node, mode: Address
 			}
 		}
 
-		current.tav = Type_And_Value {
-			type         = current_final_type,
-			mode         = mode,
-			is_lhs       = false, // Will be set appropriately by callers
-			is_bit_field = is_bit_field, // Propagate bit field flag through parens
-			value        = stored_value, // Use same conditional value as outer
+		// LEDGER #833, same field-wise semantics as the outer write above: mode always,
+		// type conditionally, value only when one of C++'s three arms fires, everything else
+		// (is_lhs, objc_super_target) left alone.
+		current.tav.mode = mode
+		current.tav.type = current_final_type
+		current.tav.is_bit_field = is_bit_field
+		if should_store_value {
+			current.tav.value = value
 		}
 	}
 }
@@ -4610,6 +4710,37 @@ convert_to_typed :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 		}
 
 	case .Union:
+		// LEDGER #846. C++ Reference: check_expr.cpp convert_to_typed, `case Type_Union:` — the
+		// FIRST thing that arm does, before any variant matching. Upstream's own comment:
+		//
+		//     IMPORTANT NOTE HACK(bill): This is just to allow for comparisons against `0` with
+		//     the `os.Error` type as a kind of transition period
+		//
+		// A deliberate carve-out, NOT a general rule — do not widen it. A zero integer/float
+		// constant converts to `os.Error` when the CHECKING package is not `os` itself, and only
+		// when `-strict-style` is off. It was never ported, so the port REJECTED `e: os.Error = 0`
+		// where the reference accepts it — a live over-rejection, probe `.claude/probes/p846oserr`.
+		//
+		// C++ ends the block with `break`, falling to the tail that sets `final_type` and calls
+		// update_untyped_expr_type; the port's tail does the same, so `break` here is the matching
+		// control flow, not `return`.
+		if !build_context.strict_style && operand.mode == .Constant && target_type.kind == .Named {
+			named := target_type.variant.(Type_Named)
+			if named.name == "Error" && (ctx.pkg == nil || ctx.pkg.name != "os") {
+				tn := named.type_name
+				if tn != nil && tn.pkg != nil && tn.pkg.name == "os" {
+					_, is_int := operand.value.(big.Int)
+					_, is_flt := operand.value.(f64)
+					if (is_int || is_flt) && is_exact_value_zero(operand.value) {
+						operand.mode = .Value
+						operand.value = nil
+						update_untyped_expr_value(ctx, operand.expr, operand.value)
+						break
+					}
+				}
+			}
+		}
+
 		// Union conversion: find matching variant
 		// C++ Reference: check_expr.cpp:4812-4937
 
@@ -8232,6 +8363,38 @@ check_or_branch_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node
 // assertion for the map expression, because a plain identifier was never recorded.
 check_expr_base :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, type_hint: ^Type) -> Expr_Kind {
 	kind := check_expr_base_internal(ctx, o, node, type_hint)
+	// C++ Reference: check_expr.cpp:12793-12802. LEDGER #812/#825/#856 -- the FIRST of the two
+	// tail blocks the port was missing. A type whose core_type is nil is a broken type that got
+	// past the dispatch; C++ poisons the operand and names it, choosing the message by whether the
+	// operand is a TYPE or a value. Reported on o.expr (the operand's own node), not `node`,
+	// exactly as C++ does -- the two differ once the dispatch has unwrapped parens or selectors.
+	if o.type != nil && core_type(o.type) == nil {
+		o.type = t_invalid
+		xs := expr_to_string(o.expr)
+		defer delete(xs)
+		if o.mode == .Type {
+			error(o.expr, "Invalid type usage '%s'", xs)
+		} else {
+			error(o.expr, "Invalid expression '%s'", xs)
+		}
+	}
+	// C++ Reference: check_expr.cpp:12803-12805. The SECOND missing block, and the one that gives
+	// the untyped-info subsystem its only writer. C++ passes `node` here, NOT o.expr: the untyped
+	// record is keyed by the node whose type-and-value is about to be recorded below, so keying it
+	// on the unwrapped operand would put the entry where no reader looks for it.
+	if o.type != nil && is_type_untyped(o.type) {
+		add_untyped(ctx, node, o.mode, o.type, o.value)
+	}
+	// C++ Reference: check_expr.cpp:12806, ordered BEFORE add_type_and_value exactly as C++
+	// orders it. C++ uses the Ast* overload (checker.cpp:51), which forwards ast_token(expr)
+	// to the Token overload the port exposes.
+	//
+	// This is the THIRD of C++'s three call sites; the port already had the other two
+	// (check_decl.odin:408, check_type.odin:424). Its absence was a live UNDER-rejection:
+	// the guard fires only when `build_context.no_rtti` AND the type is `any`, and `no_rtti`
+	// requires `-bedrock` (or a freestanding target), which no gate here passes -- so corpus
+	// and both parity sweeps could never see it. LEDGER #823.
+	check_rtti_type_disallowed(ctx, ast_token(node), o.type, "An expression is using a type, %s, which has been disallowed")
 	// C++ line 12688 — every expression, no exceptions. add_type_and_value itself skips
 	// .Invalid modes and nil nodes, matching C++'s own guards.
 	add_type_and_value(ctx, node, o.mode, o.type, o.value)
@@ -8653,10 +8816,18 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 		// Note: ast.Uninit doesn't exist, it's ast.Undef
 		o.mode = .Value
 		o.type = t_untyped_uninit
-		// C++ Reference: check_type.cpp handle_parameter_value:1769. A DEFAULT PARAMETER `---` gets its own message;
-		// the port was still emitting the global-variable wording here for both (probe
-		// n7_dashdash).
-		error(node, "Default parameter cannot be ---")
+		// C++ Reference: check_expr.cpp check_expr_base_internal:12432, the Ast_Uninit arm.
+		//
+		// THIS SITE IS THE GLOBAL-VARIABLE ONE, AND ONLY THAT ONE. C++ has a SECOND `---` message
+		// in a DIFFERENT FUNCTION -- check_type.cpp handle_parameter_value:1769 -- whose branch
+		// SHORT-CIRCUITS, so a default parameter never reaches here at all.
+		//
+		// The port previously had ONE site doing BOTH jobs, carrying the default-parameter text.
+		// A default parameter reached it only because handle_parameter_value fell through to
+		// check_expr; a package-level `y: int = ---` reached it too and got told it was a
+		// "default parameter". The two messages had to be SPLIT ACROSS THE TWO FUNCTIONS, not
+		// swapped at the shared one. LEDGER #804.
+		error(node, "Global variables will always be zeroed if left unassigned, --- is disallowed")
 		return .Expr
 
 	case ^ast.Basic_Directive:
@@ -9478,17 +9649,94 @@ write_type_to_string :: proc(b: ^strings.Builder, t: ^Type, shorthand := true) {
 				strings.write_string(b, ", ")
 			}
 			comma_index += 1
-			// Handle ellipsis (variadic)
-			if .Ellipsis in v.flags {
-				strings.write_string(b, "..")
-				if v.type != nil {
-					bt := base_type(v.type)
-					if sl, ok := bt.variant.(Type_Slice); ok {
-						write_type_to_string(b, sl.elem, shorthand)
-						continue
+
+			// LEDGER #828. C++ Reference: types.cpp write_type_to_string:5573-5624. C++ branches on the
+			// parameter ENTITY KIND here and has four distinct renderings. What stood here rendered only
+			// `v.type` (plus the ellipsis prefix), which collapsed all four onto one and dropped every
+			// `$`-prefixed decoration. The visible consequence: an INSTANTIATED polymorphic procedure
+			// printed `proc(i64, i64, f64) -> i64` where the reference prints
+			// `proc($T=i64, i64, f64) -> i64` -- reachable from any `#assert`/`#panic` inside such a body,
+			// whose continuation line is `Called within '<name>' :: <type_to_string(curr_proc_sig)>`
+			// (check_builtin.odin, C++ check_builtin.cpp:2639 and :2678-2682).
+			name := v.token.text
+
+			// C++ :5573-5587 -- a polymorphic VALUE parameter (`$N: int`, `$field_name: string`).
+			if v.kind == .Constant {
+				strings.write_string(b, "$")
+				strings.write_string(b, name)
+				value: Exact_Value
+				if ec, ok := v.variant.(Entity_Constant); ok {
+					value = ec.value
+				}
+				if !is_type_untyped(v.type) {
+					strings.write_string(b, ": ")
+					write_type_to_string(b, v.type, shorthand)
+					// C++ tests `var->Constant.value.kind`, i.e. "not ExactValue_Invalid". The port's
+					// Exact_Value is a union, so an unset value is nil.
+					if value != nil {
+						strings.write_string(b, " = ")
+						write_exact_value_to_string(b, value)
+					}
+				} else {
+					strings.write_string(b, " := ")
+					write_exact_value_to_string(b, value)
+				}
+				continue
+			}
+
+			// C++ :5589-5603 -- an ordinary value parameter.
+			if v.kind == .Variable {
+				if .C_Var_Arg in v.flags {
+					strings.write_string(b, "#c_vararg ")
+				}
+				// Handle ellipsis (variadic)
+				if .Ellipsis in v.flags {
+					strings.write_string(b, "..")
+					if v.type != nil {
+						bt := base_type(v.type)
+						if sl, ok := bt.variant.(Type_Slice); ok {
+							write_type_to_string(b, sl.elem, shorthand)
+							continue
+						}
 					}
 				}
+				write_type_to_string(b, v.type, shorthand)
+				continue
 			}
+
+			// C++ :5604-5623 -- a TYPE parameter. C++ GB_ASSERTs `var->kind == Entity_TypeName` here;
+			// the port must not abort a diagnostic path, so any other kind falls through to the plain
+			// type below rather than crashing.
+			if v.kind == .Type_Name {
+				gen: Type_Generic
+				is_generic: bool
+				if v.type != nil {
+					gen, is_generic = v.type.variant.(Type_Generic)
+				}
+				if is_generic {
+					// Still unbound: `$T: typeid`, optionally `/specialization`.
+					if len(name) != 0 {
+						strings.write_string(b, "$")
+						strings.write_string(b, name)
+						strings.write_string(b, ": typeid")
+						if gen.specialized != nil {
+							strings.write_string(b, "/")
+							write_type_to_string(b, gen.specialized, shorthand)
+						}
+					} else {
+						strings.write_string(b, "typeid/")
+						write_type_to_string(b, v.type, shorthand)
+					}
+				} else {
+					// BOUND by an instantiation: `$T=i64`. This is #828's reproducer.
+					strings.write_string(b, "$")
+					strings.write_string(b, name)
+					strings.write_string(b, "=")
+					write_type_to_string(b, v.type, shorthand)
+				}
+				continue
+			}
+
 			write_type_to_string(b, v.type, shorthand)
 		}
 
@@ -10209,7 +10457,11 @@ check_cast :: proc(ctx: ^Checker_Context, operand: ^Operand, target: ^Type, forb
 				add_package_dependency(ctx, "runtime", "floattidf", REQUIRE)
 			} else if is_type_integer_128bit(dst) && is_type_float(src) {
 				add_package_dependency(ctx, "runtime", "fixunsdfti", REQUIRE)
-				add_package_dependency(ctx, "runtime", "fixunsdfdi", REQUIRE)
+				// C++ Reference: check_expr.cpp:3985 (merge ebac23eb0) -- "fixunsdfdi" became
+				// "fixdfti". The float -> 128-bit-int conversion needs the SIGNED ti helper, not
+				// the unsigned di one; the old name pulled in a 64-bit routine for a 128-bit
+				// conversion. Upstream PR #7321 / #7319 (float-to-128-bit fixes). LEDGER #798.
+				add_package_dependency(ctx, "runtime", "fixdfti", REQUIRE)
 			} else if src == t_f16 && is_type_float(dst) {
 				add_package_dependency(ctx, "runtime", "gnu_h2f_ieee", REQUIRE)
 				add_package_dependency(ctx, "runtime", "extendhfsf2", REQUIRE)
@@ -10991,7 +11243,80 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 			if specialized_type != nil {
 				o.mode = .Type
 				o.type = specialized_type
-				o.expr = node
+				// LEDGER #882. There is DELIBERATELY no `o.expr = node` here.
+				//
+				// C++ Reference: check_expr.cpp check_call_expr_as_type_cast:8677-8688. Its success
+				// arm never reassigns `operand->expr` -- it READS it, and depends on it still being
+				// the CALLEE that was placed there when the callee was checked:
+				//     auto err = check_polymorphic_record_type(c, operand, call);
+				//     if (err == 0) {
+				//         Ast *ident = operand->expr;                 // <-- the CALLEE, `Foo`
+				//         while (ident->kind == Ast_SelectorExpr) { ident = ...selector; }
+				//         Entity *e = operand->type->Named.type_name;
+				//         add_entity_use(c, ident, e);                // ident
+				//         add_type_and_value(c, call, Addressing_Type, ot, empty_exact_value);
+				//     }                                               // call
+				// Note C++'s deliberate SPLIT on the last two lines: the entity use is recorded
+				// against the IDENT, the type-and-value against the CALL. The operand expression
+				// carrying the callee is load-bearing there, not incidental.
+				//
+				// The port used to write `o.expr = node`, widening the operand from the callee
+				// `Foo` to the whole call `Foo(int)`. MEASURED consequence, on
+				// `switch v in x { case Foo(int): ...; case Foo(int): ... }`:
+				//     oracle  Duplicate type case 'Foo'        caret ^~^        (3 columns)
+				//     port    Duplicate type case 'Foo(int)'   caret ^~~~~~~^   (8 columns)
+				// Message text and caret width were ONE defect, not two: caret width derives from
+				// the reported node's pos..end, so both are consequences of reporting on a
+				// different AST node. (Same shape as #574.)
+				//
+				// WHY THE ASSIGNMENT EXISTS AT ALL, and why removing it is safe rather than a
+				// dropped write: the two implementations split this work differently. C++'s
+				// `check_polymorphic_record_type(c, Operand *operand, Ast *call)` MUTATES the
+				// operand in place, so its caller sets nothing. The port's returns a `^Type` and
+				// takes no operand, so the caller must set `o.mode` and `o.type` itself -- and
+				// whoever wrote it set `o.expr` in the same breath. Only mode and type are
+				// actually delegated; the expr was never C++'s to set.
+				//
+				// The `add_type_and_value(ctx, node, ...)` below IS faithful and must stay pointed
+				// at `node` -- that is C++'s `add_type_and_value(c, call, ...)`, the CALL half of
+				// the split above. Do not "fix" it to match this change.
+
+				// LEDGER #883. C++ does TWO things in this arm, and #882 only cleared the obstacle
+				// to the second. Now that `o.expr` correctly holds the callee ident, C++'s rebinding
+				// is portable (check_expr.cpp:8679-8687):
+				//
+				//     Ast *ident = operand->expr;
+				//     while (ident->kind == Ast_SelectorExpr) { ident = ident->SelectorExpr.selector; }
+				//     Entity *e = operand->type->Named.type_name;   // the INSTANTIATED type
+				//     add_entity_use(c, ident, e);
+				//
+				// Both implementations already record a use when the CALLEE is checked, so this is a
+				// REBINDING from the generic `Foo` to the instantiation -- and, with more teeth, it
+				// marks the INSTANTIATION's entity USED. Without it that entity is never marked,
+				// which the entity roster or an unused-entity check could see.
+				//
+				// NO OBSERVABLE WAS PRODUCED, stated rather than implied: corpus/parity/parity_vet
+				// compare diagnostics, modelsweep compares layout, and entity-use state surfaces in
+				// the roster and doc output instead. The justification is faithfulness -- a missing
+				// call is a simplification, and this port's standard is parity. Rule 80's debt is
+				// acknowledged, not discharged.
+				//
+				// C++ spells the field `SelectorExpr.selector`; this AST spells it
+				// `Selector_Expr.field`.
+				ident := o.expr
+				for ident != nil {
+					sel, is_sel := ident.derived.(^ast.Selector_Expr)
+					if !is_sel {
+						break
+					}
+					ident = sel.field
+				}
+				if ident != nil {
+					if named, is_named := specialized_type.variant.(Type_Named); is_named {
+						add_entity_use(ctx, ident, named.type_name)
+					}
+				}
+
 				add_type_and_value(ctx, node, o.mode, o.type, o.value)
 				return .Expr
 			} else {
@@ -11158,6 +11483,21 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		success := check_builtin_procedure(ctx, o, call, builtin_id, type_hint)
 		if !success {
 			o.mode = .Invalid
+			// LEDGER #831. C++ Reference: check_expr.cpp check_call_expr:8896-8899 --
+			//     if (!check_builtin_procedure(c, operand, call, id, type_hint)) {
+			//         operand->mode = Addressing_Invalid;
+			//         operand->type = t_invalid;
+			//     }
+			// The `type` half was missing. This is the SINGLE generic site where C++ installs the
+			// invalid sentinel after a failed builtin, so its absence left the ORIGINAL type on the
+			// operand for EVERY builtin failure, not just one builtin's.
+			//
+			// Observable: any diagnostic that CASCADES off a failed builtin prints the stale type.
+			// Caught by the darwin probe in #830 -- `objc_send(rawptr, objc_super(d), "init")` where
+			// objc_super fails: the oracle's follow-on message says "of type invalid type", the port
+			// said "of type ^Derived". #825 recorded that not every C++ error path installs the
+			// sentinel; this is one that does, and it is the shared one.
+			o.type = t_invalid
 			o.expr = node
 			return .Stmt
 		}
@@ -11595,6 +11935,13 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 	// is_type_objc_ptr_to_object feed ONLY that backend path --
 	// an earlier note on #296 claimed the instance-method branch needed them, which was
 	// imprecise: they are needed for param_types, not for the return type.
+	//
+	// CORRECTION (#832): `is_type_objc_ptr_to_object` is NOT backend-only either. It is the FIRST
+	// GUARD of C++'s objc_super (check_builtin.cpp:698), i.e. a checker-side diagnostic gate, and
+	// the port's objc_super now spells out its three conjuncts inline. That makes this the SECOND
+	// correction to this paragraph -- #568 already struck objc_super_target off the same list.
+	// The pattern is worth naming: a note that says "X is backend-only" ages badly, because it is
+	// a claim about EVERY reader of X, and one new reader falsifies it.
 	//
 	// CORRECTION (#568): tav.objc_super_target is NOT backend-only and was wrongly listed above.
 	// It has a second, checker-side reader -- check_builtin.cpp add_objc_proc_type:259 gates the
@@ -12103,8 +12450,31 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 				where_ctx.curr_proc_decl = gen_decl
 				where_ctx.curr_proc_sig = entity_type(poly_data.gen_entity)
 
-				_ = evaluate_where_clauses(&where_ctx, call, gen_decl.scope, gen_decl.proc_lit.where_clauses, true)
-				gen_decl.where_clauses_evaluated = true
+				// LEDGER #890. CLAIM BEFORE PRINTING. This is the site that actually renders a
+				// failing `where` clause on the instantiation path, and it used to print
+				// UNCONDITIONALLY and set the flag AFTERWARDS -- which is the whole window.
+				//
+				// C++ check_expr.cpp:7364-7371 has the same shape (evaluate, then
+				// `decl->where_clauses_evaluated = true`), and is therefore racy in the same way;
+				// the ORACLE was measured duplicating this render 1 time in 10. The other reader,
+				// check_proc.odin (C++ check_decl.cpp:2227), consults the flag -- so when the body
+				// check runs before this store lands, BOTH sites print and the same-anchor merge
+				// concatenates the two continuation tails into one header. That is the observed
+				// output exactly.
+				//
+				// #889 put the compare-exchange on the check_proc.odin READER and measured NO
+				// improvement (6/30), which is what proved the duplication is CROSS-SITE: making
+				// one reader exclusive among its own entrants cannot stop a second site that never
+				// consults anything. The claim has to be here, where the print is.
+				//
+				// Deliberately stronger than C++, on #888's reasoning: C++'s behaviour here is a
+				// race that MISRENDERS, so reproducing it faithfully means reproducing a defect.
+				// Filed upstream alongside this.
+				claimed := true
+				if gen_decl != nil {
+					_, claimed = sync.atomic_compare_exchange_strong(&gen_decl.where_clauses_evaluated, false, true)
+				}
+				_ = evaluate_where_clauses(&where_ctx, call, gen_decl.scope, gen_decl.proc_lit.where_clauses, claimed)
 			}
 		}
 		// Continue with normal argument checking using the specialized type
@@ -12213,14 +12583,14 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 				arg_op := positional_operands[i]
 
 				if arg_op.mode != .Invalid {
-					// C++ Reference: check_expr.cpp check_call_arguments_internal:7018 routes EVERY variadic operand
+					// C++ Reference: check_expr.cpp check_call_arguments_internal routes EVERY variadic operand
 					// through the same eval_param_and_score lambda as every other argument,
 					// passing the ELEMENT type as param_type:
 					//
 					//     score += eval_param_and_score(c, o, t, err, true, var_entity, show_error);
 					//
-					// and the lambda calls check_assignment on BOTH paths -- :6879 on failure
-					// and :6884 on success.
+					// and the lambda calls check_assignment on BOTH paths -- its failure arm
+					// and its success arm.
 					//
 					// There is no `is_variadic_any` branch in C++. The port had one, and it
 					// substituted a bare add_type_info_type(arg_op.type) for the whole call.
@@ -12230,14 +12600,16 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 					// So `any` -- the type every ..any call must have RTTI for -- was never
 					// registered by any call site in the whole port. LEDGER #697.
 					if !check_is_assignable_to(ctx, &arg_op, variadic_elem_type) {
-						// C++ Reference: check_expr.cpp check_call_arguments_internal:6879, same lambda, same context
-						// name. "Cannot pass argument of type '%s' to variadic parameter
+						// C++ Reference: check_expr.cpp check_call_arguments_internal, the eval_param_and_score
+						// lambda's FAILURE arm -- same context name.
+						// "Cannot pass argument of type '%s' to variadic parameter
 						// of type '..%s'" was invented.
 						check_assignment(ctx, &arg_op, variadic_elem_type, "procedure argument")
 						data.error = true
 					} else {
-						// C++ Reference: check_expr.cpp check_call_arguments_internal:6884. The success path calls
-						// check_assignment too; this is where the ..any conversion is
+						// C++ Reference: check_expr.cpp check_call_arguments_internal, the eval_param_and_score
+						// lambda's SUCCESS arm. It calls check_assignment too;
+						// this is where the ..any conversion is
 						// performed and its RTTI registered. #194's finding, at the one
 						// argument path that had not yet been corrected.
 						check_assignment(ctx, &arg_op, variadic_elem_type, "procedure argument")

@@ -56,6 +56,24 @@ MANIFEST=(
   "mp611e|-target:js_wasm32 -microarch:bleeding-edge|#611 bespoke operand message: ^u32 for the memory pointer."
   "mp611f|-target:js_wasm32 -microarch:bleeding-edge|#611 the other four bespoke messages, one bad operand per call (C++ returns after the first failure)."
   "mp612|-target:js_wasm32|#612 has_target_feature: bulk-memory true and sse2 false on wasm32 generic. Pins the per-arch table walk."
+  # #823. These are here rather than in corpus.sh because corpus members run plain `odin build`
+  # with NO -bedrock, so build_context.no_rtti is false and check_rtti_type_disallowed cannot
+  # fire. That is precisely why the defect survived 326 corpus probes and two 323-package parity
+  # sweeps. `-bedrock` ALONE is enough: it is a COMPOSITE that sets no_rtti on both sides
+  # (C++ main.cpp:1669-1673; the port models it in triage_st). Passing -no-rtti as well would be
+  # worse than redundant -- the port harness turns an unknown -flag into a PHANTOM PACKAGE.
+  "rtti_decl|-bedrock|#823 the rtti expression-path call: a declaration reaching the check_expr_base tail. Oracle 2 errors, port 1 before the fix."
+  "rtti_expr|-bedrock|#823 the same tail via a pure EXPRESSION (an any-returning call, discarded) -- neither a declaration nor a type usage, so only the tail can report it."
+
+  # LEDGER #832. objc_super is DARWIN-ONLY, so nothing in the 327-member corpus or either
+  # 323-package parity sweep can reach it -- this row is the FIRST gate over that surface.
+  # It exercises three fixes at once: #831's invalid sentinel (the cascading objc_send message
+  # reads "of type invalid type" only if the failed builtin repaired the operand), and #832's
+  # single collapsed guard plus its corrected predicate. On the pre-fix binary the second
+  # diagnostic reads "type has no @(objc_superclass=...) attribute defined" instead of C++'s
+  # "expected a pointer to an Objective-C object, but got 'd' of type ^Derived", so this row
+  # can fail.
+  "p829objc|-target:darwin_amd64|#832 objc_super's guard, message and invalid-sentinel repair -- the only darwin-reachable surface any gate covers."
 )
 
 # --- Exclusions: NAMED, with reasons, and PRINTED ---------------------------------------------------

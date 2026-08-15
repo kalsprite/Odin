@@ -893,10 +893,20 @@ check_matrix_type_hint :: proc(matrix_type: ^Type, type_hint: ^Type) -> ^Type {
 			xt_matrix := &xt.variant.(Type_Matrix)
 			th_matrix := &th.variant.(Type_Matrix)
 
-			// If elements don't match, ignore
+			// C++ Reference: check_expr.cpp check_matrix_type_hint:4215-4222 (merge ebac23eb0).
+			// TWO changes upstream, only one of which the port needed:
+			//   (a) `} if (` -> `} else if (` -- upstream's missing `else` meant the "ignore"
+			//       branch FELL THROUGH into the dimension test, so two matrices with different
+			//       ELEMENT types could still return type_hint. The port already had `else if`
+			//       here, so it never carried that bug and needs no change for it.
+			//   (b) a THIRD conjunct, `is_row_major` equality -- that one WAS missing here. Two
+			//       matrices of identical element type and dimensions but opposite majorness are
+			//       not interchangeable, and the hint must not be returned for them. LEDGER #798.
 			if !are_types_identical(xt_matrix.elem, th_matrix.elem) {
 				// ignore - fall through
-			} else if xt_matrix.row_count == th_matrix.row_count && xt_matrix.column_count == th_matrix.column_count {
+			} else if xt_matrix.row_count == th_matrix.row_count &&
+			          xt_matrix.column_count == th_matrix.column_count &&
+			          xt_matrix.is_row_major == th_matrix.is_row_major {
 				return type_hint
 			}
 		}

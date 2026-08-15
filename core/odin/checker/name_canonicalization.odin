@@ -874,6 +874,27 @@ write_canonical_entity_name :: proc(w: ^Type_Writer, e: ^Entity) {
 			// C++ Reference: line 519-526
 			file_name := filename_without_directory(s.file.fullpath)
 
+			// The guard above tests `s.file`, NOT `e.pkg` -- and C++ is the same here
+			// (name_canonicalization.cpp, write_canonical_entity_name: the `(s->flags &
+			// ScopeFlag_File) && s->file != nullptr` arm dereferences `e->pkg->name` with no nil
+			// test, while a LATER site in the same function does guard `e->pkg != nullptr`).
+			// So this line is FAITHFUL, not a port defect.
+			//
+			// It matters here anyway because `string_canonical_entity_name` is a PUBLIC API of
+			// this package, and external consumers call it on arbitrary entities. C++ only ever
+			// reaches this function from the LLVM backend (globals, procedures, debug info) and
+			// on `Named.type_name` -- none of which is a FIELD entity. rexcode/mir passed a
+			// `bit_field` field entity (`.Variable`, non-nil scope, no `pkg`) and took a SEGFAULT
+			// with no diagnostic and no position.
+			//
+			// ASSERT rather than a silent nil-guard: inventing a fallback string would be a
+			// behavioural divergence from C++ with nothing to anchor it to, whereas an assert
+			// keeps the semantics identical on every input C++ can produce and converts an
+			// unreachable-by-construction violation into a diagnosable failure. Same trade the
+			// `#exists`/`#load` guards record: the difference between a diagnostic and an abort.
+			// Style matches `:814` in this same function.
+			assert(e.pkg != nil, "write_canonical_entity_name: file-scope branch reached with a nil pkg (entity is not package-owned -- see the bit_field field case)")
+
 			type_writer_append(w, raw_data(e.pkg.name), len(e.pkg.name))
 			if e.pkg.name == "llvm" {
 				type_writer_appendc(w, "$")
@@ -899,10 +920,41 @@ write_canonical_entity_name :: proc(w: ^Type_Writer, e: ^Entity) {
 			// The port keeps the die; the diagnostic detail is not reproduced.
 			panic(fmt.tprintf("write_canonical_entity_name: Weird entity %s", e.token.text))
 		}
-	}
 
-	// C++ Reference: line 548-551
-	if e.pkg != nil {
+	// C++ Reference: name_canonicalization.cpp write_canonical_entity_name:711-714
+	//
+	// LEDGER #880. THIS IS AN `else if`, NOT AN `if`, AND THAT IS THE WHOLE DEFECT.
+	//
+	// C++ reaches its package-prefix block by FALLING OFF THE END of the chain above. Every arm
+	// that does not fall off ends in `goto write_base_name`, which jumps PAST this block:
+	//     :657  Builtin scope              -> goto write_base_name
+	//     :676  parent decl_info           -> goto write_base_name
+	//     :684  file scope (writes pkg::[file]::) -> goto write_base_name
+	//     :686  Builtin scope, inner       -> goto write_base_name
+	//     :690  TypeName                   -> goto write_base_name
+	//     :709  anything else              -> GB_PANIC
+	// So the package prefix is written on EXACTLY ONE path: the one where neither outer condition
+	// held. An `else if` is the faithful rendering of that; a plain `if` is not.
+	//
+	// The port had a plain `if`, and each of those gotos survived only as a `// Jump to
+	// write_base_name` COMMENT with no control flow under it. Every entity taking an inner arm
+	// therefore fell through and had its package name appended a SECOND time:
+	//     @private runtime.__init_context
+	//       port  runtime::[core.odin]::runtime::__init_context
+	//       C++   runtime::[core.odin]::__init_context
+	// -- the file-scope arm at :898 writes `runtime::[core.odin]::`, then this block wrote
+	// `runtime::` again. A `@private` entity qualifies via `.Not_Exported in e.flags`; a public one
+	// skips the chain entirely, which is why `default_context` in the SAME FILE was always correct
+	// and is the control for this fix (measured unchanged: `runtime::default_context`).
+	//
+	// WHY NO GATE CAUGHT IT, and why one still cannot. The canonical name IS the linker symbol, so
+	// the only way to see this is to compare against a symbol the reference compiler EMITTED --
+	// read out of its `.rela.text`, not out of a diagnostic. corpus/parity/parity_vet compare
+	// diagnostics; modelsweep compares layout; entity_symbol_name has ZERO in-tree callers. A
+	// port-vs-port comparison agrees with itself on the wrong name. This is the same blind spot
+	// that hid #601 (the missing `!` / `#optional_ok` tags), found the same way -- by mirc failing
+	// to link -- and the probe at $S/p880 is the only instrument here that can observe it.
+	} else if e.pkg != nil {
 		type_writer_append(w, raw_data(e.pkg.name), len(e.pkg.name))
 		type_writer_appendc(w, CANONICAL_NAME_SEPARATOR)
 	}

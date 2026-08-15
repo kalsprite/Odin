@@ -250,10 +250,19 @@ init_checker :: proc(c: ^Checker, allocator := context.allocator) {
 	//
 	// This had ZERO callers, so the config package scope was never populated and #config could
 	// never resolve an override through it (LEDGER #667; same shape as #637/#638's missing
-	// min-dep driver). It is INERT today for a second reason worth stating: nothing writes
-	// build_context.defined_values either, so the port has no `-define:` input at all -- that
-	// half belongs to #591. Wiring it here is what makes the scope path correct the moment an
-	// input exists.
+	// min-dep driver).
+	//
+	// LEDGER #867 CORRECTION. This comment used to continue: "It is INERT today for a second
+	// reason worth stating: nothing writes build_context.defined_values either, so the port has
+	// no `-define:` input at all -- that half belongs to #591." **That is no longer true, and
+	// saying so was actively misleading about what this code does.** #764 landed #591 Stage B:
+	// `add_defined_value` (build_settings.odin, ported from main.cpp:1156-1205) is the writer,
+	// and the whole path -- input -> defined_values -> this scope -> `#config(NAME, default)` --
+	// is LIVE and oracle-verified 19/19.
+	//
+	// ORDERING CONTRACT, invisible from the signature and easy to get wrong: `add_defined_value`
+	// must be called BEFORE init_checker, because this procedure runs inside it. A define added
+	// afterwards never reaches a scope and is silently ignored.
 	//
 	// C++ calls exit_with_errors() on a double declaration; the port must not exit a host
 	// process (LEDGER #12), and the error is already collected, so the flag is dropped.

@@ -11,6 +11,7 @@ Reference: check_expr.cpp:6933-7504
 */
 
 import "core:odin/ast"
+import "core:sync"
 import "core:slice"
 import "core:strings"
 
@@ -1600,7 +1601,18 @@ check_call_arguments_single :: proc(
 					return false
 				}
 			} else {
-				decl.where_clauses_evaluated = true
+				// LEDGER #886. ATOMIC, because C++ declares this field `std::atomic<bool>`
+			// (checker.hpp:228) and the port flattened it to a plain `bool`
+			// (ast/semantic_types.odin). C++ reads it with `.load(std::memory_order_relaxed)`
+			// (check_decl.cpp:2227) and writes it with a plain `= true` on the atomic, i.e. a
+			// seq_cst store (check_expr.cpp:7371).
+			//
+			// NOT a systemic gap: C++'s Decl_Info has FOUR atomics, the port declares all four as
+			// plain fields, and it already compensates at the access sites for `proc_checked_state`
+			// (8 of 13 sites use sync.atomic_*, plus proc_checked_mutex). This field had ZERO
+			// compensated accesses, so two checker threads could both read `false`, both evaluate
+			// the `where` clause with print_err set, and both render.
+				sync.atomic_store(&decl.where_clauses_evaluated, true)
 				// C++ Reference: check_expr.cpp check_call_arguments_single:7304-7307. The generated entity's RESULTS
 				// become the call's result type; the port never set this, so a polymorphic
 				// call's result came from whatever the generic signature said.
