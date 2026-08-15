@@ -692,11 +692,27 @@ check_merge_queues_into_arrays :: proc(c: ^Checker) {
 	// examine even once it was called. The safety phase does the appending itself.
 
 	// Drain required_foreign_imports_through_force queue
-	// C++ Reference: checker.cpp:2975-2978, inside generate_minimum_dependency_set_internal.
-	// C++ also calls add_to_set(c, e) here; that belongs to generate_minimum_dependency_set,
-	// which the port does not implement (task #272 -- SCOPED OUT: no reader of min_dep_count
-	// emits a diagnostic). Only the array_add half is reproduced, and that is sufficient.
-	// (This previously cited task #42, which closed with an unrelated conclusion.)
+	// C++ Reference: checker.cpp, inside generate_minimum_dependency_set_internal.
+	//
+	// **STALE CLAIM CORRECTED (#927).** This said "generate_minimum_dependency_set ... the port does
+	// not implement (task #272 -- SCOPED OUT)". That was true when written and has been FALSE since
+	// LEDGER #638 stage 2: the pass runs, from the call at the top of this file, and
+	// `min_dep_count` is populated. The stale sentence was read by the rexcode/mir agent as
+	// evidence the predicate did not exist, and it filed a blocking issue on that basis
+	// (CHECKER_ISSUES/CHECKER-minimum-dependency-set-not-implemented-backend-cannot-scope-globals).
+	//
+	// MEASURED 2026-08-15 on that issue's own repro:
+	//     p::result min_dep=1   os::args min_dep=1     (in the program)
+	//     posix::stderr/stdin/stdout min_dep=0         (NOT in the program)
+	//     strings::to_upper 1, strings::to_lower 0, bytes::last_index_byte 0
+	// so the predicate discriminates for BOTH variables and procedures.
+	//
+	// What remains true is only the narrow original point: this DRAIN reproduces the `array_add`
+	// half and not the `add_to_set(c, e)` half. Everything the set itself does happens in the pass.
+	//
+	// A COMMENT THAT OUTLIVES ITS CLAIM COSTS SOMEONE ELSE A DAY. #272's scoping decision was
+	// sound for diagnostics and stopped being the whole story the moment a backend became a
+	// consumer; the sentence recording it did not move.
 	for {
 		if entity, ok := queue.mpsc_dequeue(&c.info.required_foreign_imports_through_force_queue); ok {
 			append(&c.info.required_foreign_imports_through_force, entity)
