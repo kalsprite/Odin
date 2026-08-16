@@ -4584,8 +4584,17 @@ is_literal_type :: proc(expr: ^ast.Expr) -> bool {
 		^ast.Map_Type,
 		^ast.Bit_Set_Type,
 		^ast.Matrix_Type,
-		^ast.Call_Expr,
-		^ast.Bit_Field_Type:
+		^ast.Call_Expr:
+		return true
+	case ^ast.Multi_Pointer_Type:
+		// C++ Reference: parser.cpp is_literal_type -- this case carries C++'s own one-line
+		// comment, "For better error messages", and it is a separate arm there for that reason.
+		//
+		// #948: THE PORT OMITTED IT, so `[^]int{}` died in the PARSER with "Expected ';', got {"
+		// where the oracle parses it and lets the CHECKER speak: `[^]int{1,2}` is "Invalid compound
+		// literal type '[^]int'". Accepting the parse is the whole point -- a multi-pointer
+		// compound literal is still illegal, it just deserves a type error rather than a syntax
+		// error. 1 cell in `complit` (cl.spint).
 		return true
 	}
 	return false

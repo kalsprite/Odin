@@ -1,5 +1,7 @@
 package rexcode_abi
 
+import "core:fmt"
+
 // The architecture-independent ABI vocabulary.
 //
 // Destined for `core:rexcode/abi`, alongside the ten ISAs already in
@@ -24,6 +26,22 @@ package rexcode_abi
 // Deliberately not "INTEGER | SSE": SSE is x86's name. AArch64's is the FP/SIMD
 // file and RISC-V's is `f`, and calling the concept SSE is how an x86 accident
 // becomes a cross-architecture interface.
+// INTEGER, not INT, and the choice is deliberate rather than inherited.
+//
+// Raised from outside by a consuming backend: `.INT` is what a caller reaches
+// for first, it is what the field is called in every backend the reviewer had
+// seen, and the first thing a new consumer writes does not compile. That is a
+// real cost and it is paid once per consumer.
+//
+// Kept anyway, because this package's discipline is to use the SPEC's word.
+// SysV §3.2.3 does not have a class called INT -- it says "class INTEGER", and
+// the classifier quotes that sentence at the line that implements it. Renaming
+// the enum would leave every such quotation one letter away from its own code,
+// and the whole argument for this package over the 167-line version it replaced
+// is that the rule and the citation stay together.
+//
+// The compiler already gives the right answer -- `.INT` fails with `Suggestion:
+// Did you mean? INTEGER` -- so the cost is one diagnostic, once.
 Reg_Class :: enum u8 {
 	NONE,
 	INTEGER, // GPR file
@@ -52,6 +70,40 @@ Piece :: struct {
 	reg:    u16,       // filled by assign; use the arch's reg_* accessor to read
 	class:  Reg_Class, // which register FILE
 	flags:  Piece_Flags,
+}
+
+// Convention_Id is a STABLE KEY for a base convention row.
+//
+// `name` is prose and is not an identity -- `tprint_name` says so, and a
+// consuming backend confirmed the consequence from outside: composing any
+// language but C collapses the name to the LANGUAGE, so the x86-64, AArch64,
+// RISC-V and ARM32 Odin rows are all `"odin"`. A backend caching
+// classifications per convention -- the obvious thing to do, since a
+// Convention is a value -- keyed on `name` and collided across four
+// architectures.
+//
+// This is the field to key on. It needs no allocator, it survives `compose`
+// unchanged (the base row is what it names), and it is deliberately NOT
+// derived from `name`.
+//
+// A COMPLETE cache key is `(id, language)`: `compose` returns SYSV+C and
+// SYSV+Odin with the same `id`, because they are the same platform row. The
+// language is the caller's own input to `compose`, so the caller already has
+// it -- this package does not store it, and inventing a second field for
+// something the consumer just passed in would be a fact with two owners.
+Convention_Id :: enum u8 {
+	NONE,          // an unset or hand-built Convention
+	SYSV,          // x86-64 System V
+	WIN64,         // x86-64 Windows
+	CDECL,         // i386 System V
+	AAPCS64,       // AArch64
+	DARWIN_ARM64,  // AArch64, Apple's divergences
+	LP64D,         // RISC-V 64
+	ILP32D,        // RISC-V 32
+	AAPCS32,       // ARM32 hard-float
+	AAPCS32_SOFT,  // ARM32 base/soft-float
+	LP64,          // RISC-V 64, soft-float (-mabi=lp64)
+	ILP32,         // RISC-V 32, soft-float (-mabi=ilp32)
 }
 
 Piece_Flag :: enum u8 {
@@ -95,6 +147,45 @@ eff_class :: proc(conv: ^Convention, f: Field, pos: Position, shape: Param_Shape
 		return .VECTOR
 	}
 	return .INTEGER
+}
+
+// piece_string renders a Piece the way a backend author needs to read it.
+//
+// WRITTEN BECAUSE THE PRINTED FORM IS CONFIDENTLY WRONG-LOOKING. A consuming
+// backend reported what `fmt` gives for the struct it inspects most:
+//
+//     Piece{offset = 0, reg = 263, class = "INTEGER",
+//           flags = bit_set[Piece_Flag; u8]{W_BIT0, W_BIT1, W_BIT2}}
+//
+// `263` is an opaque encoding, and the WIDTH -- the thing you are usually
+// looking for -- is three flag bits that read as three independent facts and
+// mean `width = 8`. Someone who half-knows the encoding reads a set of three
+// as three of something.
+//
+// The packing stays: 8 bytes per Piece against 16, and `Direct` at 24 rather
+// than 132, is the reason it is a bit set. What was missing is a way to see
+// THROUGH it, so this is that and nothing more. `reg_name` comes from the
+// caller because the register namespace belongs to the ISA package, not here:
+//
+//     piece_string(p, x86_64.reg_name)  ->  "rdi:8"  "xmm0:16"
+//
+// A nil `reg_name` prints the raw number rather than refusing -- a diagnostic
+// that fails when you most need it is worse than a coarse one.
+piece_string :: proc(p: Piece, reg_name: proc(u16) -> string = nil,
+                     allocator := context.temp_allocator) -> string {
+	context.allocator = allocator
+	w := piece_width(p)
+	// `Unplaced` means the convention can name NO register of this width, so
+	// `reg` is 0 and is not a register on any of these ISAs. Printing it as
+	// one would be the exact confusion this procedure exists to remove. A
+	// stack location is not a Piece at all -- it is `Location.Stack`.
+	if .Unplaced in p.flags {
+		return fmt.aprintf("unplaced@%d:%d", p.offset, w)
+	}
+	if reg_name != nil {
+		return fmt.aprintf("%s:%d", reg_name(p.reg), w)
+	}
+	return fmt.aprintf("reg#%d:%d", p.reg, w)
 }
 
 piece_width :: proc(p: Piece) -> u8 {
@@ -393,6 +484,9 @@ Assign_Mode :: enum u8 {
 Convention :: struct {
 	// Diagnostics only -- see `tprint_name` for why this is not an identity.
 	name:         string,
+	// A stable key for this base row. See `Convention_Id` -- `name` is prose
+	// and collides across architectures once a language is composed in.
+	id:           Convention_Id,
 	assign_mode:  Assign_Mode,
 	int_regs:     []u16,  // in assignment order; isa Register values
 	float_regs:   []u16,

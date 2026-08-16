@@ -1254,7 +1254,24 @@ type_info_pair_cmp :: proc(x, y: Type_Info_Pair) -> int {
 //
 // This must be called before any type_info_index() lookups.
 finalize_minimum_dependency_type_info :: proc(c: ^Checker, package_names_are_unique: bool) {
-	info := c.info
+	// #931: **`&c.info`, NOT `c.info`.** `Checker.info` is a VALUE of type `Checker_Info`
+	// (checker.odin), so `info := c.info` COPIES THE WHOLE STRUCT and every write below lands in
+	// the copy and is DISCARDED WHEN THIS PROCEDURE RETURNS. C++ has no local binding here at all
+	// -- checker.cpp check_parsed_files spells out `c->info.type_info_types_hash_map` and
+	// `c->info.min_dep_type_info_index_map` on every one of its nine lines.
+	//
+	// MEASURED BY THE mirc BACKEND, reading `sess.checker.info` after checking a program that
+	// imports core:strings/testing/fmt: `TI set=179 hashmap=0 indexmap=0`. The SET is right
+	// because `add_type_info_type` writes through `c.info.min_dep_type_info_set` directly
+	// (type_info.odin) -- it never took the copy. The two maps this procedure fills were both
+	// zero. Consequence downstream: mirc emitted `runtime::type_table` as a nil, zero-length slice
+	// and every reflection call SIGILL'd on `len(type_table) == 0`.
+	//
+	// The report explicitly did not claim a cause and listed three candidates -- that check_files
+	// never reaches the call, that the session returns a different Checker, or that the session
+	// path skips the phase. It is none of those: the phase RUNS, on the right Checker, and throws
+	// its own output away.
+	info := &c.info
 
 	// Extract all type info pairs from the set (C++ checker.cpp check_parsed_files)
 	type_info_types := make([dynamic]Type_Info_Pair, 0, len(info.min_dep_type_info_set))

@@ -1036,7 +1036,19 @@ check_expr_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 		return
 	}
 
-	expr := unparen_expr(operand.expr)
+	// C++ Reference: check_stmt.cpp check_expr_stmt -- `Ast *expr = strip_or_return_expr(operand.expr);`
+	//
+	// #945: THE PORT UNPARENED ONLY. strip_or_return_expr peels `or_return`, `or_break` and
+	// `or_continue` as well as parentheses, and it must run BEFORE the Call_Expr test below or
+	// `g1() or_return` as a statement never reaches the call arm.
+	//
+	// This surfaced as a REGRESSION FROM #941: the old node-kind whitelist happened not to list
+	// Or_Return_Expr, so such statements were exempt BY ACCIDENT. Removing the whitelist was still
+	// right -- C++ has no whitelist -- but it exposed that the mechanism C++ actually uses to
+	// exempt them was missing here. 3 cells in `orarity` (`g1()/g2()/g3() or_return`, each
+	// discarding values the or_return does not consume); `g0() or_return` never diverged because
+	// it has nothing left over.
+	expr := strip_or_return_expr_node(operand.expr)
 
 	// Check if procedure requires results to be handled
 	// C++ Reference: check_stmt.cpp:2351-2401
@@ -1089,20 +1101,35 @@ check_expr_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 		return
 	}
 
-	// C++ lines 2404-2430: Expression is not used - this is usually an error
-	// However, some expressions are okay to discard
-	#partial switch e2 in expr.derived {
-	case ^ast.Ident, ^ast.Selector_Expr, ^ast.Binary_Expr, ^ast.Unary_Expr:
-		begin_error_block()
-		defer end_error_block()
+	// C++ Reference: check_stmt.cpp check_stmt -- after the CallExpr and SelectorCallExpr arms have
+	// each `return`ed, the tail is UNCONDITIONAL:
+	//
+	//     ERROR_BLOCK();
+	//     gbString expr_str = expr_to_string(operand.expr);
+	//     error(node, "Expression is not used: '%s'", expr_str);
+	//
+	// #941: THE PORT GUARDED IT WITH A WHITELIST of four node kinds -- Ident, Selector_Expr,
+	// Binary_Expr, Unary_Expr -- and the comment justified it as "some expressions are okay to
+	// discard". C++ names no such exemption; every expression statement that is not a call and not
+	// Expr_Stmt is an error. Anything outside those four was silently accepted.
+	//
+	// MEASURED on INDEX expressions, the kind the corpus happened to cover: `m[1]` and `a[1]` as
+	// bare statements are "Expression is not used" in the oracle and were silent here
+	// (`mapindex` cell mi.MAP.stmt). The whitelist was not map-specific -- a fixed-array index
+	// escaped identically, and so did every other kind outside the four.
+	//
+	// The `== ` suggestion below stays keyed on Binary_Expr, which is C++'s own inner test, not a
+	// second whitelist.
+	begin_error_block()
+	defer end_error_block()
 
-		expr_str := expr_to_string(expr)
-		defer delete(expr_str)
-		error_node(node, "Expression is not used: '%s'", expr_str)
+	expr_str := expr_to_string(expr)
+	defer delete(expr_str)
+	error_node(node, "Expression is not used: '%s'", expr_str)
 
-		// C++ lines 2409-2430: Suggest assignment for == operator
-		#partial switch bin in expr.derived {
-		case ^ast.Binary_Expr:
+	// C++ Reference: check_stmt.cpp -- suggest assignment for a discarded `==`.
+	#partial switch bin in expr.derived {
+	case ^ast.Binary_Expr:
 			if bin.op.kind == .Cmp_Eq {
 				// Check if left-hand side can be assigned to
 				// C++ checks: Addressing_Context, Addressing_Variable, Addressing_MapIndex, Addressing_SoaVariable
@@ -1127,7 +1154,6 @@ check_expr_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 					error_line("\t            '%s = %s;'\n", lhs_str, rhs_str)
 				}
 			}
-		}
 	}
 }
 
@@ -3234,7 +3260,15 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 		link_prefix = ctx.foreign_context.link_prefix,
 		link_suffix = ctx.foreign_context.link_suffix,
 	}
-	check_decl_attributes(ctx, vd.attributes[:], &ac, .Var)
+	// #1000: pass the DECLARATION's position. C++ raises the `private`-on-a-local diagnostic from
+	// check_collect_value_decl with the decl node, so it points at the variable's NAME; without
+	// this the port pointed at the attribute element instead (`@(private) v: int` reported at
+	// `private`, column 4, where the reference reports at `v`, column 13).
+	vd_pos := tokenizer.Pos{}
+	if len(vd.names) > 0 && vd.names[0] != nil {
+		vd_pos = vd.names[0].pos
+	}
+	check_decl_attributes(ctx, vd.attributes[:], &ac, .Var, vd_pos)
 
 	// Apply attributes to entities
 	for i in 0 ..< entity_count {
@@ -3416,7 +3450,9 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 			t := base_type(type_deref(e.type))
 
 			if name == "_" {
-				error_token(token, "'using' cannot be applied to variable declared as '_'")
+				// C++ Reference: check_stmt.cpp:2379. The reference omits "to" -- "cannot be
+				// applied variable declared as '_'". The text is the contract; do not repair it.
+				error_token(token, "'using' cannot be applied variable declared as '_'")
 			} else if is_type_struct(t) || is_type_raw_union(t) {
 				// Apply using to struct/union fields, in SLOT order. LEDGER #498.
 				//
@@ -4299,11 +4335,11 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 	case .Constant:
 		error_node(expr, "'using' cannot be applied to a constant")
 
-	case .Procedure, .Proc_Group:
+	// C++ Reference: check_stmt.cpp:871-875. Entity_Procedure, Entity_ProcGroup AND
+	// Entity_Builtin share ONE arm and ONE message. The port had split .Builtin out with an
+	// invented "cannot be applied to a builtin" that appears nowhere in src/.
+	case .Procedure, .Proc_Group, .Builtin:
 		error_node(expr, "'using' cannot be applied to a procedure")
-
-	case .Builtin:
-		error_node(expr, "'using' cannot be applied to a builtin")
 
 	case .Nil:
 		error_node(expr, "'using' cannot be applied to 'nil'")
@@ -4315,6 +4351,18 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 		error_node(expr, "'using' cannot be applied to an invalid entity")
 
 	case:
+		// DELIBERATE DIVERGENCE FROM THE REFERENCE — maintainer's decision, do not "fix".
+		//
+		// C++'s default arm is `GB_PANIC("TODO(bill): 'using' other expressions?")`
+		// (check_stmt.cpp:890), i.e. it ABORTS. Three of the eleven EntityKinds reach it
+		// (TypeName, ImportName, LibraryName -- entity.cpp:7-18), and at least one is reachable
+		// from ordinary source: `foreign import lib "system:c"` then `using lib` makes the
+		// reference die with SIGILL and a core dump. Verified locally.
+		//
+		// Strict parity would mean panicking here. We keep the diagnostic instead: trading a
+		// clean error for a compiler crash is not an improvement in fidelity worth having.
+		// The reference behaviour is filed as an upstream bug --
+		// COMPILER_ISSUES/UPSTREAM-UNFILED-using-a-library-name-panics-the-checker.md
 		error_node(expr, "'using' cannot be applied to this entity type")
 	}
 

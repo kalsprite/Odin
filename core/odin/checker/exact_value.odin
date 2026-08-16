@@ -412,6 +412,34 @@ exact_value_is_negative :: proc(v: Exact_Value) -> bool {
 
 // big_int_euclidean_mod performs Euclidean modulo operation
 // C++ Reference: big_int.cpp:400-413
+// big_int_rem is C++'s `big_int_rem`: the TRUNCATED remainder, whose sign follows the DIVIDEND.
+// C++ Reference: big_int.cpp -- `big_int_quo_rem(x, y, &q, z)`, which is `mp_div`, and
+// `int_divmod` is core:math/big's spelling of the same truncating divide.
+//
+// #970: `.Mod` used to call `big.int_mod`, which is FLOORED -- its sign follows the DIVISOR. That
+// is the wrong operator: `-7 % 3` folded to 2 where Odin's `%` gives -1.
+big_int_rem :: proc(z, x, y: ^big.Int) {
+	q: big.Int
+	defer big.int_destroy(&q)
+	big.int_divmod(&q, z, x, y)
+}
+
+// big_int_mod_mod is C++'s `big_int_mod_mod`, the FLOORED modulo behind `%%`, ported as C++ writes
+// it rather than as a sign test:
+//
+//     big_int_rem(&q, x, y);  big_int_add(&q, &q, y);  big_int_rem(z, &q, y);
+//
+// #970: `.Mod_Mod` used to call `big_int_euclidean_mod`, and Euclidean modulo is a THIRD rule --
+// it forces a NON-NEGATIVE result regardless of the divisor's sign, so `7 %% -3` folded to 1 where
+// Odin gives -2. C++ has a `big_int_euclidean_mod` too; it is simply not what `%%` uses.
+big_int_mod_mod :: proc(z, x, y: ^big.Int) {
+	q: big.Int
+	defer big.int_destroy(&q)
+	big_int_rem(&q, x, y)
+	big.int_add(&q, &q, y)
+	big_int_rem(z, &q, y)
+}
+
 big_int_euclidean_mod :: proc(z, x, y: ^big.Int) {
 	// Euclidean mod: ensures result has same sign as divisor
 	// C++ line 405: big_int_quo_rem(x, y, &q, z);
@@ -988,11 +1016,13 @@ exact_binary_operator_value :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value)
 			// C++ exact_value.cpp exact_binary_operator_value: integer (truncating) division
 			big.int_div(&c, &a, &b)
 		case .Mod:
-			// C++ line 784: Remainder
-			big.int_mod(&c, &a, &b)
+			// C++ Reference: exact_value.cpp -- `case Token_Mod: big_int_rem(&c, a, b); break;`
+			// `%` is TRUNCATED: the result takes the sign of the DIVIDEND. #970.
+			big_int_rem(&c, &a, &b)
 		case .Mod_Mod:
-			// C++ line 785: Euclidean modulo
-			big_int_euclidean_mod(&c, &a, &b)
+			// C++ Reference: exact_value.cpp -- `case Token_ModMod: big_int_mod_mod(&c, a, b); break;`
+			// `%%` is FLOORED: the result takes the sign of the DIVISOR. #970.
+			big_int_mod_mod(&c, &a, &b)
 		case .And:
 			// C++ line 786: Bitwise AND
 			big_int_and(&c, &a, &b)
@@ -1011,9 +1041,35 @@ exact_binary_operator_value :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value)
 			shift_bits, _ := big.int_get_i64(&b)
 			big.int_shl(&c, &a, int(shift_bits))
 		case .Shr:
-			// C++ line 791: Right shift
+			// C++ Reference: big_int.cpp big_int_shr --
+			//
+			//     mp_div_2d(x, yy, dst, &rem);
+			//     if (mp_isneg(x) && !mp_iszero(&rem)) { mp_sub_d(dst, 1, dst); }
+			//
+			// #974: THE PORT HAD ONLY THE SHIFT, NOT THE CORRECTION. `int_shr` truncates toward
+			// zero; an arithmetic right shift FLOORS. They differ exactly when the operand is
+			// negative and any shifted-out bit was set:
+			//
+			//     -7  >> 1  ->  port -3,  reference and RUNTIME -4
+			//     -255 >> 4 ->  port -15, reference and RUNTIME -16
+			//
+			// ADJUDICATED BY RUNTIME, not by the reference: at the value tier the reference is
+			// evidence rather than the contract (see #972, where its own `&~` folding disagreed
+			// with its own runtime and the PORT was right). Here all three were consulted and the
+			// port was the odd one out.
+			//
+			// The remainder is recovered by shifting back rather than by asking the library for
+			// one: if `(c << n) != a` then bits were lost, which is `!mp_iszero(&rem)`.
 			shift_bits, _ := big.int_get_i64(&b)
 			big.int_shr(&c, &a, int(shift_bits))
+			if a.sign == .Negative {
+				back: big.Int
+				defer big.int_destroy(&back)
+				big.int_shl(&back, &c, int(shift_bits))
+				if cmp, cmp_err := big.int_cmp(&back, &a); cmp_err == nil && cmp != 0 {
+					big.int_sub_digit(&c, &c, 1)
+				}
+			}
 		case:
 			return nil
 		}

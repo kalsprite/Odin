@@ -723,12 +723,31 @@ check_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^Ex
 	// C++ Reference: checker.cpp check_proc_info
 	tags := pi.tags
 
-	// Extract tag bits using direct bitmask (Proc_Tag values are already 1<<n)
+	// #940: THESE FOUR TESTS WERE ALL WRONG, and the comment that stood here said why it was
+	// expected to work: "Proc_Tag values are already 1<<n". THEY ARE NOT. `Proc_Tag` is
+	// `ast.Proc_Tag` (checker.odin), a plain enum with SEQUENTIAL values -- Bounds_Check=0,
+	// No_Bounds_Check=1, Type_Assert=2, No_Type_Assert=3 -- while `tags` is a `bit_set` transmuted
+	// to u64, where the flag lives at BIT n. Masking with the ordinal read the wrong bit or none:
+	//
+	//     bounds_check    tags & 0  -> ALWAYS FALSE
+	//     no_bounds_check tags & 1  -> tests the Bounds_Check bit
+	//     type_assert     tags & 2  -> tests the No_Bounds_Check bit
+	//     no_type_assert  tags & 3  -> tests Bounds_Check OR No_Bounds_Check
+	//
+	// So `f :: proc() #no_bounds_check` (bit 1) left no_bounds_check FALSE and turned type_assert
+	// TRUE. MEASURED: `_ = a[9]` on a `[4]int` under `#no_bounds_check` was reported out of bounds
+	// where the oracle is silent (`boundscheck` cell bc.NOBOUNDS.outrange). The STATEMENT form
+	// `#no_bounds_check { ... }` was always correct -- it goes through check_stmt's state_flags
+	// path and never touches this conversion -- which is why only the procedure form diverged.
+	//
+	// Testing the bit_set directly removes the ordinal-vs-bit confusion at the root rather than
+	// spelling `1 << u64(...)` four times.
 	// C++ Reference: checker.cpp check_proc_info
-	bounds_check := (tags & u64(Proc_Tag.Bounds_Check)) != 0
-	no_bounds_check := (tags & u64(Proc_Tag.No_Bounds_Check)) != 0
-	type_assert := (tags & u64(Proc_Tag.Type_Assert)) != 0
-	no_type_assert := (tags & u64(Proc_Tag.No_Type_Assert)) != 0
+	tag_set := transmute(ast.Proc_Tags)u32(tags)
+	bounds_check := .Bounds_Check in tag_set
+	no_bounds_check := .No_Bounds_Check in tag_set
+	type_assert := .Type_Assert in tag_set
+	no_type_assert := .No_Type_Assert in tag_set
 
 	// Apply bounds checking flags
 	// C++ Reference: checker.cpp check_proc_info

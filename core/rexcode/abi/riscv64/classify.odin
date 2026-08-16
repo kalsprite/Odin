@@ -232,7 +232,8 @@ RV_FA := [?]u16{
 	u16(riscv.FA4), u16(riscv.FA5), u16(riscv.FA6), u16(riscv.FA7),
 }
 
-LP64D := abi.Convention{
+@(private) LP64D_BASE := abi.Convention{
+	id = .LP64D,
 	name         = "lp64d",
 	varargs      = .INT_REGS,
 	// Measured: `-> (i64, i64)` comes back as `{ i64, i64 }` in a0:a1, and
@@ -263,20 +264,97 @@ LP64D := abi.Convention{
 	float_spills_to_int = true,
 }
 
-LP64D_ODIN:  abi.Convention
-ILP32D_ODIN: abi.Convention
+// The rows, as PROCEDURES over private RAW rows. See the long note in
+// `x86_64/classify.odin`: an exported `:=` row is process-wide mutable state,
+// and composing rows in an `@(init)` makes that block responsible for its own
+// ordering. Composing on demand answers both, and `compose` is `contextless`
+// and allocation-free.
 
-@(init)
-init_riscv_conventions :: proc "contextless" () {
-	LP64D_ODIN  = abi.compose(LP64D,  abi.lang_odin())
-	ILP32D_ODIN = abi.compose(ILP32D, abi.lang_odin())
-	LP64D       = abi.compose(LP64D,  abi.lang_c())
-	ILP32D      = abi.compose(ILP32D, abi.lang_c())
+lp64d       :: proc "contextless" () -> abi.Convention { return abi.compose(LP64D_BASE,  abi.lang_c())    }
+lp64d_odin  :: proc "contextless" () -> abi.Convention { return abi.compose(LP64D_BASE,  abi.lang_odin()) }
+ilp32d      :: proc "contextless" () -> abi.Convention { return abi.compose(ILP32D_BASE, abi.lang_c())    }
+ilp32d_odin :: proc "contextless" () -> abi.Convention { return abi.compose(ILP32D_BASE, abi.lang_odin()) }
+
+// THE SOFT-FLOAT ROWS: `-mabi=lp64` and `-mabi=ilp32`.
+//
+// RISC-V is the one architecture here whose float ABI is NOT in the target
+// triple. `riscv64-unknown-linux-gnu` is lp64, lp64f or lp64d depending on a
+// flag, and all three are the same triple -- so a consumer selecting by triple
+// has to be told which, and these are the rows for the answer "none".
+//
+// Measured, clang 22, `riscv64-unknown-linux-gnu -march=rv64gc`, same source:
+//
+//                    -mabi=lp64d                    -mabi=lp64
+//     double         fmv.d fa0, ...     fa0         (no fmv at all)   a0
+//     float                             fa0                           a0
+//     {f32,f32}      fmv.w.x fa0/fa1    fa0,fa1                       a0
+//     {f64,f64}                         fa0,fa1                       a0,a1
+//
+// Nothing reaches an FP register under lp64. That is the same shape as
+// AAPCS32_SOFT -- "a soft-float ABI is not new machinery, it is a register file
+// with nothing in it" -- and it needs no new code here either.
+//
+// `float_size = 0` is what does it, and it is worth naming because it is not
+// obvious from the field name. `fp_rule` admits a member only when
+// `f.size <= flen`, and `flen` IS `conv.float_size`; at zero no float of any
+// width qualifies, the two-member flatten never fires, and every type falls
+// through to the ceil(size/XLEN) integer path. Clearing the register files alone
+// would NOT have been enough -- the rule would still have matched and then had
+// no register to name.
+//
+// SWEPT, as of the `riscv64sf` row in the oracle. It was added with five shapes
+// of clang evidence and that was said out loud as weaker than every other row
+// here carries; it now runs the full corpus and the executing probes:
+//
+//     riscv64sf   1775/1775 arguments, 1775/1775 returns agree with clang
+//                 --returns 17/17 pieces across 12 shapes, under qemu-riscv64
+//     controls    always-sse 1062 findings, never-memory 711, by-value-half 557,
+//                 ret-swap and ret-file-swap red, refuse-all red
+//
+// `all-integer` and `ignore-float` report n/a there, correctly and for the same
+// reason AAPCS32-soft does: a row with no float file never answers FLOAT, so
+// recolouring is the identity. A control that cannot bite is reported, not
+// counted.
+//
+// Adding the row also found its own instrument bug, which is the argument for
+// having added it: the first run showed exactly three disagreements --
+// `bare_f32`, `bare_f64`, `bare_f16`, every bare float scalar and nothing else
+// -- because clang TYPES a soft-float scalar `float` in the IR while placing it
+// in `a0`. The decoder needed the soft-float mode arm32sf already had. Note
+// which way that evidence ran: it also proves the classifier really was on this
+// row, since LP64D would have answered SSE and agreed.
+@(private)
+soft_of :: proc "contextless" (base: abi.Convention, id: abi.Convention_Id, name: string) -> abi.Convention {
+	s := base
+	s.id                  = id
+	s.name                = name
+	s.float_size          = 0 // the load-bearing one; see above
+	s.float_regs          = {}
+	s.float_regs_wide     = {}
+	s.float_regs_quad     = {}
+	s.ret_float_regs      = {}
+	s.ret_float_regs_wide = {}
+	s.ret_float_regs_quad = {}
+	s.float_slot_size     = 0
+	s.homogeneous         = nil
+	s.max_vector_bytes    = 0
+	s.float_spills_to_int = true
+	return s
 }
+
+@(private) LP64_BASE  :: proc "contextless" () -> abi.Convention { return soft_of(LP64D_BASE,  .LP64,  "lp64")  }
+@(private) ILP32_BASE :: proc "contextless" () -> abi.Convention { return soft_of(ILP32D_BASE, .ILP32, "ilp32") }
+
+lp64        :: proc "contextless" () -> abi.Convention { return abi.compose(LP64_BASE(),  abi.lang_c())    }
+lp64_odin   :: proc "contextless" () -> abi.Convention { return abi.compose(LP64_BASE(),  abi.lang_odin()) }
+ilp32       :: proc "contextless" () -> abi.Convention { return abi.compose(ILP32_BASE(), abi.lang_c())    }
+ilp32_odin  :: proc "contextless" () -> abi.Convention { return abi.compose(ILP32_BASE(), abi.lang_odin()) }
+
 
 // ILP32D is the same rules over a four-byte word. One row, no new code -- which
 // is the claim being tested, not an assumption being made.
-ILP32D := abi.Convention{
+@(private) ILP32D_BASE := abi.Convention{
+	id = .ILP32D,
 	name         = "ilp32d",
 	// Inherited from LP64D, not measured: Odin has no linux_riscv32 target, so
 	// no caller can be built for it. Recorded as an inheritance rather than a
@@ -319,6 +397,6 @@ reg :: proc(p: abi.Piece) -> riscv.Register { return riscv.Register(p.reg) }
 // through the one with the arch's name on it. A default argument that silently
 // discards a caller's intent is worse than not having the parameter.
 layout :: proc(params, results: []abi.Param, conv: ^abi.Convention,
-               allocator := context.allocator, n_fixed := -1) -> (abi.Call_Layout, bool) {
+               allocator := context.temp_allocator, n_fixed := -1) -> (abi.Call_Layout, bool) {
 	return abi.classify_signature(classify, params, results, conv, allocator, n_fixed)
 }

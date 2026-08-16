@@ -517,7 +517,11 @@ report_unknown_attribute :: proc(elem: ^ast.Node, name: string) {
 // check_decl_attributes checks declaration attributes
 // C++ Reference: checker.cpp:4227-4311
 // Extended to handle common attributes: deprecated, warning, link_name, test, init, fini, etc.
-check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribute, ac: ^Attribute_Context, kind: Attribute_Decl_Kind) {
+// `subject_pos` is the position of the DECLARATION the attributes belong to, when the caller knows
+// it. Only the `private`-on-a-local diagnostic needs it: C++ raises that one from
+// check_collect_value_decl with the DECL node, not from the attribute handler with `elem`, so it
+// points at the variable's name rather than at the attribute. #1000.
+check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribute, ac: ^Attribute_Context, kind: Attribute_Decl_Kind, subject_pos := tokenizer.Pos{}) {
 	// C++ Reference: checker.cpp:4228 - Early return if no attributes
 	if len(attributes) == 0 {
 		return
@@ -558,6 +562,90 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 
 			// C++ selects the attribute table by declaration kind; a name the table does not
 			// name makes the handler return false, landing on the unknown-attribute path.
+			// C++ Reference: checker.cpp var_decl_attribute --
+			//
+			//     if (c->curr_proc_decl != nullptr) {
+			//         error(elem, "Only a variable at file scope can have a '%.*s'", LIT(name));
+			//         return true;
+			//     }
+			//
+			// #946: THE GUARD MUST PRECEDE THE NAME-TABLE CHECK. In C++ it lives INSIDE
+			// var_decl_attribute and `return true`s, so a name that is not in the var table at all --
+			// `cold`, `deprecated` -- still gets THIS error rather than falling through to
+			// "Unknown attribute element name". #939 placed it after the table check and those two
+			// cells reported the wrong diagnostic.
+			//
+			// #939: ABSENT FROM THE PORT. `@(export) v: int` inside a procedure body was accepted;
+			// the oracle rejects it. 3 cells in `attributes` (export, link_name, private).
+			//
+			// The guard's POSITION in C++ is the whole rule. It sits after four names that each
+			// `return true` before reaching it -- the user tag `"tag"`, `static`, `rodata` and
+			// `thread_local` -- so those four remain legal on a LOCAL variable and everything else
+			// in attr_names_var is file-scope-only. Reproducing that ordering as an explicit
+			// exemption list is what keeps `@(static) v: int` and `@(rodata) v: int` accepted.
+			//
+			// Only .Var is guarded: C++ has no such test in proc_decl_attribute,
+			// const_decl_attribute or type_decl_attribute, and a procedure or type declared inside
+			// a procedure body keeps its attributes.
+			// C++ Reference: checker.cpp const_decl_attribute --
+			//
+			//     } else if (name == "static" || name == "thread_local" || name == "require" ||
+			//                name == "linkage" || name == "link_name" || name == "link_prefix" ||
+			//                name == "link_suffix" || name == "rodata") {
+			//         error(elem, "@(%.*s) is not supported for compile time constant value declarations", LIT(name));
+			//         return true;
+			//     }
+			//
+			// #999: the port performed these AFTER the dispatcher, from check_const_decl, using
+			// `decl.attributes[0]` -- the `@(` node -- where C++ reports at `elem`, the element
+			// inside it. Identical text, one column apart, 5 cells in `attributes`. Doing it here
+			// puts the element node in scope and collapses eight hardcoded messages into C++'s one.
+			if kind == .Const {
+				switch name {
+				case "static", "thread_local", "require", "linkage",
+				     "link_name", "link_prefix", "link_suffix", "rodata":
+					error(elem, "@(%s) is not supported for compile time constant value declarations", name)
+					continue
+				}
+			}
+
+			if kind == .Var && ctx.curr_proc_decl != nil {
+				switch name {
+				case "tag", "static", "rodata", "thread_local":
+					// Handled by C++ before the guard; still legal on a local.
+				case "private":
+					// C++ Reference: checker.cpp check_collect_value_decl --
+					//
+					//     if (entity_visibility_kind != EntityVisiblity_Public && !(c->scope->flags&ScopeFlag_File)) {
+					//         error(decl, "Attribute 'private' is not allowed on a non file scope entity");
+					//     }
+					//
+					// #946: `private` DOES reach C++'s file-scope guard, but the oracle emits this
+					// message instead -- MEASURED, one diagnostic, not two. The port has no
+					// counterpart to that collection-phase site at all (the string appears nowhere
+					// in core/odin/checker), so the message is emitted here.
+					//
+					// This is a PLACEMENT approximation and is stated as one: the TRIGGER is
+					// equivalent -- inside a procedure body the scope is not a file scope, and
+					// @(private) is by definition non-Public, so C++'s two conjuncts both hold
+					// exactly when this arm is reached -- but C++ reaches it during collection
+					// rather than during attribute checking. If the port ever grows the
+					// visibility-kind machinery, this belongs there.
+					// #1000: reported at the DECLARATION when the caller supplied its position,
+					// which is what C++ does -- `error(decl, ...)` in check_collect_value_decl.
+					// Falls back to `elem` when it was not supplied, so no caller is obliged to.
+					if subject_pos.line != 0 {
+						error(subject_pos, "Attribute 'private' is not allowed on a non file scope entity")
+					} else {
+						error(elem, "Attribute 'private' is not allowed on a non file scope entity")
+					}
+					continue
+				case:
+					error(elem, "Only a variable at file scope can have a '%s'", name)
+					continue
+				}
+			}
+
 			if !attribute_is_valid_for_kind(name, kind) {
 				report_unknown_attribute(elem, name)
 				continue

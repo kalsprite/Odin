@@ -458,7 +458,9 @@ check_builtin_simd_comparison :: proc(ctx: ^Checker_Context, operand: ^Operand, 
 	case 8:
 		new_elem = t_u64
 	case 16:
-		error(call.args[0], "'%s' not supported for 128-bit integer backed simd vector types", builtin_name)
+		// C++ Reference: check_builtin.cpp:1159. The reference omits "for" -- "not supported
+		// 128-bit integer backed simd vector types". The text is the contract.
+		error(call.args[0], "'%s' not supported 128-bit integer backed simd vector types", builtin_name)
 		return false
 	case:
 		error(call.args[0], "'%s' unsupported element size %d", builtin_name, sz)

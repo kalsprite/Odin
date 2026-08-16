@@ -1198,7 +1198,11 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		// For non-sparse enumerated arrays, positional/bare elements are not allowed
 		// Must use named syntax: { .Field = value }
 		if has_positional && !ea.is_sparse {
-			error(node, "Bare elements are not allowed in enumerated array literal; use '.FieldName = value' syntax")
+			// C++ Reference: check_expr.cpp -- `error(node, "Enumerated array literals must only have
+			// 'field = value' elements, bare elements are not allowed");`. #955: the port had
+			// rewritten this one entirely, inverting the clause order and appending a usage hint
+			// ("use '.FieldName = value' syntax") that the reference does not print.
+			error(node, "Enumerated array literals must only have 'field = value' elements, bare elements are not allowed")
 			break
 		}
 

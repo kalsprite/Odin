@@ -21,6 +21,31 @@ import "base:runtime"
 // independent of the per-arch packages -- `abi` must not depend on `abi/x86_64`,
 // or the layering that lets a backend take `isa/` alone stops holding. Each arch
 // package exports a one-line wrapper that supplies its own.
+//
+//
+// TWO ROUTES TO A `Param`, and the shorter one is not the one documented first.
+//
+// Reported from outside: `param_from_desc` builds a `Type_Desc` TREE, it is the
+// heavier route, and it is what the file leads with -- so a backend that already
+// has a flat type table may not notice it can skip `Type_Desc` entirely. Stated
+// here, before either:
+//
+//   FLAT LEAVES -- you already know the offsets, sizes and classes.
+//       p := param_aggregate(size, align, my_fields)
+//       p := param_scalar(size, align, Reg_Class.INTEGER)
+//   Nothing walks a tree; `Field` is the whole vocabulary. Most backends with a
+//   lowered type table are here.
+//
+//   A TYPE TREE -- you have nested source types and want the leaves derived.
+//       p := param_from_desc(&desc)
+//   This is the route that also derives the FLAGS from the same walk, which is
+//   why it is recommended for a front end: `HAS_EMPTY_MEMBER` cannot be read off
+//   the leaves (a zero-length member produces none), and building a Param from
+//   `flatten` alone once left that flag unreachable through this entry point --
+//   see the note on `param_scalar`'s `flags` below.
+//
+// So: flat table, use the constructors and set `flags` yourself if a member can
+// be empty. Type tree, use `param_from_desc` and the flags come with it.
 
 // Param_Shape has NO valid zero.
 //
@@ -167,8 +192,44 @@ natural_align :: proc(p: Param) -> u32 {
 // cited it. `param_from_desc` below is the fix that matters: it connects the
 // procedure that COMPUTES the fact to the one that carries it, so a caller
 // cannot forget.
-param_scalar :: proc(size, align: u32, fields: []Field, flags := Param_Flags{}) -> Param {
+// TWO forms, chosen by the third argument, because a scalar has exactly one
+// field and spelling that as a slice is both noise and a hazard.
+//
+// Raised from outside as ergonomics -- "`param_scalar(size, align, class)` would
+// remove a slice literal from the hottest call in a backend" -- and the
+// ergonomic complaint is the smaller half. A slice literal borrows the CURRENT
+// FRAME, so one handed to a constructor whose result outlives the expression
+// dangles, and Odin diagnoses that on a `return` and not at the call. This
+// project has hit it three times in its own code (the type universe's member
+// lists, the return-register name tables, the return-case list) and wrote a
+// helper each time. A consumer writing
+//
+//     p := abi.param_scalar(8, 8, {{size = 8, align = 8, class = .INTEGER}})
+//
+// has written the same bug, in the API's own documented shape.
+//
+// The class form takes an allocator for the one-element list, which is what the
+// package already is: `param_from_desc` allocates the same way, and §1 of the
+// doc comment says this is an ARENA API. One bump allocation per scalar.
+//
+// The slice form stays for a caller that already HAS its leaves -- a backend
+// with a flat type table hands over a subslice and allocates nothing -- and for
+// regularity with `param_aggregate`.
+param_scalar :: proc{param_scalar_fields, param_scalar_class}
+
+param_scalar_fields :: proc(size, align: u32, fields: []Field, flags := Param_Flags{}) -> Param {
 	return Param{size = size, align = align, fields = fields, shape = .SCALAR, flags = flags}
+}
+
+param_scalar_class :: proc(
+	size, align: u32,
+	class: Reg_Class,
+	flags := Param_Flags{},
+	allocator := context.temp_allocator,
+) -> Param {
+	fs := make([]Field, 1, allocator)
+	fs[0] = Field{offset = 0, size = size, align = align, class = class}
+	return Param{size = size, align = align, fields = fs, shape = .SCALAR, flags = flags}
 }
 
 param_aggregate :: proc(size, align: u32, fields: []Field, flags := Param_Flags{}) -> Param {
@@ -182,7 +243,7 @@ param_aggregate :: proc(size, align: u32, fields: []Field, flags := Param_Flags{
 // `flatten` alone is how `HAS_EMPTY_MEMBER` came to be unreachable: the leaves
 // cannot carry it, `desc_flags` computes it, and nothing joined the two. Here
 // they cannot come apart.
-param_from_desc :: proc(t: ^Type_Desc, allocator := context.allocator) -> Param {
+param_from_desc :: proc(t: ^Type_Desc, allocator := context.temp_allocator) -> Param {
 	fs := make([dynamic]Field, allocator)
 	flatten(t, &fs)
 	shape := Param_Shape.AGGREGATE
@@ -213,7 +274,7 @@ param_union :: proc(size, align: u32, fields: []Field, flags := Param_Flags{}) -
 // out 16 bytes aligned 8 (riscv64 emits `{i8, double}`, AArch64 the coerced
 // `[2 x i64]`), and `(i32, i32, i32)` comes out 12 aligned 4.
 @(private)
-tuple_param :: proc(results: []Param, allocator := context.allocator) -> Param {
+tuple_param :: proc(results: []Param, allocator := context.temp_allocator) -> Param {
 	n := 0
 	align := u32(1)
 	for r in results {
@@ -394,7 +455,20 @@ classify_signature :: proc(
 	params: []Param,
 	results: []Param,
 	conv: ^Convention,
-	allocator := context.allocator,
+	// DEFAULTS TO THE TEMP ALLOCATOR, and the default used to be
+	// `context.allocator` -- the one mode this package's own documentation says is
+	// wrong.
+	//
+	// A consuming backend measured it cold: 100 layouts against a tracking
+	// allocator left 200 live allocations and 19200 bytes held, silently, with
+	// correct answers throughout. Nothing here frees a `Call_Layout` and there is
+	// no `layout_destroy`, because the visible slices are not the whole
+	// allocation -- so a caller cannot hand-free it correctly either.
+	//
+	// A per-call layout is exactly what a temp allocator is for. A caller wanting
+	// an arena still passes one, and now the EASY thing is a correct thing rather
+	// than the documented mistake.
+	allocator := context.temp_allocator,
 	n_fixed := -1,
 ) -> (out: Call_Layout, ok: bool) {
 	fixed := n_fixed < 0 ? len(params) : n_fixed

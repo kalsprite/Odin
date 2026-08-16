@@ -23,6 +23,10 @@ import "core:sync"
 // bounds row_count*column_count by MAX. LEDGER #798.
 MATRIX_ELEMENT_COUNT_MIN :: 1
 MATRIX_ELEMENT_COUNT_MAX :: 64
+// C++ Reference: types.cpp -- `MATRIX_ELEMENT_MAX_SIZE = MATRIX_ELEMENT_COUNT_MAX * (2 * 8)`, the
+// comment on that line being `// complex128`. #934 needs it: `transpose` on a rank-2 array bounds
+// the SIZE of the transposed type as well as its element count.
+MATRIX_ELEMENT_MAX_SIZE :: MATRIX_ELEMENT_COUNT_MAX * (2 * 8)
 
 // check_type_internal is the main dispatcher for type checking
 // Returns false if the type is invalid
@@ -483,26 +487,25 @@ make_soa_struct_internal :: proc(ctx: ^Checker_Context, array_type_expr: ^ast.No
 		return make_array_type(elem, count, generic_type)
 	}
 
-	// Handle struct-specific checks
-	if is_type_struct(bt) {
-		old_struct := &bt.variant.(Type_Struct)
-
-		// C++ lines 3080-3084: Disallow nested SOA
-		if old_struct.soa_kind != .None {
-			error(elem_expr, "Cannot create SOA of SOA types")
-			return t_invalid
-		}
-	}
-
-	// C++ lines 3092-3097: Disallow generic types without specialization (structs only)
-	if is_type_struct(bt) {
-		old_struct := &bt.variant.(Type_Struct)
-		if generic_type != nil && old_struct.is_polymorphic && !old_struct.is_poly_specialized {
-			error(elem_expr, "Cannot create SOA of unspecialized polymorphic struct type")
-			return t_invalid
-		}
-	}
-
+	// #936: TWO INVENTED GUARDS WERE DELETED HERE. Both cited C++ line numbers ("C++ lines
+	// 3080-3084" and "3092-3097") and neither rule exists.
+	//
+	// C++'s make_soa_struct_internal (check_type.cpp:3292-3459) contains exactly TWO error() calls
+	// in its whole body: the "Invalid type for an #soa array" one immediately above, and "Array
+	// count too large for an #soa struct". Neither invented message -- "Cannot create SOA of SOA
+	// types", "Cannot create SOA of unspecialized polymorphic struct type" -- appears anywhere in
+	// src/*.cpp, nor in spec/all_errors.txt, which is the reference's own message inventory.
+	//
+	//   NESTED SOA: MEASURED. `a: #soa[]#soa[]P` is ACCEPTED by the oracle and was rejected here.
+	//   **24 cells** in `soaops`, all `accept -> reject`, spread over addr/addrfield/index/slice --
+	//   they were all the same defect, because rejecting the TYPE poisons every operation on it
+	//   ("Cannot address value 'a[0]' as it has not got a determined type yet" was the follow-on).
+	//
+	//   UNSPECIALIZED POLYMORPHIC: no C++ counterpart either, and it is not what produces the
+	//   diagnostic on `#soa[]Q` for a polymorphic `Q`. Both compilers say "Invalid use of a
+	//   non-specialized polymorphic type 'Q'" there, from a DIFFERENT site that is already correct,
+	//   which is why deleting this one leaves that case matching. Rule 65 -- ported is not reached.
+	//
 	// C++ line 3100: Allocate new struct type
 	t := alloc_type_struct(ctx.checker)
 	ts := &t.variant.(Type_Struct)
@@ -5986,6 +5989,34 @@ check_get_results :: proc(ctx: ^Checker_Context, scope: ^Scope, results_node: ^a
 		// would reach check_compound_lit with T still generic and be rejected.
 		// C++ substitutes a fresh Type_Generic named after the source text and
 		// resolves the expression at instantiation instead.
+		// C++ Reference: check_type.cpp check_get_results --
+		//
+		//     Ast *default_value = unparen_expr(field->default_value);
+		//     ParameterValue param_value = {};
+		//     ... if (default_value != nullptr) {
+		//             param_value = handle_parameter_value(ctx, type, nullptr, default_value, false);
+		//         }
+		//     ... param->Variable.param_value = param_value;
+		//
+		// #971: THE PORT NEVER LOOKED AT `field.default_value` HERE AT ALL -- this procedure
+		// contained no mention of default_value, param_value or handle_parameter_value, while the
+		// PARAMETER path (check_get_params) records all of it. So `proc() -> (a: int = 3)` parsed,
+		// checked and produced a result entity whose `param_value.kind` was Invalid with
+		// `ast_value` / `original_ast_expr` / `init_expr` all nil.
+		//
+		// A named result's default is its INITIAL value, not decoration, and it is not always the
+		// zero. `core:strings`'s `hash_str_rabin_karp :: proc(s: string) -> (hash: u32 = 0, pow: u32 = 1)`
+		// multiplies by `pow`; started at 0 instead of 1, every needle of three bytes or more
+		// reports "not found" -- `strings.index("abcdef", "cde")` returns -1 with nothing refusing
+		// and nothing crashing.
+		//
+		// Calling handle_parameter_value also CHECKS the expression, which is the half the report
+		// called more useful: recording the value without checking it would leave
+		// `-> (a: int = SOME_CONST)` and `-> (a: f64 = 1.0/3.0)` unusable, since their `tav.type`
+		// would still be nil and a backend could only read literals out of the syntax tree.
+		result_default := unparen_expr(field.default_value)
+		param_value: Parameter_Value
+
 		result_type: ^Type = nil
 		if field.type != nil {
 			if ctx.allow_polymorphic_types && ast_references_poly_params(ctx.scope, field.type) {
@@ -5994,6 +6025,15 @@ check_get_results :: proc(ctx: ^Checker_Context, scope: ^Scope, results_node: ^a
 			} else {
 				result_type = check_type(ctx, field.type)
 			}
+			// C++ passes the RESOLVED type in and no out-pointer: the default must conform to the
+			// declared type. `allow_caller_location` is false for results, as for C++.
+			if result_default != nil {
+				param_value = handle_parameter_value(ctx, result_type, nil, result_default, false)
+			}
+		} else {
+			// C++'s `field->type == nullptr` arm: no declared type, so the type is INFERRED FROM
+			// THE DEFAULT via the out-pointer. `-> (a = 3)`.
+			param_value = handle_parameter_value(ctx, nil, &result_type, result_default, false)
 		}
 
 		// Validate result type
@@ -6038,6 +6078,9 @@ check_get_results :: proc(ctx: ^Checker_Context, scope: ^Scope, results_node: ^a
 			// Set field_group_index for unnamed result (C++ line 2337)
 			if var_data, var_ok := &entity.variant.(Entity_Variable); var_ok {
 				var_data.field_group_index = -1
+				// #971: C++ assigns `param->Variable.param_value = param_value` on BOTH the unnamed
+				// and the named arm.
+				var_data.param_value = param_value
 			}
 
 			append(&result_types, result_type)
@@ -6071,6 +6114,7 @@ check_get_results :: proc(ctx: ^Checker_Context, scope: ^Scope, results_node: ^a
 				// Set field_group_index (C++ line 2361)
 				if var_data, var_ok := &entity.variant.(Entity_Variable); var_ok {
 					var_data.field_group_index = field_group_index
+					var_data.param_value = param_value   // #971
 				}
 
 				append(&result_types, result_type)
@@ -6609,11 +6653,32 @@ is_polymorphic_type_assignable :: proc(
 		if check_type_specialization_to(ctx, poly, source, compound, modify_type) {
 			return true
 		}
-		// Fall back to identity or assignment check
-		if compound {
+		// C++ Reference: check_expr.cpp is_polymorphic_type_assignable, Type_Named arm:
+		//
+		//     if (compound || !is_type_generic(poly)) {
+		//         return are_types_identical(poly, source);
+		//     }
+		//     return check_is_assignable_to(c, &o, poly);
+		//
+		// where `o` is built once at the top of the procedure as
+		// `Operand o = {Addressing_Value}; o.type = source;`.
+		//
+		// #964: THE PORT'S TWO BRANCHES RETURNED THE SAME EXPRESSION. `if compound { X } return X`
+		// -- so `compound` decided nothing, `is_type_generic` was never consulted (it is one of the
+		// procedures with zero callers that the #949 audit turned up), and the
+		// `check_is_assignable_to` fallback was unreachable. The comment above it said "identity or
+		// assignment check", describing C++'s behaviour rather than the code beneath it.
+		//
+		// Direction: the port was STRICTER, so any divergence is an under-acceptance. REACHABILITY
+		// IS NOT ESTABLISHED -- four polymorphic shapes were measured and all four matched, and
+		// separating the two implementations needs a case where specialization FAILS,
+		// are_types_identical is FALSE and check_is_assignable_to is TRUE for a Named generic poly.
+		// No such witness was found. This lands as a faithfulness fix, not a measured one.
+		if compound || !is_type_generic(poly) {
 			return are_types_identical(poly, source)
 		}
-		return are_types_identical(poly, source)
+		o := Operand{mode = .Value, type = source}
+		return check_is_assignable_to(ctx, &o, poly)
 	}
 
 	// === Type_Generic === (C++ check_expr.cpp is_polymorphic_type_assignable)
@@ -6796,21 +6861,111 @@ is_polymorphic_type_assignable :: proc(
 		return true
 	}
 
-	// NO Type_Struct / Type_Union ARM - deliberately.
+	// === Type_SoaPointer === (C++ check_expr.cpp is_polymorphic_type_assignable)
 	//
-	// C++ Reference: check_expr.cpp is_polymorphic_type_assignable (the function's real extent). Its switch on
-	// `poly->kind` has no Struct and no Union case; a record poly falls through to the final
-	// `return false`. Records are check_type_specialization_to's job, and that procedure calls
-	// THIS one as its fall-back tail (check_type.cpp:1626), passing base types so the callee can
-	// never re-enter it through the Named arm.
+	//     isize level = check_is_assignable_to_using_subtype(source->SoaPointer.elem,
+	//                       poly->SoaPointer.elem, 0, false, /*allow_polymorphic*/true);
+	//     if (level > 0) { return true; }
+	//     return is_polymorphic_type_assignable(c, poly->SoaPointer.elem, source->SoaPointer.elem,
+	//                                           true, modify_type);
 	//
-	// This port used to have Struct and Union arms here that "delegate to
-	// check_type_specialization_to". Combined with check_type_specialization_to's own
-	// `polymorphic_parent == nil -> is_polymorphic_type_assignable(specialization, type)`
-	// fall-back, that is a closed cycle with the arguments never changing: the two procedures
-	// call each other until the stack is gone. It is reachable from ordinary code - a
-	// `$T/Some_Struct` constraint resolved against a non-polymorphic struct - and took out
-	// core/crypto/legacy/md5 and the multi-threaded test runner.
+	// #982: MISSING, found by auditing this switch against C++ after #981 showed two arms had been
+	// deleted. MEASURED: `f :: proc(p: #soa ^#soa[]$E)` called with `&soa[0]` is accepted by the
+	// reference and was rejected here. The concrete form `#soa ^#soa[]Foo` already matched, so only
+	// the POLYMORPHIC element was affected -- the same shape as #981.
+	//
+	// The subtype probe comes first and is not an optimisation: an SOA pointer to an EMBEDDED
+	// record is assignable to a pointer to the embedded type, and only the recursion's failure
+	// would otherwise be reported.
+	if poly_base.kind == .Soa_Pointer && source_base.kind == .Soa_Pointer {
+		pe := poly_base.variant.(Type_Soa_Pointer).elem
+		se := source_base.variant.(Type_Soa_Pointer).elem
+		if check_is_assignable_to_using_subtype(se, pe, 0, false, true) > 0 {
+			return true
+		}
+		return is_polymorphic_type_assignable(ctx, pe, se, true, modify_type)
+	}
+
+	// === Type_BitField === (C++ check_expr.cpp is_polymorphic_type_assignable)
+	//
+	//     return is_polymorphic_type_assignable(c, poly->BitField.backing_type,
+	//                                           source->BitField.backing_type, true, modify_type);
+	//
+	// #982: also missing. No witness was found for it -- a polymorphic bit_field specialization has
+	// no spelling I could construct that both compilers accept -- so this lands as faithfulness,
+	// stated as such, alongside the SoaPointer arm that IS measured.
+	if poly_base.kind == .Bit_Field && source_base.kind == .Bit_Field {
+		pb := poly_base.variant.(Type_Bit_Field).backing_type
+		sb := source_base.variant.(Type_Bit_Field).backing_type
+		return is_polymorphic_type_assignable(ctx, pb, sb, true, modify_type)
+	}
+
+	// NOTE ON Type_Enum: C++ has `case Type_Enum: return false;`. The port has no arm, so an enum
+	// poly falls through to this procedure's own final `return false`. Same answer, and checked
+	// rather than assumed -- that case body is one line.
+
+	// === Type_Union === (C++ check_expr.cpp is_polymorphic_type_assignable, `case Type_Union`)
+	//
+	// #981: THE COMMENT THAT STOOD HERE SAID C++'s SWITCH "HAS NO STRUCT AND NO UNION CASE". IT
+	// HAS BOTH -- check_expr.cpp, immediately before the Proc case. The arms were removed to break
+	// a real infinite recursion, and the diagnosis of that recursion was right: the port's OLD arms
+	// DELEGATED to check_type_specialization_to, which calls back here with the arguments
+	// unchanged. C++'s arms do no such thing. They recurse only on STRICTLY SMALLER arguments --
+	// each union variant, or the soa element -- so the cycle cannot form.
+	//
+	// Deleting them also deleted the only path by which `#soa` specializations match, which is the
+	// defect being fixed here.
+	if poly_base.kind == .Union && source_base.kind == .Union {
+		pu := poly_base.variant.(Type_Union)
+		su := source_base.variant.(Type_Union)
+		if len(pu.variants) != len(su.variants) {
+			return false
+		}
+		for i in 0 ..< len(pu.variants) {
+			if !is_polymorphic_type_assignable(ctx, pu.variants[i], su.variants[i], false, modify_type) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// === Type_Struct === (C++ check_expr.cpp is_polymorphic_type_assignable, `case Type_Struct`)
+	//
+	// The ONLY thing C++ matches here is an SOA struct against an SOA struct of the same KIND,
+	// recursing on the element. Anything else returns false -- records proper remain
+	// check_type_specialization_to's job, which is the half the old comment got right.
+	//
+	// #981, MEASURED: `make(#soa[dynamic]SoaS)` was rejected with "No procedures or ambiguous call
+	// for procedure group 'make'". The overload is
+	// `make_soa_dynamic_array :: proc($T: typeid/#soa[dynamic]$E, ...)`, so resolving it IS this
+	// match. All three SOA forms failed -- `#soa[]$E`, `#soa[dynamic]$E`, `#soa[4]$E` -- while
+	// plain `[]$E` and `[dynamic]$E` matched, which is what localised it here.
+	if poly_base.kind == .Struct && source_base.kind == .Struct {
+		ps := poly_base.variant.(Type_Struct)
+		ss := source_base.variant.(Type_Struct)
+		if ps.soa_kind == ss.soa_kind && ps.soa_kind != .None {
+			ok := is_polymorphic_type_assignable(ctx, ps.soa_elem, ss.soa_elem, true, modify_type)
+			if ok && modify_type {
+				// C++ rebuilds the poly type as a CONCRETE soa struct over the now-resolved
+				// element and memmoves it over `poly`, so the caller sees a finished type rather
+				// than one still carrying a generic element.
+				rebuilt: ^Type
+				#partial switch ss.soa_kind {
+				case .Fixed:
+					rebuilt = make_soa_struct_fixed(ctx, ps.node, nil, ps.soa_elem, ps.soa_count, nil)
+				case .Slice:
+					rebuilt = make_soa_struct_slice(ctx, ps.node, nil, ps.soa_elem)
+				case .Dynamic:
+					rebuilt = make_soa_struct_dynamic_array(ctx, ps.node, nil, ps.soa_elem)
+				}
+				if rebuilt != nil {
+					poly_base^ = rebuilt^
+				}
+			}
+			return ok
+		}
+		return false
+	}
 
 	// === Type_Proc === (C++ check_expr.cpp is_polymorphic_type_assignable)
 	if poly_base.kind == .Proc && source_base.kind == .Proc {
@@ -7349,8 +7504,21 @@ check_array_count :: proc(ctx: ^Checker_Context, operand: ^Operand, expr: ^ast.E
 				}
 				return 0
 			}
+			// C++ Reference: check_type.cpp:2864-2871. C++ accepts the count only when the
+			// BigInt occupies AT MOST ONE limb -- `switch (count.used) { case 0: return 0;
+			// case 1: return big_int_to_u64(&count); }` -- and anything wider falls through
+			// to "Array count too large". BigInt is a libtommath mp_int and MP_DIGIT_BIT is
+			// 60 on every 64-bit target (src/libtommath/tommath.h:58-60), so the threshold is
+			// a magnitude below 2^60, NOT "fits in an i64".
+			//
+			// This CANNOT be written as `count.used <= 1` against core:math/big: that library
+			// uses 63-bit digits (_DIGIT_TYPE_BITS - _DIGIT_NAILS, core/math/big/common.odin:207),
+			// so mirroring the field would put the threshold at 2^63 and keep accepting the
+			// counts the reference rejects.
+			CPP_MP_DIGIT_BIT :: 60
+			bits, bits_err := big.count_bits(&count)
 			result, get_err := big.int_get_i64(&count)
-			if get_err != nil {
+			if bits_err != nil || get_err != nil || bits > CPP_MP_DIGIT_BIT {
 				str, err := big.int_to_string(&count)
 				if err == nil {
 					defer delete(str)

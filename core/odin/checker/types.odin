@@ -3641,6 +3641,19 @@ is_type_u8_array :: proc(t: ^Type) -> bool {
 	return is_type_u8(arr.elem)
 }
 
+// is_type_u16_array checks if type is [N]u16
+// C++ Reference: types.cpp is_type_u16_array -- the UTF-16 sibling of is_type_u8_array.
+// #985: absent from this port entirely, which is why check_is_castable_to's untyped-string arm
+// had a u8 branch and a rune branch and no u16 one.
+is_type_u16_array :: proc(t: ^Type) -> bool {
+	bt := base_type(t)
+	if bt == nil || bt.kind != .Array {
+		return false
+	}
+	arr := bt.variant.(Type_Array)
+	return is_type_u16(arr.elem)
+}
+
 // is_type_rune_array checks if type is [N]rune
 // C++ Reference: types.cpp is_type_rune_array
 is_type_rune_array :: proc(t: ^Type) -> bool {
@@ -4720,55 +4733,52 @@ is_calling_convention_odin :: proc(cc: Proc_Calling_Convention) -> bool {
 
 // get_array_type_count is defined in check_expr.odin
 
-// type_math_rank returns the numeric rank for type promotion
-// C++ Reference: checker.cpp:2345-2388
+// type_math_rank returns a type's MATHEMATICAL RANK -- its dimensionality, not a numeric ordering.
+// C++ Reference: types.cpp type_math_rank:
+//
+//     i32 rank = 0;
+//     for (;;) {
+//         t = base_type(t);
+//         switch (t->kind) {
+//         case Type_Array:  rank += 1; t = t->Array.elem;  break;
+//         case Type_Matrix: rank += 2; t = t->Matrix.elem; break;
+//         default: return rank;
+//         }
+//     }
+//
+// A matrix counts TWO because it is two-dimensional in one type constructor. So `[2][2]f32` and
+// `matrix[2,2]f32` both rank 2, while `[2]matrix[2,2]f32` ranks 3.
+//
+// #935: WHAT WAS HERE BEFORE WAS A DIFFERENT FUNCTION WEARING THIS NAME -- a numeric promotion
+// table (`.I8 -> 1`, `.I16 -> 2`, ... `.Untyped_Quaternion -> 103`) that returned 0 for every array
+// and every matrix, i.e. it answered the opposite question and answered it wrongly for the only
+// kinds this function is asked about. It had **ZERO CALLERS** (#711/#158's shape: a well-formed
+// named procedure nothing invokes), and `type_math_rank` is the ONLY `*rank*` function in the whole
+// C++ compiler -- there is no reference function that table could have been a port of. So nothing
+// is lost by replacing it outright, and leaving it would have silently broken transpose: with rank
+// pinned at 0, `transpose([2][2][2]f32)` skipped C++'s `rank > 2` error and was ACCEPTED where the
+// oracle rejects it.
+//
+// C++'s only other caller is llvm_backend_expr.cpp, which is out of scope here.
 type_math_rank :: proc(t: ^Type) -> int {
-	bt := base_type(t)
-
-	if basic, ok := bt.variant.(Type_Basic); ok {
-		#partial switch basic.kind {
-		case .I8, .U8:
-			return 1
-		case .I16, .U16:
-			return 2
-		case .I32, .U32, .Rune:
-			return 3
-		case .I64, .U64:
-			return 4
-		case .I128, .U128:
-			return 5
-		case .Int, .Uint, .Uintptr:
-			return 6
-		case .F16:
-			return 7
-		case .F32:
-			return 8
-		case .F64:
-			return 9
-		case .Complex32:
-			return 10
-		case .Complex64:
-			return 11
-		case .Complex128:
-			return 12
-		case .Quaternion64:
-			return 13
-		case .Quaternion128:
-			return 14
-		case .Quaternion256:
-			return 15
-		case .Untyped_Integer:
-			return 100
-		case .Untyped_Float:
-			return 101
-		case .Untyped_Complex:
-			return 102
-		case .Untyped_Quaternion:
-			return 103
+	rank := 0
+	t := t
+	for {
+		bt := base_type(t)
+		if bt == nil {
+			return rank
+		}
+		#partial switch v in bt.variant {
+		case Type_Array:
+			rank += 1
+			t = v.elem
+		case Type_Matrix:
+			rank += 2
+			t = v.elem
+		case:
+			return rank
 		}
 	}
-
-	return 0
 }
 
 // is_valid_bit_field_backing_type checks if a type can back a bit_field

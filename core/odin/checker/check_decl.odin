@@ -232,7 +232,7 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 	decl := decl_info_of_entity(e)
 	assert(decl == ctx.decl)
 	if decl != nil {
-		check_decl_attributes(ctx, decl.attributes, &ac, .Var)
+		check_decl_attributes(ctx, decl.attributes, &ac, .Var, e.token.pos)
 	}
 
 	// C++ Reference: check_decl.cpp:1631-1634
@@ -301,7 +301,9 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 			// LEDGER 346: `{` is a format verb in Odin's fmt; C++'s printf passes it through.
 			// Unescaped this printed "'foreign %!(MISSING ARGUMENT)%!(MISSING CLOSE BRACE)".
 			// C++ Reference: src/check_decl.cpp check_global_variable_decl
-			error(e.token, "A foreign variable declaration can not be scoped to a module and must be declared in a 'foreign {{' (without a library) block")
+			// C++ Reference: check_decl.cpp:1753 -- ONE brace. Odin's fmt is printf-style
+			// (`%` verbs), so `{{` is not an escape here; it renders as two braces.
+			error(e.token, "A foreign variable declaration can not be scoped to a module and must be declared in a 'foreign {' (without a library) block")
 		}
 	}
 
@@ -936,29 +938,13 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 		ac := Attribute_Context{}
 		check_decl_attributes(ctx, decl.attributes[:], &ac, .Const)
 
-		// C++ Reference: checker.cpp:4143-4163 (const_decl_attribute)
-		// Error on attributes not valid for compile-time constants
-		if ac.is_static {
-			error(decl.attributes[0], "@(static) is not supported for compile time constant value declarations")
-		}
-		if ac.thread_local_model != "" {
-			error(decl.attributes[0], "@(thread_local) is not supported for compile time constant value declarations")
-		}
-		if ac.require_declaration {
-			error(decl.attributes[0], "@(require) is not supported for compile time constant value declarations")
-		}
-		if ac.linkage != "" {
-			error(decl.attributes[0], "@(linkage) is not supported for compile time constant value declarations")
-		}
-		if ac.link_name != "" {
-			error(decl.attributes[0], "@(link_name) is not supported for compile time constant value declarations")
-		}
-		if ac.link_prefix != "" {
-			error(decl.attributes[0], "@(link_prefix) is not supported for compile time constant value declarations")
-		}
-		if ac.link_suffix != "" {
-			error(decl.attributes[0], "@(link_suffix) is not supported for compile time constant value declarations")
-		}
+		// #999: the eight per-attribute rejections that stood here were MOVED into
+		// check_decl_attributes (check_decl_helpers.odin), which is where C++ performs them --
+		// `const_decl_attribute` reports at `elem`, the attribute ELEMENT, while this block only had
+		// `decl.attributes[0]`, the whole `@(...)` node. That is a one-column difference
+		// (`@(link_name="n")` reports at the name, not the `@`) and it was 5 cells in `attributes`.
+		//
+		// Moving them also replaces eight hardcoded names with C++'s single parameterised message.
 	}
 }
 
@@ -2230,7 +2216,8 @@ check_foreign_import_fullpaths :: proc(ctx: ^Checker_Context) {
 						fullpath = joined
 					} else {
 						// Unknown collection - report error but continue with original path
-						error_node(fp_expr, "Unknown library collection '%s'", collection_name)
+						// C++ Reference: parser.cpp:6253 -- note the COLON after "collection".
+						error_node(fp_expr, "Unknown library collection: '%s'", collection_name)
 						fullpath = file_str
 					}
 				}

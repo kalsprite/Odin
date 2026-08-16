@@ -843,7 +843,33 @@ target_freestanding_amd64_win64 := Target_Metrics {
 	int_size       = 8,
 	max_align      = AMD64_MAX_ALIGNMENT,
 	max_simd_align = 32,
-	target_triplet = "x86_64-pc-none-msvc",
+	// #961: was "x86_64-pc-none-msvc". C++ build_settings.cpp gives this target
+	// "x86_64-pc-windows-msvc" -- the vendor/OS component is `windows`, not `none`, even though
+	// the Odin-level OS is Freestanding. Found by field-comparing the metrics tables, which
+	// rule_engine findings/079 explicitly left unchecked ("checked for symbol pairing, not for
+	// field-by-field equality").
+	target_triplet = "x86_64-pc-windows-msvc",
+	abi            = .Win64,
+}
+
+// C++ Reference: build_settings.cpp `target_freestanding_amd64_mingw`.
+//
+// #961, rule_engine findings/079: THE PORT HAD NO SUCH TARGET -- `named_targets` listed 27 where
+// C++ lists 28, and `get_target_metrics_from_name("freestanding_amd64_mingw")` returned nil for a
+// target the reference accepts (measured: the compiler reaches the ordinary cross-link limitation
+// rather than "Unknown target", so the name resolves).
+//
+// It is NOT a duplicate of freestanding_amd64_win64 above: same OS, arch, sizes and ABI, but the
+// LLVM TRIPLE differs -- `windows-gnu` against `windows-msvc`. Dropping it removed the only way to
+// name the GNU toolchain triple for a freestanding amd64 build.
+target_freestanding_amd64_mingw := Target_Metrics {
+	os             = .Freestanding,
+	arch           = .Amd64,
+	ptr_size       = 8,
+	int_size       = 8,
+	max_align      = AMD64_MAX_ALIGNMENT,
+	max_simd_align = 32,
+	target_triplet = "x86_64-pc-windows-gnu",
 	abi            = .Win64,
 }
 
@@ -864,7 +890,9 @@ target_freestanding_arm32 := Target_Metrics {
 	int_size       = 4,
 	max_align      = 8,
 	max_simd_align = 16,
-	target_triplet = "arm-unknown-unknown-gnueabihf",
+	// #961: was "arm-unknown-unknown-gnueabihf". C++ gives this target "arm-none-eabihf" -- three
+	// components, not four. Same field-comparison as the win64 triple above.
+	target_triplet = "arm-none-eabihf",
 }
 
 target_freestanding_riscv64 := Target_Metrics {
@@ -924,6 +952,10 @@ named_targets := []Named_Target_Metrics {
 
 	{"freestanding_amd64_sysv", &target_freestanding_amd64_sysv},
 	{"freestanding_amd64_win64", &target_freestanding_amd64_win64},
+	// #961: placed HERE, matching C++'s row order (build_settings.cpp lists mingw immediately after
+	// win64). Its absence also made `get_all_target_names` advertise 27 targets where the reference
+	// honours 28, so a consumer building a suggestion list from the port under-reported.
+	{"freestanding_amd64_mingw", &target_freestanding_amd64_mingw},
 
 	{"freestanding_arm64", &target_freestanding_arm64},
 	{"freestanding_arm32", &target_freestanding_arm32},

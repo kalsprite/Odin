@@ -295,8 +295,11 @@ Decl_Info :: ast.Decl_Info
 
 // Proc_Tag defines procedure attribute tags
 // C++ Reference: enum ProcTag in parser.hpp:272-279
-// NOTE: Values are bitmasks (1<<n), not sequential indices, to support bit testing
-Proc_Tag :: ast.Proc_Tag // NOTE: Uses bit_set for tag flags (refactored from bitfield)
+// #940: the note that used to sit here -- "Values are bitmasks (1<<n), not sequential indices, to
+// support bit testing" -- was FALSE and was acted upon. `ast.Proc_Tag` is a plain enum with
+// sequential values; the bit positions exist only in `ast.Proc_Tags`, the bit_set over it. Test
+// membership in the SET (`.No_Bounds_Check in tag_set`); never mask with the enum value.
+Proc_Tag :: ast.Proc_Tag
 Proc_Tags :: ast.Proc_Tags
 
 // Proc_Info stores procedure checking information

@@ -584,7 +584,8 @@ SSE_ARGS  := [?]u16{
 }
 WIN64_SSE := [?]u16{u16(x86.XMM0), u16(x86.XMM1), u16(x86.XMM2), u16(x86.XMM3)}
 
-SYSV := abi.Convention{
+@(private) SYSV_BASE := abi.Convention{
+	id = .SYSV,
 	name         = "sysv",
 	varargs      = .SYSV_AL,
 	// x86-64 is the one target that NEVER packs a result tuple: Odin gives
@@ -656,40 +657,51 @@ SYSV := abi.Convention{
 	red_zone     = 128,
 }
 
-// ODIN and CONTEXTLESS are SYSV COMPOSED with a language, not rows of their own.
+// The rows, as PROCEDURES over a private RAW row, not as package variables.
 //
-// They used to be hand-written copies differing in two fields, and the copy
-// silently fell out of step: it never carried `multi_return`, so once that
-// field became load-bearing the hidden-pointer protocol vanished for x86-64
-// while every composed platform kept it. A duplicated row drifting from its
-// original, in the package whose entire argument is that duplication is what
-// goes wrong.
-ODIN:        abi.Convention
-CONTEXTLESS: abi.Convention
+// Three problems went away together, and only the first was asked for.
+//
+// MUTABILITY. `x86_64.SYSV` was exported and declared with `:=`, so
+// `X.SYSV.word_size = 4` was accepted silently and every later classification in
+// the process was wrong -- reported from outside by a consuming backend, which
+// is where that kind of defect actually lands. A row reached through a procedure
+// cannot be assigned to.
+//
+// COMPOSITION ORDER. The composed rows were package vars filled by an `@(init)`,
+// and that block had to sequence itself: `WIN64_ODIN` was computed BEFORE
+// `WIN64` was overwritten with its C composition, with a comment saying so.
+// Composing on demand from a row nothing overwrites removes the ordering
+// question rather than documenting the answer -- and this package has already
+// lost a day to cross-package initialisation order once (see `language.odin`).
+//
+// DUPLICATION. `ODIN` and `CONTEXTLESS` began as hand-written copies of SysV
+// differing in two fields, fell out of step, and never carried `multi_return` --
+// so the hidden-pointer protocol vanished for x86-64 while every composed
+// platform kept it. They are compositions here, and cannot drift.
+//
+// `compose` is `contextless` and allocation-free (`tprint_name` returns one of
+// its two arguments), so an accessor costs a struct copy and no more.
+//
+// NAMED FOR WHAT THEY ARE: `sysv_odin()` rather than `ODIN`, because "ODIN" in a
+// package with three platform rows does not say which one it composed onto.
+
+sysv             :: proc "contextless" () -> abi.Convention { return abi.compose(SYSV_BASE,  abi.lang_c())           }
+sysv_odin        :: proc "contextless" () -> abi.Convention { return abi.compose(SYSV_BASE,  abi.lang_odin())        }
+sysv_contextless :: proc "contextless" () -> abi.Convention { return abi.compose(SYSV_BASE,  abi.lang_contextless()) }
 
 // Odin on i386. Worth having as more than completeness: cdecl has NO argument
 // registers, so the implicit context is a stack slot at every arity -- the only
 // target where `--context` exercises that branch at all.
-CDECL_ODIN:  abi.Convention
+cdecl            :: proc "contextless" () -> abi.Convention { return abi.compose(CDECL_BASE, abi.lang_c())           }
+cdecl_odin       :: proc "contextless" () -> abi.Convention { return abi.compose(CDECL_BASE, abi.lang_odin())        }
+
 // Odin on Windows, which is a PRIMARY target. Win64 already makes any aggregate
 // that is not 1/2/4/8 bytes indirect, so Odin's own by-pointer rule coincides
 // with the platform's rather than overriding it -- but the implicit `^Context`
 // and the multi-value protocol are language deltas that exist here and nowhere
 // in the C row.
-WIN64_ODIN:  abi.Convention
-
-@(init)
-init_x86_64_conventions :: proc "contextless" () {
-	ODIN        = abi.compose(SYSV, abi.lang_odin())
-	CONTEXTLESS = abi.compose(SYSV, abi.lang_contextless())
-	CDECL_ODIN  = abi.compose(CDECL, abi.lang_odin())
-	// Composed BEFORE the C row overwrites `WIN64`, for the same
-	// initialisation-order reason the others are.
-	WIN64_ODIN  = abi.compose(WIN64, abi.lang_odin())
-	WIN64       = abi.compose(WIN64, abi.lang_c())
-	CDECL       = abi.compose(CDECL, abi.lang_c())
-	SYSV        = abi.compose(SYSV, abi.lang_c())
-}
+win64            :: proc "contextless" () -> abi.Convention { return abi.compose(WIN64_BASE, abi.lang_c())           }
+win64_odin       :: proc "contextless" () -> abi.Convention { return abi.compose(WIN64_BASE, abi.lang_odin())        }
 
 // ---------------------------------------------------------------------------
 // Win64
@@ -886,7 +898,8 @@ classify_win64 :: proc(
 // consequence -- both put the same bytes in the same slot -- so a classifier
 // matching the IR would be encoding a codegen heuristic as if it were the ABI.
 // `max_by_value` here therefore only ever sees the scalars the probe passes.
-CDECL := abi.Convention{
+@(private) CDECL_BASE := abi.Convention{
+	id = .CDECL,
 	// A complex of at most two words comes back in EAX:EDX. Measured, and
 	// upstream reached the same bound: "return a complex of eight bytes or
 	// fewer in EAX:EDX". `_Complex double` at 16 bytes uses sret, and a
@@ -948,7 +961,8 @@ CDECL := abi.Convention{
 	splits_vectors = true,
 }
 
-WIN64 := abi.Convention{
+@(private) WIN64_BASE := abi.Convention{
+	id = .WIN64,
 	name         = "win64",
 	varargs      = .WIN64_DUPLICATE,
 	// MEASURED. This said "never measured: there is no Win64 odin row to
@@ -1004,12 +1018,12 @@ reg :: proc(p: abi.Piece) -> x86.Register { return x86.Register(p.reg) }
 // through the one with the arch's name on it. A default argument that silently
 // discards a caller's intent is worse than not having the parameter.
 layout :: proc(params, results: []abi.Param, conv: ^abi.Convention,
-               allocator := context.allocator, n_fixed := -1) -> (abi.Call_Layout, bool) {
+               allocator := context.temp_allocator, n_fixed := -1) -> (abi.Call_Layout, bool) {
 	return abi.classify_signature(classify, params, results, conv, allocator, n_fixed)
 }
 
 // layout_win64 is the same for the Windows row, which has its own classifier.
 layout_win64 :: proc(params, results: []abi.Param, conv: ^abi.Convention,
-                     allocator := context.allocator, n_fixed := -1) -> (abi.Call_Layout, bool) {
+                     allocator := context.temp_allocator, n_fixed := -1) -> (abi.Call_Layout, bool) {
 	return abi.classify_signature(classify_win64, params, results, conv, allocator, n_fixed)
 }

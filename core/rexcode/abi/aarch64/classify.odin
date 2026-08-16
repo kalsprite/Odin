@@ -352,7 +352,8 @@ A64_RET_Q := [?]u16{
 	u16(arm64.REG_Q | 0), u16(arm64.REG_Q | 1), u16(arm64.REG_Q | 2), u16(arm64.REG_Q | 3),
 }
 
-AAPCS64 := abi.Convention{
+@(private) AAPCS64_BASE := abi.Convention{
+	id = .AAPCS64,
 	// A vector under one eightbyte is INTEGER here -- EXCEPT as a bare result.
 	// Measured: `void a(v4i8 x, int t)` leaves `t` in w1, so the vector took
 	// x0; `struct{v4i8} r(void)` is `ldr w0`; and `v4i8 r(void)` is `ldr s0`.
@@ -414,28 +415,30 @@ AAPCS64 := abi.Convention{
 	// and Darwin sets 1 -- which is what the previous wording claimed.
 }
 
+// The rows, as PROCEDURES over private RAW rows. See the long note in
+// `x86_64/classify.odin`: an exported `:=` row is process-wide mutable state,
+// and composing rows in an `@(init)` makes that block responsible for its own
+// ordering. Composing on demand answers both, and `compose` is `contextless`
+// and allocation-free.
+
+aapcs64      :: proc "contextless" () -> abi.Convention { return abi.compose(AAPCS64_BASE, abi.lang_c())    }
 // The Odin convention on THIS platform, which could not exist while a
 // convention was one flat row: there was a single `ODIN` and it was x86-64's,
 // so the sweep's Odin column had to be switched off everywhere else. Composing
 // a language delta onto a platform is what makes it a one-liner.
-AAPCS64_ODIN: abi.Convention
+aapcs64_odin :: proc "contextless" () -> abi.Convention { return abi.compose(AAPCS64_BASE, abi.lang_odin()) }
+
+darwin       :: proc "contextless" () -> abi.Convention { return abi.compose(DARWIN_BASE,  abi.lang_c())    }
 // Odin on Darwin. Its probes cannot be EXECUTED here -- a Mach-O binary needs
 // macOS -- but `-build-mode:llvm-ir` needs neither a linker nor a Mac, and the
 // sweep has always read this target's second oracle that way. Without the row
 // the "which convention does the classifier implement?" question was never put
 // on 1147 Darwin rows, for want of a convention rather than for want of a
 // runner.
-DARWIN_ODIN: abi.Convention
+darwin_odin  :: proc "contextless" () -> abi.Convention { return abi.compose(DARWIN_BASE,  abi.lang_odin()) }
 
-@(init)
-init_aarch64_conventions :: proc "contextless" () {
-	AAPCS64_ODIN = abi.compose(AAPCS64, abi.lang_odin())
-	DARWIN_ODIN  = abi.compose(DARWIN,  abi.lang_odin())
-	AAPCS64      = abi.compose(AAPCS64, abi.lang_c())
-	DARWIN       = abi.compose(DARWIN, abi.lang_c())
-}
-
-DARWIN := abi.Convention{
+@(private) DARWIN_BASE := abi.Convention{
+	id = .DARWIN_ARM64,
 	// A vector under one eightbyte is INTEGER here -- EXCEPT as a bare result.
 	// Measured: `void a(v4i8 x, int t)` leaves `t` in w1, so the vector took
 	// x0; `struct{v4i8} r(void)` is `ldr w0`; and `v4i8 r(void)` is `ldr s0`.
@@ -523,6 +526,6 @@ reg :: proc(p: abi.Piece) -> arm64.Register { return arm64.Register(p.reg) }
 // through the one with the arch's name on it. A default argument that silently
 // discards a caller's intent is worse than not having the parameter.
 layout :: proc(params, results: []abi.Param, conv: ^abi.Convention,
-               allocator := context.allocator, n_fixed := -1) -> (abi.Call_Layout, bool) {
+               allocator := context.temp_allocator, n_fixed := -1) -> (abi.Call_Layout, bool) {
 	return abi.classify_signature(classify, params, results, conv, allocator, n_fixed)
 }

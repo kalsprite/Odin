@@ -31,7 +31,8 @@ A32_S := [?]u16{
 	u16(arm32.REG_SPR | 12), u16(arm32.REG_SPR | 13), u16(arm32.REG_SPR | 14), u16(arm32.REG_SPR | 15),
 }
 
-AAPCS32 := abi.Convention{
+@(private) AAPCS32_BASE := abi.Convention{
+	id = .AAPCS32,
 	name             = "aapcs32",
 	// The only target that packs the tuple UNCONDITIONALLY: a result tuple too
 	// wide for r0 comes back through an sret pointer as a whole, where AArch64
@@ -159,10 +160,35 @@ AAPCS32 := abi.Convention{
 
 reg :: proc(p: abi.Piece) -> arm32.Register { return arm32.Register(p.reg) }
 
-AAPCS32_ODIN: abi.Convention
+// The rows, as PROCEDURES over a private RAW row. See the long note in
+// `x86_64/classify.odin`: an exported `:=` row is process-wide mutable state,
+// and composing rows in an `@(init)` makes that block responsible for its own
+// ordering.
+//
+// This package is where that ordering hurt most. The block below used to be TWO
+// `@(init)` procedures, and the soft-float one copied `AAPCS32` -- so it
+// silently depended on the composing one having run first, which Odin does not
+// guarantee. Merging them into one made the dependency a sequence of statements
+// instead of a hope; deriving the soft row inside a PURE function removes the
+// dependency altogether, because there is no longer a mutation to be ordered
+// against.
+
+aapcs32           :: proc "contextless" () -> abi.Convention { return abi.compose(AAPCS32_BASE,      abi.lang_c())    }
+aapcs32_odin      :: proc "contextless" () -> abi.Convention { return abi.compose(AAPCS32_BASE,      abi.lang_odin()) }
+aapcs32_soft      :: proc "contextless" () -> abi.Convention { return abi.compose(aapcs32_soft_base(), abi.lang_c())    }
+// Odin's OWN arm32 ABI... except that it is NOT. `odin build -target:linux_arm32`
+// emits `arm-unknown-linux-gnueabihf` with `.fpu vfpv2`, so the row an Odin
+// caller on ARM actually uses is `aapcs32_odin`, the HARD-float one. This row is
+// Odin over the soft EABI: correct for a freestanding target built that way, and
+// not what Odin's own Linux target does.
+//
+// The old comment here claimed the opposite and the harness believed it, pairing
+// hard-float Odin against soft-float clang in six places and filing a SIGSEGV
+// that was entirely self-inflicted.
+aapcs32_soft_odin :: proc "contextless" () -> abi.Convention { return abi.compose(aapcs32_soft_base(), abi.lang_odin()) }
 
 // AAPCS32 SOFT-FLOAT (the base EABI), which is what most freestanding ARM
-// targets and Odin's own `linux_arm32` use.
+// targets use.
 //
 // The claim under test: a soft-float ABI needs no new machinery, only an EMPTY
 // float file plus the fallback that already exists for RISC-V. Measured --
@@ -176,25 +202,11 @@ AAPCS32_ODIN: abi.Convention
 //
 // This is also the shape a MICROCONTROLLER takes: no FPU is not a new kind of
 // convention, it is a register file with nothing in it.
-AAPCS32_SOFT: abi.Convention
-
-// Odin's OWN arm32 ABI. `odin build -target:linux_arm32` is soft-float, so this
-// -- not AAPCS32_ODIN -- is the row an Odin caller on ARM actually uses, and the
-// only one of the two that `--multi`/`--context` can drive.
-AAPCS32_SOFT_ODIN: abi.Convention
-
-// ONE initialiser for all four rows, because the order matters and separate
-// `@(init)` procedures do not have one.
-//
-// This was two: the soft-float block copied `AAPCS32` and so silently depended
-// on the composing block having run first. Odin guarantees no such order, and
-// this project has already lost a day to exactly that -- `multi_return` came
-// out SINGLE for Odin because a language var was still zeroed when `compose`
-// ran. The dependency is now a sequence of statements instead of a hope.
-@(init)
-init_arm32_conventions :: proc "contextless" () {
+@(private)
+aapcs32_soft_base :: proc "contextless" () -> abi.Convention {
 	// Derived from the RAW platform row, before any language composes onto it.
-	soft := AAPCS32
+	soft := AAPCS32_BASE
+	soft.id = .AAPCS32_SOFT
 	soft.name                = "aapcs32-soft"
 	soft.float_regs          = {}
 	soft.float_regs_wide     = {}
@@ -224,9 +236,5 @@ init_arm32_conventions :: proc "contextless" () {
 	soft.ret_float_regs_quad = {}
 	soft.max_vector_bytes    = 0
 	soft.float_spills_to_int = true
-
-	AAPCS32_SOFT      = abi.compose(soft, abi.lang_c())
-	AAPCS32_SOFT_ODIN = abi.compose(soft, abi.lang_odin())
-	AAPCS32_ODIN      = abi.compose(AAPCS32, abi.lang_odin())
-	AAPCS32           = abi.compose(AAPCS32, abi.lang_c())
+	return soft
 }

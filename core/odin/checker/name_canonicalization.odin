@@ -77,23 +77,52 @@ default_calling_convention :: proc() -> Calling_Convention {
 	return .Odin
 }
 
-// proc_calling_convention_strings maps Calling_Convention to canonical string representation
-// C++ Reference: parser.cpp (calling convention string table)
+// proc_calling_convention_strings maps Calling_Convention to its CANONICAL string.
+// C++ Reference: parser.hpp `proc_calling_convention_strings[ProcCC_MAX]`.
+//
+// #960, from rule_engine findings/078: FOUR OF FOURTEEN ENTRIES DIVERGED. The header above claims
+// this table mirrors C++'s, and it did not:
+//
+//     member        C++            port (before)
+//     Std           "stdcall"      "std"
+//     Fast          "fastcall"     "fast"
+//     Inline_Asm    "inlineasm"    "inline_asm"
+//     Invalid       ""             "invalid"
+//
+// These strings ESCAPE. This table feeds the CANONICAL TYPE NAME (write_canonical_type below),
+// `type_to_string` (check_expr.odin), and three diagnostics (check_type.odin x2, check_expr.odin).
+// So the same source produced a different canonical name and a different diagnostic under the two
+// checkers -- and since canonical names feed type hashing, this reached the model a backend reads,
+// not just the text a user sees.
+//
+// MEASURED by the reporter: `h :: proc "std" () {}` built for arm64 makes the reference say
+//     Invalid procedure calling convention "stdcall" for target architecture ...
+// i.e. the compiler CANONICALISES through this table rather than echoing the source spelling, which
+// is what makes the divergence observable at all. The port printed "std".
+//
+// NOT a round-trip break, and that is why nothing was being rejected: the PARSER keeps its own
+// independent accept list (`core/odin/parser/parser.odin`, which takes "stdcall" and "std",
+// "fastcall" and "fast"), so both spellings remain valid source under both implementations. Only
+// the canonical OUTPUT was wrong.
+//
+// `Invalid` is the sharpest of the four: C++ emits the EMPTY string, so an invalid convention
+// contributes NOTHING to a canonical name, where the port contributed the literal "invalid" --
+// changing a name's shape rather than one word in it.
 proc_calling_convention_strings := [Calling_Convention]string {
 	.Odin        = "odin",
 	.Contextless = "contextless",
 	.C           = "cdecl",
-	.Std         = "std",
-	.Fast        = "fast",
+	.Std         = "stdcall",
+	.Fast        = "fastcall",
 	.None        = "none",
 	.Naked       = "naked",
-	.Inline_Asm  = "inline_asm",
+	.Inline_Asm  = "inlineasm",
 	.Win64       = "win64",
 	.SysV        = "sysv",
 	.Preserve_None = "preserve/none",
 	.Preserve_Most = "preserve/most",
 	.Preserve_All  = "preserve/all",
-	.Invalid       = "invalid",
+	.Invalid       = "",
 }
 
 // quote_to_ascii escapes special characters in strings for canonical representation

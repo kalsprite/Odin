@@ -81,6 +81,17 @@ main :: proc() {
 			checker.build_context.ODIN_DEFAULT_TO_NIL_ALLOCATOR = true
 		case "-disable-init-fini":
 			checker.build_context.disable_init_fini = true
+		case "-dynamic-literals":
+			// LEDGER #938. The spec corpus's `litarity` suite declares `-dynamic-literals` in its
+			// flags.txt, and 21 of 137 suites declare flags at all. Without this case the flag fell
+			// into the default arm and became a PHANTOM PACKAGE -- the harness printed
+			// `### -dynamic-literals files=0` and checked the real cell with the feature OFF, so all
+			// four `la.sdynamicint.*` cells looked like port defects when the CHECKER WAS ALREADY
+			// CORRECT: build_settings.odin already parses "dynamic-literals" and
+			// check_for_dynamic_literals reads build_context.dynamic_literals.
+			//
+			// Jon's ruling stands -- the harness conforms to the library, not the other way around.
+			checker.build_context.dynamic_literals = true
 		case "-no-threads":
 			// LEDGER #426. The REAL control for #344, replacing a taskset attempt whose effect on
 			// worker_count was never verified. checker_lifecycle.odin:193 gates thread-pool

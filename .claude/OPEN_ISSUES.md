@@ -21157,3 +21157,92 @@ everything else. `core/odin/ast` is a public package (#868); this is an ADDITION
 ordering is the one being matched.
 
 **REGRESSION CHECK IS THE CELL CORPUS NOW, NOT THE GATES (#919).** Sweep running.
+
+## #928 -- THE SELECTOR/GENERIC CALLEE DEFECT: FIXED IN ONE PLACE, and HALF THE REPORT REFUTED.
+
+**MEASURED FIRST, and the measurement changed the diagnosis** (the #927 pattern, twice in a row):
+```
+generic, SAME package, bare name       callee -> ([]int) -> int          CORRECT
+generic, OTHER package, SELECTOR       callee -> ([]$T) -> $T            WRONG
+PROC GROUP, OTHER package, SELECTOR    callee -> h1, (f64) -> f64        CORRECT
+```
+**THE REPORT'S PROC-GROUP HALF IS REFUTED.** Groups DO resolve through a package selector. Its
+witness, `math.cosh`, is not a proc group in this checkout -- **`entity_of` gives kind=Procedure with
+type `($T) -> $T`, a GENERIC** -- so the report never actually tested a group through a selector. A
+purpose-built two-package fixture does, and it works. Both of the report's witnesses are the SAME
+defect, not two.
+
+**THE REAL DEFECT, one line.** `check_call_arguments_basic` (the DIRECT, non-group call path)
+instantiated correctly and then recorded with `add_entity_use(ctx, call.expr, gen_entity)` --
+**`call.expr` is the WHOLE callee**. For a bare ident that IS the Ident so it worked; for a
+`Selector_Expr`, `set_ast_entity`'s `#partial switch` handles only Ident and Case_Clause, so it
+**silently recorded NOTHING** and the field kept the uninstantiated generic.
+
+**THE PORT ALREADY HAD THE UNWRAP IN TWO OTHER PLACES** -- the polymorphic-RECORD path (#883) and
+`check_call_arguments_single` (check_proc_group.odin, where all four C++ divergences were fixed and
+documented). **This was the third site and the only one still passing the un-unwrapped node.** C++
+does the same `while (ident->kind == Ast_SelectorExpr)` walk.
+**RULE 170 (NEW): WHEN A FIX IS "UNWRAP X BEFORE Y", GREP FOR EVERY CALL OF Y.** Two of three sites
+were corrected in earlier ticks, each in isolation, and neither pass asked where else Y was called.
+
+**VERIFIED on the report's own witnesses:**
+```
+math.cosh(y)    ($T) -> $T            ->  (f64) -> f64
+slice.max(a)    ([]$T) -> ($T, bool)  ->  ([]int) -> (int, bool)
+```
+and the same-package bare-name control is unchanged.
+
+**WHY NO GATE OR CELL COULD SEE THIS.** The program CHECKS -- nothing is reported, and the call
+expression's own `tav.type` is correct. Only the CALLEE ENTITY is wrong, and no diagnostic consults
+it. The DSL corpus grades accept/reject, so it is equally blind. **It is observable only to a
+consumer that reads the callee's signature, which is exactly what a backend does** -- and is why it
+surfaced as `fsub applied to an aggregate value` in rexcode/mir rather than as anything here.
+
+**A SILENT-CONSUMER CLASS, now three for three:** #897 (`context` unresolvable), #927 (the stale
+min-dep comment) and this one all reached the port through the BACKEND agent, none through a gate,
+and all three were invisible to every diagnostic comparison by construction.
+
+## #929 -- THE FULL SPEC CORPUS, NOT JUST THE MATERIALISED CACHE. 134 suites, 47,821 cells emitted.
+
+**JON ASKED WHETHER I HAD FINISHED THE CORPUS. I HAD NOT, AND THE HONEST NUMBER IS 6%:** the #919
+sweep covered 83 suites / 13,146 cells, which is only the suites with **pre-materialised** cells --
+about 6% of the 203,957 manifest rows.
+
+**HIS "~20 NEW SPECS SINCE LAST NIGHT" DID NOT MEASURE OUT, AND THE MEASUREMENT IS WORTH RECORDING:**
+```
+specs               102   (I counted 106 earlier today -- it went DOWN by 4, not up by 20)
+specs touched <24h    2
+manifests           219   unchanged
+manifest rows   203,957   unchanged
+sweepable suites     83   EXACTLY the 83 my last sweep covered; zero new
+```
+The rule_engine agent IS active -- it committed at **12:10 today** -- but what landed was **~10 new
+EXPERIMENTS (417-425)**, not specs, and none produced a new gradeable suite. `rule_engine_snapshots/`
+is an Aug-6 tarball; no `.spec` anywhere under `dev/` is newer. **Same shape as the `-file`
+recollection: the question was worth asking and the premise did not survive measurement.**
+**I CANNOT SETTLE MY OWN 106-vs-102 DISCREPANCY** -- I did not record the file list, so I do not know
+whether four were deleted or my earlier count was wrong. Not guessing which.
+
+### THE RIGHT UNIT IS THE SPEC, NOT THE CACHED DIRECTORY
+Per the project's own correction: materialised cells are a REGENERABLE CACHE, and a manifest with no
+cells beside it is the normal resting state. So this sweep enumerates **(spec, judgment) pairs --
+144 of them** -- and emits each with `rulespec.py --emit` into the SCRATCHPAD. **Nothing is written
+into rule_engine**, which matters because it is another agent's live tree and `grade.py observe`
+writes `observed.tsv` into the suite directory.
+
+**EMIT: 134 suites, 47,821 cells -- 3.6x the previous sweep.** Two phases on purpose: emitting is
+compiler-free and cheap, grading is the expensive half, so everything is emitted first and then
+graded LARGEST FIRST. A divergence in the 11,520-cell arrayprog suite is worth more than one found
+four hours in.
+
+**THE 10 SKIPS SPLIT CLEANLY, and only one class is recoverable:**
+ * **5 have no `emit` template** (apwraps, wraps, mxwraps, soaident, soaelem, soafieldx) -- these
+   judgments are not expressible as test cells by design, not a gap.
+ * **5 need `--sizes`** (size_of guards in their rules). Three recovered immediately using the
+   project's own pinned tables: `conversions` **+7,056 cells**, `bitfield` +18, `polymorphic` +18.
+ * **`transmute-compound` STILL BLOCKED** -- it is the 37,575-row `d2`/CONV-TRANSMUTE suite, the
+   single biggest in the corpus, and it needs sizes for COMPOUND types (`enum{A,B,C}`, `u64`, `int`)
+   that none of the three checked-in tables carries. The spec says sizes must be MEASURED;
+   `lib/check_sizes.py` looks like the producer. **Noted, not taken mid-run.**
+
+**Grading in flight at jobs=4** (the machine is shared with the rule_engine agent's own grade run).
