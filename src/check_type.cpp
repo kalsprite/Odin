@@ -1368,7 +1368,7 @@ gb_internal void check_bit_set_type(CheckerContext *c, Type *type, Type *named_t
 			gb_free(a, s.text);
 			return;
 		}
-		if (!check_representable_as_constant(c, iv, t, nullptr)) {
+		if (!check_representable_as_constant(c, jv, t, nullptr)) {
 			gbAllocator a = heap_allocator();
 			String s = big_int_to_string(a, &j);
 			gbString ts = type_to_string(t);
@@ -3538,9 +3538,12 @@ gb_internal void check_array_type_internal(CheckerContext *ctx, Ast *e, Type **t
 			return;
 		}
 
+		// Track user input and recovery value seperate, since both could be '0'
+		bool count_recovered = false;
 		if (count < 0) {
 			error(at->count, "? can only be used in conjunction with compound literals");
 			count = 0;
+			count_recovered = true;
 		}
 
 
@@ -3562,7 +3565,12 @@ gb_internal void check_array_type_internal(CheckerContext *ctx, Ast *e, Type **t
 					// Ignore
 				} else if (count < 1 || !is_power_of_two(count)) {
 					*type = alloc_type_array(elem, count, generic_type);
-					if (ctx->disallow_polymorphic_return_types && count == 0) {
+					if (count_recovered) {
+						return;
+					}
+					// a polymorphic value used as the count is still unresolved while the
+					// signature is checked and reads as 0; only a written count is constant
+					if (ctx->disallow_polymorphic_return_types && o.mode != Addressing_Constant) {
 						return;
 					}
 					error(at->count, "Invalid length for #simd, expected a power of two length, got '%lld'", cast(long long)count);
