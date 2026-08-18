@@ -1097,6 +1097,61 @@ error_line_va :: proc(format: string, args: ..any) {
 	// the continuation on its own would spray headerless fragments at stderr, so drop it.
 }
 
+// syntax_error_with_verbose_va reports a syntax diagnostic WITHOUT the "Syntax Error: " prefix
+// unless the terminal has ANSI colours.
+//
+// C++ Reference: error.cpp:669-695 syntax_error_with_verbose_va. It differs from syntax_error_va in
+// EXACTLY ONE respect -- its prefix is guarded by has_ansi_terminal_colours() where the ordinary
+// one's is unconditional. Piped, C++ therefore emits the bare message.
+//
+// #1241. THE TRAILING try_pop_error_value() IS LOAD-BEARING. Tick 197 copied this function without
+// it: the value was STAGED and never COMMITTED, so the diagnostic never reached the list (printing
+// nothing) AND tls_curr_error_value_set stayed set, swallowing the checker's own error at the same
+// position. The symptom was "the port prints nothing at all", which I misdiagnosed as a merge
+// problem for two ticks.
+syntax_error_with_verbose_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args: ..any) {
+	if error_limit_reached() {
+		return
+	}
+
+	sync.atomic_add(&global_error_collector.count, 1)
+
+	if sync.atomic_load(&global_error_collector.count) > build_context.max_error_count {
+		sync.atomic_store(&global_error_collector.limit_reached, true)
+		return
+	}
+
+	push_error_value(pos, .Warning)
+
+	if pos.line == 0 {
+		error_out_empty()
+		if has_ansi_terminal_colours() {
+			error_out_coloured("Syntax Error: ", .Normal, .Red)
+		}
+		error_out(format, ..args)
+		error_out("\n")
+	} else {
+		if json_errors() {
+			error_out_empty()
+		} else {
+			error_out_pos(pos)
+		}
+		if has_ansi_terminal_colours() {
+			error_out_coloured("Syntax Error: ", .Normal, .Red)
+		}
+		error_out(format, ..args)
+		error_out("\n")
+		show_error_on_line(pos, end)
+	}
+
+	try_pop_error_value()
+}
+
+// syntax_error_with_verbose_pos is the Error_Handler-shaped wrapper the parser is wired with.
+syntax_error_with_verbose_pos :: proc(pos: tokenizer.Pos, format: string, args: ..any) {
+	syntax_error_with_verbose_va(pos, {}, format, ..args)
+}
+
 // syntax_error_va reports a syntax error with "Syntax Error:" prefix
 // C++ Reference: error.cpp syntax_error_va
 syntax_error_va :: proc(pos: tokenizer.Pos, end: tokenizer.Pos, format: string, args: ..any) {
@@ -1996,6 +2051,81 @@ check_did_you_mean_type :: proc(name: string, fields: []^Entity, prefix := "") {
 		if len(target) == 0 || target == "_" {
 			continue
 		}
+		append(&suggestions, Distance_And_Target{levenshtein_distance(name, target), target})
+	}
+
+	check_did_you_mean_print(did_you_mean_results(&suggestions), prefix)
+}
+
+// populate_did_you_mean_objc collects an objc type's member names, recursing through `using` fields
+// so an @(objc_superclass) chain contributes its members too.
+// C++ Reference: check_expr.cpp:173-200 (populate_check_did_you_mean_objc_entity).
+populate_did_you_mean_objc :: proc(out: ^[dynamic]string, e: ^Entity, is_type: bool) {
+	if e == nil || e.kind != .Type_Name {
+		return
+	}
+	tn, tn_ok := e.variant.(Entity_Type_Name)
+	if !tn_ok || tn.objc_metadata == nil {
+		return
+	}
+	md := tn.objc_metadata
+	entries := is_type ? md.type_entries[:] : md.value_entries[:]
+	for entry in entries {
+		append(out, entry.name)
+	}
+
+	// C++ 194-199: an entity reached through a `using` field contributes ITS objc members too --
+	// that is how an @(objc_superclass) chain's methods appear in the suggestion list.
+	t := base_type(entity_type(e))
+	if t != nil && t.kind == .Struct {
+		if st, st_ok := t.variant.(Type_Struct); st_ok {
+			for f in st.fields {
+				if f == nil || .Using not_in f.flags {
+					continue
+				}
+				ft := entity_type(f)
+				if ft != nil && ft.kind == .Named {
+					if nt, nt_ok := ft.variant.(Type_Named); nt_ok {
+						populate_did_you_mean_objc(out, nt.type_name, is_type)
+					}
+				}
+			}
+		}
+	}
+}
+
+// check_did_you_mean_objc prints suggestions for an objc member that was not found.
+// C++ Reference: check_expr.cpp:204-216 (check_did_you_mean_objc_entity), reached from the selector
+// path at check_expr.cpp:6188-6193 when the operand's type_name carries objc_metadata.
+// #1180: the port had the STRUCT and ENUM arms of that chain and NOT this one, so a misspelled objc
+// member got no suggestion list at all. WITNESSED on -target:darwin_amd64 with
+// `@(objc_type=Foo, objc_name="bar")` and `g.barx`: the oracle prints
+// "Suggestion: Did you mean? / bar" and the port printed nothing.
+check_did_you_mean_objc :: proc(name: string, e: ^Entity, is_type: bool, prefix := "") {
+	if build_context.terse_errors {
+		return
+	}
+
+	names := make([dynamic]string, 0, 8, context.temp_allocator)
+	defer delete(names)
+	populate_did_you_mean_objc(&names, e, is_type)
+
+	// SORT BEFORE SCORING. C++ collects into a StringSet and iterates it in raw hash order; the port
+	// must not be nondeterministic instead, and the distance sort below is unstable, so it needs a
+	// fixed input. Exactly the reasoning recorded on check_did_you_mean_scope, where iterating a map
+	// directly made the suggestion order flip between runs of the same binary -- and the sweep could
+	// not see it because sweep_det.sh runs under `setarch -R`.
+	slice.sort(names[:])
+
+	suggestions: [dynamic]Distance_And_Target
+	defer delete(suggestions)
+	seen := make(map[string]bool, len(names), context.temp_allocator)
+	defer delete(seen)
+	for target in names {
+		if len(target) == 0 || target == "_" || target in seen {
+			continue
+		}
+		seen[target] = true
 		append(&suggestions, Distance_And_Target{levenshtein_distance(name, target), target})
 	}
 

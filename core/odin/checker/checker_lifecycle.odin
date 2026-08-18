@@ -931,10 +931,19 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 	// C++ Reference: checker.cpp init_universal
 	// ------------------------------------------------------------------------------
 
-	// DEVIATION: C++ registers `nil` with alloc_entity_nil (Entity_Nil). The port has
-	// alloc_entity_nil, but nothing in check_ident handles the .Nil entity kind, so `nil`
-	// stays a constant of type untyped nil - observationally the same thing.
-	add_global_constant(builtin_scope, "nil", t_untyped_nil, nil, allocator)
+	// C++ Reference: checker.cpp:1147 -- `add_global_entity(alloc_entity_nil(str_lit("nil"), t_untyped_nil));`
+	// DEVIATION REMOVED (#1164). This used to register `nil` as an ENTITY_CONSTANT with a nil
+	// value, under a comment claiming that was "observationally the same thing". IT WAS NOT: it made
+	// `nil` and an UNRESOLVED POLYMORPHIC CONSTANT PARAMETER the SAME STATE (mode Constant, value
+	// nil), which had two witnessed consequences --
+	//   * `X :: nil` was ACCEPTED (oracle: "'nil' is not a compile-time known constant"), because a
+	//     Constant-mode operand satisfies a constant declaration;
+	//   * check_type.odin's #simd length guard could not tell a written `#simd[0]` from an
+	//     unresolved poly count, so `proc() -> #simd[0]int` was accepted (sweep cell sr.0).
+	// With a real Entity_Nil whose ident arm yields Addressing_Value, both distinctions return.
+	nil_entity := alloc_entity_nil("nil", t_untyped_nil, allocator)
+	nil_entity.state = .Resolved
+	scope_insert(builtin_scope, nil_entity)
 	add_global_bool_constant(builtin_scope, "true", true, allocator)
 	add_global_bool_constant(builtin_scope, "false", false, allocator)
 

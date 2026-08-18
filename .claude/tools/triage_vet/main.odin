@@ -42,6 +42,14 @@ main :: proc() {
 	defer delete(paths)
 	for a in args[1:] {
 		switch a {
+		case "-no-rtti":
+			// The harness silently IGNORED this flag until tick 191, so every -no-rtti witness
+			// measured a port with no_rtti UNSET -- three cells "matched" or "diverged" for
+			// reasons that had nothing to do with the checker. The oracle additionally REFUSES
+			// -no-rtti unless the target is freestanding or -bedrock is given; that validation
+			// lives in the driver, not the checker library, so it is deliberately not modelled
+			// here -- the harness's job is to be able to express what the oracle accepts.
+			checker.build_context.no_rtti = true
 		case "-bedrock":
 			// main.cpp:1669-1673 -- `-bedrock` is a COMPOSITE, not a single bool. Setting only
 			// .bedrock here would make the harness disagree with the oracle about init/fini.
@@ -58,6 +66,17 @@ main :: proc() {
 			checker.build_context.ODIN_DEFAULT_TO_NIL_ALLOCATOR = true
 		case "-disable-init-fini":
 			checker.build_context.disable_init_fini = true
+		case "-no-threads":
+			// LEDGER #426/#344, and triage_st/main.odin has carried this since then. It was MISSING
+			// here, and portwrap.sh passes -no-threads UNCONDITIONALLY, so every invocation of this
+			// harness through the wrapper fell into the default arm below and appended it to
+			// `paths` -- a PHANTOM PACKAGE (#938), printing `### -no-threads files=0`. Two effects:
+			// the flag did nothing, so this harness graded vet cells THREADED while the plain one
+			// pins them single-threaded, and the per-cell answer was therefore not reproducible in
+			// the way #344 requires. checker_lifecycle.odin:193 gates pool creation on this flag.
+			// Not caught earlier because portwrap reads `errors=` from the FIRST summary line, so
+			// the phantom's trailing `errors=0` never changed a verdict -- it hid instead of failing.
+			checker.build_context.no_threaded_checker = true
 		case "-entry-point":
 			// Undoes the default above. C++ checks `main` unless -no-entry-point is passed, and
 			// the bedrock calling-convention rule lives INSIDE that block -- so without this the

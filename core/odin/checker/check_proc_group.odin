@@ -70,7 +70,10 @@ eval_param_and_score :: proc(
 		// path too. check_is_assignable_to_with_score answers "could this convert";
 		// check_assignment performs the conversion and reports what only the conversion can
 		// discover. Omitting it was an UNDER-REJECTION -- #194's class, fixed there for a
-		// different site and still missing here:
+		// different site and WAS missing here. FIXED -- the check_assignment call below IS the fix.
+		// (This line used to read "still missing here", which reads like an OPEN gap; tick 192
+		// re-verified it with witness $S/phase2/wit_claims/cl_pgenum and both compilers now emit
+		// the same diagnostic. Wording corrected so it is not chased again.) The example:
 		//     E :: enum{A,B};  fe :: proc(x: E);  ge :: proc{fe};  ge(0)
 		//     oracle -> Cannot convert untyped value '0' to 'E' from 'untyped integer'
 		//     port   -> accepted
@@ -1066,7 +1069,32 @@ check_call_arguments_internal :: proc(
 		// Try to instantiate the polymorphic procedure
 		poly_data := Poly_Proc_Data{}
 		ctx_copy := ctx^
-		ctx_copy.in_proc_group = true
+		// #1108 (B2-i i5). C++ Reference: check_expr.cpp check_call_arguments — `in_proc_group` is
+		// set true ONLY around the SILENT candidate-scoring loop and cleared BEFORE the winner is
+		// re-checked:
+		//
+		//     c->in_proc_group = true;
+		//     for_array(i, procs) { ... CallArgumentErrorMode::NoErrors ... }
+		//     c->in_proc_group = false;
+		//
+		// Its sole reader is check_type.cpp's polymorphic-name-parameter check (ported at
+		// check_type.odin):
+		//     if (!ctx->in_proc_group) {
+		//         error(op.expr, "Expected a constant value for this polymorphic name parameter,
+		//                         got %s", ...);
+		//     }
+		//     success = false;
+		//
+		// The port set the flag unconditionally, INSIDE check_call_arguments_internal — which runs
+		// for EVERY error mode, the reporting pass included. So that diagnostic could never print,
+		// and `success = false` still failed the call: A SILENT HARD ERROR.
+		// MEASURED: `fp :: proc($N: int); g :: proc{fp}; x := 3; g(x)`
+		//     oracle: exit 1, "Expected a constant value for this polymorphic name parameter, got x"
+		//     port:   exit 0, ZERO diagnostics — it ACCEPTED the call outright.
+		//
+		// `!show_error` is exactly C++'s scoping: NoErrors (speculative scoring) -> true,
+		// Show_Errors (the winner re-check, and the single-candidate path) -> false.
+		ctx_copy.in_proc_group = !show_error
 		if find_or_generate_polymorphic_procedure_from_parameters(&ctx_copy, entity, operands, call_node, &poly_data) {
 			// Use the specialized procedure type instead
 			if poly_data.gen_entity != nil {
@@ -1193,10 +1221,30 @@ check_call_arguments_internal :: proc(
 		// C++ Reference: check_expr.cpp check_call_arguments_internal, the
 		// `for (isize i = 0; i < pt->param_count; i++) { if (!visited[i]) ... }` loop.
 		//
-		// C++'s `-vet explicit-allocators` arm inside that loop is NOT ported here, and its
-		// absence is deliberate rather than an omission: C++ gates it on `!checking_proc_group`,
-		// and every path through this file is a proc-group candidate. The direct-call copy in
-		// check_expr.odin owns that diagnostic and has it.
+		// #1110 (B2-i i3): THE COMMENT THAT STOOD HERE WAS FACTUALLY WRONG. It read:
+		//     "C++'s `-vet explicit-allocators` arm inside that loop is NOT ported here, and its
+		//      absence is deliberate rather than an omission: C++ gates it on
+		//      `!checking_proc_group`, and every path through this file is a proc-group candidate."
+		// The second clause is false. check_call_arguments_single is invoked from THREE sites in
+		// this very file with checking_proc_group = FALSE (the single-candidate path, the
+		// single-valid path, and the winner re-check); only the speculative scoring loop passes
+		// true. So the C++ arm is reachable here, and its absence was an omission.
+		//
+		// C++ Reference: check_expr.cpp check_call_arguments_internal:
+		//     bool context_allocator_error = false;
+		//     if (ast_file_vet_explicit_allocators(c->file) && !checking_proc_group) {
+		//         ... if the default is context.allocator / context.temp_allocator ...
+		//         context_allocator_error = true;
+		//     }
+		//     if (!context_allocator_error) { ...fill the default...; continue; }
+		//     ... if (show_error) { if (context_allocator_error) {
+		//         error(call, "Parameter '%.*s' of type '%s' must be explicitly provided in "
+		//                     "procedure call", ...); } ... }
+		//     err = CallArgumentError_ParameterMissing;
+		//
+		// So under the vet flag the default is NOT filled and a distinct diagnostic is raised.
+		// MEASURED: `#+vet explicit-allocators` with `fa :: proc(n: int, allocator := context.allocator)`
+		// called through a group as `g(1)` — oracle 1, port 0.
 		for i in 0 ..< len(ordered_operands) {
 			if visited[i] {
 				continue
@@ -1209,6 +1257,25 @@ check_call_arguments_internal :: proc(
 			if var_e.param_value.kind == .Invalid {
 				continue
 			}
+
+			// See the #1110 note above. The gate is the vet flag AND !checking_proc_group, exactly
+			// as C++ spells it: a SPECULATIVE candidate scoring pass must not raise this.
+			context_allocator_error := false
+			if ctx.file != nil && .Explicit_Allocators in ctx.file.vet_flags && !checking_proc_group {
+				if param_default_is_context_allocator(var_e.param_value.original_ast_expr) {
+					context_allocator_error = true
+				}
+			}
+			if context_allocator_error {
+				if show_error {
+					type_str := type_to_string(entity_type(e))
+					error_node(call_node, "Parameter '%s' of type '%s' must be explicitly provided in procedure call", e.token.text, type_str)
+				}
+				data.error = true
+				// NO FILL — C++ skips the default entirely on this path, leaving visited[i] false.
+				continue
+			}
+
 			o := Operand {
 				mode = .Value,
 				type = entity_type(e),
@@ -1285,6 +1352,44 @@ check_call_arguments_internal :: proc(
 	// See the named-argument site above: C++ SETS an error and continues scoring (#526).
 	had_wrong_types := false
 
+	// #1109 (B2-i i2). C++ Reference: check_expr.cpp check_call_arguments_internal:
+	//
+	//     bool vari_expand = (ce->ellipsis.pos.line != 0);
+	//     ...
+	//     if (vari_expand && !variadic) {
+	//         error(ce->ellipsis, "Cannot use '..' in call to a non-variadic procedure: '%.*s'", ...);
+	//         err = CallArgumentError_NonVariadicExpand;
+	//     }
+	//
+	// The PORT'S DIRECT-CALL PATH already does this (check_expr.odin) and is correct there — which
+	// is why a direct `nv(..s)` matches the oracle. THE GROUP PATH NEVER READ call.ellipsis AT
+	// ALL, so `g(..s)` on a non-variadic group member was accepted silently.
+	// MEASURED: `nv :: proc(x: []int); g :: proc{nv}; g(..s)` — oracle 1, port 0.
+	//
+	// C++ RECORDS AND CONTINUES (err = ...; no return), so the argument mismatch is still reported
+	// afterwards; the direct path's #962 note makes the same point. Same shape here.
+	// call_node is a ^ast.Node here, not a ^ast.Call_Expr — this procedure takes the generic node.
+	vari_expand := false
+	call_ce, call_is_ce := call_node.derived.(^ast.Call_Expr)
+	if call_is_ce {
+		vari_expand = call_ce.ellipsis.kind != .Invalid
+	}
+	if vari_expand && !pt.variadic {
+		callee_name: string
+		owned := false
+		if id, is_id := call_ce.expr.derived.(^ast.Ident); is_id {
+			callee_name = id.name
+		} else {
+			callee_name = expr_to_string(call_ce.expr)
+			owned = true
+		}
+		defer if owned { delete(callee_name) }
+		if show_error {
+			error(call_ce.ellipsis.pos, "Cannot use '..' in call to a non-variadic procedure: '%s'", callee_name)
+		}
+		data.error = true
+	}
+
 	// Match positional arguments
 	for &operand, i in positional_operands {
 		// Index of the parameter this argument binds to. Everything at or past the
@@ -1360,7 +1465,31 @@ check_call_arguments_internal :: proc(
 		// `f(xs..)` passes the slice itself, so accept that spelling first.
 		effective_type := param_type
 		if is_variadic_param {
-			if check_is_assignable_to(ctx, &operand, param_type) {
+			// #1109 (B2-i i1). C++ Reference: check_expr.cpp check_call_arguments_internal scores
+			// every variadic operand against the ELEMENT type, and substitutes the SLICE type
+			// ONLY under vari_expand:
+			//
+			//     Type *elem = base_type(slice)->Slice.elem;
+			//     Type *t = elem;
+			//     for_array(operand_index, variadic_operands) {
+			//         if (vari_expand) { t = slice; ... }
+			//         score += eval_param_and_score(c, o, t, err, true, var_entity, show_error);
+			//     }
+			//
+			// The port had an UNCONDITIONAL "if the argument is assignable to the whole slice,
+			// take it" fast path with a FABRICATED score. That accepted a bare slice passed to a
+			// variadic parameter — no `..` in sight — which the reference rejects:
+			//     fv :: proc(xs: ..int); g :: proc{fv}; s := []int{1,2}; g(s)
+			//         oracle: "Cannot assign value 's' of type '[]int' to 'int' in a procedure
+			//                  argument"
+			//         port:   accepted.
+			//
+			// It could not simply be deleted: it is ALSO what made the legitimate `g(..s)` work on
+			// this path, since the group path has no vari_expand handling of its own. Gating it on
+			// the ellipsis is what separates the two spellings — which is exactly C++'s condition.
+			// The score is left as-is; correcting it to the real conversion distance is a separate
+			// question from which spellings are legal.
+			if vari_expand && check_is_assignable_to(ctx, &operand, param_type) {
 				total_score += assign_score_function(1, true)
 				continue
 			}
@@ -1398,6 +1527,28 @@ check_call_arguments_internal :: proc(
 			if var_e.param_value.kind == .Invalid {
 				continue
 			}
+
+			// #1110, SECOND SITE. The port has TWO default-fill implementations — the named-path
+			// loop above and this positional twin — and THIS is the one a plain `g(1)` reaches.
+			// I patched the named one first and the witness stayed silent; a behavioural probe
+			// (replacing the whole gate with `if true`) still produced nothing, which proved the
+			// loop was never reached rather than the gate being wrong. Same condition as C++:
+			// the vet flag AND !checking_proc_group.
+			context_allocator_error := false
+			if ctx.file != nil && .Explicit_Allocators in ctx.file.vet_flags && !checking_proc_group {
+				if param_default_is_context_allocator(var_e.param_value.original_ast_expr) {
+					context_allocator_error = true
+				}
+			}
+			if context_allocator_error {
+				if show_error {
+					ca_type_str := type_to_string(entity_type(e))
+					error_node(call_node, "Parameter '%s' of type '%s' must be explicitly provided in procedure call", e.token.text, ca_type_str)
+				}
+				data.error = true
+				continue
+			}
+
 			param_type := entity_type(e)
 			o := Operand {
 				mode = .Value,

@@ -1379,6 +1379,53 @@ compare_string16 :: proc(a, b: Exact_Value_String16) -> int {
 
 // compare_exact_values compares two exact values with an operator
 // C++ Reference: exact_value.cpp:950-1062
+// compare_exact_values_compound_lit_cpp is C++'s compound-literal comparator.
+// C++ Reference: check_expr.cpp compare_exact_values_compound_lit:
+//
+//     ast_node(x_cl, CompoundLit, x.value_compound);
+//     ast_node(y_cl, CompoundLit, y.value_compound);
+//     if (x_cl->elems.count != y_cl->elems.count) { return false; }
+//     bool test = op == Token_CmpEq;
+//     for (isize i = 0; i < x_cl->elems.count; i++) {
+//         if (compare_exact_values(op, x_cl->elems[i]->tav.value,
+//                                      y_cl->elems[i]->tav.value) != test) { return !test; }
+//     }
+//     return test;
+//
+// #1104: the port HAS a `compare_exact_values_compound_lit`, but with a different signature (it
+// takes a ^Checker_Context), different semantics (it unwraps Field_Value, demands both operands
+// be Addressing_Constant, and always compares with .Cmp_Eq internally so it cannot express the
+// test/!test protocol) and — decisively — NO CALLER except itself. It was unreachable from
+// compare_exact_values, which has no ctx to pass. This is C++'s version, reachable.
+@(private = "file")
+compare_exact_values_compound_lit_cpp :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value) -> bool {
+	xc, x_ok := x.(Exact_Value_Compound)
+	yc, y_ok := y.(Exact_Value_Compound)
+	if !x_ok || !y_ok || xc.expr == nil || yc.expr == nil {
+		return false
+	}
+	x_cl, x_is_cl := xc.expr.derived.(^ast.Comp_Lit)
+	y_cl, y_is_cl := yc.expr.derived.(^ast.Comp_Lit)
+	if !x_is_cl || !y_is_cl {
+		return false
+	}
+	if len(x_cl.elems) != len(y_cl.elems) {
+		return false
+	}
+	test := op == .Cmp_Eq
+	for i in 0 ..< len(x_cl.elems) {
+		lhs := x_cl.elems[i]
+		rhs := y_cl.elems[i]
+		if lhs == nil || rhs == nil {
+			return !test
+		}
+		if compare_exact_values(op, lhs.tav.value, rhs.tav.value) != test {
+			return !test
+		}
+	}
+	return test
+}
+
 compare_exact_values :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value) -> bool {
 	// C++ line 951: Promote values to common type
 	x_promoted := x
@@ -1467,12 +1514,59 @@ compare_exact_values :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value) -> boo
 		c := real(y_complex)
 		d := imag(y_complex)
 
+		// #1104. C++ Reference: exact_value.cpp compare_exact_values, the Complex arm:
+		//     if (isnan(a) || isnan(b) || isnan(c) || isnan(d)) { return op == Token_NotEq; }
+		// The port's FLOAT arm already has this guard; the COMPLEX arm dropped it. cmp_f64
+		// returns 0 for a NaN pair (neither > nor <), so NaN-bearing complex constants compared
+		// EQUAL. MEASURED: `complex(NaN,0) == complex(NaN,0)` — oracle false, port true.
+		if math.is_nan(a) || math.is_nan(b) || math.is_nan(c) || math.is_nan(d) {
+			return op == .Not_Eq
+		}
+
 		#partial switch op {
 		case .Cmp_Eq:
 			return cmp_f64(a, c) == 0 && cmp_f64(b, d) == 0
 		case .Not_Eq:
 			return cmp_f64(a, c) != 0 || cmp_f64(b, d) != 0
 		}
+
+	// #1104: THE quaternion256 ARM WAS ABSENT ENTIRELY, so every quaternion constant comparison
+	// fell through to `return false` — `A == A` folded FALSE and `A != B` folded FALSE too.
+	// C++ Reference: exact_value.cpp compare_exact_values, case ExactValue_Quaternion.
+	case quaternion256:
+		y_quat, yq_ok := y_promoted.(quaternion256)
+		if !yq_ok {
+			return false
+		}
+		ar, ai, aj, ak := real(val), imag(val), jmag(val), kmag(val)
+		br, bi, bj, bk := real(y_quat), imag(y_quat), jmag(y_quat), kmag(y_quat)
+		if math.is_nan(ar) || math.is_nan(ai) || math.is_nan(aj) || math.is_nan(ak) ||
+		   math.is_nan(br) || math.is_nan(bi) || math.is_nan(bj) || math.is_nan(bk) {
+			return op == .Not_Eq
+		}
+		#partial switch op {
+		case .Cmp_Eq:
+			return cmp_f64(ar, br) == 0 && cmp_f64(ai, bi) == 0 &&
+			       cmp_f64(aj, bj) == 0 && cmp_f64(ak, bk) == 0
+		case .Not_Eq:
+			return cmp_f64(ar, br) != 0 || cmp_f64(ai, bi) != 0 ||
+			       cmp_f64(aj, bj) != 0 || cmp_f64(ak, bk) != 0
+		}
+
+	// #1104: THE Exact_Value_Compound ARM WAS ABSENT, so array/struct constant comparison folded
+	// to false in both directions. C++ Reference: exact_value.cpp compare_exact_values:
+	//     case ExactValue_Compound:
+	//         if (op != Token_CmpEq && op != Token_NotEq) { return false; }
+	//         if (x.kind != y.kind) { return false; }
+	//         return compare_exact_values_compound_lit(op, x, y);
+	case Exact_Value_Compound:
+		if op != .Cmp_Eq && op != .Not_Eq {
+			return false
+		}
+		if _, y_is_compound := y_promoted.(Exact_Value_Compound); !y_is_compound {
+			return false
+		}
+		return compare_exact_values_compound_lit_cpp(op, x_promoted, y_promoted)
 
 	// C++ line 1007-1019: String comparison
 	case string:

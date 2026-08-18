@@ -20,7 +20,7 @@ package checker
 // The LLVM major version whose table this file was generated from.
 MICROARCH_LLVM_MAJOR :: 22
 
-// C++: build_settings.cpp MicroarchFeatureList
+// C++: build_settings.cpp MicroarchFeatureList:130-133
 Microarch_Feature_List :: struct {
 	microarch: string,
 	features:  string,

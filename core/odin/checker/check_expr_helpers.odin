@@ -616,6 +616,15 @@ write_expr_to_string :: proc(builder: ^strings.Builder, node: ^ast.Node, shortha
 		if derived.is_raw_union {
 			strings.write_string(builder, "#raw_union ")
 		}
+		// C++ Reference: check_expr.cpp:13533-13536 prints FOUR flags; the port had two.
+		// Both fields exist on ast.Struct_Type and the port's parser sets them, so any message
+		// naming an anonymous `struct #all_or_none {...}` or `struct #simple {...}` lost the tag.
+		if derived.is_all_or_none {
+			strings.write_string(builder, "#all_or_none ")
+		}
+		if derived.is_simple {
+			strings.write_string(builder, "#simple ")
+		}
 		if derived.align != nil {
 			strings.write_string(builder, "#align ")
 			write_expr_to_string(builder, derived.align, shorthand)
@@ -1049,29 +1058,35 @@ check_is_not_addressable :: proc(ctx: ^Checker_Context, o: ^Operand) -> bool {
 
 		// Type assertion is special case
 		if ta, ok := expr.derived.(^ast.Type_Assertion); ok {
-			// Check if type assertion result is addressable based on type
-			// Some type assertions (pointer, union variants, any) may be addressable
-			// C++ Reference: check_expr.cpp:2593-2604
-			if o.type != nil {
-				// Pointer types are addressable
-				if is_type_pointer(o.type) {
-					return false
-				}
-				// Check if base expression type is a union or any
-				if ta.expr != nil {
-					base_type_info := type_of_expr(ta.expr, ctx.info)
-					if base_type_info != nil {
-						derefed := type_deref(base_type_info)
-						// Union variants are addressable
-						if is_type_union(derefed) {
-							return false
-						}
-						// Any type assertions are addressable
-						if is_type_any(derefed) {
-							return false
-						}
-					}
-				}
+			// C++ Reference: check_expr.cpp:2821-2832 --
+			//     TypeAndValue tv = ta->expr->tav;
+			//     if (is_type_pointer(tv.type))                                  return false;
+			//     if (is_type_union(tv.type) && tv.mode == Addressing_Variable)   return false;
+			//     if (is_type_any(tv.type))                                       return false;
+			//     return true;
+			// THREE divergences in the port's version, of which the second is the live one:
+			//  1. it tested is_type_pointer(o.type) -- the assertion's RESULT type -- where the
+			//     reference tests tv.type, the type of the asserted-FROM expression;
+			//  2. it OMITTED `tv.mode == Addressing_Variable` on the union arm, so a union RVALUE
+			//     (a call result) was treated as addressable;
+			//  3. it applied type_deref to the source type, which the reference does not.
+			// WITNESSED as a COUNT divergence by the text instrument (wit_b3rest/d_optional_ok):
+			// `p := &get().(int)` on `get :: proc() -> U` -- the oracle emits
+			// "Cannot take the pointer address of 'get().(int)'" and the port emitted nothing,
+			// so the port hands back a pointer into a temporary.
+			// *** I HAD LOGGED THIS CELL AS "NOT REPRODUCED" ON VERDICT ALONE. *** Both compilers
+			// exit 1 (for an unrelated reason), so only comparing OUTPUT could see it -- exactly the
+			// case my own note about "static confirmation of a code difference is not confirmation
+			// of an effect" was written for, now resolved in the direction of the code read.
+			tv, _ := tav_lookup(ctx.info, ta.expr)
+			if is_type_pointer(tv.type) {
+				return false
+			}
+			if is_type_union(tv.type) && tv.mode == .Variable {
+				return false
+			}
+			if is_type_any(tv.type) {
+				return false
 			}
 		}
 		// All other optional-ok cases are not addressable
@@ -1411,12 +1426,30 @@ check_for_dynamic_literals :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> bo
 	// C++ Reference: check_expr.cpp:10514 uses check_feature_flags(c, node), NOT ctx.file
 	// directly. Reading ctx.file skips the proc-literal and node fallbacks, so the flag was
 	// invisible whenever ctx.file was unset (LEDGER task 244).
-	if check_feature_flags(ctx, node) & {.Dynamic_Literals} != {} {
-		return true
-	}
-
-	// Check global build settings
-	if build_context.dynamic_literals {
+	// C++ Reference: check_expr.cpp:10620-10643. The reference's flag test is ONE NEGATED
+	// CONJUNCTION whose `else` still runs a CONTEXT check:
+	//
+	//     if ((check_feature_flags(c, node) & OptInFeatureFlag_DynamicLiterals) == 0 &&
+	//         !build_context.dynamic_literals) {
+	//         ... the error block ...  return false;
+	//     } else if (c->curr_proc_decl != nullptr && c->curr_proc_calling_convention != ProcCC_Odin) {
+	//         if (c->scope != nullptr && (c->scope->flags & ScopeFlag_ContextDefined) == 0) {
+	//             error(node, "Compound literals of dynamic types require a 'context' to defined");
+	//         }
+	//     }
+	//     return true;
+	//
+	// The port split it into two early `return true`s, so the `else if` had no counterpart and
+	// that diagnostic could NEVER fire -- `grep "require a 'context'"` found it nowhere in the
+	// port. A dynamic literal inside a non-"odin"-convention procedure with no context was
+	// silently accepted. (The reference's missing-apostrophe wording "to defined" is its own;
+	// reproduced verbatim.)
+	if check_feature_flags(ctx, node) & {.Dynamic_Literals} != {} || build_context.dynamic_literals {
+		if ctx.curr_proc_decl != nil && ctx.curr_proc_calling_convention != .Odin {
+			if ctx.scope != nil && .Context_Defined not_in ctx.scope.flags {
+				error(node, "Compound literals of dynamic types require a 'context' to defined")
+			}
+		}
 		return true
 	}
 

@@ -136,6 +136,97 @@ dump_doc :: proc(c: ^Checker, path: string) -> bool {
 		fmt.sbprintf(&sb, "doc\t%s\t%v\tflags=%s\n", dump_doc_str(&w, de.name), de.kind,
 			dump_doc_flags(de.flags))
 		append(&lines, strings.to_string(sb))
+
+		// #1195. A SECOND LINE TYPE carrying the entity's DOC COMMENT TEXT, emitted only when there
+		// is any. The `doc` line above carries names and flag bits and NOTHING ELSE, which is why it
+		// could not verify #1177 (the struct-field / enum-member docs+comment WRITER in
+		// check_type.odin) or #1178 (the entity-level READER fallback in docs_writer.odin): those
+		// fixes populate Doc_Entity.docs / .comment, and no instrument in this tree ever printed
+		// them. Both fixes have been unverifiable since they landed.
+		//
+		// DELIBERATELY A NEW LINE TYPE, not extra fields on `doc`. The recorded design for this
+		// (LEDGER, the triage_doc DOCCOMMENT note) says the same thing for the same reason: the
+		// existing consumers field-split the line they know, so widening it breaks them silently.
+		// Here that is pre757_docflag.sh / pre759_docflag.sh, which read `doc` lines.
+		//
+		// The oracle's comparable artifact is the BINARY `odindoc` file from `odin doc -doc-format`,
+		// which stores comment text as plain bytes -- so `strings -a` on it yields the same texts
+		// this line prints, and the two can be compared without a binary-format reader.
+		// #1198. A THIRD line type, for the entity's ATTRIBUTES. Same gap #1195 closed for doc
+		// comments: docs_writer.odin:1417 writes `doc_entity.attributes = doc_write_attributes(...)`,
+		// mirroring docs_writer.cpp:977 -- and nothing in this tree ever printed them, so the whole
+		// attribute surface of the doc output was unverified. `flags=` on the `doc` line above is a
+		// DIFFERENT thing (Doc_Entity_Flags bits, not the source attributes).
+		//
+		// Again a NEW line type rather than widening `doc`: pre757_docflag.sh / pre759_docflag.sh
+		// field-split that line.
+		//
+		// Doc_Array(T) is {offset, length} into w.data (docs_writer.odin:44-47), and the attribute
+		// items sit contiguously from `offset`, so the i'th is read by offsetting a typed pointer --
+		// exactly how doc_get_item indexes the entity array.
+		if de.attributes.length > 0 {
+			alo := int(de.attributes.offset)
+			need := int(de.attributes.length) * size_of(Doc_Attribute)
+			if alo >= 0 && alo + need <= len(w.data) {
+				attrs := (cast([^]Doc_Attribute)&w.data[alo])[:de.attributes.length]
+				sb3 := strings.builder_make()
+				fmt.sbprintf(&sb3, "docattrs\t%s", dump_doc_str(&w, de.name))
+				for a in attrs {
+					fmt.sbprintf(&sb3, "\t%s=%q", dump_doc_str(&w, a.name), dump_doc_str(&w, a.value))
+				}
+				fmt.sbprintf(&sb3, "\n")
+				append(&lines, strings.to_string(sb3))
+			} else {
+				// Bounds-checked, not asserted: this is an instrument, and a malformed span should
+				// show as a visible marker rather than take down the run it is measuring.
+				sb3 := strings.builder_make()
+				fmt.sbprintf(&sb3, "docattrs\t%s\t<bad-span>\n", dump_doc_str(&w, de.name))
+				append(&lines, strings.to_string(sb3))
+			}
+		}
+
+		// #1199. A FOURTH line type. Auditing EVERY Doc_Entity field against what this dump printed
+		// found TEN never printed: reserved, pos, type, init_string, reserved_for_init,
+		// field_group_index, foreign_library, link_name, grouped_entities, where_clauses.
+		// Of those, THREE are string-valued and therefore comparable against the oracle's binary
+		// odindoc via `strings -a` with no format reader:
+		//     init_string    the declaration's initialiser text
+		//     link_name      @(link_name=...) as recorded in the doc
+		//     where_clauses  each `where` clause's text (a Doc_Array of Doc_String)
+		// The other seven are numeric indices or padding (pos, type, field_group_index,
+		// foreign_library, grouped_entities, and the two reserved words); comparing those needs the
+		// type/entity tables and is a separate job, deliberately not started here.
+		// All three of these cover ground with prior fixes -- link_name alone had #1181 and #1188 --
+		// and none of them was verifiable before this line existed.
+		init_s := dump_doc_str(&w, de.init_string)
+		link_s := dump_doc_str(&w, de.link_name)
+		if init_s != "<blank>" || link_s != "<blank>" || de.where_clauses.length > 0 {
+			sb4 := strings.builder_make()
+			fmt.sbprintf(&sb4, "docextra\t%s\tinit=%q\tlink=%q", dump_doc_str(&w, de.name), init_s, link_s)
+			if de.where_clauses.length > 0 {
+				wlo := int(de.where_clauses.offset)
+				need := int(de.where_clauses.length) * size_of(Doc_String)
+				if wlo >= 0 && wlo + need <= len(w.data) {
+					wcs := (cast([^]Doc_String)&w.data[wlo])[:de.where_clauses.length]
+					for wc in wcs {
+						fmt.sbprintf(&sb4, "\twhere=%q", dump_doc_str(&w, wc))
+					}
+				} else {
+					fmt.sbprintf(&sb4, "\twhere=<bad-span>")
+				}
+			}
+			fmt.sbprintf(&sb4, "\n")
+			append(&lines, strings.to_string(sb4))
+		}
+
+		docs_s := dump_doc_str(&w, de.docs)
+		comment_s := dump_doc_str(&w, de.comment)
+		if docs_s != "<blank>" || comment_s != "<blank>" {
+			sb2 := strings.builder_make()
+			fmt.sbprintf(&sb2, "doccomment\t%s\tdocs=%q\tcomment=%q\n",
+				dump_doc_str(&w, de.name), docs_s, comment_s)
+			append(&lines, strings.to_string(sb2))
+		}
 	}
 	slice.sort(lines[:])
 

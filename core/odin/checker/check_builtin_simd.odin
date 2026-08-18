@@ -174,6 +174,29 @@ check_builtin_simd_binary_numeric :: proc(ctx: ^Checker_Context, operand: ^Opera
 		// Note: C++ continues even after this error (doesn't return)
 	}
 
+	// #1071: pairwise add/sub fold ADJACENT lanes, so an odd lane count leaves one lane with no
+	// partner. C++ Reference: check_builtin.cpp, immediately after the simd_div arm above:
+	//
+	//     if (id == BuiltinProc_simd_pairwise_add || id == BuiltinProc_simd_pairwise_sub) {
+	//         i64 lanes = get_array_type_count(x.type);
+	//         if (lanes % 2 != 0) {
+	//             error(x.expr, "'%.*s' expected a #simd type with an even lane count, got '%s'",
+	//                   LIT(builtin_name), xs);
+	//             return false;
+	//         }
+	//     }
+	//
+	// Arrived with the merge; the port shares one handler for the whole add/sub/mul/div/min/max
+	// family and never grew the pairwise-only guard. Reachable in practice only via #simd[1],
+	// every other legal lane count being an even power of two.
+	if id == .Simd_Pairwise_Add || id == .Simd_Pairwise_Sub {
+		lanes := get_array_type_count(x.type)
+		if lanes % 2 != 0 {
+			error(x.expr, "'%s' expected a #simd type with an even lane count, got '%s'", builtin_name, type_to_string(x.type))
+			return false
+		}
+	}
+
 	// Result type is same as input
 	operand.mode = .Value
 	operand.type = x.type
@@ -435,11 +458,13 @@ check_builtin_simd_comparison :: proc(ctx: ^Checker_Context, operand: ^Operand, 
 	}
 
 	if !are_types_identical(x.type, y.type) {
-		// C++ Reference: check_builtin.cpp:1141 -- names both types. Missed by the gotscan
-		// pass because C++'s tail here is ", '%s' vs '%s'" rather than ", got ...", so the
-		// prefix split did not line the two messages up.
+		// C++ Reference: check_builtin.cpp:1148-1154 -- names both types, and DOES NOT RETURN.
+		// The reference reports and FALLS THROUGH, still building
+		// alloc_type_simd_vector(count, new_elem) from x's element, so the call yields a
+		// well-typed operand. The port's `return false` produced an INVALID operand instead: same
+		// first diagnostic, then a different diagnostic COUNT downstream and no type_of available.
+		// Same shape as the simd_div-on-integers arm the port already handles correctly.
 		error(call, "Mismatched types to '%s', '%s' vs '%s'", builtin_name, type_to_string(x.type), type_to_string(y.type))
-		return false
 	}
 
 	// Create result type: unsigned integer vector with element size matching input
@@ -553,7 +578,8 @@ check_builtin_simd_memory :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 		mask_count := get_array_type_count(mask.type)
 
 		if ptr_count != values_count || values_count != mask_count {
-			error(call, "All simd vectors must be of the same length, got %d vs %d vs %d", ptr_count, values_count, mask_count)
+			// C++ Reference: check_builtin.cpp:1236 anchors at mask.expr -- ARGUMENT 3, not the call.
+		error(call.args[2], "All simd vectors must be of the same length, got %d vs %d vs %d", ptr_count, values_count, mask_count)
 			return false
 		}
 	} else {
@@ -561,7 +587,8 @@ check_builtin_simd_memory :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 		mask_count := get_array_type_count(mask.type)
 
 		if values_count != mask_count {
-			error(call, "All simd vectors must be of the same length, got %d vs %d", values_count, mask_count)
+			// C++ Reference: check_builtin.cpp:1245 anchors at mask.expr -- ARGUMENT 3, not the call.
+		error(call.args[2], "All simd vectors must be of the same length, got %d vs %d", values_count, mask_count)
 			return false
 		}
 	}
@@ -599,7 +626,11 @@ check_builtin_simd_indices :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 	}
 
 	if x.mode != .Type {
-		error(call.args[0], "'%s' expected a simd vector type, got '%s'", builtin_name, type_to_string(x.type))
+		// C++ Reference: check_builtin.cpp:1268-1272 prints `expr_to_string(x.expr)` HERE, while
+		// the immediately following !is_type_simd_vector arm (1275-1277) prints type_to_string.
+		// The two arms differ ON PURPOSE and the port collapsed them: for `simd_indices(5)` the
+		// reference says "got '5'" and the port said "got 'untyped integer'".
+		error(call.args[0], "'%s' expected a simd vector type, got '%s'", builtin_name, expr_to_string(x.expr))
 		return false
 	}
 
@@ -997,6 +1028,29 @@ check_builtin_simd_shuffle :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp, the third guard of simd_shuffle, with its comment:
+	//     // the result is as wide as the index list, which may be twice the operand width
+	//     if (arg_count > SIMD_ELEMENT_COUNT_MAX) {
+	//         error(call, "'%.*s' constructs a #simd vector beyond the maximum element count of
+	//                %d, got %lld", LIT(builtin_name), SIMD_ELEMENT_COUNT_MAX, arg_count);
+	//         return false;
+	//     }
+	// (located by searching the message text; line citations predate the a58490711 merge.)
+	//
+	// #1069 — ADDED BY THAT MERGE, and the port had no counterpart. The earlier guard above caps
+	// arg_count at max_count = len(x) + len(y), which for two #simd[64] operands is 128 — so a
+	// shuffle could legally ask for 128 lanes and build a vector twice the architectural maximum.
+	// That is exactly what the corpus cell bitsetwidth__lsbs128 does.
+	//
+	// SIMD_ELEMENT_COUNT_MAX is 64 (types.cpp:407). Declared locally here because the port's other
+	// use (check_type.odin:997) is also a proc-local constant; there is no package-level one to
+	// share yet.
+	SIMD_ELEMENT_COUNT_MAX :: 64
+	if arg_count > SIMD_ELEMENT_COUNT_MAX {
+		error(call, "'%s' constructs a #simd vector beyond the maximum element count of %d, got %d", builtin_name, SIMD_ELEMENT_COUNT_MAX, arg_count)
+		return false
+	}
+
 	operand.mode = .Value
 	operand.type = alloc_type_simd_vector(arg_count, elem)
 	return true
@@ -1007,7 +1061,7 @@ check_builtin_simd_shuffle :: proc(ctx: ^Checker_Context, operand: ^Operand, cal
 // C++ Reference: check_builtin.cpp:1334-1385
 // ============================================================================
 
-check_builtin_simd_select :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr) -> bool {
+check_builtin_simd_select :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^Ast_Call_Expr, type_hint: ^Type = nil) -> bool {
 	builtin_name := "simd_select"
 
 	if len(call.args) != 3 {
@@ -1035,7 +1089,9 @@ check_builtin_simd_select :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 
 	// Check value vectors
 	x: Operand
-	check_expr(ctx, &x, call.args[1])
+	// C++ Reference: check_builtin.cpp:1594 -- `check_expr_with_type_hint(c, &x, ce->args[1],
+	// type_hint)`. This is the ONLY type_hint consumer in check_builtin_simd_operation.
+	check_expr_with_type_hint(ctx, &x, call.args[1], type_hint)
 	if x.mode == .Invalid {
 		return false
 	}
@@ -1241,13 +1297,18 @@ check_builtin_simd_lanes_rotate :: proc(ctx: ^Checker_Context, operand: ^Operand
 		return false
 	}
 
-	convert_to_typed(ctx, &offset, t_i64)
+	// C++ Reference: check_builtin.cpp:1797-1802, whose own comment says why:
+	//     // `base:intrinsics` declares the offset as `int` and does not mark it #any_int
+	// t_int is TARGET-DEPENDENT and t_i64 is not, so the port both named the wrong type in
+	// check_assignment's message ('i64' vs 'int') and accepted, on 32-bit targets, untyped
+	// constants that overflow a 32-bit int.
+	convert_to_typed(ctx, &offset, t_int)
 	if !is_type_integer(offset.type) || offset.mode != .Constant {
-		error(call.args[1], "'%s' expected a constant integer offset", builtin_name)
+		error(offset.expr, "'%s' expected a constant integer offset", builtin_name)
 		return false
 	}
 
-	check_assignment(ctx, &offset, t_i64, builtin_name)
+	check_assignment(ctx, &offset, t_int, builtin_name)
 
 	operand.mode = .Value
 	operand.type = x.type
@@ -1310,13 +1371,17 @@ check_builtin_simd_clamp :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp:1831-1846. Both messages name BOTH types, anchor at
+	// x.expr (argument 1) rather than the call, and the SECOND reuses the "2 arguments" wording --
+	// a reference quirk, reproduced deliberately. The port's sibling handlers already anchor at
+	// the argument; clamp was the outlier.
 	if !are_types_identical(x.type, y.type) {
-		error(call, "'%s' expected arguments of the same type", builtin_name)
+		error(x.expr, "'%s' expected 2 arguments of the same type, got '%s' vs '%s'", builtin_name, type_to_string(x.type), type_to_string(y.type))
 		return false
 	}
 
 	if !are_types_identical(x.type, z.type) {
-		error(call, "'%s' expected arguments of the same type", builtin_name)
+		error(x.expr, "'%s' expected 2 arguments of the same type, got '%s' vs '%s'", builtin_name, type_to_string(x.type), type_to_string(z.type))
 		return false
 	}
 
@@ -1662,6 +1727,27 @@ check_builtin_simd_interleave :: proc(ctx: ^Checker_Context, operand: ^Operand, 
 	MAX_COUNT :: i64(64)
 	if count > MAX_COUNT {
 		error(call, "'%s' exceeds the maximum #simd count %d, got %d", builtin_name, MAX_COUNT, count)
+		return false
+	}
+
+	// #1071. C++ Reference: check_builtin.cpp, `case BuiltinProc_simd_interleave:`, directly
+	// after the max-count guard above:
+	//
+	//     // the lane count is the operand width times the argument count, so it is a power
+	//     // of two only when the argument count is
+	//     if (!is_power_of_two(count)) {
+	//         error(ce->proc, "'%.*s' must produce a power of two #simd count, got %lld",
+	//               LIT(builtin_name), cast(long long)count);
+	//         return false;
+	//     }
+	//
+	// Arrived with the merge. Without it `simd_interleave(v, v, v)` on #simd[2]f32 produced a
+	// #simd[6], a vector type with a lane count no #simd declaration can express.
+	//
+	// Reported against call.expr (the proc expression), matching C++'s ce->proc — MEASURED as
+	// column 7 spanning 'intrinsics.simd_interleave', not the call node.
+	if !is_power_of_two(count) {
+		error(call.expr, "'%s' must produce a power of two #simd count, got %d", builtin_name, count)
 		return false
 	}
 

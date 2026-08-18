@@ -628,6 +628,27 @@ is_type_matrix :: proc(t: ^Type) -> bool {
 	return bt.kind == .Matrix
 }
 
+// is_matrix_square reports whether a matrix type has equal row and column counts.
+// C++ Reference: types.cpp is_matrix_square:
+//
+//     gb_internal bool is_matrix_square(Type *t) {
+//         t = base_type(t);
+//         GB_ASSERT(t->kind == Type_Matrix);
+//         return t->Matrix.row_count == t->Matrix.column_count;
+//     }
+//
+// The caller is responsible for having established that `t` is a matrix; this
+// mirrors the reference's GB_ASSERT by returning false for anything else rather
+// than aborting.
+is_matrix_square :: proc(t: ^Type) -> bool {
+	bt := base_type(t)
+	if bt == nil || bt.kind != .Matrix {
+		return false
+	}
+	mat := bt.variant.(Type_Matrix)
+	return mat.row_count == mat.column_count
+}
+
 // is_type_fixed_capacity_dynamic_array reports whether a type is `[dynamic; N]T`.
 // C++ Reference: types.cpp is_type_fixed_capacity_dynamic_array.
 is_type_fixed_capacity_dynamic_array :: proc(t: ^Type) -> bool {
@@ -2019,8 +2040,33 @@ is_type_simple_compare :: proc(t: ^Type) -> bool {
 		// type_is_valid_map_key and the comparison predicate alike (#916 -- four cells, one
 		// invention).
 		//
-		// C++'s `Struct.is_simple` fast path has no port counterpart (the field does not exist);
-		// it is a cache for this same loop, so omitting it changes no answer.
+		// #1088: THE COMMENT THAT STOOD HERE MADE TWO CLAIMS AND BOTH WERE FALSE. It read:
+		//   "C++'s `Struct.is_simple` fast path has no port counterpart (the field does not
+		//    exist); it is a cache for this same loop, so omitting it changes no answer."
+		//
+		//  * The field DOES exist — ast/semantic_types.odin Type_Struct.is_simple — and IS
+		//    written, at check_type.odin in check_struct_type, from the `#simple` directive.
+		//  * It is NOT a cache for this loop. C++ sets it when every field is
+		//    is_type_nearly_simple_compare (check_type.cpp check_struct_type), which is STRICTLY
+		//    WEAKER than is_type_simple_compare. So a `#simple` struct can hold a float — nearly
+		//    simple compare but not simple compare — and short-circuit to true here while the
+		//    loop below would answer false.
+		//
+		// C++ Reference: types.cpp is_type_simple_compare:
+		//     case Type_Struct:
+		//         if (t->Struct.is_simple) { return true; }
+		//         for_array(...) { if (!is_type_simple_compare(f->type)) return false; }
+		//         return true;
+		//
+		// MEASURED: `S :: struct #simple { a: f32 }` —
+		//     #assert(intrinsics.type_is_simple_compare(S)) passes on the oracle, FAILED here.
+		// Feeds map-key hasher selection, the TypeInfoFlag_Simple_Compare bit, and
+		// is_type_comparable's raw-union delegation, so a `struct #raw_union #simple` was also
+		// coming out non-comparable.
+		if struc.is_simple {
+			return true
+		}
+
 		for field in struc.fields {
 			if field.kind == .Variable {
 				field_type := entity_type(field)
@@ -2356,15 +2402,22 @@ is_type_lock_free :: proc(t: ^Type) -> bool {
 	}
 	sz := type_size_of(ct)
 
-	// Common lock-free sizes on most platforms
-	// Uses max_align as upper bound (typically 8 on 64-bit, 4 on 32-bit)
-	if sz <= 0 {
-		return false
-	}
-	// Must be power of 2 for atomic operations
-	if sz & (sz - 1) != 0 {
-		return false
-	}
+	// #1074: TWO INVENTED REJECTIONS WERE DELETED HERE — a `sz <= 0` guard and a power-of-two
+	// test. C++ Reference: types.cpp is_type_lock_free IS ONLY THIS:
+	//
+	//     t = core_type(t);
+	//     if (t == t_invalid) { return false; }
+	//     i64 sz = type_size_of(t);
+	//     // TODO(bill): Figure this out correctly
+	//     return sz <= build_context.max_align;
+	//
+	// The reference's own TODO says it is not doing anything clever. The port's extra guards
+	// looked plausible — atomics really do want a power-of-two size — but they are not the
+	// contract, and this predicate is USER-REACHABLE AS A CONSTANT through
+	// intrinsics.atomic_type_is_lock_free, so the two compilers folded different compile-time
+	// values. MEASURED on `T :: struct { a, b, c: u8 }` (size 3):
+	//     oracle #assert(atomic_type_is_lock_free(T)) passes, port FAILS.
+	// Affects every size that is 0 or a non-power-of-two <= max_align: 0, 3, 5, 6, 7.
 	return sz <= int(build_context.max_align)
 }
 
@@ -2446,22 +2499,49 @@ is_type_endian_specific :: proc(t: ^Type) -> bool {
 		return false
 	}
 
-	// Handle BitSet by checking its backing integer type
-	// C++ Reference: types.cpp:1993-1995
+	// Handle BitSet by checking its backing integer type.
+	// C++ Reference: types.cpp is_type_endian_specific:
+	//     if (t->kind == Type_BitSet) { t = bit_set_to_int(t); }
+	//     if (t->kind == Type_Basic) { switch (...) }
+	//
+	// #1086: C++ REASSIGNS AND FALLS THROUGH — it does NOT recurse, and it does NOT re-apply
+	// core_type to the result. bit_set_to_int returns BitSet.underlying verbatim when that is an
+	// integer, so a bit_set over a NAMED integer yields a Type_Named here, fails the
+	// `kind == Type_Basic` test, and answers false. The port recursed, which re-entered
+	// core_type and unwrapped the Named — answering true. (An earlier fix, LEDGER #802, made the
+	// recursion terminate; it did not make it faithful.)
 	if ct.kind == .Bit_Set {
-		// C++ Reference: types.cpp is_type_endian_specific — `t = bit_set_to_int(t); return
-		// is_type_endian_specific(t);` recurses on the REASSIGNED value. The port assigned the
-		// reduction to `ct` and then recursed on the ORIGINAL `t`, so the bit_set never reduced
-		// and the call recursed forever — a stack overflow, i.e. SIG11. Latent until #800 gave
-		// is_type_different_to_arch_endianness a call to this on every type. LEDGER #802.
-		return is_type_endian_specific(bit_set_to_int(ct))
+		ct = bit_set_to_int(ct)
+		if ct == nil {
+			return false
+		}
 	}
 
-	// Check if Basic type is endian-specific
+	// Check if Basic type is endian-specific.
+	//
+	// #1086: THE PORT TESTED THE ENDIAN FLAG; C++ ENUMERATES BASIC KINDS, AND ITS LIST IS NOT
+	// THE SAME SET. i128le and i128be carry BasicFlag_EndianLittle/Big in the reference's own
+	// basic_types table, yet are ABSENT from this switch, while their unsigned twins u128le and
+	// u128be are present.
+	//
+	// *** THIS IS A REFERENCE QUIRK AND IT IS THE CONTRACT — DO NOT "FIX" IT HERE. ***
+	// Filed upstream:
+	//   COMPILER_ISSUES/UPSTREAM-UNFILED-is-type-endian-specific-omits-i128le-i128be.md
+	//
+	// MEASURED: `BF :: bit_field i128le { a: u16le | 8 }` — the oracle REJECTS it (the field is
+	// Little, the backing i128le classifies as Native, so determine_endian_kind sees a mismatch)
+	// and the port ACCEPTED it, because the flag test called i128le "specific" and the two
+	// agreed. Enumerating the kinds reproduces the reference exactly.
 	if ct.kind == .Basic {
 		basic := ct.variant.(Type_Basic)
-		endian := get_basic_kind_endianness(basic.kind)
-		return endian == .Little || endian == .Big
+		#partial switch basic.kind {
+		case .I16le, .U16le, .I32le, .U32le, .I64le, .U64le, .U128le:
+			return true
+		case .I16be, .U16be, .I32be, .U32be, .I64be, .U64be, .U128be:
+			return true
+		case .F16le, .F16be, .F32le, .F32be, .F64le, .F64be:
+			return true
+		}
 	}
 
 	return false
@@ -3238,6 +3318,49 @@ lookup_field_with_selection :: proc(c: ^Checker, type_: ^Type, field_name: strin
 			bitset := type.variant.(Type_Bit_Set)
 			// For bit sets, lookup in the element type (e.g., enum values)
 			return lookup_field_with_selection(c, bitset.elem, field_name, true, sel, allow_blank_ident)
+		}
+
+		// #1091 (g4). C++ Reference: types.cpp lookup_field_with_selection — the arm directly
+		// after the BitSet one in the same else-if chain:
+		//
+		//     } else if (type->kind == Type_BitField) {
+		//         for_array(i, type->BitField.fields) {
+		//             Entity *f = type->BitField.fields[i];
+		//             if (f->kind != Entity_Variable || (f->flags & EntityFlag_Field) == 0) continue;
+		//             if (field_name == entity_interned_name(f)) {
+		//                 selection_add_index(&sel, i);
+		//                 sel.entity = f;
+		//                 sel.is_bit_field = true;
+		//                 return sel;
+		//             }
+		//         }
+		//     }
+		//
+		// ABSENT from the port's is_type chain, so TYPE-level access to a bit_field member did
+		// not resolve. The VALUE-level arm further down this same procedure already does exactly
+		// this — the two halves disagreed with each other.
+		//
+		// MEASURED — both compilers exit 1, so the verdict corpus called this cell MATCHING.
+		// Only the output diff exposed it:
+		//     BF :: bit_field u32 { a: u8 | 4 };  X :: BF.a
+		//     oracle: "'BF.a' is not a compile-time known constant"  -- it RESOLVED the field
+		//     port:   "Type 'BF' has no field 'a'"                   -- it did not
+		if type.kind == .Bit_Field {
+			bf := type.variant.(Type_Bit_Field)
+			for field, i in bf.fields {
+				if field == nil || field.kind != .Variable {
+					continue
+				}
+				if .Field not_in field.flags {
+					continue
+				}
+				if field.token.text == field_name {
+					selection_add_index(&sel, i)
+					sel.entity = field
+					sel.is_bit_field = true
+					return sel
+				}
+			}
 		}
 
 		// Generic type specialized lookup
@@ -4541,14 +4664,29 @@ is_type_array_like :: proc(t: ^Type) -> bool {
 // is_type_ordered_numeric checks if a type supports ordered comparison
 // C++ Reference: types.cpp is_type_ordered_numeric
 is_type_ordered_numeric :: proc(t: ^Type) -> bool {
-	// #918: TWO divergences in one procedure, and they pointed in OPPOSITE directions.
+	// #918 (HISTORY, still true of the OLD reference): two divergences pointing in opposite
+	// directions. The port had used base_type AND carried `Type_Pointer, Type_Multi_Pointer ->
+	// true`, which belong to is_type_ordered. Measured then (#916): base_type made BF/BF2/E reject
+	// where the oracle ACCEPTED, and the pointer arms made ^int / #simd pointers accept where the
+	// oracle rejected. So the port moved to core_type. That was correct against the reference AS IT
+	// STOOD.
 	//
-	// C++ is `t = core_type(t); switch { case Type_Basic: return flags & OrderedNumeric; } return
-	// false;` -- Basic and nothing else. The port used base_type AND carried `Type_Pointer,
-	// Type_Multi_Pointer -> true`, which belong to is_type_ordered and were evidently copied
-	// across. Measured (#916): base_type made BF/BF2/E reject where the oracle accepts, and the
-	// pointer arms made ^int / #simd pointers accept where the oracle REJECTS.
-	bt := core_type(t)
+	// #1068 — THE MERGE a58490711 INVERTED HALF OF THAT. types.cpp now reads:
+	//     t = base_type(t);                                    // was core_type(t)
+	//     switch (t->kind) {
+	//     case Type_Basic: return (t->Basic.flags & BasicFlag_OrderedNumeric) != 0;
+	//     case Type_Enum:  return is_type_ordered_numeric(t->Enum.base_type);   // NEW ARM
+	//     }
+	//     return false;
+	//
+	// The two edits are one change. core_type unwraps Named -> Enum -> BIT_FIELD, so a bit_field
+	// used to reach its backing type (u32) and test TRUE; base_type stops at the bit_field, so it
+	// now tests FALSE. The explicit Enum arm was added precisely to KEEP enums answering true once
+	// core_type's unwrapping was given up. Copying only the base_type half would have broken enums.
+	//
+	// MEASURED on the merged oracle: `#assert(intrinsics.type_is_ordered_numeric(BF))` now FAILS
+	// upstream (corpus cells tp.is_ordered_numeric.BF and .BF2).
+	bt := base_type(t)
 	if bt == nil {
 		return false
 	}
@@ -4558,6 +4696,8 @@ is_type_ordered_numeric :: proc(t: ^Type) -> bool {
 		// Check using BASIC_FLAG_ORDERED_NUMERIC composite flag
 		// ORDERED_NUMERIC = Integer | Float | Rune
 		return (v.flags & BASIC_FLAG_ORDERED_NUMERIC) != {}
+	case Type_Enum:
+		return is_type_ordered_numeric(v.base_type)
 	}
 	return false
 }

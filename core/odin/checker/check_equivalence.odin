@@ -567,9 +567,32 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 			// NOTE: Anything can cast to 'Any'
 			return MAXIMUM_TYPE_DISTANCE
 		}
-		// Use core_type to unwrap distinct/named types to their underlying basic type
-		dst_core := core_type(dst)
-		if dst_core != nil && dst_core.kind == .Basic {
+		// #1113. C++ Reference: check_expr.cpp check_distance_between_types:
+		//
+		//     if (dst->kind == Type_Basic) {
+		//
+		// THE RAW KIND, with NO unwrapping. The port used `core_type(dst)`, whose comment claimed
+		// it was "to unwrap distinct/named types to their underlying basic type" — but core_type
+		// also unwraps ENUM (to its backing integer) and BIT_FIELD (to its backing type), so an
+		// ENUM destination entered an arm the reference skips entirely.
+		//
+		// CONSEQUENCE, reported by the mirc agent as an order-dependent union conversion:
+		//     E :: enum u8 { A, B }
+		//     U :: union { int, E }   U(5) REJECTED by the port, accepted by the reference
+		//     U :: union { E, int }   U(5) accepted by both
+		// The multi-variant union scoring loop is character-identical to C++'s, so the algorithm
+		// was never the bug — the SCORE was. Admitting the enum here gives it a score >= 0, and
+		// with `int` also scoring, the loop's tie-detection (prev_lowest_score == lowest_score)
+		// then rejects in one variant order and accepts in the other:
+		//     {int, E}: lowest=0, prev=0    -> equal -> ambiguous -> reject
+		//     {E, int}: lowest=k, prev=k, lowest=0 -> unequal -> accept
+		//
+		// A DIRECT `x: E = 5` is rejected by BOTH front ends, which is what made this hard to see:
+		// the divergence is in the intermediate SCORE, not the final assignability verdict.
+		//
+		// Named/distinct destinations do NOT need the unwrap: the reference skips this arm for them
+		// too (their kind is Type_Named) and handles them further down. Controls pin that.
+		if dst.kind == .Basic {
 			if operand.mode == .Constant {
 				// Check if the constant value can be represented in the destination type
 				// C++ Reference: check_expr.cpp check_distance_between_types

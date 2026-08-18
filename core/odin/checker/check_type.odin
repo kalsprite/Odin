@@ -423,8 +423,15 @@ check_type_expr :: proc(ctx: ^Checker_Context, e: ^ast.Node, named_type: ^Type) 
 	// no-op on the error path above, where C++ overwrites the arm's write with t_invalid.
 	set_base_type(named_type, type)
 
-	// C++ Reference: check_type.cpp check_type_expr. One of C++'s THREE call sites; the port had only
-	// check_decl's. (The third, check_expr.cpp:12686, is still missing -- see the ledger.)
+	// C++ Reference: check_type.cpp:4145 check_type_expr. One of C++'s THREE call sites, and ALL
+	// THREE are now ported: check_decl.odin:415 (C++ check_decl.cpp:1833), this one, and
+	// check_expr.odin:9332 (C++ check_expr.cpp:12838).
+	// This comment previously said the third was "still missing"; it was added by a later tick and
+	// the note was never updated -- and its cited line 12686 had drifted too (it is now an
+	// IndexExpr dispatch). VERIFIED by witness, not by reading: $S/phase2/wit_nortti/{nr_var,
+	// nr_expr,nr_type} under `-no-rtti -target:freestanding_wasm32` each produce THREE matching
+	// diagnostics. Those cells could not have been run before tick 191, because the harness
+	// ignored -no-rtti and portwrap silently dropped it.
 	check_rtti_type_disallowed(ctx, ast_token(e), type, "Use of a type, %s, which has been disallowed")
 
 	return type
@@ -513,7 +520,33 @@ make_soa_struct_internal :: proc(ctx: ^Checker_Context, array_type_expr: ^ast.No
 	// C++ lines 3102-3106: Set SOA metadata
 	ts.soa_kind = soa_kind
 	ts.soa_elem = elem
-	ts.soa_count = count
+
+	// #1072. C++ Reference: check_type.cpp make_soa_struct_internal, between the node assignment
+	// and soa_count:
+	//
+	//     if (count > I32_MAX) {
+	//         count = I32_MAX;
+	//         error(array_typ_expr, "Array count too large for an #soa struct, got %lld", count);
+	//     }
+	//     soa_struct->Struct.soa_count = cast(i32)count;
+	//
+	// This is the SECOND of the two error() calls the comment below correctly enumerates -- and
+	// only the first was ever implemented. check_array_count rejects only counts needing more
+	// than one BigInt limb, so anything up to U64_MAX reaches here and the port accepted it
+	// silently. C++ additionally CLAMPS, and soa_count participates in are_types_identical and
+	// in name canonicalisation, so without the clamp the two compilers can also disagree on
+	// whether two #soa types are the same type.
+	// NOTE THE ORDER: C++ assigns the clamp to `count` BEFORE formatting, so the message reports
+	// I32_MAX rather than the count actually written. "got 2147483647" for a source that says
+	// 3_000_000_000 reads like a bug in the reference, and arguably is one -- but it is the
+	// contract, and MEASURED: oracle "got 2147483647", port (clamping into a temporary and
+	// printing the original) "got 3000000000". Verdict alone would never have caught this.
+	soa_count := count
+	if soa_count > i64(max(i32)) {
+		soa_count = i64(max(i32))
+		error_node(array_type_expr, "Array count too large for an #soa struct, got %d", soa_count)
+	}
+	ts.soa_count = soa_count
 	// C++ Reference: check_type.cpp make_soa_struct_internal - `soa_struct->Struct.is_polymorphic = is_polymorphic;`
 	// This assignment was missing entirely, so nothing downstream could tell a polymorphic #soa
 	// struct from a concrete one - complete_soa_type then asserted on the Generic element.
@@ -576,6 +609,25 @@ make_soa_struct_internal :: proc(ctx: ^Checker_Context, array_type_expr: ^ast.No
 	// is_complete branch, and its array path always takes that branch. That is exactly the
 	// missed-RTTI defect #690 recorded as a curiosity and #692's gate caught -- reintroducing it
 	// for array elements only would have been invisible to every diagnostic-text gate.
+	// #1072. C++ Reference: check_type.cpp make_soa_struct_internal, after the field construction
+	// and before the is_complete branch:
+	//
+	//     Token token = {};
+	//     token.string = str_lit("Base_Type");
+	//     Entity *base_type_entity = alloc_entity_type_name(scope, token, elem, EntityState_Resolved);
+	//     add_entity(ctx, scope, nullptr, base_type_entity);
+	//
+	// UNCONDITIONAL in C++ -- on the complete, incomplete AND polymorphic paths alike. The port
+	// created no such entity anywhere, so `Base_Type` was simply not a member of any #soa type
+	// and every use of it failed to resolve. This is an OVER-REJECTION: the port refuses what the
+	// reference accepts. MEASURED: `A :: #soa[]S; B :: A.Base_Type` -- oracle 0, port 1.
+	//
+	// Placed here so it precedes the branch, matching C++'s order and covering all three paths.
+	if ts.scope != nil {
+		base_type_entity := alloc_entity_type_name(ts.scope, make_token_ident("Base_Type"), elem, .Resolved, ctx.checker.allocator)
+		scope_insert(ts.scope, base_type_entity)
+	}
+
 	elem_fields_ready := false
 	if !is_polymorphic {
 		if is_type_struct(bt) || is_type_raw_union(bt) {
@@ -945,9 +997,13 @@ check_array_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^T
 
 		// Validate count for non-generic arrays
 		// C++ lines 3298-3301
+		// C++ Reference: check_type.cpp:3541-3546, whose comment gives the reason:
+		//     // Track user input and recovery value seperate, since both could be '0'
+		count_recovered := false
 		if count < 0 {
 			error(at.len, "? can only be used in conjunction with compound literals")
 			count = 0
+			count_recovered = true
 		}
 
 		// Check for array tags (#soa, #simd)
@@ -981,7 +1037,42 @@ check_array_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^T
 					// Generic count - allow for polymorphic specialization
 				} else if count < 1 || !is_power_of_two(count) {
 					type^ = make_array_type(elem, count, generic_type)
-					if ctx.disallow_polymorphic_return_types && count == 0 {
+					// *** KNOWN OPEN DIVERGENCE (sweep suite simdlane__simdret, cell sr.0), AND
+					// *** THE FIX DOES NOT BELONG HERE. C++ Reference: check_type.cpp:3566-3577:
+					//         if (count_recovered) { return; }
+					//         // a polymorphic value used as the count is still unresolved while
+					//         // the signature is checked and reads as 0; only a written count is
+					//         // constant
+					//         if (ctx->disallow_polymorphic_return_types && o.mode != Addressing_Constant) { return; }
+					//     error(at->count, "Invalid length for #simd, ...");
+					// So the reference separates a WRITTEN `#simd[0]` (constant -> report) from an
+					// UNRESOLVED polymorphic count (non-constant -> stay silent).
+					// MEASURED with a temporary probe: in THIS port the two states are IDENTICAL --
+					//     h :: proc() -> #simd[0]int   (oracle REJECTS)
+					//     g :: proc($N: int) -> #simd[N]f32 (oracle ACCEPTS)
+					//   both give count=0 recovered=false o.mode=Constant generic_type=nil
+					//   disallow=true.
+					// So NO guard at this point can distinguish them: the port's check_array_count
+					// resolves a polymorphic count to a CONSTANT 0 where the reference leaves the
+					// operand non-constant. Porting the reference's test verbatim made `g` fail --
+					// trading a missing diagnostic for a FALSE one -- so it was reverted and the
+					// root cause recorded instead. The real fix is to make check_array_count's
+					// operand mode faithful, which is a separate change with its own blast radius.
+					if count_recovered {
+						return
+					}
+					// C++ Reference: check_type.cpp:3573-3575 --
+					//     // a polymorphic value used as the count is still unresolved while the
+					//     // signature is checked and reads as 0; only a written count is constant
+					//     if (ctx->disallow_polymorphic_return_types && o.mode != Addressing_Constant) { return; }
+					// RESTORED by #1164. This test was attempted in #1161 and REVERTED, because at
+					// that time the port could not distinguish the two states -- both a written
+					// `#simd[0]` and an unresolved polymorphic count arrived here with
+					// o.mode == Constant. #1164 fixed the cause (the Entity_Constant ident arm now
+					// returns early on an unresolved value, which was only possible once `nil`
+					// stopped being a Constant-with-nil-value), so the reference's own predicate
+					// finally works here.
+					if ctx.disallow_polymorphic_return_types && o.mode != .Constant {
 						return
 					}
 					error_node(at.len, "Invalid length for #simd, expected a power of two length, got '%d'", count)
@@ -1360,8 +1451,8 @@ check_struct_fields :: proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, st: ^
 
 		type_expr := f.type
 		field_type: ^Type = nil
-		_ = f.docs
-		_ = f.comment
+		// f.docs / f.comment are consumed at the field-entity creation below (#1177). They used to
+		// be discarded here, which is what made the commented-out assignments look harmless.
 
 		// Check field type
 		if type_expr != nil {
@@ -1451,12 +1542,28 @@ check_struct_fields :: proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, st: ^
 				entity.flags += {.Subtype}
 			}
 
-			// Set documentation comments
+			// C++ Reference: check_type.cpp:202-208 --
+			//     if (j == 0)                  { field->Variable.docs    = docs; }
+			//     if (j+1 == p->names.count)   { field->Variable.comment = comment; }
+			// #1177. These two assignments were COMMENTED OUT and the values discarded a few lines
+			// above (`_ = f.docs; _ = f.comment`), so every struct FIELD lost its doc comment. Both
+			// Entity_Variable.docs/.comment (ast/semantic_types.odin:532-533) and ast.Field's
+			// docs/comment (ast.odin:873,879) exist and are type-compatible, so the omission was not
+			// a compile constraint.
+			// NOTE THE ASYMMETRY, which is the reference's and is preserved: docs attach to the FIRST
+			// name of a multi-name field group (`a, b: int`) and the comment to the LAST.
+			// The consumer is docs_writer's entity emission, so this is STATE that only `odin doc`
+			// output can show -- see the note in COVERAGE.md about the inverted fix order: no
+			// instrument here compares comment TEXT, so this had to be fixed from the code read.
 			if j == 0 {
-				// entity.Variable.docs = docs
+				if v, vok := &entity.variant.(Entity_Variable); vok {
+					v.docs = f.docs
+				}
 			}
 			if j + 1 == len(f.names) {
-				// entity.Variable.comment = comment
+				if v, vok := &entity.variant.(Entity_Variable); vok {
+					v.comment = f.comment
+				}
 			}
 
 			append(&st.fields, entity)
@@ -1504,8 +1611,18 @@ check_struct_fields :: proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, st: ^
 			if (soa_ptr || !does_field_type_allow_using(t)) && len(f.names) >= 1 {
 				if ident, ok2 := f.names[0].derived.(^ast.Ident); ok2 {
 					field_name := ident.name
-					// C++ Reference: check_type.cpp check_struct_fields
-					type_str := type_to_string(t)
+					// C++ Reference: check_type.cpp check_struct_fields:
+					//     gbString type_str = type_to_string(first_type);
+					//
+					// #1072: FIRST_TYPE, NOT `t`. `t` is the base_type(type_deref(..)) computed
+					// two lines up FOR THE PREDICATE ONLY; C++ tests with `t` and REPORTS with
+					// `first_type`, so the message names the field's DECLARED type, pointer
+					// indirection and name intact. The port reported the stripped one.
+					// MEASURED on `using f: ^Named_E` where Named_E is an alias of an enum:
+					//     C++  "... of type '^E'"
+					//     port "... of type 'enum int {A}'"
+					// The port both dropped the pointer and expanded the enum inline.
+					type_str := type_to_string(first_type)
 					error(ident, "'using' cannot be applied to the field '%s' of type '%s'", field_name, type_str)
 					continue
 				}
@@ -1522,8 +1639,9 @@ check_struct_fields :: proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, st: ^
 			if !does_field_type_allow_using(t) && len(f.names) >= 1 {
 				if ident, ok3 := f.names[0].derived.(^ast.Ident); ok3 {
 					field_name := ident.name
-					// C++ Reference: check_type.cpp check_struct_fields
-					type_str := type_to_string(t)
+					// C++ Reference: check_type.cpp check_struct_fields — the subtype arm makes
+					// the same choice as the using arm above: test with `t`, report `first_type`.
+					type_str := type_to_string(first_type)
 					error(ident, "'subtype' cannot be applied to the field '%s' of type '%s'", field_name, type_str)
 				}
 			}
@@ -2712,7 +2830,9 @@ is_type_untyped_nil :: proc(t: ^Type) -> bool {
 
 // type_deref dereferences pointer and SOA pointer types
 // Reference: types.cpp:1202-1225
-type_deref :: proc(t: ^Type) -> ^Type {
+// #1221: `allow_multi_pointer` mirrors C++'s second parameter (types.cpp:1271). Defaulted to
+// false so every existing call site is unchanged; only check_unary_op's Token_Mul arm passes true.
+type_deref :: proc(t: ^Type, allow_multi_pointer := false) -> ^Type {
 	if t == nil {
 		return nil
 	}
@@ -2726,6 +2846,14 @@ type_deref :: proc(t: ^Type) -> ^Type {
 	case .Pointer:
 		ptr := bt.variant.(Type_Pointer)
 		return ptr.elem
+
+	case .Multi_Pointer:
+		// C++ types.cpp:1286-1290: multi-pointers deref ONLY when explicitly allowed; otherwise
+		// the switch falls through and the ORIGINAL type is returned, not the element.
+		if allow_multi_pointer {
+			mp := bt.variant.(Type_Multi_Pointer)
+			return mp.elem
+		}
 
 	case .Soa_Pointer:
 		// SOA pointer dereferences to the soa_elem of the underlying struct
@@ -2799,7 +2927,20 @@ populate_using_array_index :: proc(ctx: ^Checker_Context, target_scope: ^Scope, 
 	// C++ lines 8-19
 	e := scope_lookup_current(target_scope, name)
 	if e != nil {
-		error(e.token, "'%s' is already declared", name)
+		// C++ Reference: check_type.cpp:13-22. TWO variants, chosen on whether the AST node is
+		// available, and the port had ONLY the second:
+		//     if (node != nullptr) { str = expr_to_string(node); }
+		//     if (str != nullptr) { error(..., "'%.*s' is already declared in '%s'", LIT(name), str); }
+		//     else                { error(..., "'%.*s' is already declared", LIT(name)); }
+		// #1201. Dropping the `in '%s'` clause loses the only part of the message that says WHICH
+		// aggregate the collision happened in.
+		if node != nil {
+			str := expr_to_string(node)
+			defer delete(str)
+			error(e.token, "'%s' is already declared in '%s'", name, str)
+		} else {
+			error(e.token, "'%s' is already declared", name)
+		}
 	} else {
 		// Create array element accessor entity
 		// C++ lines 21-31
@@ -2853,7 +2994,15 @@ populate_using_entity_scope :: proc(ctx: ^Checker_Context, target_scope: ^Scope,
 			if e != nil && name != "_" {
 				// C++ check_type.cpp populate_using_entity_scope_field passes type_to_string(original_type). The port passed
 				// the ^Type itself to a "%v", which dumps the whole Type struct. LEDGER 287.
-				error(e.token, "'%s' is already declared, through 'using' from '%s'", name, type_to_string(original_type))
+				// C++ Reference: check_type.cpp:44-52 -- again TWO variants on `node != nullptr`, and
+				// again the port had only the one WITHOUT the type. #1201.
+				if node != nil {
+					str := expr_to_string(node)
+					defer delete(str)
+					error(e.token, "'%s' is already declared in '%s', through 'using' from '%s'", name, str, type_to_string(original_type))
+				} else {
+					error(e.token, "'%s' is already declared, through 'using' from '%s'", name, type_to_string(original_type))
+				}
 			} else {
 				// Add field entity to target scope
 				// C++ line 61
@@ -3030,12 +3179,42 @@ check_union_type :: proc(ctx: ^Checker_Context, union_type: ^Type, node: ^ast.Un
 			ok := true
 			t = default_type(t)
 
-			// Validate variant type
-			if is_type_untyped(t) || is_type_empty_union(t) {
+			// #1076: C++ HAS A THREE-WAY if / else-if / else HERE; THE PORT COLLAPSED THE FIRST
+			// TWO INTO ONE DISJUNCTION. C++ Reference: check_type.cpp check_union_type:
+			//
+			//     if (is_type_untyped(t)) {
+			//         ok = false; error(node, "Invalid variant type in union '%s'", str);
+			//     } else if (is_type_empty_union(t)) {
+			//         Type *base = base_type(t);
+			//         if (base == nullptr || base->kind != Type_Union || base->Union.node == nullptr) {
+			//             ok = false; error(node, "Invalid variant type in union '%s'", str);
+			//         }
+			//     } else {
+			//         ...duplicate scan...
+			//     }
+			//
+			// TWO consequences, both measured:
+			//  * An empty union that is NAMED (base is a Union WITH a node) passes the inner
+			//    guard, so `ok` stays true and C++ ACCEPTS it. The port rejected it outright.
+			//        Empty :: union {}; U :: union { Empty, int }   oracle 0, port 1
+			//  * C++ does NOT run the duplicate scan for an empty union at all — the else-if
+			//    consumes the case. So two identical empty-union variants draw NO duplicate
+			//    diagnostic.
+			//        V :: union { Empty, Empty }                    oracle 0, port 1
+			// Restored as C++ spells it.
+			if is_type_untyped(t) {
 				ok = false
 				// C++ Reference: check_type.cpp check_union_type
 				type_str := type_to_string(t)
 				error(variant_node, "Invalid variant type in union '%s'", type_str)
+			} else if is_type_empty_union(t) {
+				base := base_type(t)
+				if base == nil || base.kind != .Union || base.variant.(Type_Union).node == nil {
+					ok = false
+					// C++ Reference: check_type.cpp check_union_type
+					type_str := type_to_string(t)
+					error(variant_node, "Invalid variant type in union '%s'", type_str)
+				}
 			} else {
 				// Check for duplicate variant types
 				for existing_variant, j in ut.variants {
@@ -3082,26 +3261,66 @@ check_union_type :: proc(ctx: ^Checker_Context, union_type: ^Type, node: ^ast.Un
 	case .maybe:
 		ut.kind = .Maybe
 	case .shared_nil:
-		// shared_nil is represented as Normal in the type system
-		// The semantic difference is enforced during variant checking above
-		ut.kind = .Normal
+		// #1116. C++ Reference: check_type.cpp check_union_type does a STRAIGHT COPY:
+		//     union_type->Union.kind = ut->kind;
+		// with no per-kind mapping at all. The port mapped shared_nil onto .Normal, with the
+		// comment "shared_nil is represented as Normal in the type system / The semantic difference
+		// is enforced during variant checking above". The variant check IS present and correct —
+		// but the KIND is also read for OUTPUT, and those readers then could never fire:
+		//     name_canonicalization.odin  the "#shared_nil" suffix in canonical type names
+		//     check_expr.odin             type_to_string
+		//     docs_writer.odin            the Doc_Type_Flag_Union.Shared_Nil bit
+		// So a #shared_nil union was indistinguishable from a plain one in every rendered name.
+		//
+		// REPORTED BY THE mirc AGENT as state-only and "needs a model dump". IT IS WITNESSABLE:
+		// a NAMED union prints as its name, but an ANONYMOUS one prints its expanded form —
+		//     x: union #shared_nil { ^int, rawptr } = "wrong"
+		//     oracle: "... to 'union #shared_nil {^int, rawptr}' ..."
+		//     port:   "... to 'union {^int, rawptr}' ..."
+		// and the #no_nil equivalent already matched, because THAT kind was recorded.
+		//
+		// SAFE because every BEHAVIOURAL consumer tests .No_Nil specifically
+		// (check_equivalence's `kind != .No_Nil`, check_builtin's `== .No_Nil` and
+		// `== .No_Nil ? 0 : 1`), for which Shared_Nil and Normal are equivalent either way.
+		ut.kind = .Shared_Nil
 	}
 
-	// Validate #no_nil constraint
+	// Validate #no_nil constraint.
+	// C++ Reference: check_type.cpp check_union_type:
+	//
+	//     case UnionType_no_nil:
+	//         if (union_type->Union.is_polymorphic && poly_operands == nullptr) {
+	//             GB_ASSERT(variants.count == 0);
+	//             if (ut->variants.count != 1) {
+	//                 break;                    // <-- LEAVES THE CASE. NO ERROR.
+	//             }
+	//         }
+	//         if (variants.count < 2) {
+	//             error(node, "A union with #no_nil must have at least 2 variants");
+	//         }
+	//         break;
+	//
+	// #1076: THE GUARD WAS INVERTED. That `break` exits the switch case and SUPPRESSES the
+	// error; the port's comment read "Fall through to error below" and it did exactly that, so
+	// an unspecialized polymorphic #no_nil union with anything other than one source variant was
+	// rejected. MEASURED: `U :: union($T: typeid) #no_nil { T, int }` — oracle 0, port 1.
+	// (Two source variants, != 1, so C++ takes the break and says nothing.)
+	//
+	// Reproduced with a labelled block, which is the faithful spelling of C++'s `break` out of a
+	// switch case that Odin's `if` cannot express directly.
 	if node.kind == .no_nil {
-		// For unspecialized polymorphic unions, skip variant count check
-		if ut.is_polymorphic && len(poly_operands) == 0 {
-			assert(len(ut.variants) == 0)
-			if len(node.variants) != 1 {
-				// Fall through to error below
-			} else {
-				// Single variant in source, this is fine for unspecialized
+		no_nil_check: {
+			if ut.is_polymorphic && len(poly_operands) == 0 {
+				assert(len(ut.variants) == 0)
+				if len(node.variants) != 1 {
+					break no_nil_check
+				}
 			}
-		}
 
-		if len(ut.variants) < 2 {
-			// C++ Reference: check_type.cpp check_union_type
-			error(node, "A union with #no_nil must have at least 2 variants")
+			if len(ut.variants) < 2 {
+				// C++ Reference: check_type.cpp check_union_type
+				error(node, "A union with #no_nil must have at least 2 variants")
+			}
 		}
 	}
 
@@ -3263,12 +3482,21 @@ check_enum_type :: proc(ctx: ^Checker_Context, enum_type: ^Type, named_type: ^Ty
 			continue
 		}
 
-		// Check for reserved identifier 'names'
-		if name == "names" {
-			// C++ Reference: check_type.cpp check_enum_type
-			error(field, "'names' is a reserved identifier for enumerations")
-			continue
-		}
+		// #1074: AN INVENTED RULE WAS DELETED HERE.
+		//
+		//     if name == "names" {
+		//         error(field, "'names' is a reserved identifier for enumerations")
+		//         continue
+		//     }
+		//
+		// It cited "C++ Reference: check_type.cpp check_enum_type". That procedure has no such
+		// check: C++ goes straight from the blank-identifier skip above to the min/max tracking
+		// below. `grep -rn "reserved identifier" src/` returns NOTHING — the string exists
+		// nowhere in the reference.
+		//
+		// Two divergences, not one: the diagnostic itself, and the `continue`, which dropped the
+		// member from Enum.fields entirely — so len, min and max of the enum were all wrong
+		// afterwards. MEASURED on `E :: enum { a, names, b }`: oracle 0, port 1.
 
 		// Track min/max values
 		if min_value_set {
@@ -3785,9 +4013,18 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 			bit_size_op.mode = .Invalid
 		}
 
-		// C++ Reference: check_type.cpp check_bit_field_type -- a float constant is CONVERTED, not rejected.
-		if is_type_float(bit_size_op.type) {
-			bit_size_op.type = t_untyped_integer
+		// C++ Reference: check_type.cpp check_bit_field_type -- a float constant is CONVERTED, not rejected:
+		//
+		//     if (o.value.kind == ExactValue_Float) {
+		//         o.value = exact_value_to_integer(o.value);
+		//     }
+		//
+		// #1084: the port switched on the operand's TYPE and then rewrote the TYPE, leaving the
+		// VALUE a float. C++ switches on the VALUE KIND and rewrites the VALUE. The distinction
+		// matters immediately below, where the reference tests the value kind to decide whether
+		// the bit size is an integer at all.
+		if _, is_float_value := bit_size_op.value.(f64); is_float_value {
+			bit_size_op.value = exact_value_to_integer(bit_size_op.value)
 		}
 
 		// C++ Reference: check_type.cpp check_bit_field_type. This is an ERROR, not a warning, and it fires
@@ -3810,7 +4047,22 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 		//     oracle: the non-integer bit size AND "'a' is already declared in this bit_field"
 		//     port:   the non-integer bit size only
 		// Probe p677f. LEDGER #677.
-		if !is_type_integer(bit_size_op.type) {
+		// #1084: C++ TESTS THE VALUE KIND, NOT THE TYPE:
+		//
+		//     ExactValue bit_size = o.value;
+		//     if (bit_size.kind != ExactValue_Integer) {
+		//         error(f->bit_size, "Expected an integer constant value for the specified bit size, got %s", s);
+		//     }
+		//
+		// The port asked `!is_type_integer(bit_size_op.type)`. The two disagree in BOTH
+		// directions:
+		//   * An ENUM constant carries ExactValue_Integer but is not is_type_integer, so C++
+		//     ACCEPTS `a: u8 | E.X` and the port REJECTED it. MEASURED: oracle 0, port 1.
+		//   * A non-constant `int` expression IS is_type_integer but its value kind is Invalid,
+		//     so C++ emits this diagnostic in ADDITION to "must be a constant" and the port
+		//     emitted only the first.
+		// Testing the value kind reproduces both.
+		if _, is_int_value := bit_size_op.value.(big.Int); !is_int_value {
 			val_str := expr_to_string(ast_field.bit_size)
 			defer delete(val_str)
 			error_node(ast_field.bit_size, "Expected an integer constant value for the specified bit size, got %s", val_str)
@@ -3876,6 +4128,21 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 		// C++'s own guard - so EVERY bit_field member lookup failed, by value and through a
 		// pointer alike. core/mem's Rollback_Stack_Header accounts for 294 of the class.
 		field_entity := alloc_entity_field(scope, field_token, field_type, false, i32(bit_field_index))
+		// C++ Reference: check_type.cpp check_bit_field_type, immediately before the flag:
+		//     e->Variable.bit_field_bit_size = bit_size_u8;
+		//
+		// THIS ASSIGNMENT WAS ABSENT, and it is the only writer of the field in the whole
+		// checker. `Entity_Variable.bit_field_bit_size` was declared (ast/semantic_types.odin)
+		// and READ in three places -- check_stmt's assignment path, check_compound_lit's field
+		// init, and dump_model -- all of which therefore saw a permanent zero. Every one of
+		// those readers guards on `!= 0`, so the entire bit-field width machinery was dead:
+		// ctx.bit_field_bit_size never became non-zero, and a constant was only ever range
+		// checked against the BACKING type. `B :: bit_field u8 { a: u8 | 3 }; B{a = 255}` was
+		// accepted, storing 255 in three bits.
+		//
+		// The clamps above have already forced bit_size into 1..=64 and within the field type,
+		// which is what makes the u8 narrowing safe -- same order as the reference.
+		(&field_entity.variant.(Entity_Variable)).bit_field_bit_size = u8(bit_size)
 		field_entity.flags += {.Bit_Field_Field}
 
 		// Add to scope
@@ -4014,14 +4281,47 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 
 	// Check element type
 	// C++ Reference: check_type.cpp check_matrix_type -- `Type *elem = check_type_expr(ctx, mt->elem, nullptr)`.
-	elem := check_type(ctx, mt.elem)
-	if elem == nil || elem == t_invalid {
-		error_node(mt.elem, "Invalid element type for matrix")
-		// Do not leave the half-built matrix type published to the caller.
-		type^ = t_invalid
-		set_base_type(named_type, t_invalid)
-		return false
-	}
+	//
+	// #1073: THE CALL WAS `check_type`, WHILE THE COMMENT ON THE LINE ABOVE QUOTED C++ CORRECTLY
+	// AS check_type_expr. Third instance of comment-right/code-wrong (cf. #1070's builtin
+	// prologue, and the matrix element ordering note further down this same procedure).
+	//
+	// The two differ in ONE respect that matters here: check_type installs a FRESH
+	// checker_type_path (check_type.odin, and C++ check_type.cpp check_type), whereas
+	// check_type_expr inherits the caller's. The type path IS the declaration-cycle detector, so
+	// starting a new one means a cycle running through a matrix element is never seen.
+	//
+	// MEASURED: `A :: struct { m: matrix[2, 2]A }`
+	//     oracle  exit 1, "Illegal declaration cycle"
+	//     port    exit 139 -- SIGSEGV, recursion to stack exhaustion
+	// A crash is never the contract, so this is a fix regardless of tier.
+	elem := check_type_expr(ctx, mt.elem, nil)
+
+	// #1095: AN INVENTED BAIL WAS DELETED HERE:
+	//
+	//     if elem == nil || elem == t_invalid {
+	//         error_node(mt.elem, "Invalid element type for matrix")
+	//         type^ = t_invalid; set_base_type(named_type, t_invalid); return false
+	//     }
+	//
+	// `grep -rn "Invalid element type for matrix" src/` returns NOTHING. C++'s check_matrix_type
+	// has NO nil/invalid test on the element at all: it runs check_type_expr, then the
+	// is_type_valid_for_matrix_elems check further down (which the port already has, with the
+	// t_typeid escape hatch), and then ALWAYS assigns via alloc_type_matrix — a t_invalid element
+	// included.
+	//
+	// The bail did three wrong things at once: emitted a message the reference never emits,
+	// SUPPRESSED the diagnostics C++ produces after it, and returned false, which made
+	// check_type_expr add a cascading "'<expr>' is not a type".
+	// MEASURED, both cells textdiff-only (verdicts agreed, so the verdict corpus saw nothing):
+	//     `M :: matrix[x, y]Undefined`
+	//         oracle: "Undeclared name: x" + "Undeclared name: y"
+	//         port:   "'matrix[x, y]Undefined' is not a type"   (both count errors LOST)
+	//     `A :: struct { m: matrix[2, 2]A }`  (the #1073 cycle cell)
+	//         oracle line 2: "Matrix elements types are limited to integers, floats, and
+	//                         complex, got invalid type"
+	// Nothing downstream needs a non-nil elem here: the assignment below mirrors C++'s
+	// alloc_type_matrix, which stores whatever check_type_expr returned.
 
 	mat.elem = elem
 
@@ -4182,10 +4482,26 @@ check_matrix_type_expr :: proc(ctx: ^Checker_Context, mt: ^ast.Matrix_Type, type
 		}
 	}
 
-	// Calculate stride (elements are stored column-major by default)
-	// C++ doesn't calculate this here - done later during codegen
-	elem_size := type_size_of(elem)
-	mat.stride_in_bytes = int(row_count) * elem_size
+	// #1078: AN EAGER STRIDE ASSIGNMENT WAS DELETED HERE:
+	//
+	//     elem_size := type_size_of(elem)
+	//     mat.stride_in_bytes = int(row_count) * elem_size
+	//
+	// and the comment sitting directly above it already said "C++ doesn't calculate this here"
+	// — the fourth comment-right/code-wrong in this campaign (cf. #1070, #1072, #1073).
+	//
+	// C++ Reference: types.cpp alloc_type_matrix sets elem, row_count, column_count,
+	// is_row_major and RETURNS — stride_in_bytes is left ZERO and computed lazily by
+	// matrix_type_stride_in_bytes (types.cpp), which branches on is_row_major:
+	//     if (is_row_major) stride = elem_size*column_count; else stride = elem_size*row_count;
+	//
+	// The port's own matrix_type_stride_in_bytes (types.odin) has that branch and is CORRECT —
+	// but it returns the cached field first when non-zero, so this eager value, which ignores
+	// is_row_major entirely, always won. Every #row_major matrix therefore had the wrong stride
+	// and, through type_size_of, the wrong SIZE.
+	// MEASURED: `M :: #row_major matrix[2, 3]f32` — size_of(M) is 24 on the oracle, 16 here.
+	//
+	// Leaving the field at zero is what makes the lazy path run, which is exactly C++'s design.
 
 	return true
 }
@@ -4765,6 +5081,45 @@ determine_type_from_polymorphic :: proc(ctx: ^Checker_Context, poly_type: ^Type,
 
 // is_caller_expression checks if an expression is a caller expression directive
 // Reference: check_type.cpp:1637-1655
+// is_expr_from_a_parameter reports whether an expression is rooted in a procedure parameter.
+// C++ Reference: check_type.cpp is_expr_from_a_parameter:
+//
+//     if (expr == nullptr) { return false; }
+//     expr = unparen_expr(expr);
+//     if (expr->kind == Ast_SelectorExpr) {
+//         Ast *lhs = expr->SelectorExpr.expr;
+//         return is_expr_from_a_parameter(ctx, lhs);
+//     } else if (expr->kind == Ast_Ident) {
+//         Operand x = {};
+//         Entity *e = check_ident(ctx, &x, expr, nullptr, nullptr, true);
+//         GB_ASSERT(e != nullptr);
+//         if (e->flags & EntityFlag_Param) { return true; }
+//     }
+//     return false;
+//
+// #1085: absent from the port, so handle_parameter_value's second rejection was unreachable.
+// The recursion is the point: `a.x.y` walks left to `a` and asks whether THAT is a parameter,
+// because the selector itself resolves to a struct FIELD entity which carries no .Param flag.
+// C++ asserts the entity is non-null; a nil here is treated as "not a parameter" rather than
+// aborting, since a crash is never the contract.
+is_expr_from_a_parameter :: proc(ctx: ^Checker_Context, expr: ^ast.Node) -> bool {
+	if expr == nil {
+		return false
+	}
+	e := unparen_expr(expr)
+	#partial switch v in e.derived {
+	case ^ast.Selector_Expr:
+		return is_expr_from_a_parameter(ctx, v.expr)
+	case ^ast.Ident:
+		x: Operand
+		entity := check_ident(ctx, &x, e, nil, nil, true)
+		if entity != nil && .Param in entity.flags {
+			return true
+		}
+	}
+	return false
+}
+
 is_caller_expression :: proc(expr: ^ast.Node) -> bool {
 	// Check for #caller_expression directive
 	if basic_dir, ok := expr.derived.(^ast.Basic_Directive); ok {
@@ -4909,6 +5264,25 @@ handle_parameter_value :: proc(ctx: ^Checker_Context, in_type: ^Type, out_type_p
 					param_value.proc_entity = entity
 				} else if .Param in entity.flags {
 					// Cannot use another parameter as default
+					error(pexpr, "Default parameter cannot be another parameter")
+				} else if is_expr_from_a_parameter(ctx, pexpr) {
+					// #1085. C++ Reference: check_type.cpp handle_parameter_value — the else of
+					// the EntityFlag_Param test is NOT the value branch; it is a SECOND test:
+					//
+					//     if (e->flags & EntityFlag_Param) {
+					//         error(expr, "Default parameter cannot be another parameter");
+					//     } else {
+					//         if (is_expr_from_a_parameter(ctx, expr)) {
+					//             error(expr, "Default parameter cannot be another parameter");
+					//         } else {
+					//             param_value.kind = ParameterValue_Value; ...
+					//         }
+					//     }
+					//
+					// The first test catches a BARE parameter reference; this one catches a
+					// parameter reached through selectors, which resolves to a FIELD entity (no
+					// .Param flag) even though its base is a parameter.
+					// MEASURED: `f :: proc(a: Foo, b: int = a.x)` — oracle 1, port 0.
 					error(pexpr, "Default parameter cannot be another parameter")
 				} else {
 					// Store as runtime value (for global variables, etc.)
@@ -6058,8 +6432,24 @@ check_get_results :: proc(ctx: ^Checker_Context, scope: ^Scope, results_node: ^a
 		is_unnamed_result := len(field.names) == 0
 		if !is_unnamed_result && len(field.names) == 1 {
 			if first_ident, ident_ok := field.names[0].derived.(^ast.Ident); ident_ok {
-				// Parser-generated placeholders use "_" or empty string
-				is_unnamed_result = first_ident.name == "_" || first_ident.name == ""
+				// #1106. C++ Reference: check_type.cpp check_get_results treats a result field
+				// with names as NAMED, and inside that branch:
+				//
+				//     if (is_blank_ident(token)) {
+				//         error(name, "Result value cannot be a blank identifer `_`");
+				//     }
+				//
+				// and then builds the entity anyway. `is_blank_ident` is `len == 1 && str[0]=='_'`
+				// (parser.cpp), so the EMPTY string is NOT blank — and the parser writes "" for a
+				// genuinely anonymous result field. A `_` in a result list is therefore ALWAYS
+				// user-written.
+				//
+				// The port conflated the two: it accepted "_" as a parser placeholder and routed
+				// it down the UNNAMED path, which made the blank-identifier error further down
+				// this same procedure DEAD CODE for the only input that can reach it.
+				// MEASURED: `f :: proc() -> (_: int) { return 1 }` — oracle 1, port 0.
+				// Dropping "_" from this test is the whole fix; the diagnostic was already there.
+				is_unnamed_result = first_ident.name == ""
 			}
 		}
 
@@ -6099,7 +6489,18 @@ check_get_results :: proc(ctx: ^Checker_Context, scope: ^Scope, results_node: ^a
 				// Check for blank identifier (user explicitly wrote `_: type`)
 				if is_blank_ident(name) {
 					error(name_node, "Result value cannot be a blank identifer `_`")
-					continue
+					// #1106: NO `continue` HERE. C++ Reference: check_type.cpp check_get_results
+					// reports and FALLS THROUGH — it still builds the entity and still appends it
+					// to `variables`, so the results TUPLE keeps its arity.
+					// The port's `continue` dropped the element, which changed the procedure's
+					// return count and produced a CASCADE the reference never emits:
+					//     `f :: proc() -> (_: int) { return 1 }`
+					//         oracle: 1 diagnostic (the blank identifier)
+					//         port:   that PLUS "No return values expected"
+					//     `f :: proc() -> (_: int, b: int) { return 1, 2 }`
+					//         port additionally: "Expected 1 return values, got 2"
+					// This half only became visible once the blank case reached this branch at
+					// all — before the is_unnamed_result fix above, it never got here.
 				}
 
 				// Create named result entity
@@ -7035,19 +7436,67 @@ is_polymorphic_type_assignable :: proc(
 
 	// === Type_BitSet === (C++ check_expr.cpp is_polymorphic_type_assignable)
 	if poly_base.kind == .Bit_Set && source_base.kind == .Bit_Set {
-		poly_bs := poly_base.variant.(Type_Bit_Set)
+		poly_bs := &poly_base.variant.(Type_Bit_Set)
 		source_bs := source_base.variant.(Type_Bit_Set)
 
+		// #1107 (B2-c c4). C++ Reference: check_expr.cpp is_polymorphic_type_assignable,
+		// case Type_BitSet:
+		//
+		//     if (!is_type_polymorphic(poly->BitSet.elem)) {
+		//         if (poly->BitSet.upper != source->BitSet.upper ||
+		//             poly->BitSet.lower != source->BitSet.lower) {
+		//             return false;
+		//         }
+		//     }
+		//
+		// THE BOUNDS GUARD WAS ABSENT, so two range-bit_sets with the same element type but
+		// DIFFERENT bounds unified. MEASURED:
+		//     f :: proc($T: typeid/bit_set[0..<4]) {}
+		//     f(bit_set[0..<8])        oracle 1 (specialization mismatch), port 0
+		//
+		// The guard is skipped when the poly ELEMENT is itself polymorphic — for `bit_set[$E]`
+		// the bounds were never computable when the poly type was built, so they are zero and
+		// comparing them would reject everything.
+		if !is_type_polymorphic(poly_bs.elem) {
+			if poly_bs.upper != source_bs.upper || poly_bs.lower != source_bs.lower {
+				return false
+			}
+		}
+
 		// Check element type
-		if !is_polymorphic_type_assignable(ctx, poly_bs.elem, source_bs.elem, compound, modify_type) {
+		if !is_polymorphic_type_assignable(ctx, poly_bs.elem, source_bs.elem, true, modify_type) {
 			return false
 		}
 
-		// Check underlying type if present
-		if poly_bs.underlying != nil && source_bs.underlying != nil {
-			if !is_polymorphic_type_assignable(ctx, poly_bs.underlying, source_bs.underlying, compound, modify_type) {
-				return false
+		// C++ Reference: same arm, continued. For a generic `bit_set[$E]` the poly type's bounds
+		// and underlying are zero/nil because they could not be determined at construction, so
+		// the INSTANTIATION fills them in from the source. The port did none of this, leaving an
+		// instantiated bit_set with upper == lower == 0 and a nil underlying.
+		//     if (poly->BitSet.upper == 0 && modify_type) poly->BitSet.upper = source->...upper;
+		//     if (poly->BitSet.lower == 0 && modify_type) poly->BitSet.lower = source->...lower;
+		if poly_bs.upper == 0 && modify_type {
+			poly_bs.upper = source_bs.upper
+		}
+		if poly_bs.lower == 0 && modify_type {
+			poly_bs.lower = source_bs.lower
+		}
+
+		// C++ Reference: same arm. NOTE THE SHAPE — it is an if/else-if on the POLY side alone,
+		// not the port's `both non-nil` conjunction:
+		//     if (poly->BitSet.underlying == nullptr) {
+		//         if (modify_type) poly->BitSet.underlying = source->BitSet.underlying;
+		//     } else if (!is_polymorphic_type_assignable(c, poly->BitSet.underlying,
+		//                                                source->BitSet.underlying, true, modify_type)) {
+		//         return false;
+		//     }
+		// The port's version skipped the recursion entirely whenever the SOURCE's underlying was
+		// nil, and never propagated the source's underlying into the instantiation.
+		if poly_bs.underlying == nil {
+			if modify_type {
+				poly_bs.underlying = source_bs.underlying
 			}
+		} else if !is_polymorphic_type_assignable(ctx, poly_bs.underlying, source_bs.underlying, true, modify_type) {
+			return false
 		}
 
 		return true

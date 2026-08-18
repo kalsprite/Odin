@@ -468,9 +468,31 @@ darwin_odin  :: proc "contextless" () -> abi.Convention { return abi.compose(DAR
 	// Found by building the asm read that makes the field falsifiable, which is
 	// the whole argument for insisting every row value have one.
 	int_pair_alignment  = false,
-	// The cap still applies to a COMPOSITE, which does take pair alignment on
-	// this row; only the C.10 rule above is absent.
-	int_pair_align_max  = 16,
+	// ZERO, and it was 16 with a comment claiming "the cap still applies to a
+	// COMPOSITE, which does take pair alignment on this row". That claim is
+	// false and the value was unreachable, which is why nothing caught it:
+	//
+	//   * the read site is gated on `int_pair_alignment || force_pair_align`.
+	//     The first is false here. The second is `variadic && varargs ==
+	//     .INT_REGS`, and this row is ALL_STACK -- so neither path can reach
+	//     the cap and any value would have behaved identically.
+	//   * the claim itself does not hold. Measured, `f(long, T, long)`:
+	//
+	//       struct{long,long} __attribute__((aligned(16)))
+	//         aarch64-linux   x1:x2   darwin  x1:x2     neither rounds up
+	//       struct{__int128}
+	//         aarch64-linux   x2:x3   darwin  x1:x2     only LINUX rounds up
+	//
+	//     Composites do not take pair alignment on this row. Note also that on
+	//     Linux it is the __int128 MEMBER that rounds up and not the declared
+	//     `aligned(16)` -- which is `natural_align` derived from the leaves,
+	//     already the package's rule.
+	//
+	// Zero is what this field's own documentation prescribes: "Left zero on
+	// every row that does not round up at all." Found by `--field-audit`, which
+	// reported it as the one field on this target that is SET and that no probe
+	// anywhere can falsify.
+	int_pair_align_max  = 0,
 	stack_arg_align_max = 16,
 	// MEASURED, not inherited. This was left SINGLE under the reasoning that
 	// "a Mach-O binary cannot be run here, so Darwin's protocol has never been

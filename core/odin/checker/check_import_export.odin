@@ -542,14 +542,28 @@ topological_sort_packages :: proc(graph: ^Import_Graph, allocator: runtime.Alloc
 			path := find_import_cycle(graph, node, allocator)
 			if len(path) > 1 {
 				// Report cycle error
-				first_item := path[len(path) - 1]
-				error_node(first_item.decl, "Cyclic importation of '%s'", first_item.pkg.name)
+				// C++ Reference: checker.cpp:6187-6196. The loop is PRINT-THEN-ADVANCE:
+				//     error(item.decl, "'%s' refers to", pkg_name);   // current decl AND name
+				//     item = path[i];                                  // then step
+				//     pkg_name = item.pkg->name;
+				// The port advanced FIRST (`item := path[i]`) and then printed `item.decl` with
+				// the PREVIOUS `first_item.pkg.name`, so its ANCHOR ran one step ahead of its
+				// NAME. Net effect on a two-package cycle: the two diagnostics land on each
+				// other's files and name each other's packages --
+				//     oracle: a.odin "'b' refers to"            b.odin "Cyclic importation of 'a'"
+				//     port:   a.odin "Cyclic importation of 'b'" b.odin "'b' refers to"
+				// *** THE COUNT AND THE EXIT STATUS ARE IDENTICAL, so the verdict corpus calls
+				// this cell clean. It was found by a CONTROL cell (a top-level cycle) written only
+				// to prove the detector fired at all. ***
+				item := path[len(path) - 1]
+				pkg_name := item.pkg.name
+				error_node(item.decl, "Cyclic importation of '%s'", pkg_name)
 				for i := 0; i < len(path); i += 1 {
-					item := path[i]
-					error_node(item.decl, "'%s' refers to", first_item.pkg.name)
-					first_item = item
+					error_node(item.decl, "'%s' refers to", pkg_name)
+					item = path[i]
+					pkg_name = item.pkg.name
 				}
-				error_node(first_item.decl, "'%s'", first_item.pkg.name)
+				error_node(item.decl, "'%s'", pkg_name)
 			}
 		}
 

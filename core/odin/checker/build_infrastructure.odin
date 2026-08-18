@@ -243,9 +243,24 @@ is_in_builtin_package :: proc(file: ^ast.File) -> bool {
 	return is_package_builtin(file.pkg)
 }
 
-// should_check_file determines if a file should be type-checked
-// Lazy files are skipped unless explicitly needed
-// C++ Reference: checker.cpp:1878 - if (c->file != nullptr && (c->file->flags & AstFile_IsLazy) != 0)
+// *** INVENTED, DEAD, AND ITS SEMANTICS CONTRADICT THE REFERENCE. DO NOT CALL IT. ***
+//
+// There is no `should_check_file` in src/. The citation this carried -- "checker.cpp:1878" -- is
+// STALE: that line is `check_set_expr_info`, an unrelated function.
+//
+// AstFile_IsLazy has exactly ONE consumer in the whole reference, checker.cpp:2079:
+//     if (c->file != nullptr && (c->file->flags & AstFile_IsLazy) != 0 && scope->flags & ScopeFlag_File)
+// i.e. lazy-ness marks a FILE-SCOPE ENTITY as EntityFlag_Lazy so it is checked ON DEMAND. The
+// reference NEVER skips checking a lazy file. The port implements that faithfully in
+// entity_helpers.odin's add_entity_flags_from_file (file lazy + file scope -> mark the entity).
+//
+// So this predicate would, if anyone called it, SKIP lazy files outright -- the opposite of
+// deferring their entities. Zero callers today (verified across the package), which is the only
+// reason it is harmless.
+// KEPT rather than deleted because `core/odin/checker` is a LIBRARY with external consumers
+// (rexcode/mir), so removing an exported symbol is a separate, coordinated decision. Flagged here
+// as a deletion candidate. This is exactly the two-implementations-of-one-contract hazard that
+// #1134 demonstrated, where a fix landed in the duplicate and never in the live path.
 should_check_file :: proc(info: ^Checker_Info, file: ^ast.File) -> bool {
 	if file == nil {
 		return false
@@ -358,8 +373,14 @@ Entity_Visibility :: enum {
 	Private_To_File, // Private to file (@private="file")
 }
 
-// get_file_default_visibility determines default visibility for entities in a file
-// C++ Reference: checker.cpp:4569-4573
+// get_file_default_visibility determines default visibility for entities in a file.
+// C++ Reference: checker.cpp:4911-4919 (the citation below said 4569-4573, which is
+// check_decl_attributes' prologue -- corrected).
+//
+// SECOND COPY, ZERO CALLERS. The live implementation of this contract is INLINE in
+// check_collect.odin's check_collect_value_decl, which tests .Is_Private_File before
+// .Is_Private_Pkg exactly as the reference does. This copy agrees with it today; it is recorded as
+// a drift risk rather than deleted, for the library-API reason noted on should_check_file above.
 // - AstFile_IsPrivateFile -> Private to file
 // - AstFile_IsPrivatePkg -> Private to package
 // - else -> Public

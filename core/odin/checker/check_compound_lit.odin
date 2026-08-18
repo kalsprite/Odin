@@ -8,6 +8,7 @@ Reference: check_expr.cpp:9549-10728
 
 import "core:math/big"
 import "core:odin/ast"
+import "core:strings"
 import "core:sync"
 
 // check_compound_literal_field_values checks named field values in struct literals
@@ -165,9 +166,11 @@ check_compound_literal_field_values :: proc(ctx: ^Checker_Context, elems: []^ast
 					case Type_Array:
 						ft = v.elem
 					case Type_Bit_Field:
-						// C++ Reference: checker.cpp:9720-9723
-						// Bit fields cannot be constant
-						is_constant^ = false
+						// C++ Reference: check_expr.cpp:10483-10486. The reference has
+						// `// is_constant = false;` -- DELIBERATELY COMMENTED OUT. The port's
+						// old comment ("Bit fields cannot be constant") asserted the opposite
+						// of the reference, and the second loop below (matching 10512-10513)
+						// already agreed with the reference, so this was the outlier.
 						ft = entity_type(v.fields[index])
 					case:
 						// Unexpected type in nested path
@@ -233,6 +236,23 @@ check_compound_literal_field_values :: proc(ctx: ^Checker_Context, elems: []^ast
 			is_constant^ = check_is_operand_compound_lit_constant(ctx, &value_operand, entity_type(field))
 		}
 
+		// C++ Reference: check_expr.cpp:10533-10537 --
+		//     if (bt->kind == Type_BitField) {
+		//         if (is_type_different_to_arch_endianness(field->type)) { is_constant = false; }
+		//     }
+		// A bit_field field whose type differs from the target's endianness makes the whole literal
+		// NON-CONSTANT. The port omitted this, so `B :: bit_field u32 { x: u16be | 16 }; b :: B{x=3}`
+		// kept its constant-ness and the oracle's second diagnostic
+		// ("'B{x = 3}' is not a compile-time known constant") never appeared -- a COUNT divergence
+		// the verdict corpus cannot see (both compilers exit 1 for the endian-mismatch error).
+		// is_type_different_to_arch_endianness already exists in the port (types.odin) and is used
+		// elsewhere; only this call site was missing.
+		if bt.kind == .Bit_Field {
+			if is_type_different_to_arch_endianness(entity_type(field)) {
+				is_constant^ = false
+			}
+		}
+
 		// Handle bit field assignments
 		// Reference: C++ lines 9692-9700
 		prev_bit_field_bit_size := ctx.bit_field_bit_size
@@ -245,6 +265,64 @@ check_compound_literal_field_values :: proc(ctx: ^Checker_Context, elems: []^ast
 		check_assignment(ctx, &value_operand, entity_type(field), assignment_str)
 
 		ctx.bit_field_bit_size = prev_bit_field_bit_size
+	}
+
+	// #all_or_none: every named field must be assigned, or none of them.
+	// C++ Reference: check_expr.cpp:10551-10600. This block was absent entirely, so
+	// `S :: struct #all_or_none {a, b: int}; x := S{a = 1}` was silently accepted.
+	// Type_Struct.is_all_or_none was already populated (check_type.odin:1196) and the
+	// message is in the port's own spec/all_errors.txt -- only the consumer was missing.
+	if bt.kind == .Struct {
+		bs := bt.variant.(Type_Struct)
+		if bs.is_all_or_none && len(elems) > 0 && len(bs.fields) > 0 {
+			missing_fields := make([dynamic]^Entity)
+			defer delete(missing_fields)
+
+			for field in bs.fields {
+				name := field.token.text
+				if is_blank_ident(name) || name == "" {
+					continue
+				}
+				_, found := fields_visited[name]
+				_, via_raw_union := fields_visited_through_raw_union[name]
+				if !found && !via_raw_union {
+					append(&missing_fields, field)
+				}
+			}
+
+			if len(missing_fields) > 0 {
+				// The reference is `expr = o->expr; if (expr == nullptr) expr = elems.back();`
+				// -- but its o->expr is EMPIRICALLY ALWAYS NIL here, so it always takes the
+				// fallback: with `S{a=1}` it anchors at `a = 1`, and with `S{a=1, b=2}` at
+				// `b = 2`, i.e. the last element in both. The PORT's operand does carry an
+				// expr (the whole literal), so writing the reference's condition literally
+				// anchored at `S{...}` and produced col 6 against the oracle's col 15.
+				// Anchoring at the last element unconditionally reproduces the reference's
+				// observable behaviour. The underlying o.expr state divergence is recorded
+				// separately -- same class as the HelperType/operand.expr finding.
+				assert(len(elems) > 0)
+				expr := elems[len(elems)-1]
+
+				begin_error_block()
+				if terse_errors() {
+					fields_string := strings.builder_make()
+					defer strings.builder_destroy(&fields_string)
+					for field, i in missing_fields {
+						if i > 0 {
+							strings.write_string(&fields_string, ", ")
+						}
+						strings.write_string(&fields_string, field.token.text)
+					}
+					error(expr, "All or none of the fields must be assigned to a struct with '#all_or_none' applied, missing fields: %s", strings.to_string(fields_string))
+				} else {
+					error(expr, "All or none of the fields must be assigned to a struct with '#all_or_none' applied, missing fields:")
+					for field in missing_fields {
+						error_line("\t%s: %s\n", field.token.text, type_to_string(entity_type(field)))
+					}
+				}
+				end_error_block()
+			}
+		}
 	}
 }
 
@@ -308,9 +386,31 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				// Check for [?] syntax
 				if unary, is_unary := count.derived.(^ast.Unary_Expr); is_unary {
 					if unary.op.kind == .Question {
-						// Inferred array count: [?]T{...}
+						// Inferred array count: [?]T{...} -- or #simd[?]T{...}, which
+						// produces a SIMD VECTOR, not an array.
+						// C++ Reference: check_expr.cpp:10693-10712
 						elem_type := check_type(ctx, array_type.elem)
-						type = alloc_type_array(elem_type, -1)
+
+						is_simd_tag := false
+						if array_type.tag != nil {
+							// The parser stores a Basic_Directive here (parser.odin:3743,
+							// :3783), never a Tag_Expr. The reference GB_ASSERTs this;
+							// a failed assertion is unreachable by construction, so this
+							// declines to reproduce the abort.
+							if bd, is_bd := array_type.tag.derived.(^ast.Basic_Directive); is_bd {
+								is_simd_tag = bd.name == "simd"
+							}
+						}
+						if is_simd_tag {
+							if !is_type_valid_vector_elem(elem_type) && !is_type_polymorphic(elem_type) {
+								error(array_type.elem, "Invalid element type for #simd, expected an integer, float, boolean, or 'rawptr' with no specific endianness, got '%s'", type_to_string(elem_type))
+								type = alloc_type_array(elem_type, -1)
+							} else {
+								type = alloc_type_simd_vector(-1, elem_type)
+							}
+						} else {
+							type = alloc_type_array(elem_type, -1)
+						}
 						is_to_be_determined_array_count = true
 					}
 				}
@@ -321,9 +421,9 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			}
 
 			// Check for SOA tag
-			// Reference: C++ lines 9879-9895
+			// C++ Reference: check_expr.cpp:10716-10733
 			if len(cl.elems) > 0 && array_type.tag != nil {
-				if tag_expr, ok2 := array_type.tag.derived.(^ast.Tag_Expr); ok2 {
+				if tag_expr, ok2 := array_type.tag.derived.(^ast.Basic_Directive); ok2 {
 					if tag_expr.name == "soa" {
 						is_soa = true
 						// Check restrictions on SOA array literals
@@ -582,7 +682,14 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			}
 
 			// Validate count for SOA Fixed arrays
-			if max_type_count >= 0 && len(cl.elems) > 0 {
+			// C++ Reference: check_expr.cpp:11126-11131 -- the count check applies only when
+			// `elems[0]` is NOT a FieldValue. The indexed form `#soa[4]V{0={1,2}, 1={3,4}}` is
+			// EXEMPT, and the port rejected it.
+			is_first_fv := false
+			if len(cl.elems) > 0 {
+				_, is_first_fv = cl.elems[0].derived.(^ast.Field_Value)
+			}
+			if max_type_count >= 0 && len(cl.elems) > 0 && !is_first_fv {
 				if 0 < max && max < ts.soa_count {
 					error(node, "Expected %d values for this #soa array literal, got %d", ts.soa_count, max)
 				}
@@ -729,16 +836,16 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				if len(cl.elems) < field_count {
 					if min_field_count < field_count {
 						if len(cl.elems) < min_field_count {
-							error(node, "Too few values in structure literal, expected at least %d, got %d", min_field_count, len(cl.elems))
+							error_pos(cl.close, "Too few values in structure literal, expected at least %d, got %d", min_field_count, len(cl.elems))
 						}
 					} else if handled_elem_count != field_count {
-						error(node, "Too few values in structure literal, expected %d, got %d", field_count, len(cl.elems))
+						error_pos(cl.close, "Too few values in structure literal, expected %d, got %d", field_count, len(cl.elems))
 					}
 				}
 			}
 		}
 
-	case Type_Array, Type_Slice, Type_Fixed_Capacity_Dynamic_Array:
+	case Type_Array, Type_Slice, Type_Fixed_Capacity_Dynamic_Array, Type_Simd_Vector, Type_Matrix, Type_Dynamic_Array:
 		// Array, slice and fixed-capacity-dynamic-array literal checking
 		// Reference: C++ lines 9949-10187
 		//
@@ -765,6 +872,35 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		} else if slice, is_slice := variant.(Type_Slice); is_slice {
 			elem_type = slice.elem
 			context_name = "slice literal"
+		} else if da, is_da := variant.(Type_Dynamic_Array); is_da {
+			// C++ Reference: check_expr.cpp:10925-10927 -- elem, context_name, and is_constant=false.
+			// max_type_count stays -1: a dynamic array literal has no upper bound, which is exactly
+			// what lets the shared body's INDEXED form (`[dynamic]int{2 = 7}`) through.
+			// FOLDED IN by #1174, completing #1132: that tick folded Simd_Vector and Matrix into
+			// this shared arm but left Dynamic_Array as a splinter still carrying the invented
+			// rejection "Dynamic array literals cannot contain 'field = value' entries" (0 hits in
+			// src/), which the text instrument kept reporting as an extra diagnostic.
+			elem_type = da.elem
+			context_name = "dynamic array literal"
+			is_constant = false
+		} else if sv, is_sv := variant.(Type_Simd_Vector); is_sv {
+			// C++ Reference: check_expr.cpp:10934-10937. Folded into this SHARED arm because
+			// that is where the reference has it -- Struct/Slice/Array/DynamicArray/SimdVector/
+			// Matrix/FCDA all run ONE body, so the indexed `field = value` form, the tuple
+			// expansion and the index-bounds diagnostics apply to every one of them. The port
+			// had split simd and matrix into separate arms that re-implemented a fraction of
+			// this body and outright REJECTED the indexed form with invented messages.
+			elem_type = sv.elem
+			context_name = "simd vector literal"
+			if !is_to_be_determined_array_count {
+				max_type_count = sv.count
+			}
+		} else if mx, is_mx := variant.(Type_Matrix); is_mx {
+			// C++ Reference: check_expr.cpp:10940-10941. max_type_count is the FULL element
+			// count, unconditionally (a matrix count is never inferred from the literal).
+			elem_type = mx.elem
+			context_name = "matrix literal"
+			max_type_count = mx.row_count * mx.column_count
 		} else if fc, is_fc := variant.(Type_Fixed_Capacity_Dynamic_Array); is_fc {
 			// C++ Reference: check_expr.cpp check_compound_literal. context_name is what the shared
 			// index-bounds diagnostics interpolate, so this spelling is what produces
@@ -908,12 +1044,20 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				}
 			} else {
 				// Positional elements (non-indexed)
-				// Reference: C++ lines 10112-10142
-				// `max` counts the slots consumed, which is more than the number
-				// of elements once a multi-valued element expands
-				// (`[]int{returns_two(), 3}`).
-				for elem in cl.elems {
-					index := max
+				// C++ Reference: check_expr.cpp:11064-11080. The bounds test uses the LOOP
+				// COUNTER, which is independent of `max`:
+				//     for (isize index = 0; index < cl->elems.count; index++) {
+				//         defer (max += 1);
+				//         ...
+				//         if (0 <= max_type_count && max_type_count <= index) {
+				// `max` accumulates SLOTS and grows by `variables.count-1` on a tuple element
+				// (11093), so the two diverge the moment a multi-valued element appears.
+				// The port used `index := max`, and its comment claimed that was deliberate --
+				// but the reference tracks both quantities separately for exactly this reason.
+				// EFFECT: `a := [3]int{two(), 9, 9}` was rejected with "Index 3 is out of bounds
+				// (>= 3) for array literal" where the reference accepts it (max ends at 4, so
+				// 11109's `max < count` is false and the quirk lets it through).
+				for elem, index in cl.elems {
 					defer max += 1
 
 					if elem == nil {
@@ -926,7 +1070,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 						continue
 					}
 
-					if 0 <= max_type_count && max_type_count <= index {
+					if 0 <= max_type_count && max_type_count <= i64(index) {
 						error(elem, "Index %d is out of bounds (>= %d) for %s", index, max_type_count, context_name)
 					}
 
@@ -972,6 +1116,47 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				if !not_field_value {
 					if 0 < max && max < arr.count {
 						error(node, "Expected %d values for this array literal, got %d", arr.count, max)
+					}
+				}
+			}
+		}
+
+		// C++ Reference: check_expr.cpp:11113-11122. The ENTIRE #simd length law is inside
+		// `is_to_be_determined_array_count`: for an already-known count there is NO element-count
+		// check, so `#simd[4]f32{1,2}` is ACCEPTED.
+		if _, is_sv2 := variant.(Type_Simd_Vector); is_sv2 {
+			if is_to_be_determined_array_count {
+				SIMD_ELEMENT_COUNT_MAX :: 64
+				sv_type := &t.variant.(Type_Simd_Vector)
+				sv_type.count = max
+				if max < 1 || !is_power_of_two(max) {
+					error(node, "Invalid length for #simd, expected a power of two length, got '%d'", max)
+				} else if max > SIMD_ELEMENT_COUNT_MAX {
+					error(node, "#simd support a maximum element count of %d, got %d", SIMD_ELEMENT_COUNT_MAX, max)
+				}
+			}
+		}
+
+		// C++ Reference: check_expr.cpp:11148-11153 -- the dynamic-literal gate lives in the SHARED
+		// tail, after the per-kind count blocks and before the matrix one. The RESULT is the gate for
+		// the two runtime dependencies.
+		if _, is_da2 := variant.(Type_Dynamic_Array); is_da2 {
+			if len(cl.elems) > 0 {
+				if check_for_dynamic_literals(ctx, node) {
+					add_package_dependency(ctx, "runtime", "__dynamic_array_reserve")
+					add_package_dependency(ctx, "runtime", "__dynamic_array_append")
+				}
+			}
+		}
+
+		// C++ Reference: check_expr.cpp:11156-11162. TOO-FEW only, gated on elems[0] not being a
+		// FieldValue. Too-many is reported by the shared index-bounds diagnostic above.
+		if mx2, is_mx2 := variant.(Type_Matrix); is_mx2 {
+			if len(cl.elems) > 0 {
+				if _, is_fv := cl.elems[0].derived.(^ast.Field_Value); !is_fv {
+					total := mx2.row_count * mx2.column_count
+					if 0 < max && max < total {
+						error(node, "Expected %d values for this matrix literal, got %d", total, max)
 					}
 				}
 			}
@@ -1138,6 +1323,19 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 					is_constant = false
 				}
 
+				// `bit_set[E]{.A | .B}` almost certainly means `{.A, .B}`: `|` on an enum
+				// operand is LEGAL (core_type(Enum) is its backing integer, so the binary
+				// expression type-checks), which makes this diagnostic the only thing that
+				// rejects the form. It was missing entirely.
+				// C++ Reference: check_expr.cpp:11583-11597.
+				if be, is_binary := elem.derived.(^ast.Binary_Expr); is_binary {
+					#partial switch be.op.kind {
+					case .Or:
+						error(elem, "Was the following intended? '%s, %s'; if not, surround the expression with parentheses '(%s)'",
+						      expr_to_string(be.left), expr_to_string(be.right), expr_to_string(elem))
+					}
+				}
+
 				// C++ Reference: check_expr.cpp check_compound_literal — check_assignment against the
 				// DECLARED element type, not a bespoke check_is_assignable_to. The custom
 				// version this replaces compared the operand against elem_type after
@@ -1173,8 +1371,16 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		index_type := ea.index
 		elem_count := ea.count
 
-		// Empty literal is OK
-		if len(cl.elems) == 0 {
+		// C++ Reference: check_expr.cpp:11205-11212. The reference has NO empty-elems early
+		// break in this arm -- it computes constant-ness FIRST, and its own `elems.count > 0`
+		// guards come later (11374, 11385). The port's `if len(cl.elems)==0 { break }` skipped
+		// elem_type_can_be_constant entirely, so `X :: [E]any{}` stayed CONSTANT where the
+		// reference makes it a value and rejects the constant declaration.
+		bet_early := base_type(elem_type)
+		if !elem_type_can_be_constant(bet_early) {
+			is_constant = false
+		}
+		if bet_early == t_invalid {
 			break
 		}
 
@@ -1189,20 +1395,50 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			}
 		}
 
-		// Cannot mix named and positional
-		if has_named && has_positional {
-			error(node, "Cannot mix named and positional elements in enumerated array literal")
-			break
+		// #1230. THE MIXING GATE HERE WAS INVENTED AND IT ABORTED THE WHOLE PATH.
+		// C++ (check_expr.cpp:11340-11352 and its named counterpart) dispatches on elems[0]
+		// ALONE -- the note at the next block already says so -- and then reports EACH element
+		// of the wrong kind individually with "Mixture of 'field = value' and value elements in
+		// a literal is not allowed", anchored ON THAT ELEMENT, and CONTINUES. Because it
+		// continues, the unhandled-cases report below still runs. Witness
+		// $S/phase2/wit_misc3/n_enummix (`[E]int{.A = 1, 2}`):
+		//     oracle: "Unhandled enumerated array case: B" + its #partial Suggestion,
+		//             AND "Mixture of ..." at column 35 (the offending `2`)
+		//     port:   ONE invented "Cannot mix named and positional elements ..." at column 20
+		//             and nothing else, because it broke out.
+		// So a mixed literal takes the branch its FIRST element selects.
+		if has_named && has_positional && len(cl.elems) > 0 {
+			if _, first_is_fv := cl.elems[0].derived.(^ast.Field_Value); first_is_fv {
+				has_positional = false
+			} else {
+				has_named = false
+			}
 		}
 
-		// For non-sparse enumerated arrays, positional/bare elements are not allowed
-		// Must use named syntax: { .Field = value }
-		if has_positional && !ea.is_sparse {
-			// C++ Reference: check_expr.cpp -- `error(node, "Enumerated array literals must only have
-			// 'field = value' elements, bare elements are not allowed");`. #955: the port had
-			// rewritten this one entirely, inverting the clause order and appending a usage hint
-			// ("use '.FieldName = value' syntax") that the reference does not print.
-			error(node, "Enumerated array literals must only have 'field = value' elements, bare elements are not allowed")
+		// C++ Reference: check_expr.cpp:11373-11382. The reference dispatches on `elems[0]` NOT
+		// being a FieldValue, with NO is_sparse term -- `sed -n '11168,11430p' | grep is_sparse`
+		// finds nothing, i.e. the enumerated-array arm never reads is_sparse at all. And it is a
+		// TWO-WAY split: a too-few count reports the count message, everything else reports the
+		// bare-elements message. The port gated the whole thing on `!ea.is_sparse`, so a SPARSE
+		// enumerated array with positional elements was silently accepted.
+		was_error := false
+		if has_positional {
+			if 0 < i64(len(cl.elems)) && i64(len(cl.elems)) < elem_count {
+				error(node, "Expected %d values for this enumerated array literal, got %d", elem_count, len(cl.elems))
+			} else {
+				error(node, "Enumerated array literals must only have 'field = value' elements, bare elements are not allowed")
+			}
+			was_error = true
+			// #1230: C++'s positional element loop (check_expr.cpp:11342-11352) ALSO reports each
+			// `field = value` element it meets, with the same "Mixture" message anchored on that
+			// element, INDEPENDENTLY of the bare-elements error above. The port broke out here and
+			// emitted only the first message. Witness n_enummix2 (`[E]int{1, .B = 2}`): the oracle
+			// emits BOTH (col 20 and col 31), the port only the one at col 20.
+			for elem in cl.elems {
+				if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
+					error(elem, "Mixture of 'field = value' and value elements in a literal is not allowed")
+				}
+			}
 			break
 		}
 
@@ -1212,7 +1448,76 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			indices_visited := make(map[i64]bool, context.temp_allocator)
 
 			for elem in cl.elems {
-				fv := elem.derived.(^ast.Field_Value)
+				// A NON-field-value element in a named literal is C++'s "Mixture" case. This also
+				// removes an unchecked type assertion: the invented gate above was load-bearing
+				// against a PANIC here, which is why it could not simply be deleted.
+				fv, elem_is_fv := elem.derived.(^ast.Field_Value)
+				if !elem_is_fv {
+					error(elem, "Mixture of 'field = value' and value elements in a literal is not allowed")
+					continue
+				}
+
+				// A RANGE index: `[E]int{ .A ..= .C = 1 }`.
+				// C++ Reference: check_expr.cpp:11229-11296. The port had NO range branch at all
+				// -- every fv.field went straight to check_expr_with_type_hint below, which
+				// rejects a range operator in expression position, so the whole form was refused
+				// AND (because nothing was recorded) the unhandled-case report then fired too.
+				if is_ast_range(fv.field) {
+					binary := fv.field.derived.(^ast.Binary_Expr)
+					x: Operand
+					y: Operand
+					if !check_range(ctx, fv.field, false, &x, &y, nil, index_type) {
+						continue
+					}
+					idx_type_str := type_to_string(index_type)
+					// NOTE: the reference tests `are_types_identical(x.type, index_type)` in BOTH
+					// arms -- x, not y, in the second. Reproduced deliberately; it is the
+					// contract, and "fixing" it to y would be a divergence.
+					if x.mode != .Constant || !are_types_identical(x.type, index_type) {
+						error(x.expr, "Expected a constant enum of type '%s' as an array field", idx_type_str)
+						continue
+					}
+					if y.mode != .Constant || !are_types_identical(x.type, index_type) {
+						error(y.expr, "Expected a constant enum of type '%s' as an array field", idx_type_str)
+						continue
+					}
+
+					lo := exact_value_to_i64(x.value)
+					hi := exact_value_to_i64(y.value)
+					if binary.op.kind == .Range_Half {
+						hi -= 1
+					}
+
+					// Overlap detection. The port's named path tracks a set of visited indices
+					// rather than the reference's range cache; for a finite enum index the two
+					// agree, and the set is what the unhandled-case report above consults.
+					overlaps := false
+					for v in lo ..= hi {
+						if indices_visited[v] {
+							overlaps = true
+							break
+						}
+					}
+					if overlaps {
+						lo_str := expr_to_string(x.expr)
+						defer delete(lo_str)
+						hi_str := expr_to_string(y.expr)
+						defer delete(hi_str)
+						error(elem, "Overlapping field range index %s %s %s for enumerated array literal", lo_str, binary.op.text, hi_str)
+						continue
+					}
+					for v in lo ..= hi {
+						indices_visited[v] = true
+					}
+
+					value_operand := Operand{}
+					check_expr_with_type_hint(ctx, &value_operand, fv.value, elem_type)
+					check_assignment(ctx, &value_operand, elem_type, "enumerated array literal")
+					if is_constant {
+						is_constant = check_is_operand_compound_lit_constant(ctx, &value_operand, elem_type)
+					}
+					continue
+				}
 
 				// Check index expression (should be enum value)
 				// Use index_type as hint for implicit selector resolution
@@ -1293,7 +1598,10 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				}
 			}
 
-			if !ea.is_sparse && !is_partial {
+			// C++ Reference: check_expr.cpp:11385 -- `cl->elems.count > 0 && !was_error &&
+			// !is_partial`. NO is_sparse term. The port's `!ea.is_sparse` suppressed the whole
+			// unhandled-case report for every #sparse enumerated array.
+			if len(cl.elems) > 0 && !was_error && !is_partial {
 				// C++ Reference: check_expr.cpp check_compound_literal. C++ walks the index enum's
 				// fields and collects the ones the literal never mentioned, then names them.
 				et := base_type(index_type)
@@ -1370,116 +1678,29 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				}
 			}
 
-			// Validate element count for positional syntax
-			if i64(len(cl.elems)) != elem_count {
-				error(node, "Expected %d values for enumerated array literal, got %d", elem_count, len(cl.elems))
-			}
+			// C++ Reference: NONE. `grep -c "values for enumerated array literal" src/check_expr.cpp`
+			// is 0 -- this wording (without "this") exists nowhere in the reference. The only
+			// enumerated-array count diagnostic is check_expr.cpp:11376, which is worded
+			// "for this enumerated array literal", is gated on `elems[0]` not being a FieldValue,
+			// and fires only for TOO FEW (`0 < max && max < count`). That one is now emitted
+			// above. This invented `!=` copy also fired on an EMPTY literal, which is how it
+			// surfaced: after the empty-elems early break was removed, `X :: [E]any{}` started
+			// reporting "Expected 1 values..." instead of the oracle's "is not a compile-time
+			// known constant" -- the right exit status for the wrong reason.
 		}
 
-	case Type_Dynamic_Array:
-		// Dynamic array literal: [dynamic]int{1, 2, 3}
-		// Reference: C++ lines 10172-10177
-		//
-		// Dynamic literals are opt-in: C++ gates them on a per-file
-		// `#+feature dynamic-literals` or the project-wide build setting
-		// (check_expr.cpp check_compound_literal -- the [dynamic]T arm and the map arm). Only reported for a
-		// NON-EMPTY literal. `check_for_dynamic_literals` already existed with zero call
-		// sites; the feature flags it reads are populated in check_files.odin.
-		//
-		// C++ Reference: check_expr.cpp check_compound_literal, same shape as the map case above:
-		//     if (check_for_dynamic_literals(c, node, cl)) {
-		//         add_package_dependency(c, "runtime", "__dynamic_array_reserve");
-		//         add_package_dependency(c, "runtime", "__dynamic_array_append");
-		//     }
-		if len(cl.elems) > 0 {
-			if check_for_dynamic_literals(ctx, node) {
-				add_package_dependency(ctx, "runtime", "__dynamic_array_reserve")
-				add_package_dependency(ctx, "runtime", "__dynamic_array_append")
-			}
-		}
-		da := variant
-		elem_type := da.elem
-
-		// Dynamic arrays are never constant (require runtime allocation)
-		is_constant = false
-
-		// Dynamic array literals cannot use named/indexed fields
-		for elem in cl.elems {
-			if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
-				error(elem, "Dynamic array literals cannot contain 'field = value' entries")
-				continue
-			}
-
-			// Check element value
-						elem_operand := Operand{}
-			check_expr_with_type_hint(ctx, &elem_operand, elem, elem_type)
-			check_assignment(ctx, &elem_operand, elem_type, "dynamic array literal")
-		}
-
-	case Type_Simd_Vector:
-		// SIMD vector literal: #simd[4]f32{1, 2, 3, 4}
-		// Reference: C++ lines 9984-9994
-		sv := variant
-		elem_type := sv.elem
-		elem_count := sv.count
-
-		// SIMD vector literals cannot use named fields
-		// Reference: C++ lines 9985-9987
-		for elem in cl.elems {
-			if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
-				error(elem, "SIMD vector literals cannot contain 'field = value' entries")
-				continue
-			}
-
-			// Check element value
-						elem_operand := Operand{}
-			check_expr_with_type_hint(ctx, &elem_operand, elem, elem_type)
-			check_assignment(ctx, &elem_operand, elem_type, "simd vector literal")
-
-			// C++ Reference: check_expr.cpp check_compound_literal -- guarded, and via
-			// check_is_operand_compound_lit_constant, not a bare mode comparison.
-			if is_constant {
-				is_constant = check_is_operand_compound_lit_constant(ctx, &elem_operand, elem_type)
-			}
-		}
-
-		// Validate element count
-		// Reference: C++ lines 9990-9994
-		if i64(len(cl.elems)) != elem_count && len(cl.elems) != 0 {
-			error(node, "Expected %d values for SIMD vector literal, got %d", elem_count, len(cl.elems))
-		}
-
-	case Type_Matrix:
-		// Matrix literal: matrix[2, 3]f32{1, 2, 3, 4, 5, 6}
-		// Reference: C++ lines 9988-9994
-		mx := variant
-		elem_type := mx.elem
-		total_count := mx.row_count * mx.column_count
-
-		// Matrix literals cannot use named fields
-		for elem in cl.elems {
-			if _, is_fv := elem.derived.(^ast.Field_Value); is_fv {
-				error(elem, "Matrix literals cannot contain 'field = value' entries")
-				continue
-			}
-
-			// Check element value
-						elem_operand := Operand{}
-			check_expr_with_type_hint(ctx, &elem_operand, elem, elem_type)
-			check_assignment(ctx, &elem_operand, elem_type, "matrix literal")
-
-			// C++ Reference: check_expr.cpp check_compound_literal -- guarded, and via
-			// check_is_operand_compound_lit_constant, not a bare mode comparison.
-			if is_constant {
-				is_constant = check_is_operand_compound_lit_constant(ctx, &elem_operand, elem_type)
-			}
-		}
-
-		// Validate element count
-		if i64(len(cl.elems)) != total_count && len(cl.elems) != 0 {
-			error(node, "Expected %d values for matrix[%d, %d] literal, got %d", total_count, mx.row_count, mx.column_count, len(cl.elems))
-		}
-
+	// The Type_Dynamic_Array arm that was HERE is DELETED (#1174), folded into the shared
+	// `case Type_Array, Type_Slice, Type_Fixed_Capacity_Dynamic_Array, Type_Simd_Vector,
+	// Type_Matrix, Type_Dynamic_Array:` arm above -- which is how check_expr.cpp structures it.
+	//
+	// This COMPLETES #1132. That tick folded in Simd_Vector and Matrix and left this one behind,
+	// so it kept its invented rejection "Dynamic array literals cannot contain 'field = value'
+	// entries" (0 hits in src/) plus a single-value element entry point with no tuple expansion and
+	// no index-bounds diagnostic. The reference gives dynamic arrays the SAME shared body as arrays,
+	// with max_type_count = -1, which is precisely what makes the indexed form legal.
+	// The text instrument is what kept this visible: both compilers rejected the witness (the
+	// dynamic-literal gate fires first), so the extra diagnostic was invisible to the verdict corpus
+	// and showed up only as a diagnostic-COUNT difference.
 	case Type_Bit_Field:
 		// C++ Reference: check_expr.cpp check_compound_literal. C++ has NO bit_field element loop --
 		// it delegates to check_compound_literal_field_values, the SAME helper it uses for
@@ -1507,7 +1728,10 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			// Non-any basic types cannot have compound literals with fields
 			// Reference: C++ lines 10452-10460
 			if len(cl.elems) != 0 {
-				type_str := type_to_string(type)
+				// C++ Reference: check_expr.cpp:11432-11433 prints `t`, the BASE type, not the
+				// declared one: `gbString s = type_to_string(t);` where `t = base_type(type)`.
+				// For `My_Int :: distinct int` the reference says "int", the port said "My_Int".
+				type_str := type_to_string(t)
 				error(node, "Illegal compound literal, %s cannot be used as a compound literal with fields", type_str)
 				is_constant = false
 			}
@@ -1600,7 +1824,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 
 				// Validate element count
 				if len(cl.elems) < field_count {
-					error(node, "Too few values in 'any' literal, expected %d, got %d", field_count, len(cl.elems))
+					error_pos(cl.close, "Too few values in 'any' literal, expected %d, got %d", field_count, len(cl.elems))
 				}
 			}
 		}

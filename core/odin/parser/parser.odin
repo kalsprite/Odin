@@ -8,6 +8,12 @@ import "base:runtime"
 
 import "core:fmt"
 import "core:strconv"
+import "core:unicode/utf8"
+
+// C++ Reference: src/build_settings.cpp:11. Duplicated rather than imported: this package cannot
+// depend on core:odin/checker (the dependency runs the other way), and the value is part of the
+// reference's observable behaviour, not an implementation detail.
+DEFAULT_MAX_ERROR_COLLECTOR_COUNT :: 36
 
 Warning_Handler :: #type proc(pos: tokenizer.Pos, fmt: string, args: ..any)
 Error_Handler   :: #type proc(pos: tokenizer.Pos, fmt: string, args: ..any)
@@ -18,6 +24,12 @@ Error_Handler   :: #type proc(pos: tokenizer.Pos, fmt: string, args: ..any)
 // It is a SEPARATE type from Error_Handler because a continuation line has no position of its
 // own; giving it one would sort it away from the diagnostic it belongs to.
 Error_Line_Handler :: #type proc(fmt: string, args: ..any)
+
+// Error_Verbose_Handler is C++'s syntax_error_with_verbose: like Error_Handler but it also takes
+// the END position, because the reference underlines the whole offending expression
+// (`^~~~~~~~~~~~^`) rather than pointing at its first character. Passing only `pos` produced a
+// single-caret span where the oracle spans the expression -- visible immediately in a witness diff.
+Error_Verbose_Handler :: #type proc(pos: tokenizer.Pos, end: tokenizer.Pos, fmt: string, args: ..any)
 
 // Error_Block_Handler brackets a diagnostic and its continuation lines, so that the
 // continuations attach to it instead of being flushed on their own.
@@ -81,6 +93,10 @@ Parser :: struct {
 	// Continuation lines, and the bracket that makes them attach. Supplied by the driver like
 	// `err` and the build-level inputs below; all nil means continuations are simply not
 	// emitted, which is what every pre-existing consumer of this package gets. #307.
+	// #1241: C++'s syntax_error_with_verbose -- same shape as `err`, but the host omits the
+	// "Syntax Error: " prefix unless the terminal has colours. Used by the or_return/or_branch
+	// parenthesis checks, which C++ routes through that variant. Optional like the others.
+	err_verbose:     Error_Verbose_Handler,
 	err_line:        Error_Line_Handler,
 	err_block_begin: Error_Block_Handler,
 	err_block_end:   Error_Block_Handler,
@@ -111,8 +127,16 @@ Parser :: struct {
 	line_comment: ^ast.Comment_Group,
 
 	curr_proc: ^ast.Node,
+	// C++ Reference: AstFile::in_when_statement (src/parser.cpp:4874-4907). Set while parsing a
+	// `when` statement's BODY and its `else` chain, saved/restored so nesting works. Its only
+	// reader is the import guard, which rejects `when { import ... }`.
+	in_when_statement: bool,
 
 	error_count: int,
+
+	// The cap that stops the statement loops; 0 selects DEFAULT_MAX_ERROR_COLLECTOR_COUNT. The
+	// driver sets it from build_context.max_error_count. See error_limit_reached below.
+	max_error_count: int,
 
 	fix_count: int,
 	fix_prev_pos: tokenizer.Pos,
@@ -160,6 +184,32 @@ error :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: ..any) {
 	}
 	p.file.syntax_error_count += 1
 	p.error_count += 1
+}
+
+// error_limit_reached mirrors the ONE thing that terminates a file-scope guard's parse in C++.
+//
+// C++ Reference: error.cpp:536-540. syntax_error_va bumps the global collector and, once it passes
+// MAX_ERROR_COLLECTOR_COUNT (build_settings.cpp:674, default 36), calls print_all_errors() and
+// gb_exit(1) -- it EXITS THE PROCESS from inside the diagnostic routine.
+//
+// That exit is load-bearing for the parser, not just a convenience. parse_for_stmt, parse_if_stmt,
+// parse_switch_stmt, parse_defer_stmt and parse_block_stmt all report their file-scope guard and
+// return a Bad_Stmt WITHOUT consuming the offending token (e.g. parser.cpp:4942), so the decl loop
+// hands parse_stmt the same token again and again. MEASURED on the reference: `for {}` at file
+// scope with `-max-error-count:500000` runs for minutes; with the default it prints one line and
+// exits. The repeats are invisible because they share a position and merge into one diagnostic.
+//
+// A LIBRARY cannot exit its host's process, so the port stops the two statement loops instead. The
+// visible result is the same single merged diagnostic, and the port's own collector already
+// latches and drops past the cap (checker/error.odin:962). Counting per-parser rather than
+// globally is the one deliberate difference: this package cannot see the checker's collector, and
+// during parsing the two agree.
+error_limit_reached :: proc(p: ^Parser) -> bool {
+	max_count := p.max_error_count
+	if max_count <= 0 {
+		max_count = DEFAULT_MAX_ERROR_COLLECTOR_COUNT
+	}
+	return p.error_count > max_count
 }
 
 // error_no_file_count reports a diagnostic WITHOUT bumping the file's syntax_error_count.
@@ -371,7 +421,7 @@ parse_file :: proc(p: ^Parser, file: ^ast.File) -> bool {
 
 	p.file.decls = make([dynamic]^ast.Stmt)
 
-	for p.curr_tok.kind != .EOF {
+	for p.curr_tok.kind != .EOF && !error_limit_reached(p) {
 		stmt := parse_stmt(p)
 		if stmt != nil {
 			if _, ok := stmt.derived.(^ast.Empty_Stmt); !ok {
@@ -479,9 +529,42 @@ parse_setup_file_decls :: proc(p: ^Parser, decls: []^ast.Stmt) {
 			if len(fl.fullpaths) == 0 {
 				error_node(p, node, "No foreign paths found")
 			} else if !fl.multiple_filepaths && len(fl.fullpaths) == 1 {
-				if bl, bl_ok := fl.fullpaths[0].derived.(^ast.Basic_Lit); bl_ok {
-					file_str := path_string_from_token(bl.tok)
-					if is_import_path_absolute(file_str) {
+				{
+					// C++:6360 does `GB_ASSERT(fp->kind == Ast_BasicLit)` and then reads
+					// fp->BasicLit.token unconditionally. In a release build that assert is
+					// compiled out, so a NON-literal path (e.g. `foreign import lib v`) has the
+					// wrong union member read and yields an EMPTY string -- which then fails
+					// is_import_path_valid and reports "Invalid import path: ''". The port skipped
+					// the check entirely for non-literals and stayed silent
+					// ($S/phase2/open_div/c_fimp_nonc). Matching the OBSERVABLE behaviour without
+					// reproducing the bad read: a non-literal contributes the empty string.
+					file_str: string
+					if bl, bl_ok := fl.fullpaths[0].derived.(^ast.Basic_Lit); bl_ok {
+						file_str = path_string_from_token(bl.tok)
+					}
+					// #1227: C++ parser.cpp:6364 checks is_import_path_absolute, and
+					// determine_path_from_string (:6207-6216) then checks is_import_path_valid on
+					// the SAME text, emitting the SAME message. The port resolves paths in the
+					// checker, so both tests belong here -- otherwise an empty or
+					// illegal-rune-bearing path reaches the checker and gets a different,
+					// invented diagnostic at a different position.
+					// THE COLLECTION PREFIX MUST BE SPLIT OFF BEFORE VALIDATING. ':' is in
+					// illegal_import_runes, so validating the whole string rejects every
+					// `system:c`-style path. C++ does the split first
+					// (determine_path_from_string, :6196-6201) and validates only the part
+					// AFTER the colon. My first attempt validated the whole string and broke
+					// every collection import in base:runtime -- caught immediately by control
+					// cell l_ok, which is why it is in the corpus.
+					path_str := file_str
+					for i in 0 ..< len(file_str) {
+						if file_str[i] == ':' {
+							if i > 0 {
+								path_str = file_str[i + 1:]
+							}
+							break
+						}
+					}
+					if is_import_path_absolute(file_str) || !is_import_path_valid(path_str) {
 						error_node(p, node, "Invalid import path: '%s'", file_str)
 					}
 				}
@@ -497,6 +580,49 @@ parse_setup_file_decls :: proc(p: ^Parser, decls: []^ast.Stmt) {
 // Both rules apply unconditionally; neither is gated on the host platform. The reference compiler
 // rejects a Windows-style drive path while running on Linux, which probe c27_winimp verifies
 // against the oracle rather than against this reading.
+// C++ Reference: src/parser.cpp:6035-6045 and 6047-6077. #1227: THE PORT HAD NEITHER, so it
+// performed none of the reference's import-path text validation -- no illegal-rune check, no
+// BOM check, no invalid-UTF-8 check, AND NO EMPTY-PATH CHECK. The last one is the visible one:
+// `is_import_path_valid("")` falls through to `return false`, so the reference rejects an empty
+// foreign-import path in the PARSER with "Invalid import path: ''", while the port let it reach
+// the checker and reported its own invented "Foreign library path cannot be empty" at a
+// different column. Witness $S/phase2/wit_flib/l_empty.
+illegal_import_runes := [?]rune{
+	'"', '\'', '`',
+	'\t', '\r', '\n', '\v', '\f',
+	'\\', // NOTE(bill): Disallow windows style filepaths
+	'!', '$', '%', '^', '&', '*', '(', ')', '=',
+	'[', ']', '{', '}',
+	';',
+	':', // NOTE(bill): Disallow windows style absolute filepaths
+	'#',
+	'|', ',', '<', '>', '?',
+}
+
+is_import_path_valid :: proc(path: string) -> bool {
+	if len(path) > 0 {
+		for r, offset in path {
+			// C++ decodes explicitly and rejects an undecodable rune, and rejects a BOM
+			// anywhere except the very start. Odin's range-over-string yields RUNE_ERROR for
+			// invalid UTF-8, which is the same test expressed differently.
+			if r == utf8.RUNE_ERROR {
+				return false
+			}
+			if r == 0xFEFF && offset > 0 {
+				return false
+			}
+			for ir in illegal_import_runes {
+				if r == ir {
+					return false
+				}
+			}
+		}
+		return true
+	}
+	// An EMPTY path is invalid -- C++ falls out of the `len > 0` block to `return false`.
+	return false
+}
+
 is_import_path_absolute :: proc(path: string) -> bool {
 	if len(path) > 0 && path[0] == '/' {
 		return true
@@ -1272,7 +1398,8 @@ parse_stmt_list :: proc(p: ^Parser) -> []^ast.Stmt {
 	list: [dynamic]^ast.Stmt
 	for p.curr_tok.kind != .Case &&
 	    p.curr_tok.kind != .Close_Brace &&
-	    p.curr_tok.kind != .EOF  {
+	    p.curr_tok.kind != .EOF &&
+	    !error_limit_reached(p)  {
 		stmt := parse_stmt(p)
 		if stmt != nil {
 			if _, ok := stmt.derived.(^ast.Empty_Stmt); !ok {
@@ -1292,6 +1419,7 @@ parse_block_stmt :: proc(p: ^Parser, is_when: bool) -> ^ast.Stmt {
 	skip_possible_newline_for_literal(p)
 	if !is_when && p.curr_proc == nil {
 		error(p, p.curr_tok.pos, "You cannot use a block statement in the file scope")
+		return ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
 	}
 	return parse_body(p)
 }
@@ -1316,6 +1444,11 @@ parse_when_stmt :: proc(p: ^Parser) -> ^ast.When_Stmt {
 	if cond == nil {
 		error(p, p.curr_tok.pos, "expected a condition for when statement")
 	}
+	// C++ Reference: src/parser.cpp:4874-4875 -- the flag covers the body AND the else chain,
+	// and is saved/restored rather than simply cleared so that nested `when`s behave.
+	was_in_when_statement := p.in_when_statement
+	p.in_when_statement = true
+
 	if allow_token(p, .Do) {
 		// C++ Reference: src/parser.cpp:4856
 		body = parse_do_body(p, do_body_token(cond, tok), "then when statement")
@@ -1340,6 +1473,9 @@ parse_when_stmt :: proc(p: ^Parser) -> ^ast.When_Stmt {
 			else_stmt = ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
 		}
 	}
+
+	// C++ Reference: src/parser.cpp:4907 -- restored after the else chain, not before it.
+	p.in_when_statement = was_in_when_statement
 
 	end := body.end
 	if else_stmt != nil {
@@ -1469,6 +1605,7 @@ parse_control_statement_semicolon_separator :: proc(p: ^Parser) -> bool {
 parse_for_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 	if p.curr_proc == nil {
 		error(p, p.curr_tok.pos, "You cannot use a for statement in the file scope")
+		return ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
 	}
 
 	tok := expect_token(p, .For)
@@ -1644,6 +1781,12 @@ parse_case_clause :: proc(p: ^Parser, is_type_switch: bool) -> ^ast.Case_Clause 
 }
 
 parse_switch_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
+	// C++ Reference: src/parser.cpp:5075-5079 -- before the keyword is consumed, oracle 3:1.
+	if p.curr_proc == nil {
+		error(p, p.curr_tok.pos, "You cannot use a switch statement in the file scope")
+		return ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
+	}
+
 	tok := expect_token(p, .Switch)
 
 	init: ^ast.Stmt
@@ -1658,6 +1801,7 @@ parse_switch_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 
 		if p.curr_tok.kind == .In {
 			in_tok := expect_token(p, .In)
+			error(p, in_tok.pos, "Prefer 'switch _ in' over 'switch in'")
 			is_type_switch = true
 
 			lhs := make([]^ast.Expr, 1)
@@ -2050,12 +2194,28 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 
 	case .Foreign: return parse_foreign_decl(p)
 	case .Import:  return parse_import_decl(p)
-	case .If:      return parse_if_stmt(p)
+	case .If:
+		// See the twin at the 'else' recovery site below for why this is duplicated rather than
+		// living inside parse_if_stmt. Returning a Bad_Stmt is load-bearing: parse_setup_file_decls
+		// exempts Bad_Stmt, so without it the port emitted BOTH this message and the generic
+		// file-scope one -- and, for `if`, a third from parse_block_stmt on the body.
+		if p.curr_proc == nil {
+			error(p, p.curr_tok.pos, "You cannot use an if statement in the file scope")
+			return ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
+		}
+		return parse_if_stmt(p)
 	case .When:    return parse_when_stmt(p)
 	case .For:     return parse_for_stmt(p)
 	case .Switch:  return parse_switch_stmt(p)
 
 	case .Defer:
+		// C++ Reference: src/parser.cpp:5140-5144, guarding BEFORE the keyword is consumed, so it
+		// reports at `defer` itself (oracle 3:1). The port had no guard here at all and produced
+		// the generic file-scope message with a full-statement caret span instead.
+		if p.curr_proc == nil {
+			error(p, p.curr_tok.pos, "You cannot use a defer statement in the file scope")
+			return ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
+		}
 		tok := advance_token(p)
 		stmt := parse_stmt(p)
 		#partial switch s in stmt.derived_stmt {
@@ -2080,6 +2240,15 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 	case .Return:
 		tok := advance_token(p)
 
+
+		// C++ Reference: src/parser.cpp:4916-4920. The guard sits AFTER the keyword is consumed
+		// and reports at the token that FOLLOWS it -- `return` alone at file scope is oracle 3:7,
+		// not 3:1 like every other guard in this family. Without it the port fell through to the
+		// generic "Only declarations are allowed at file scope, got return statement".
+		if p.curr_proc == nil {
+			error(p, p.curr_tok.pos, "You cannot use a return statement in the file scope")
+			return ast.new(ast.Bad_Stmt, tok.pos, end_pos(p.curr_tok))
+		}
 		if p.expr_level > 0 {
 			error(p, tok.pos, "You cannot use a return statement within an expression")
 		}
@@ -2348,6 +2517,14 @@ parse_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 		error(p, token.pos, "'else' unattached to an 'if' statement")
 		#partial switch p.curr_tok.kind {
 		case .If:
+			// parse_if_stmt keeps UPSTREAM's `-> ^ast.If_Stmt` signature (it is on master), so it
+			// cannot hand back a Bad_Stmt; the reference's guard lives inside parse_if_stmt and
+			// therefore also covers this error-recovery path. Duplicated at both call sites
+			// rather than widening a public return type.
+			if p.curr_proc == nil {
+				error(p, p.curr_tok.pos, "You cannot use an if statement in the file scope")
+				return ast.new(ast.Bad_Stmt, p.curr_tok.pos, end_pos(p.curr_tok))
+			}
 			return parse_if_stmt(p)
 		case .When:
 			return parse_when_stmt(p)
@@ -2614,6 +2791,22 @@ convert_to_ident_list :: proc(p: ^Parser, list: []Expr_And_Flags, ignore_flags, 
 			} else {
 				error(p, ident.expr.pos, "Expected a non-polymorphic identifier")
 			}
+		case ^ast.Implicit:
+			// #1240. C++ Reference: parser.cpp:4375-4383. The reference has a DEDICATED arm for an
+			// implicit keyword (`context`, `self`, ...) that NAMES the keyword and, for `context`,
+			// suggests an alternative. The port had only the catch-all below, so
+			// `proc(context: int)` produced a bare "Expected an identifier":
+			//     oracle: Expected an identifier, 'context' which is a keyword
+			//             Suggestion: Would 'ctx' suffice as an alternative name?
+			//     port:   Expected an identifier
+			// Witness $S/phase2/wit_parser/ps_kw.
+			if p.err_block_begin != nil { p.err_block_begin() }
+			error(p, ident.expr.pos, "Expected an identifier, '%s' which is a keyword", n.tok.text)
+			if n.tok.kind == .Context && p.err_line != nil {
+				p.err_line("\tSuggestion: Would 'ctx' suffice as an alternative name?\n")
+			}
+			if p.err_block_end != nil { p.err_block_end() }
+			id = ast.new(ast.Ident, ident.expr.pos, ident.expr.end)
 		case:
 			error(p, ident.expr.pos, "Expected an identifier")
 			id = ast.new(ast.Ident, ident.expr.pos, ident.expr.end)
@@ -2771,6 +2964,90 @@ parse_var_type :: proc(p: ^Parser, flags: ast.Field_Flags) -> ^ast.Expr {
 	}
 
 	return type
+}
+
+
+// check_polymorphic_params_for_type -- C++ Reference: src/parser.cpp:2167-2186.
+//
+// Rejects a record parameter FIELD that mixes `$T` and bare names, e.g. `struct($T, N: typeid)`.
+// Compares every name in a field against that field's FIRST name and returns on the first
+// mismatch, so at most one diagnostic per record. `token` is the record keyword, which the
+// message names.
+//
+// This is the SECOND of the reference's three mixture checks and the port had only the third.
+// They are not interchangeable and they do not have the same message:
+//   * check_procedure_name_list (parser.cpp:4448) -- procedure parameters, per name list,
+//     "Mixture of polymorphic and non-polymorphic identifiers". The port already had this one,
+//     faithfully, which is what made the other two look present in a text search.
+//   * this one -- record parameters, WITHIN one field, names the keyword.
+//   * parser_check_polymorphic_record_parameters -- record parameters, ACROSS fields.
+// The reference runs BOTH record checks, on BOTH struct and union (parser.cpp:2842, 2959, 2987,
+// 3056, all inside parse_operand).
+check_polymorphic_params_for_type :: proc(p: ^Parser, poly_params: ^ast.Field_List, token: tokenizer.Token) {
+	if poly_params == nil {
+		return
+	}
+	for field in poly_params.list {
+		if field == nil || len(field.names) == 0 {
+			continue
+		}
+		first := field.names[0]
+		for name in field.names {
+			if name == nil || first == nil {
+				continue
+			}
+			_, name_is_poly  := name.derived.(^ast.Poly_Type)
+			_, first_is_poly := first.derived.(^ast.Poly_Type)
+			if name_is_poly != first_is_poly {
+				error_node(p, name, "Mixture of polymorphic names using both $ and not for %s parameters", token.text)
+				return
+			}
+		}
+	}
+}
+
+// parser_check_polymorphic_record_parameters -- C++ Reference: src/parser.cpp:2339-2378.
+//
+// The cross-field twin of the check above. It carries a prefix state (Unknown -> Dollar or Bare)
+// ACROSS every name of every field, so `struct($T: typeid, N: int)` -- two separate fields, each
+// internally consistent -- is caught here and NOT by check_polymorphic_params_for_type. That was
+// the witness that showed the port accepted it outright (oracle rejects at 3:25, port errors=0).
+//
+// Unlike its twin it does NOT return after reporting: the reference reports every offending name.
+parser_check_polymorphic_record_parameters :: proc(p: ^Parser, poly_params: ^ast.Field_List) {
+	if poly_params == nil {
+		return
+	}
+	Prefix :: enum { Unknown, Dollar, Bare }
+	prefix := Prefix.Unknown
+	for field in poly_params.list {
+		if field == nil {
+			continue
+		}
+		for name in field.names {
+			if name == nil {
+				continue
+			}
+			is_error := false
+			#partial switch _ in name.derived {
+			case ^ast.Poly_Type:
+				switch prefix {
+				case .Unknown: prefix = .Dollar
+				case .Dollar:  // consistent
+				case .Bare:    is_error = true
+				}
+			case ^ast.Ident:
+				switch prefix {
+				case .Unknown: prefix = .Bare
+				case .Dollar:  is_error = true
+				case .Bare:    // consistent
+				}
+			}
+			if is_error {
+				error_node(p, name, "Mixture of polymorphic $ names and normal identifiers are not allowed within record parameters")
+			}
+		}
+	}
 }
 
 check_procedure_name_list :: proc(p: ^Parser, names: []^ast.Expr) -> bool {
@@ -4156,6 +4433,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 				poly_params = nil
 			}
 			expect_token_after(p, .Close_Paren, "parameter list")
+			check_polymorphic_params_for_type(p, poly_params, tok)
 		}
 
 		prev_level := p.expr_level
@@ -4204,11 +4482,22 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 					error(p, tag.pos, "Duplicate struct tag '#%s'", tag.text)
 				}
 				is_raw_union = true
-			case "no_copy":
-				if is_no_copy {
-					error(p, tag.pos, "Duplicate struct tag '#%s'", tag.text)
-				}
-				is_no_copy = true
+			// NO `case "no_copy":` HERE, DELIBERATELY. The reference compiler has no such case --
+			// `grep -rn no_copy src/` returns exactly one line, the `bool is_no_copy` field
+			// declaration at src/parser.hpp:793, which nothing ever writes or reads. So
+			// `struct #no_copy {}` is rejected by src/parser.cpp as an ordinary unknown tag
+			// (oracle: "Syntax Error: Invalid struct tag '#no_copy'") and must be rejected here.
+			//
+			// This package accepted it, which is the uncomfortable direction: a program written
+			// against the port BUILDS under the port and FAILS on the real compiler, and nothing
+			// in the port says so. Reported by the rexcode/mir session's sweep-directives.sh,
+			// filed as CHECKER_ISSUES/CHECKER-no-copy-is-a-struct-tag-the-reference-does-not-have.md
+			//
+			// UPSTREAM master has the same case (core/odin/parser/parser.odin:2826), so this is
+			// an upstream inconsistency between the tooling parser and the compiler, not port
+			// drift -- filed separately. `is_no_copy` and ast.Type_Struct.is_no_copy are KEPT:
+			// core/odin/ast is public (#868) and src keeps its dead field too, so the storage
+			// matching is itself the faithful shape. It is now always false, exactly as in src.
 			case:
 				error(p, tag.pos, "Invalid struct tag '#%s'", tag.text)
 			}
@@ -4238,6 +4527,8 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		fields, name_count = parse_field_list(p, .Close_Brace, ast.Field_Flags_Struct)
 		close := expect_closing_brace_of_field_list(p)
 
+		parser_check_polymorphic_record_parameters(p, poly_params)
+
 		st := ast.new(ast.Struct_Type, tok.pos, end_pos(close))
 		st.poly_params       = poly_params
 		st.align             = align
@@ -4260,6 +4551,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		align:       ^ast.Expr
 		is_no_nil:     bool
 		is_shared_nil: bool
+		is_maybe: bool // #1168: set in the tag loop, reported after it, per parser.cpp:3028
 
 		if allow_token(p, .Open_Paren) {
 			param_count: int
@@ -4269,6 +4561,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 				poly_params = nil
 			}
 			expect_token_after(p, .Close_Paren, "parameter list")
+			check_polymorphic_params_for_type(p, poly_params, tok)
 		}
 
 		prev_level := p.expr_level
@@ -4282,7 +4575,14 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 				}
 				align = parse_expr(p, true)
 			case "maybe":
-				error(p, tag.pos, "#%s functionality has now been merged with standard 'union' functionality", tag.text)
+				// C++ Reference: src/parser.cpp:3028-3030 reports this AFTER the tag loop, at
+				// `f->curr_token` -- the token following the whole tag list, i.e. the '{' -- and
+				// AFTER the #shared_nil/#no_nil conflict check. The port reported it INSIDE the
+				// loop at tag.pos (the `maybe` ident), giving col 25 against the oracle's col 31 on
+				// `x: union #maybe { ^int }`. Deferred below so both the anchor and the ORDER
+				// relative to the conflict diagnostic match. Note the port's conflict check already
+				// uses p.curr_tok.pos, so this brings the two siblings into agreement.
+				is_maybe = true
 			case "no_nil":
 				if is_no_nil {
 					error(p, tag.pos, "Duplicate union tag '#%s'", tag.text)
@@ -4301,6 +4601,10 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 
 		if is_no_nil && is_shared_nil {
 			error(p, p.curr_tok.pos, "#shared_nil and #no_nil cannot be applied together")
+		}
+		// C++ Reference: src/parser.cpp:3028-3030 -- second, and at the same anchor.
+		if is_maybe {
+			error(p, p.curr_tok.pos, "#maybe functionality has now been merged with standard 'union' functionality")
 		}
 
 		union_kind := ast.Union_Type_Kind.Normal
@@ -4339,6 +4643,8 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 
 
 
+		parser_check_polymorphic_record_parameters(p, poly_params)
+
 		ut := ast.new(ast.Union_Type, tok.pos, end_pos(close))
 		ut.poly_params   = poly_params
 		ut.variants      = variants[:]
@@ -4358,7 +4664,7 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 
 		skip_possible_newline_for_literal(p)
 		open := expect_token(p, .Open_Brace)
-		fields := parse_elem_list(p)
+		fields := parse_enum_field_list(p)
 		close := expect_closing_brace_of_field_list(p)
 
 		et := ast.new(ast.Enum_Type, tok.pos, end_pos(close))
@@ -4605,6 +4911,65 @@ parse_value :: proc(p: ^Parser) -> ^ast.Expr {
 	defer p.allow_range = prev_allow_range
 	p.allow_range = true
 	return parse_expr(p, false)
+}
+
+// parse_enum_field_list parses an enum body, CAPTURING each member's doc and line comments.
+//
+// C++ Reference: parser.cpp:2018-2046 parse_enum_field_list. Enum bodies previously went through the
+// generic parse_elem_list (the compound-literal path), which attaches NO comment groups -- so every
+// enum member's docs and trailing comment were dropped before the checker ever saw them. #1177 (the
+// Entity_Constant docs/comment WRITER in check_type.odin) and #1178 (the doc-writer fallback) were
+// therefore correct and permanently inert for enum members: their input was always nil. MEASURED via
+// #1195's `doccomment` line -- `odin doc` reports the text, the port reported nothing.
+//
+// C++ takes docs from lead_comment BEFORE parsing the element, consumes the line comment after it, and
+// then -- critically -- consumes AGAIN after the field separator, because in
+//     A, // comment
+// the comment follows the COMMA and is not available until the separator has been eaten.
+//
+// SCOPE, and it is a real limitation: only the `name = value` form can carry the comments here, because
+// that is the only form that produces a node with somewhere to put them (ast.Field_Value.docs/.comment,
+// ast.odin:365-366). A BARE member stays a plain ^ast.Ident, which has no such fields. C++ wraps every
+// member in Ast_EnumFieldValue, a node this AST deliberately omits (ast.odin:1274) because enum fields
+// reuse Field_Value -- and core/odin/ast is PUBLIC (#868), so adding the node or changing bare members
+// into Field_Value is an API decision, not a parser fix. Bare-member docs remain a known divergence.
+parse_enum_field_list :: proc(p: ^Parser) -> []^ast.Expr {
+	elems: [dynamic]^ast.Expr
+
+	for p.curr_tok.kind != .Close_Brace && p.curr_tok.kind != .EOF {
+		// C++ line 2023: CommentGroup *docs = f->lead_comment;  -- read BEFORE the element.
+		docs := p.lead_comment
+
+		elem := parse_value(p)
+		if p.curr_tok.kind == .Eq {
+			eq := expect_token(p, .Eq)
+			value := parse_value(p)
+
+			fv := ast.new(ast.Field_Value, elem.pos, value)
+			fv.field = elem
+			fv.sep   = eq.pos
+			fv.value = value
+			fv.docs  = docs
+
+			elem = fv
+		}
+
+		// C++ line 2030: comment = consume_line_comment(f);
+		if fv, ok := elem.derived.(^ast.Field_Value); ok && fv.comment == nil {
+			fv.comment = p.line_comment
+		}
+
+		append(&elems, elem)
+
+		allow_field_separator(p) or_break
+
+		// C++ lines 2043-2045: the SECOND consume, for a comment that follows the separator.
+		if fv, ok := elem.derived.(^ast.Field_Value); ok && fv.comment == nil {
+			fv.comment = p.line_comment
+		}
+	}
+
+	return elems[:]
 }
 
 parse_elem_list :: proc(p: ^Parser) -> []^ast.Expr {
@@ -5054,6 +5419,8 @@ parse_unary_expr :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		expr := parse_unary_expr(p, lhs)
 
 		ue := ast.new(ast.Unary_Expr, op.pos, expr)
+		// C++ ast_unary_expr (parser.cpp:658-668) -- its text reads "an unary".
+		check_or_expr_needs_parens(p, expr, "an unary")
 		ue.op   = op
 		ue.expr = expr
 		return ue
@@ -5064,6 +5431,8 @@ parse_unary_expr :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		expr := parse_unary_expr(p, lhs)
 
 		ue := ast.new(ast.Unary_Expr, op.pos, expr)
+		// C++ ast_unary_expr (parser.cpp:658-668) -- its text reads "an unary".
+		check_or_expr_needs_parens(p, expr, "an unary")
 		ue.op   = op
 		ue.expr = expr
 		return ue
@@ -5071,13 +5440,45 @@ parse_unary_expr :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 	case .Period:
 		op := advance_token(p)
 		field := parse_ident(p)
-		ise := ast.new(ast.Implicit_Selector_Expr, op.pos, field)
+		// C++ Reference: src/parser_pos.cpp:35-39 -- ast_token(Ast_ImplicitSelectorExpr) returns
+		//     if (selector != nullptr) return ast_token(selector);   // the IDENTIFIER
+		//     return token;                                          // the '.' only as a fallback
+		// so the reference's `.A` starts at the IDENTIFIER, not at the dot. The port baked op.pos
+		// (the dot) into the node, so EVERY diagnostic anchored on an implicit selector was one
+		// column early -- e.g. the bit_set `|` message reported 3:17 against the oracle's 3:18.
+		// ISOLATED WITH A CONTROL: the same message on an EXPLICIT selector (`bit_set[E]{E.A | E.B}`)
+		// matched at 3:17 on both compilers, which proved the message and the diagnostic were right
+		// and only this node's START POSITION was wrong.
+		// The reference's fallback matters: parse_ident can synthesise a Bad_Expr-ish ident on a
+		// parse error, so keep op.pos when there is no field.
+		ise_pos := field != nil ? field.pos : op.pos
+		ise := ast.new(ast.Implicit_Selector_Expr, ise_pos, field)
 		ise.field = field
 		return ise
 
 	}
 	return parse_atom_expr(p, parse_operand(p, lhs), lhs)
 }
+
+// check_or_expr_needs_parens reports C++'s "not wrapped in parentheses" diagnostic for an
+// `or_return` / `or_break` / `or_continue` expression used directly as an operand.
+//
+// C++ Reference: parser.cpp:658-706 -- the checks live inside ast_unary_expr and ast_binary_expr,
+// so every unary/binary node gets them. The port builds those nodes inline, so the check is
+// factored here and called at the build sites. C++ routes them through syntax_error_with_verbose
+// (prefix-less when piped), hence p.err_verbose rather than p.err.
+check_or_expr_needs_parens :: proc(p: ^Parser, expr: ^ast.Expr, context_name: string) {
+	if expr == nil || p.err_verbose == nil {
+		return
+	}
+	#partial switch e in expr.derived_expr {
+	case ^ast.Or_Return_Expr:
+		p.err_verbose(expr.pos, expr.end, "'or_return' within %s expression not wrapped in parentheses (...)", context_name)
+	case ^ast.Or_Branch_Expr:
+		p.err_verbose(expr.pos, expr.end, "'%s' within %s expression not wrapped in parentheses (...)", e.token.text, context_name)
+	}
+}
+
 parse_binary_expr :: proc(p: ^Parser, lhs: bool, prec_in: int) -> ^ast.Expr {
 	expr := parse_unary_expr(p, lhs)
 
@@ -5178,6 +5579,9 @@ parse_binary_expr :: proc(p: ^Parser, lhs: bool, prec_in: int) -> ^ast.Expr {
 					error(p, op.pos, "expected expression on the right-hand side of the binary operator")
 				}
 				be := ast.new(ast.Binary_Expr, expr.pos, end_pos(p.prev_tok))
+				// C++ ast_binary_expr checks BOTH operands (parser.cpp:688-705).
+				check_or_expr_needs_parens(p, expr, "a binary")
+				check_or_expr_needs_parens(p, right, "a binary")
 				be.left  = expr
 				be.op    = op
 				be.right = right
@@ -5381,6 +5785,21 @@ parse_value_decl :: proc(p: ^Parser, names: []^ast.Expr, docs: ^ast.Comment_Grou
 
 	end := p.prev_tok
 
+	// C++ Reference: src/parser.cpp:3833 `CommentGroup *end_comment = f->lead_comment;` -- read
+	// BEFORE the semicolon and passed to ast_value_decl as its `comment` (parser.cpp:1403,
+	// `result->ValueDecl.comment = comment`).
+	//
+	// #1197. The port captured NOTHING here, so EVERY top-level declaration's TRAILING LINE COMMENT
+	// was discarded: `pr :: proc() {} // note`, `CN :: 42 // note`, `gv: int // note`,
+	// `TY :: distinct int // note`, `BS :: bit_set[0..<4] // note`, `pg :: proc{pr} // note` all
+	// reached the doc writer with comment == nil. Their LEADING docs worked, which is why the gap
+	// survived: docs and comment are populated by different mechanisms and only one was wired.
+	//
+	// NOTE IT IS lead_comment, NOT line_comment. By this point the tokenizer has already attached the
+	// declaration's trailing `// ...` as the LEAD comment of the NEXT token, so lead_comment is where
+	// it lives. Using p.line_comment here yields nil -- measured, not assumed.
+	end_comment := p.lead_comment
+
 	if p.expr_level >= 0 {
 		end: ^ast.Expr
 		if !is_mutable && len(values) > 0 {
@@ -5421,6 +5840,7 @@ parse_value_decl :: proc(p: ^Parser, names: []^ast.Expr, docs: ^ast.Comment_Grou
 
 	decl := ast.new(ast.Value_Decl, names[0].pos, end_pos(end))
 	decl.docs = docs
+	decl.comment = end_comment
 	decl.names = names
 	decl.type = type
 	decl.values = values
@@ -5454,9 +5874,37 @@ parse_import_decl :: proc(p: ^Parser, kind := Import_Decl_Kind.Standard) -> ^ast
 	decl.fullpath   = path.text
 
 	if p.curr_proc != nil {
-		error(p, decl.pos, "import declarations cannot be used within a procedure, it must be done at the file scope")
+		// C++ Reference: src/parser.cpp:5188 --
+		//     syntax_error(import_name, "Cannot use 'import' within a procedure. This must be done at the file scope");
+		// TEXT and ANCHOR both differed. The port had invented wording ("import declarations cannot
+		// be used within a procedure, it must be done at the file scope") and anchored at decl.pos
+		// (the `import` keyword) where the reference anchors at IMPORT_NAME, which for an
+		// un-aliased import is the path token -- oracle 3:9 vs port 3:2 on `\timport "core:fmt"`.
+		// The port already computes import_name with the reference's own fallback
+		// (`import_name.pos = p.curr_tok.pos` before the path is consumed), so the anchor was
+		// available all along.
+		// The FOREIGN import twin at :1918 already matched the reference exactly, text and column,
+		// which is what showed this was one site's drift rather than a systematic anchor problem.
+		error(p, import_name.pos, "Cannot use 'import' within a procedure. This must be done at the file scope")
 	} else {
 		append(&p.file.imports, decl)
+	}
+
+	// C++ Reference: src/parser.cpp:5194-5196. ABSENT from the port, so `when true { import "x" }`
+	// was ACCEPTED where the reference raises a Syntax Error -- an over-permissiveness that let a
+	// whole construct through. Reported at the import NAME, after the procedure guard above, which
+	// is the reference's order (both can fire for one declaration).
+	if p.in_when_statement {
+		error(p, import_name.pos, "Cannot use 'import' within a 'when' statement. Prefer using the file suffixes (e.g. foo_windows.odin) or '#+build' tags")
+	}
+
+	// C++ Reference: src/parser.cpp:5198-5200. ABSENT from the port, so `using import "core:fmt"`
+	// was ACCEPTED outright (errors=0) where the reference raises a Syntax Error. Anchored at
+	// import_name like its two siblings above, which for an un-aliased import is the PATH token
+	// (oracle 3:14 on `using import "core:fmt"`), and placed AFTER the 'when' check because that
+	// is the reference's order -- both can fire for one declaration.
+	if is_using {
+		error(p, import_name.pos, "'using import' is not allowed, please use the import name explicitly")
 	}
 	expect_semicolon(p, decl)
 	decl.comment = p.line_comment

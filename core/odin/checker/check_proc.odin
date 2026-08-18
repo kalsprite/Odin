@@ -201,8 +201,18 @@ check_procedure_later_from_entity :: proc(c: ^Checker, e: ^Entity, from_msg: str
 	// C++ tests `type == t_invalid`, NOT nullptr, and RETURNS. The port tested only nil and then
 	// asserted kind == .Proc -- so an entity whose procedure type failed to check reached that
 	// assertion and PANICKED the checker where C++ walks away quietly. t_invalid is Basic-kinded, so
-	// the assertion could not have passed. Reachability of an invalid-typed procedure entity here is
-	// UNMEASURED; the fix is C++'s own test either way.
+	// the assertion could not have passed. The fix is C++'s own test either way.
+	//
+	// REACHABILITY MEASURED (tick 138) AND THIS GUARD WAS NOT REACHED. A hit counter on the branch
+	// below (probe presence verified in-source BEFORE building, after tick 136's vacuous-zero
+	// mistake) recorded 0 hits on all of:
+	//     $S/phase2/wit_badproctype/bpt_badparam   `f :: proc(x: NoSuchType) {}` plus a call
+	//     $S/phase2/wit_badproctype/bpt_badresult  `g :: proc() -> NoSuchType` plus a call
+	//     $S/phase2/wit_badproctype/bpt_group      the same inside a proc GROUP
+	//     core/odin/checker                        (a large real package)
+	// All three cells DO produce diagnostics and all three MATCH the oracle exactly, so an
+	// invalid-typed procedure entity is certainly produced -- it simply never arrives here.
+	// Recorded as UNREACHED ON FOUR INPUTS, not as dead code.
 	//
 	// The nil arm is a port-only defence with no C++ counterpart -- C++ would hand nullptr to
 	// base_type and segfault. Kept deliberately, not inherited.
@@ -328,9 +338,15 @@ consume_proc_info :: proc(c: ^Checker, pi: ^Proc_Info, untyped: ^map[^ast.Expr]^
 		// drain in check_procedure_bodies re-evaluates len(procs_to_check) every iteration. An
 		// unconditional re-defer therefore feeds the loop its own work indefinitely.
 		//
-		// REACHABILITY UNMEASURED: this needs a Proc_Info enqueued for a nested procedure whose
-		// parent body is never checked, and no repro was built. Ported for parity regardless -- and
-		// because the failure mode here is a hang, not a wrong diagnostic.
+		// REACHABILITY MEASURED (tick 136), and this gate was NOT REACHED. Instrumented with a hit
+		// counter and run over five packages: the three purpose-built shapes in
+		// $S/phase2/wit_polynest (uninstantiated `outer :: proc($T: typeid)` with a nested proc, the
+		// same instantiated, and a doubly-nested polymorphic variant) plus core/fmt and
+		// core/odin/checker -- 0 hits on ALL FIVE, while the sibling gate below took 25042 hits on the
+		// six-line cell alone. Recorded as UNREACHED ON FIVE PACKAGES, not as dead code: the
+		// precondition (a Proc_Info enqueued for a nested procedure whose parent body is never checked)
+		// may need a shape not yet built. Kept for parity, and the failure mode it guards is a hang
+		// rather than a wrong diagnostic.
 		if parent.kind == .Procedure && !sync.atomic_load(&parent.proc_body_checked) {
 			// C++ Reference: checker.cpp consume_proc_info
 			is_poly := false
@@ -427,10 +443,15 @@ check_proc_info_worker_proc :: proc(data: rawptr) -> int {
 			// never checked, so the task re-queues itself forever. C++ deliberately FALLS THROUGH
 			// in that case and checks the nested body now.
 			//
-			// Reachability of the livelock is UNMEASURED: it needs a nested procedure whose
-			// enclosing procedure is an uninstantiated polymorphic one, reached on the threaded
-			// path. The gate is ported because C++ has it and the port's omission is not a
-			// documented divergence -- not because a hang was observed.
+			// REACHABILITY MEASURED (tick 136): THIS GATE IS HOT. A hit counter recorded 25042 hits on
+			// a SIX-LINE cell, 135722 on core/fmt and 281148 on core/odin/checker, which is consistent
+			// with it sitting inside the re-queue/wait spin rather than being an edge case. So the
+			// guard is load-bearing on the ordinary threaded path and porting it was necessary, not
+			// merely defensible.
+			// STILL UNMEASURED, and the distinction matters: the LIVELOCK needs this gate AND the
+			// specific condition inside it. Gate reachability is established; the combination is not.
+			// The three wit_polynest shapes all complete with rc=0 and outputs matching the oracle, so
+			// no hang has been observed in either compiler.
 			//
 			// A missing variant is treated as NOT polymorphic, which is the conservative reading:
 			// it keeps C++'s re-queue behaviour rather than silently skipping the wait.
@@ -1638,7 +1659,27 @@ check_scope_usage_internal :: proc(c: ^Checker, scope: ^Scope, vet_flags_param: 
 			append(&vetted_entities, ve_unused)
 		} else if is_shadowed {
 			append(&vetted_entities, ve_shadowed)
-		} else if e.kind == .Variable && (.Param not_in e.flags && .Using not_in e.flags && .Static not_in e.flags && .Field not_in e.flags) {
+		// #1114 (B2-h h1). C++ Reference: checker.cpp check_scope_usage_internal:
+		//
+		//     } else if (e->kind == Entity_Variable &&
+		//                ((e->flags & (Param|Using|Static|Field)) == 0 ||
+		//                 (e->flags & EntityFlag_Result) != 0) &&
+		//               !e->Variable.is_global) {
+		//
+		// THE `|| Result` DISJUNCT WAS DROPPED. Named results carry Param AND Result together
+		// (check_type.cpp sets Used|Param|Result on them, and the port's alloc_entity_param plus
+		// check_get_results do the same), so the Param bit alone excluded EVERY named result from
+		// the stack-overflow warning. C++'s Result disjunct is what rescues them.
+		//
+		// This warning is NOT gated on any vet flag — it sits outside the vet_flags block — so it
+		// fires on a plain `odin check`.
+		// MEASURED, and note BOTH compilers exit 0 because it is a WARNING:
+		//     `big :: proc() -> (buf: [1 << 20]u8) { return }`
+		//     oracle: warns for the named result `buf` AND for the local at the call site
+		//     port:   the call-site local only
+		} else if e.kind == .Variable &&
+		   ((.Param not_in e.flags && .Using not_in e.flags && .Static not_in e.flags && .Field not_in e.flags) ||
+		    .Result in e.flags) {
 			// Check for large stack allocations
 			// C++ Reference: checker.cpp check_scope_usage_internal
 			if e_var, ok := &e.variant.(Entity_Variable); ok && !e_var.is_global && e.type != nil {
@@ -1783,10 +1824,14 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 	//
 	// The `ctx.pkg != nil` guard below is a PORT-ONLY divergence: C++ writes
 	// `if (ctx->pkg->name != "runtime")` and dereferences unguarded, so a nil pkg segfaults it.
-	// Whether that is reachable is UNMEASURED -- the guard is kept because removing it can only
-	// turn a working check into a crash, and adding it can only suppress a crash. Recorded as
-	// unmeasured rather than justified: if it ever needs settling, instrument the nil branch and
-	// look for a hit, the way #122 and #508 were settled.
+	// MEASURED (tick 139), by exactly the method this note prescribed -- instrument the nil branch and
+	// look for a hit. A counter on `ctx.pkg == nil` at this point recorded 0 hits on core/fmt,
+	// core/odin/checker, base/runtime, core/sys/linux and a single-file cell (probe presence verified
+	// in-source before building). So ctx.pkg is never nil here on any input tried, and C++'s unguarded
+	// `ctx->pkg->name` dereference is safe for all of them.
+	// THE GUARD STAYS: 0 hits on five inputs is not a proof of unreachability, and the asymmetry the
+	// original note gave still holds -- removing it can only turn a working check into a crash, while
+	// keeping it can only suppress one. Now recorded as MEASURED-INERT rather than unmeasured.
 	if ctx.pkg != nil && ctx.pkg.name != "runtime" {
 		proc_type := type.variant.(Type_Proc)
 		#partial switch proc_type.calling_convention {
@@ -2214,7 +2259,16 @@ type_align_of :: proc(t: ^Type) -> int {
 		}
 		// Every remaining basic (the plain integers, floats, booleans and runes) aligns
 		// to its own size.
-		return min(basic.size, 16) if basic.size > 0 else 1
+		// #1115 (B2-h h6). C++ Reference: types.cpp type_align_of_internal's tail:
+		//     return gb_clamp(next_pow2(type_size_of_internal(t, path)), 1, build_context.max_align);
+		// The port hard-coded the cap as 16 and omitted next_pow2. The literal COINCIDES with
+		// build_context.max_align on amd64, which is why no witness on this target can separate
+		// them — but max_align is 8 on linux_arm32 (build_settings.odin's metrics table), and it is
+		// also 8 on amd64 when built against LLVM < 18. On those targets i128/u128 align 8 in the
+		// reference and 16 here.
+		// KNOWN, UNWITNESSABLE-ON-THIS-TARGET divergence, fixed by reading rather than by probe;
+		// see the note in COVERAGE.md about why that is still worth doing.
+		return clamp(next_pow2_int(basic.size), 1, int(build_context.max_align)) if basic.size > 0 else 1
 
 	// C++ has NO explicit Type_Pointer / Type_MultiPointer / Type_Proc arm in
 	// type_align_of_internal -- all three fall to its tail,
@@ -2302,6 +2356,28 @@ type_align_of :: proc(t: ^Type) -> int {
 
 	case .Union:
 		un := bt.variant.(Type_Union)
+
+		// #1114 (B2-h h5). C++ Reference: types.cpp type_align_of_internal, case Type_Union:
+		//
+		//     if (t->Union.variants.count == 0) { return 1; }
+		//     if (t->Union.custom_align > 0)    { return gb_max(t->Union.custom_align, 1); }
+		//     ... then the max-of-variants walk ...
+		//
+		// BOTH early returns were missing. `union #align(N)` was therefore ignored entirely and the
+		// alignment came out as the max of the variants — which also makes the SIZE and every
+		// enclosing struct's field OFFSETS wrong, since type_size_of rounds to the alignment.
+		// The field is not unused elsewhere: check_equivalence.odin and name_canonicalization.odin
+		// both read union custom_align, so only this function ignored it.
+		// MEASURED: `U :: union #align(32) { u8, u16 }` — `#assert(align_of(U) == 32)` passes on the
+		// oracle and FAILED here. The sibling .Struct arm two cases up already honours its own
+		// custom_align, so the two disagreed with each other.
+		if len(un.variants) == 0 {
+			return 1
+		}
+		if un.custom_align > 0 {
+			return max(int(un.custom_align), 1)
+		}
+
 		// Union alignment is the max alignment of its variants
 		max_align := 1
 		for variant in un.variants {
@@ -2351,7 +2427,12 @@ type_align_of :: proc(t: ^Type) -> int {
 		elem_size := type_size_of(sv.elem)
 		total_size := int(sv.count) * elem_size
 		// Round up to power of 2
-		return min(total_size, 64) if total_size > 0 else 1
+		// #1115 (B2-h h6). C++ Reference: types.cpp type_align_of_internal, case Type_SimdVector:
+		//     return gb_clamp(next_pow2(type_size_of_internal(t, path)), 1, build_context.max_simd_align*2);
+		// The port hard-coded 64 and omitted next_pow2. 64 == max_simd_align*2 on amd64
+		// (max_simd_align 32), so this target cannot witness it; max_simd_align is 16 on i386,
+		// arm32 and wasm, where the reference caps at 32 and the port capped at 64.
+		return clamp(next_pow2_int(total_size), 1, int(build_context.max_simd_align) * 2) if total_size > 0 else 1
 
 	case .Fixed_Capacity_Dynamic_Array:
 		// C++ Reference: types.cpp type_align_of_internal, case Type_FixedCapacityDynamicArray:
@@ -2446,6 +2527,22 @@ matrix_align_of :: proc(mat: Type_Matrix) -> int {
 
 // prev_pow2_int ports C++ prev_pow2(i64) (src/common.cpp:535) -- the largest power of two <= n.
 @(private = "file")
+// next_pow2_int is C++'s next_pow2 (src/common.cpp), used by type_align_of_internal's clamps.
+// Returns v rounded UP to a power of two; v <= 0 yields 0, matching the reference's guard shape.
+next_pow2_int :: proc(v: int) -> int {
+	if v <= 0 {
+		return 0
+	}
+	n := v - 1
+	n |= n >> 1
+	n |= n >> 2
+	n |= n >> 4
+	n |= n >> 8
+	n |= n >> 16
+	n |= n >> 32
+	return n + 1
+}
+
 prev_pow2_int :: proc(v: int) -> int {
 	if v <= 0 {
 		return 0

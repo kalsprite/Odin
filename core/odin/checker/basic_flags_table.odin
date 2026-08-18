@@ -132,7 +132,17 @@ basic_flags_table := [Basic_Kind]Basic_Flags {
 	.Untyped_Complex    = {.Complex, .Untyped},
 	.Untyped_Quaternion = {.Quaternion, .Untyped},
 	.Untyped_String     = {.String, .Untyped},
-	.Untyped_Rune       = {.Integer, .Rune, .Untyped},
+	// C++ Reference: types.cpp:571 --
+	//     {Type_Basic, {Basic_UntypedRune, BasicFlag_Integer | BasicFlag_Untyped, 0, "untyped rune"}}
+	// NO BasicFlag_Rune, unlike the TYPED `rune` at types.cpp:506 which does carry it. The port
+	// added .Rune here, so is_type_rune(untyped rune) was TRUE in the port and FALSE in the
+	// reference (both implementations read the flag identically).
+	// NO WITNESS FOUND: every is_type_rune caller either pairs it with `is_type_integer(...) ||`
+	// (and untyped rune carries .Integer on both sides, masking it), or is reached only through
+	// `type_of`, which rejects an untyped constant first -- probed four ways, diagnostics
+	// byte-identical. Fixed anyway: a lookup table that disagrees with the reference is a latent
+	// defect, and the correct entry costs one token.
+	.Untyped_Rune       = {.Integer, .Untyped},
 	.Untyped_Nil        = {.Untyped},
 	.Untyped_Uninit     = {.Untyped},
 }

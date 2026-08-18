@@ -307,6 +307,27 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	//     cycles, so the early call was also a potential UNDER-REJECTION.
 	// Parity was at baseline before this move, which means no corpus package exercises a global
 	// initialisation cycle -- the diagnostic half of this is UNMEASURED, not proven inert.
+	//
+	// TICK 137: FOUR SHAPES ATTEMPTED, NONE WITNESSES "Cyclic initialization" ON EITHER COMPILER.
+	// Recorded so the next attempt does not repeat them ($S/phase2/wit_initcycle):
+	//   ic_direct    `a := b` / `b := a`                 -> both emit "Illegal declaration cycle of
+	//                                                       `a`" from check_cycle, a DIFFERENT
+	//                                                       detector; MATCH.
+	//   ic_three     a 3-node decl cycle                 -> same declaration-cycle path; MATCH.
+	//   ic_viaproc   a := f() / b := g(), f and g
+	//                "contextless" and reading b / a     -> a genuine dependency cycle among globals
+	//                                                       that is NOT a declaration cycle; BOTH
+	//                                                       CLEAN. This is the shape the diagnostic
+	//                                                       looks like it should catch and does not.
+	//   ic_main      the same with a real `main` and no
+	//                -no-entry-point                     -> BOTH CLEAN, so the phase is not gated on
+	//                                                       the entry point (checker.cpp:7759 is an
+	//                                                       unconditional TIME_SECTION).
+	// The detector needs `n->dep_count > 0` when the node is popped from the priority queue, i.e. a
+	// cycle that survives generate_entity_dependency_graph's own collapsing -- two hops through a
+	// procedure evidently does not produce one. PARITY-RELEVANT CONCLUSION: on all four shapes the
+	// port and the reference behave IDENTICALLY, so the move is not observably wrong; the diagnostic
+	// itself stays unwitnessed.
 	store_global_init_order(c)
 
 	// C++ Reference: check_parsed_files, TIME_SECTION("add type info for type definitions")

@@ -1408,6 +1408,30 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 	doc_entity.name = doc_write_string(w, e.token.text)
 	doc_entity.type = 0 // Set later in update pass
 
+	// C++ Reference: docs_writer.cpp:975 `doc_entity.link_name = odin_doc_write_string(w, link_name);`
+	// sourced at :881 `link_name = e->Variable.link_name;` and :901
+	// `link_name = e->Procedure.link_name;`.
+	//
+	// #1200. The port NEVER ASSIGNED THIS FIELD -- zero writes to doc_entity.link_name anywhere -- so
+	// the doc output's link_name was always empty even though the checker records the value on the
+	// entity (check_decl.odin:314 for a variable, :1544/:1564/:2368 for a procedure, fields declared
+	// at ast/semantic_types.odin:528 and :577).
+	// MEASURED with #1199's `docextra` line: for `@(link_name="LINKMARK_sym") lk :: proc() ---` the
+	// oracle's doc contains that string TWICE (once as the attribute, once as this field) and the port
+	// contained it ONCE. That second occurrence is this line.
+	// Found by auditing EVERY Doc_Entity field against what the dump printed -- ten were unprinted, and
+	// this is the one of them that turned out to be a real gap rather than a numeric index.
+	#partial switch v in e.variant {
+	case Entity_Variable:
+		if len(v.link_name) > 0 {
+			doc_entity.link_name = doc_write_string(w, v.link_name)
+		}
+	case Entity_Procedure:
+		if len(v.link_name) > 0 {
+			doc_entity.link_name = doc_write_string(w, v.link_name)
+		}
+	}
+
 	// Serialize init_string, comment, docs, and attributes from decl_info
 	// C++ Reference: docs_writer.cpp:820-870
 	if e.decl_info != nil {
@@ -1415,6 +1439,39 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 		doc_entity.comment = doc_write_comment_group(w, e.decl_info.comment)
 		doc_entity.docs = doc_write_comment_group(w, e.decl_info.docs)
 		doc_entity.attributes = doc_write_attributes(w, e.decl_info.attributes)
+	}
+
+	// C++ Reference: docs_writer.cpp:836-843 -- the ENTITY-LEVEL FALLBACK, absent from the port:
+	//     if (e->kind == Entity_Variable) {
+	//         if (!comment) { comment = e->Variable.comment; }
+	//         if (!docs)    { docs    = e->Variable.docs; }
+	//     } else if (e->kind == Entity_Constant) { ...same for Constant... }
+	// #1178, the READER half of B3-f finding 7. A struct FIELD or enum MEMBER has no decl_info, so
+	// the block above leaves both empty and the entity's own docs/comment were never consulted.
+	// #1177 restored the WRITER (check_type.odin was discarding f.docs/f.comment and had the
+	// assignments commented out); without this reader the populated fields still went nowhere, which
+	// is exactly what the first verification attempt showed -- the fix looked inert because BOTH
+	// halves were missing and I had only restored one.
+	// Entity_Constant.docs/.comment were ALREADY written by the port (check_type.odin's enum path and
+	// check_decl_helpers) with ZERO readers, so this activates those too.
+	// Note the reference's precedence: decl_info WINS; the entity is only a fallback for empties.
+	if doc_entity.comment == {} || doc_entity.docs == {} {
+		#partial switch v in e.variant {
+		case Entity_Variable:
+			if doc_entity.comment == {} {
+				doc_entity.comment = doc_write_comment_group(w, v.comment)
+			}
+			if doc_entity.docs == {} {
+				doc_entity.docs = doc_write_comment_group(w, v.docs)
+			}
+		case Entity_Constant:
+			if doc_entity.comment == {} {
+				doc_entity.comment = doc_write_comment_group(w, v.comment)
+			}
+			if doc_entity.docs == {} {
+				doc_entity.docs = doc_write_comment_group(w, v.docs)
+			}
+		}
 	}
 
 	// C++ Reference: docs_writer.cpp odin_doc_add_entity, Entity_Constant arm --

@@ -994,6 +994,7 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 
 	// C++ line 4489-4493: Initialize visibility and attribute flags
 	entity_visibility_kind := Entity_Visibility_Kind.Public
+	is_priv := false
 	is_test := false
 	is_init := false
 	is_fini := false
@@ -1046,12 +1047,23 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 				if !success {
 					error(value, "'%s' expects no parameter, or a string literal containing \"file\" or \"package\"", name)
 				} else {
-					// C++ line 4541-4545: Set visibility kind (use most restrictive)
-					if entity_visibility_kind >= kind {
-						error(elem, "Previous declaration of '%s'", name)
-					} else {
-						entity_visibility_kind = kind
-					}
+					// C++ Reference: checker.cpp:4884. `is_priv` records that a WELL-FORMED
+					// @(private) was seen, independent of the visibility-kind update below.
+					// It gates the test-case guard after this loop.
+					is_priv = true
+				}
+
+				// C++ Reference: checker.cpp:4886-4890. THIS RUNS UNCONDITIONALLY -- it is NOT
+				// inside the `else` above. The port had it nested, so a MALFORMED @(private=...)
+				// reported the parse error and then left the entity Public, where the reference
+				// still applies `kind` (Private_To_Package by default) and hides the entity from
+				// other packages. Witness wit_priv/pv_xpkg/bogus: oracle also reports
+				// "'Foo' is not exported by 'lib'" at the importer; the port reported nothing.
+				// C++ line 4541-4545: Set visibility kind (use most restrictive)
+				if entity_visibility_kind >= kind {
+					error(elem, "Previous declaration of '%s'", name)
+				} else {
+					entity_visibility_kind = kind
 				}
 			} else if name == "test" {
 				// C++ line 4547
@@ -1064,6 +1076,13 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 				is_fini = true
 			}
 		}
+	}
+
+	// C++ Reference: checker.cpp:4907-4910. A test case cannot be private, and the reference
+	// ABORTS collection entirely rather than continuing with a downgraded visibility.
+	if is_priv && is_test {
+		error_node(decl, "Attribute 'private' is not allowed on a test case")
+		return
 	}
 
 	// C++ line 4566-4574: Apply file-level visibility
@@ -1398,7 +1417,16 @@ check_add_foreign_import_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 		}
 	}
 	if library_name == "" || is_blank_ident(library_name) {
-		error(decl, "File name cannot be used as a library name as it is not a valid identifier")
+		// #1231. C++ Reference: checker.cpp:5847 --
+		//     error(fl->token, "File name, '%.*s', cannot be as a library name as it is not a
+		//                       valid identifier", LIT(library_name));
+		// The port dropped the NAME and silently corrected the reference's grammar slip
+		// ("cannot be as" -> "cannot be used as"). Witness $S/phase2/wit_libname/k_numname:
+		//     oracle: File name, '_', cannot be as a library name as it is not a valid identifier
+		//     port:   File name cannot be used as a library name as it is not a valid identifier
+		// The name is '_' here because path_to_entity_name yields a blank identifier for a path
+		// that cannot produce one -- which is exactly the case this branch catches. Typo kept.
+		error(decl, "File name, '%s', cannot be as a library name as it is not a valid identifier", library_name)
 		return
 	}
 
@@ -1623,8 +1651,28 @@ process_all_delayed_decls :: proc(ctx: ^Checker_Context, file: ^ast.File) {
 	// Phase 1: Process import declarations (C++ Reference: checker.cpp check_import_entities)
 	process_delayed_import_decls(ctx, file)
 
-	// Phase 2: Process foreign block declarations (C++ Reference: checker.cpp check_import_entities)
-	process_delayed_foreign_block_decls(ctx, file)
+	// Phase 2 — foreign blocks — is deliberately NOT run here either, for EXACTLY the reason given
+	// for Phase 3 below.
+	//
+	// C++ drains the ForeignBlock queue inside check_import_entities (checker.cpp:6284), one step
+	// before the Expr drain at :6303 and, like it, AFTER check_export_entities_in_pkg
+	// (checker.cpp:6119) has published each file's entities into the package scope. Draining it here
+	// -- during check_collect_entities_all -- evaluates a foreign block's ATTRIBUTE VALUES before any
+	// export has happened, so `@(private=GC)` could not see a file-scope constant at all:
+	//     GC :: "package"
+	//     @(private=GC)
+	//     foreign lib { f :: proc() --- }
+	// gave "Undeclared name: GC" in the port and is ACCEPTED by the reference -- an OVER-REJECTION of
+	// valid code, not merely a wording difference. Witness $S/phase2/zzorder/const.
+	//
+	// check_delayed_foreign_blocks_all (below, called from check_files.odin:118) was already added to
+	// drain "a SECOND time, after the import/export cycle has run" -- but this early call CLEARS the
+	// queue at line 1608, so that later drain has always found it empty and did nothing. Removing the
+	// early call is what actually moves the work into the correct phase; the late drain then does it.
+	//
+	// The Expr queue had this identical defect and identical fix (LEDGER: the `#assert(size_of(...))`
+	// mis-sizing in core/sys/linux). Two queues, one mistake, fixed one at a time -- the sibling was
+	// sitting three lines above the comment explaining why it was wrong.
 
 	// Phase 3 — directive expressions — is deliberately NOT run here.
 	//

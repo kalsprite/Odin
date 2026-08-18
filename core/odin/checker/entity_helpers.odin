@@ -361,10 +361,34 @@ redeclaration_error :: proc(name: string, prev: ^Entity, found: ^Entity) -> bool
 			return false
 		}
 
+		// C++ Reference: checker.cpp:2053-2059, verbatim including its NOTE:
+		//     // NOTE: the insertion order is a race between the files of a package, so order the
+		//     // pair by position; the later declaration stays the anchor, as it is the one being
+		//     // reported
+		//     TokenPos first = prev->token.pos;
+		//     TokenPos second = pos;
+		//     if (second < first) { first = pos; second = prev->token.pos; }
+		//     error(second, "...\n\tat %s", ..., token_pos_to_string(first));
+		// The port had NO ordering: it always reported at prev and anchored at `pos`, i.e. the
+		// insertion order decided which of the two positions carried the error. Across the files
+		// of one package that order is exactly the race the reference NOTE is normalising away,
+		// so the port both anchored the wrong way round AND reported a different NUMBER of
+		// diagnostics -- when the normalised report position coincides with one already emitted,
+		// the reference's pair collapses onto it. Witness: core/rexcode/isa/x86/tools, four files
+		// declaring `main`, oracle 2 errors / port 3 (parity count mismatch), reduced to
+		// $S/phase2/xpkg_multi/rexshape.
+		// tokenizer.pos_compare has the reference's key order (offset, line, column, file), so it
+		// is the faithful comparator here.
+		first := prev.token.pos
+		second := pos
+		if tokenizer.pos_compare(second, first) < 0 {
+			first = pos
+			second = prev.token.pos
+		}
 		if .Result in found.flags {
-			error(prev.token, "Direct shadowing of the named return value '%s' in this scope\n\tat %s", name, token_pos_to_string(pos))
+			error_pos(second, "Direct shadowing of the named return value '%s' in this scope\n\tat %s", name, token_pos_to_string(first))
 		} else {
-			error(prev.token, "Redeclaration of '%s' in this scope\n\tat %s", name, token_pos_to_string(pos))
+			error_pos(second, "Redeclaration of '%s' in this scope\n\tat %s", name, token_pos_to_string(first))
 		}
 	}
 
@@ -583,7 +607,12 @@ add_entity_and_decl_info :: proc(ctx: ^Checker_Context, identifier: ^ast.Node, e
 	case:
 		ident_str := expr_to_string(identifier)
 		defer delete(ident_str)
-		error(identifier, "A variable declaration must be an identifier, got '%s'", ident_str)
+		// C++ Reference: checker.cpp:2223 spells this "identifer" and does NOT quote the %s --
+		// unlike its twin at check_stmt.cpp:904, which spells it correctly and quotes. The two
+		// reference sites genuinely differ, so the two port sites must differ the same way.
+		// Reproduced verbatim; the reference calls this arm "a safety check", so it is very
+		// likely unreachable and this is text parity rather than a behaviour change.
+		error(identifier, "A variable declaration must be an identifer, got %s", ident_str)
 		return
 	}
 

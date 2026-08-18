@@ -329,6 +329,33 @@ file_header_selects_target :: proc(header: ^ast.File, fullpath: string, src: str
 		delete(tags.build_project_name)
 	}
 
+	// `#+test` EXCLUDES THE FILE unless the command is `odin test`.
+	// C++ Reference: src/parser.cpp:6808-6811 --
+	//     } else if (string_starts_with(lc, str_lit("test"))) {
+	//         if ((build_context.command_kind & Command_test) == 0) { return false; }
+	// and a false return from parse_file_tag makes parse_file return false, i.e. the file never
+	// joins the package.
+	// The port treated this as a no-op, with a comment claiming "the port has no test command, so
+	// there is nothing to gate" -- but the gate is on build_context.command_kind, which the port
+	// HAS (build_settings.odin:204-217, .Test = bit 5), and `odin check` is Command_Check. So a
+	// `#+test` file's declarations stayed VISIBLE here and are invisible in the reference.
+	// WITNESSED (wit_tags/tg_test_excl): a.odin is `#+test` + `X :: 1`, b.odin returns X.
+	//     oracle: "Undeclared name: X"   port: ACCEPTED
+	// The `#+ignore` twin (tg_ignore_excl) already matched on both, which is what proved the
+	// exclusion MECHANISM here was sound and only this tag was missing from it.
+	// parse_file_tags does not carry a `test` field (File_Tags is public parser API), so the tag
+	// is read directly rather than by widening that struct.
+	if .Test not_in build_context.command_kind {
+		for tok in stub.tags {
+			if len(tok.text) < 3 || tok.text[:2] != "#+" {
+				continue
+			}
+			if strings.has_prefix(strings.trim_space(tok.text[2:]), "test") {
+				return false
+			}
+		}
+	}
+
 	if parser.match_build_tags(tags, target) {
 		return true
 	}
@@ -786,6 +813,7 @@ load_package_with_dependencies :: proc(
 		// syntax_error_va pops one per call, so without the bracket the Suggestion under
 		// "Expected a package declaration ..." fell through to a bare stderr write and came
 		// out ahead of the sorted stream.
+		syntax_parser.err_verbose     = syntax_error_with_verbose_va
 		syntax_parser.err_line        = error_line
 		syntax_parser.err_block_begin = begin_error_block
 		syntax_parser.err_block_end   = end_error_block
@@ -805,6 +833,9 @@ load_package_with_dependencies :: proc(
 		syntax_parser.vet_flags = transmute(ast.Vet_Flags)build_context.vet_flags
 		// #211: parse_do_body reads this; build_context.disallow_do was stored but never read.
 		syntax_parser.disallow_do = build_context.disallow_do
+		// The parser's statement loops stop here instead of exiting the process the way C++'s
+		// syntax_error does at the same cap. See parser.error_limit_reached.
+		syntax_parser.max_error_count = build_context.max_error_count
 		pkg, parse_ok := parse_package_for_target(pkg_path, pkg_to_load.kind, &syntax_parser)
 		if !parse_ok || pkg == nil {
 			result.parse_errors += 1

@@ -146,10 +146,22 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 				// markers. So the membership is an EXPLICIT SET, generated from the 93 names
 				// between BuiltinProc__type_begin and BuiltinProc__type_end
 				// (src/checker_builtin_procs.hpp:257-381). LEDGER #383.
+				//
+				// #1070: THE NON-TYPE BRANCH WAS `check_expr`, NOT `check_multi_expr` -- and the
+				// C++ quoted directly above spells `check_multi_expr`. The comment was right and
+				// the code was wrong. `check_expr` IS `check_multi_expr` followed by
+				// check_not_tuple (check_expr.cpp check_expr), so the port rejected a
+				// TUPLE-VALUED first argument here, in the shared prologue, for every builtin:
+				//     "2-valued expression found where single value expected"
+				// That fires before any handler runs, which makes compress_values(two_ints())
+				// -- the builtin whose entire purpose is flattening multi-value calls --
+				// impossible to express. Same class as #1023/#1028/#1036/#1063: substituting one
+				// of the four near-identical entry points for another is invisible to a reader
+				// and silently changes what compiles.
 				if is_type_builtin_id(id) {
 					check_expr_or_type(ctx, operand, call.args[0])
 				} else {
-					check_expr(ctx, operand, call.args[0])
+					check_multi_expr(ctx, operand, call.args[0])
 				}
 			}
 		}
@@ -253,7 +265,7 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		result = check_builtin_expand_values(ctx, operand, call)
 
 	case .Compress_Values:
-		result = check_builtin_compress_values(ctx, operand, call)
+		result = check_builtin_compress_values(ctx, operand, call, type_hint)
 
 	// SOA operations
 	case .Soa_Zip:
@@ -501,7 +513,13 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		result = check_builtin_simd_shuffle(ctx, operand, call)
 
 	case .Simd_Select:
-		result = check_builtin_simd_select(ctx, operand, call)
+		// C++ Reference: check_builtin.cpp:1594 -- simd_select's ARGUMENT 1 is checked with
+		// check_expr_with_type_hint(..., type_hint), and it is the ONLY consumer of type_hint in
+		// the whole of check_builtin_simd_operation. Without it a bare compound literal in that
+		// position has nothing to infer from, so
+		// `v: #simd[4]f32 = intrinsics.simd_select(mask, {1,2,3,4}, {5,6,7,8})` failed with
+		// "Missing type in compound literal".
+		result = check_builtin_simd_select(ctx, operand, call, type_hint)
 
 	case .Simd_Runtime_Swizzle:
 		result = check_builtin_simd_runtime_swizzle(ctx, operand, call)
@@ -964,6 +982,34 @@ check_builtin_type_of :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 	check_expr_or_type(ctx, &o, call.args[0])
 
 	if o.mode == .Invalid || o.mode == .Builtin {
+		// #1101. C++ Reference: check_builtin.cpp, BuiltinProc_type_of -- this branch is NOT a
+		// bare bail in the reference:
+		//
+		//     if (o.mode == Addressing_Invalid || o.mode == Addressing_Builtin) {
+		//         Entity *e = entity_of_node(expr);
+		//         if (e != nullptr && e->state == EntityState_InProgress && e->type == nullptr) {
+		//             error(expr, "Invalid cyclic type usage from 'type_of', got '%s'",
+		//                   expr_to_string(expr));
+		//         }
+		//         return false;
+		//     }
+		//
+		// The port had the SECOND cyclic guard further down (the curr_proc_sig one) but not this
+		// FIRST one, so a self-referential declaration bailed SILENTLY.
+		// `x: type_of(x)` -- the entity `x` is mid-resolution (In_Progress) with no type yet,
+		// which is exactly the state this detects.
+		// MEASURED (both compilers exit 1 on the first diagnostic, so the verdict corpus called
+		// the cell matching):
+		//     oracle: "'type_of(x)' is not a type" + "Invalid cyclic type usage from 'type_of',
+		//              got 'x'"
+		//     port:   the first only.
+		// Anchored on the ARGUMENT node, not o.expr -- the operand is invalid on this path.
+		e := entity_of_node(ctx.info, call.args[0])
+		if e != nil && e.state == .In_Progress && e.type == nil {
+			expr_str := expr_to_string(call.args[0])
+			defer delete(expr_str)
+			error_node(call.args[0], "Invalid cyclic type usage from 'type_of', got '%s'", expr_str)
+		}
 		return false
 	}
 
@@ -1172,7 +1218,27 @@ check_atomic_memory_order_argument :: proc(ctx: ^Checker_Context, expr: ^ast.Exp
 		return false
 	}
 
-	if x.mode != .Constant {
+	// #1102. C++ Reference: check_builtin.cpp check_atomic_memory_order_argument:
+	//
+	//     if (!are_types_identical(x.type, t_atomic_memory_order) || x.mode != Addressing_Constant) {
+	//         ... "Expected a constant Atomic_Memory_Order value for '%.*s', got %s" ...
+	//     }
+	//
+	// THE PORT DROPPED THE TYPE-IDENTITY HALF and tested only the CONSTANT half. A constant of
+	// some OTHER enum therefore sailed through: `E :: enum { A, B, C, D }` passed as a memory
+	// order is Addressing_Constant, so the port accepted it here and the complaint came from a
+	// later per-builtin range check, naming a memory order the user never wrote.
+	// MEASURED on `intrinsics.atomic_load_explicit(x, E.D)` (both compilers exit 1, so the
+	// verdict corpus called the cell matching):
+	//     oracle: "Expected a constant Atomic_Memory_Order value for 'atomic_load_explicit', got E"
+	//     port:   "Illegal memory order .Release for 'atomic_load_explicit'"
+	// The port's message is actively misleading -- E.D is ordinal 3, which happens to be
+	// .Release in Atomic_Memory_Order, so it reported a value from an enum that is not in play.
+	//
+	// type_hint is nil until core:runtime is loaded; C++ has no such window, so the identity
+	// test is applied only when the type is available.
+	bad_order_type := type_hint != nil && !are_types_identical(x.type, type_hint)
+	if bad_order_type || x.mode != .Constant {
 		// C++ Reference: check_builtin.cpp check_atomic_memory_order_argument -- names the type that was supplied.
 		type_str := type_to_string(x.type)
 		if extra_message != "" {
@@ -1572,7 +1638,13 @@ check_builtin_objc_send :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	} else if is_operand_nil(rt) {
 		return_type = nil
 	} else {
-		error_node(rt.expr, "'objc_send' expected a type or nil to define the return type, got value")
+		// C++ Reference: check_builtin.cpp:308 -- the full sentence names the call and the offender:
+		//     "'%.*s' expected a type or nil to define the return type of the Objective-C call, got %s"
+		// #1210: the port had truncated it to "...to define the return type, got value", losing both
+		// "of the Objective-C call" and the actual expression. Witness ob_send_badret:
+		//     oracle: ... of the Objective-C call, got 7
+		error_node(rt.expr, "'objc_send' expected a type or nil to define the return type of the Objective-C call, got %s",
+			expr_to_string(rt.expr))
 		return false
 	}
 
@@ -1626,12 +1698,23 @@ check_builtin_objc_send :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 	} else {
 		// Instance method: check pointer element is objc_object with class attribute
 		deref_type := type_deref(self.type)
+		// #1233. C++ Reference: check_builtin.cpp:353-360. ONE combined condition there
+		//     !(kind == Named && type_name != nullptr && objc_class_name != "")
+		// which the port splits into two ifs -- behaviourally the same, one error either way --
+		// but BOTH arms must carry C++'s full message: the builtin name as a PARAMETER and the
+		// ", got type %s" clause. The port had a hardcoded name, no got-clause, and the WRONG
+		// SPELLING: this site is "obj_class", not "objc_class".
+		// THE SPELLING IS PER-SITE. The reference has FIVE of these messages and THREE variants:
+		//   :331 :357          "@(obj_class=<string>) , got type"    (objc_send)
+		//   :449               "@(objc_class=<string>) , got type"   (objc_ivar_get)
+		//   checker.cpp:3822 :4175  "@(obj_class=<string>), got type" (no space before the comma)
+		// Unifying them would be wrong at four sites out of five.
 		if deref_type.kind != .Named {
-			error_node(self.expr, "'objc_send' expected a named type with the attribute @(objc_class=<string>)")
+			error_node(self.expr, "'%s' expected a named type with the attribute @(obj_class=<string>) , got type %s", builtin_name, type_to_string(deref_type))
 			return false
 		}
 		if !has_type_got_objc_class_attribute(deref_type) {
-			error_node(self.expr, "'objc_send' expected a named type with the attribute @(objc_class=<string>)")
+			error_node(self.expr, "'%s' expected a named type with the attribute @(obj_class=<string>) , got type %s", builtin_name, type_to_string(deref_type))
 			return false
 		}
 	}
@@ -1754,18 +1837,33 @@ check_builtin_objc_ivar_get :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 	self: Operand
 	check_expr_or_type(ctx, &self, call.args[0])
 
-	if !is_operand_value(self) {
-		error_node(self.expr, "'objc_ivar_get' expected a value derived from intrinsics.objc_object")
+	// C++ Reference: check_builtin.cpp:427-434 -- ONE combined condition and ONE message, not two:
+	//     if (!is_operand_value(self) || !check_is_assignable_to(c, &self, t_objc_id)) {
+	//         error(self.expr, "'%.*s' expected a type or value derived from intrinsics.objc_object,
+	//               got '%s' of type %s", LIT(builtin_name), e, t);
+	//         return false;
+	//     } else if (!is_type_pointer(self.type)) { ... "expected a pointer OF a value ..." }
+	//
+	// #1210. The port SPLIT the condition into two arms with TWO INVENTED messages -- "expected a value
+	// derived from intrinsics.objc_object" (no got-clause) and "expected a value assignable to objc_id"
+	// (no C++ counterpart at all) -- so the wording depended on WHICH half failed, where the reference
+	// gives one sentence naming the expression and its type. Witness
+	// $S/phase2/wit_objcbi/ob_ivarget_notobjc:
+	//     oracle: 'objc_ivar_get' expected a type or value derived from intrinsics.objc_object,
+	//             got 'p' of type ^Plain
+	//     port:   'objc_ivar_get' expected a value assignable to objc_id
+	if !is_operand_value(self) || !check_is_assignable_to(ctx, &self, ctx.checker.t_objc_id) {
+		error_node(self.expr, "'objc_ivar_get' expected a type or value derived from intrinsics.objc_object, got '%s' of type %s",
+			expr_to_string(self.expr), type_to_string(self.type))
 		return false
 	}
 
-	if !check_is_assignable_to(ctx, &self, ctx.checker.t_objc_id) {
-		error_node(self.expr, "'objc_ivar_get' expected a value assignable to objc_id")
-		return false
-	}
-
+	// C++ Reference: check_builtin.cpp:434-440. Note "a pointer OF a value", not "a pointer TO a
+	// value" -- the reference's phrasing is odd and is reproduced verbatim -- and it carries the same
+	// got-clause as its sibling above, which the port omitted entirely. #1210.
 	if !is_type_pointer(self.type) {
-		error_node(self.expr, "'objc_ivar_get' expected a pointer to a value derived from intrinsics.objc_object")
+		error_node(self.expr, "'objc_ivar_get' expected a pointer of a value derived from intrinsics.objc_object, got '%s' of type %s",
+			expr_to_string(self.expr), type_to_string(self.type))
 		return false
 	}
 
@@ -1774,13 +1872,16 @@ check_builtin_objc_ivar_get :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 
 	// Must be named type with objc_class attribute
 	// C++ ref: check_builtin.cpp:433-440
+	// #1233. C++ Reference: check_builtin.cpp:445-452. NOTE THE SPELLING: this site is
+	// "objc_class", WITH the c -- unlike objc_send's two sites above, which say "obj_class".
+	// Same missing ", got type %s" clause and same hardcoded name as there.
 	if self_type.kind != .Named {
-		error_node(self.expr, "'objc_ivar_get' expected a named type with the attribute @(objc_class=<string>)")
+		error_node(self.expr, "'%s' expected a named type with the attribute @(objc_class=<string>) , got type %s", builtin_name, type_to_string(self_type))
 		return false
 	}
 
 	if !has_type_got_objc_class_attribute(self_type) {
-		error_node(self.expr, "'objc_ivar_get' expected a named type with the attribute @(objc_class=<string>)")
+		error_node(self.expr, "'%s' expected a named type with the attribute @(objc_class=<string>) , got type %s", builtin_name, type_to_string(self_type))
 		return false
 	}
 
@@ -1792,7 +1893,11 @@ check_builtin_objc_ivar_get :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 
 	if ivar_type == nil {
 		type_str := type_to_string(self_type)
-		error_node(self.expr, "'objc_ivar_get' requires that type %s have the attribute @(objc_ivar=<ivar_type_name>)", type_str)
+		// C++ Reference: check_builtin.cpp:457 ends this sentence with a PERIOD:
+		//     "'%.*s' requires that type %s have the attribute @(objc_ivar=<ivar_type_name>)."
+		// #1210. The port dropped it -- a one-character text divergence, invisible to any verdict
+		// comparison and to a `grep` for the message body. Witness $S/phase2/wit_objcbi/ob_ivarget_bad.
+		error_node(self.expr, "'objc_ivar_get' requires that type %s have the attribute @(objc_ivar=<ivar_type_name>).", type_str)
 		return false
 	}
 
@@ -1860,7 +1965,14 @@ check_builtin_objc_block :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 	check_expr_or_type(ctx, &handler, call.args[capture_arg_count])
 
 	if !is_operand_value(handler) || !is_type_proc(handler.type) {
-		error_node(handler.expr, "'%s' expected a procedure as the last argument", builtin_name)
+		// C++ Reference: check_builtin.cpp:521
+		//     error(handler.expr, "'%.*s' expected a procedure, but got '%s' of type %s", LIT(builtin_name), e, t);
+		// where e is expr_to_string(handler.expr) and t is type_to_string(handler.type). #1210: the
+		// port's "expected a procedure as the last argument" was INVENTED and named neither the
+		// offending expression nor its type. Witness ob_block_notproc:
+		//     oracle: 'objc_block' expected a procedure, but got '42' of type untyped integer
+		error_node(handler.expr, "'%s' expected a procedure, but got '%s' of type %s", builtin_name,
+			expr_to_string(handler.expr), type_to_string(handler.type))
 		return false
 	}
 
@@ -1877,11 +1989,32 @@ check_builtin_objc_block :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		entity_proc, is_proc := n.entity.variant.(Entity_Procedure)
 		_ = entity_proc
 		if !is_proc {
+			// C++:541-556. Both arms emit TWO continuation lines the port emitted neither of
+			// (witness ob_identvar). The second begins with "\n" and neither ends with one --
+			// reproduced exactly, since the line breaks are part of the compared output.
+			begin_error_block()
+			defer end_error_block()
 			error_node(handler.expr, "'%s' expected a direct reference to a procedure", builtin_name)
+			if _, is_var := n.entity.variant.(Entity_Variable); is_var {
+				error_line("\tSuggestion: Variables referencing a procedure are not allowed, they are not a direct procedure reference.")
+			} else {
+				error_line("\tSuggestion: Ensure '%s' is not a runtime-evaluated expression.", expr_to_string(handler_node))
+			}
+			error_line("\n\t            Refer to a procedure directly by its name or declare it anonymously: %s(proc(){{}})", builtin_name)   // {{}} -- core:fmt reads a bare {} as a verb
 			return false
 		}
 	case:
+		// C++:557-570 -- same pair, but the first line depends on whether the handler was a CALL.
+		// Witness ob_identexpr (`g()`): "Do not use a procedure returned from another procedure."
+		begin_error_block()
+		defer end_error_block()
 		error_node(handler.expr, "'%s' expected a direct reference to a procedure", builtin_name)
+		if _, is_call := handler_node.derived.(^ast.Call_Expr); is_call {
+			error_line("\tSuggestion: Do not use a procedure returned from another procedure.")
+		} else {
+			error_line("\tSuggestion: Ensure '%s' is not a runtime-evaluated expression.", expr_to_string(handler_node))
+		}
+		error_line("\n\t            Refer to a procedure directly by its name or declare it anonymously: %s(proc(){{}})", builtin_name)   // {{}} -- core:fmt reads a bare {} as a verb
 		return false
 	}
 
@@ -1894,35 +2027,59 @@ check_builtin_objc_block :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		return false
 	}
 
-	// Check calling convention
-	#partial switch proc_info.calling_convention {
-	case .Odin, .Contextless, .C:
-		// OK
-	case:
-		error_node(handler.expr, "'%s' Invalid calling convention for block procedure.", builtin_name)
-		return false
+	// #1214: THE ORDER BELOW IS THE REFERENCE'S, AND IT DIFFERS FROM WHAT THE PORT HAD.
+	// C++ (check_builtin.cpp:580-628) runs: param-count -> CONTEXT -> result-count ->
+	// assignability -> calling-convention -> polymorphic. The port ran calling-convention and
+	// polymorphic THIRD, so a handler that trips two checks reported the wrong one first.
+	// Witness ob_order (`proc "stdcall" () -> (int, int)`):
+	//     oracle: Handler procedures for 'objc_block' cannot have multiple return values
+	//     port:   'objc_block' Invalid calling convention for block procedure.
+
+	// If the handler is Odin calling convention, a context must be defined in this scope.
+	// C++:588-593. THE PORT HAD NO SUCH CHECK AT ALL -- witness ob_noctx: oracle rejects,
+	// port SILENT. Over-permissive, and invisible to any audit keyed on the port's own text.
+	if proc_info.calling_convention == .Odin {
+		if .Context_Defined not_in ctx.scope.flags {
+			begin_error_block()
+			defer end_error_block()
+			error_node(handler.expr, "The handler procedure for '%s' requires a context, but no context is defined in the current scope", builtin_name)
+			error_line("\tSuggestion: 'context = runtime.default_context()', or use the \"c\" calling convention for the handler procedure")
+			return false
+		}
 	}
 
-	if proc_info.is_polymorphic {
-		error_node(handler.expr, "'%s' Unspecialized polymorphic procedures are not allowed.", builtin_name)
-		return false
-	}
-
-	// At most a single return value is supported
+	// At most a single return value is supported. C++:596-599 anchors this on the proc type's
+	// RESULTS field list, not on the handler expression -- witness ob_multiret shows the column
+	// move (5:63 vs 5:47) as well as the wording.
 	if proc_info.result_count > 1 {
-		error_node(handler.expr, "'%s' handler procedures cannot have multiple return values", builtin_name)
+		results_node: ^ast.Node = handler.expr
+		if proc_info.node != nil {
+			if pt, ok := proc_info.node.derived.(^ast.Proc_Type); ok && pt.results != nil {
+				results_node = pt.results
+			}
+		}
+		error_node(results_node, "Handler procedures for '%s' cannot have multiple return values", builtin_name)
 		return false
 	}
 
-	// Check captured arguments are assignable to handler's capture parameters
-	// C++ Reference: check_builtin.cpp L580-620
-	if proc_info.params != nil {
+	// Check captured arguments are assignable to handler's capture parameters.
+	// C++ Reference: check_builtin.cpp:594-611.
+	//
+	// THE CAPTURE PARAMETERS ARE THE *LAST* capture_arg_count PARAMETERS:
+	//     slice(handler_param_types, count - capture_arg_count, count)
+	// The port indexed from 0 instead, so with more parameters than captures it compared each
+	// captured value against the WRONG parameter. Witness ob_lastparam
+	// (`objc_block(1.5, proc "c" (x: int, y: f64) {})`): oracle ACCEPTS -- 1.5 goes to `y` --
+	// while the port rejected it against `x`. An OVER-REJECTION of valid code.
+	if proc_info.param_count > 0 && proc_info.params != nil {
 		params := proc_info.params.variant.(Type_Tuple)
+		offset := len(params.variables) - capture_arg_count
 		for i := 0; i < capture_arg_count; i += 1 {
-			if i >= len(params.variables) {
+			idx := offset + i
+			if idx < 0 || idx >= len(params.variables) {
 				break
 			}
-			param := params.variables[i]
+			param := params.variables[idx]
 			if param == nil {
 				continue
 			}
@@ -1935,12 +2092,80 @@ check_builtin_objc_block :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 
 			// Check assignability
 			if !check_is_assignable_to(ctx, &x, param.type) {
-				x_str := type_to_string(x.type)
-				p_str := type_to_string(param.type)
-				error_node(x.expr, "'%s' capture argument %d: cannot assign '%s' to '%s'", builtin_name, i + 1, x_str, p_str)
+				error_node(x.expr, "'%s' captured value '%s' of type '%s' is not assignable to type '%s'",
+					builtin_name, expr_to_string(x.expr), type_to_string(x.type), type_to_string(param.type))
 				return false
 			}
 		}
+	}
+
+	// Check calling convention. C++:613-627 -- note the reference's own two typos in the
+	// suggestion ("ot else", "cotextless") are reproduced verbatim: agreeing is the job.
+	#partial switch proc_info.calling_convention {
+	case .Odin, .Contextless, .C:
+		// OK
+	case:
+		begin_error_block()
+		defer end_error_block()
+		error_node(handler.expr, "'%s' Invalid calling convention for block procedure.", builtin_name)
+		error_line("\tSuggestion: Do not specify a calling convention ot else use \"c\" or \"cotextless\"")
+		return false
+	}
+
+	if proc_info.is_polymorphic {
+		error_node(handler.expr, "'%s' Unspecialized polymorphic procedures are not allowed.", builtin_name)
+		return false
+	}
+
+	// C++ Reference: check_builtin.cpp:635-680 -- build the SPECIALIZED result type.
+	//
+	// #1216: the port returned `t_rawptr` behind a comment reading "Full implementation would
+	// create specialized Objc_Block(T) type ... For now". That is a simplified function, which
+	// the standing instruction forbids. Witness ob_restype:
+	//     oracle: ... of type '^Objc_Block($T=proc "cdecl" ())' to 'int'
+	//     port:   ... of type 'rawptr' to 'int'
+	//
+	// C++ clones the handler's ProcType node, DROPS THE CAPTURE PARAMETERS FROM THE CLONE, forces
+	// the calling convention to "c", and instantiates Objc_Block(T) with the result.
+	handler_type_node := clone_ast_node(proc_info.node)
+	cloned_proc_type: ^ast.Proc_Type
+	if handler_type_node != nil {
+		cloned_proc_type, _ = handler_type_node.derived.(^ast.Proc_Type)
+	}
+	if cloned_proc_type == nil {
+		operand.mode = .Invalid
+		operand.type = t_invalid
+		error_node(handler.expr, "'%s' failed to determine resulting Objc_Block handler procedure", builtin_name)
+		return false
+	}
+
+	// C++:665-666 `handler_proc_type_copy->ProcType.params->FieldList.list.count -= capture_arg_count`.
+	// That is a FIELD count, not a parameter count -- a field declaring `x, y: int` counts once.
+	// Reproduced as-is rather than "corrected" to a parameter count.
+	if cloned_proc_type.params != nil && capture_arg_count > 0 {
+		remaining := len(cloned_proc_type.params.list) - capture_arg_count
+		if remaining < 0 {
+			remaining = 0
+		}
+		cloned_proc_type.params.list = cloned_proc_type.params.list[:remaining]
+	}
+
+	// C++:668-672: always "c", even when a context exists, because the invoker is always "c".
+	// The AST node's calling_convention is a `union{string, ...}`, not the semantic enum -- the
+	// string is what check_type later maps through string_to_calling_convention ("c" -> .C).
+	cloned_proc_type.calling_convention = "c"
+
+	block_proc_type := check_type(ctx, handler_type_node)
+	t_objc_block := find_core_type(ctx.checker, "Objc_Block")
+	poly_operands := [1]Operand{{mode = .Type, type = block_proc_type, expr = handler_type_node}}
+	specialized := check_polymorphic_record_type(ctx, t_objc_block, poly_operands[:], call)
+
+	// C++:674-680 -- on failure the operand is poisoned BEFORE the diagnostic.
+	if specialized == nil || specialized == t_objc_block || block_proc_type == nil {
+		operand.mode = .Invalid
+		operand.type = t_invalid
+		error_node(handler.expr, "'%s' failed to determine resulting Objc_Block handler procedure", builtin_name)
+		return false
 	}
 
 	// C++ Reference: check_builtin.cpp:683-688. C++ picks exactly ONE of these on
@@ -1953,11 +2178,9 @@ check_builtin_objc_block :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		try_to_add_package_dependency(ctx, "runtime", "_NSConcreteStackBlock")
 	}
 
-	// NOTE: Full implementation would create specialized Objc_Block(T) type
-	// via check_polymorphic_record_type. For now, return rawptr which is
-	// semantically compatible as a pointer type.
+	// C++:690-692 -- the builtin yields a POINTER to the specialized block type, as a value.
 	operand.mode = .Value
-	operand.type = t_rawptr
+	operand.type = alloc_type_pointer(specialized)
 	return true
 }
 
@@ -2207,7 +2430,14 @@ check_builtin_offset_of_impl :: proc(ctx: ^Checker_Context, operand: ^Operand, c
 	// C++ Reference: check_builtin.cpp:2734-2738
 	if is_type_array(type) {
 		type_str := type_to_string(type)
-		error_node(field_arg, "Invalid a struct type for 'offset_of', got '%s'", type_str)
+		// #1238. TWO-SITE SPLIT, and the REFERENCE is the inconsistent one:
+		//     check_builtin.cpp:3197 (offset_of)           "EXPECTED a struct type for '%s', got '%s'"
+		//     check_builtin.cpp:3286 (offset_of_by_string) "INVALID a struct type for '%s', got '%s'"
+		// The second is ungrammatical -- it looks like a botched edit of the first -- but it is what
+		// the reference emits. The port had copied the MANGLED variant to BOTH sites, so offset_of
+		// was wrong and offset_of_by_string was right. Only this one changes.
+		// Witnesses $S/phase2/wit_offsetof/{oo_arr,oo_str_arr}: the two builtins must NOT agree.
+		error_node(field_arg, "Expected a struct type for 'offset_of', got '%s'", type_str)
 		return false
 	}
 
@@ -2310,7 +2540,16 @@ check_builtin_offset_of_by_string :: proc(ctx: ^Checker_Context, operand: ^Opera
 	field_name: string
 
 	if field_arg == nil {
-		error_node(call, "Expected a constant (non-empty) string for field argument")
+		// C++ Reference: check_builtin.cpp:3269 spells this "(NOT-empty)" while its sibling twenty
+		// lines later at :3279 spells it "(NON-empty)". The two reference sites genuinely differ, and
+		// the port had unified them on "non-empty" -- the same trap as #1183's "identifer"/"identifier"
+		// pair and #1187a's double space: grepping the correct spelling finds one site and hides the
+		// other, and pairing must be done by ENCLOSING CONDITION, not by message text.
+		// #1204. This arm is `field_arg == nil`, i.e. offset_of_by_string called with no field
+		// argument -- and the ARITY CHECK FIRES FIRST ("Too few arguments for 'offset_of_by_string',
+		// expected 2, got 1", measured on both compilers), so it is almost certainly unreachable from
+		// source. Recorded as TEXT PARITY, not a behaviour fix, exactly as #1183 was.
+		error_node(call, "Expected a constant (not-empty) string for field argument")
 		return false
 	}
 
@@ -2571,11 +2810,27 @@ check_builtin_real_imag :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		panic("Invalid complex/quaternion type")
 	}
 
-	// Apply type hint if compatible
-	// C++ Reference: check_builtin.cpp:3409-3411
-	if type_hint != nil && check_is_castable_to(ctx, operand, type_hint) {
-		operand.type = type_hint
-	}
+	// #1112: A TYPE-HINT ABSORPTION TAIL WAS DELETED HERE:
+	//
+	//     if type_hint != nil && check_is_castable_to(ctx, operand, type_hint) {
+	//         operand.type = type_hint
+	//     }
+	//
+	// C++'s real/imag arm (check_builtin.cpp) and its jmag/kmag arm BOTH end at the type switch
+	// above with a bare `break` — NEITHER contains a type_hint reference anywhere. The tail exists
+	// in the reference only on the conj arm that FOLLOWS them, which is where it was copied from.
+	// Both port sites carried a citation pointing at code that is not there.
+	//
+	// UPSTREAM FIXED THIS AND THE PORT DID NOT INHERIT THE FIX — the same shape as #1067: a defect
+	// this project filed (UPSTREAM-646), repaired on the C++ side by the master merge of
+	// 2026-08-16, and left live here, silently un-fixing something already closed.
+	// Reported by the mirc agent in CHECKER_ISSUES.
+	//
+	// MEASURED: `c := complex(1.5, 2.5); x: f32 = real(c)`
+	//     oracle: "Cannot assign value 'real(c)' of type 'f64' to 'f32' in a variable declaration"
+	//     port:   accepted — real(complex128) absorbed the f32 context instead of staying f64.
+	// OVER-acceptance: a program only the port accepts builds for any consumer of the port and
+	// fails the moment the reference sees the same source.
 
 	return true
 }
@@ -4096,13 +4351,27 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			call.state_flags += {.Directive_Was_False}
 			return false
 		}
-		if !os.is_dir(path) {
-			error_node(call, "%s error - expected a directory, got a file: %s", name, original_string)
-			return false
-		}
+		// #1235. C++ (check_builtin.cpp:2344-2364) classifies the read failure and has SIX
+		// distinct messages, two of which differ ONLY by a comma:
+		//     ReadDirectory_Permission -> "... unknown error whilst reading path, %s"   (comma)
+		//     ReadDirectory_Unknown    -> "... unknown error whilst reading path %s"    (no comma)
+		// The port checked os.is_dir BEFORE attempting the read, and os.is_dir returns FALSE for a
+		// directory it cannot open -- so a permission-denied directory was reported as
+		// "expected a directory, got a file". Witness $S/phase2/wit_loaddir/ld_perm (a chmod 000
+		// directory):
+		//     oracle: load_directory error - unknown error whilst reading path, noaccess
+		//     port:   load_directory error - expected a directory, got a file: noaccess
+		// Attempt the read FIRST, as the reference does, and classify from the error.
 		entries, read_err := os.read_directory_by_path(path, -1, context.temp_allocator)
 		if read_err != nil {
-			error_node(call, "%s error - unknown error whilst reading path, %s", name, original_string)
+			if read_err == .Permission_Denied {
+				error_node(call, "%s error - unknown error whilst reading path, %s", name, original_string)
+			} else if !os.is_dir(path) {
+				error_node(call, "%s error - expected a directory, got a file: %s", name, original_string)
+			} else {
+				// C++'s ReadDirectory_Unknown arm -- NOTE: no comma before the path here.
+				error_node(call, "%s error - unknown error whilst reading path %s", name, original_string)
+			}
 			return false
 		}
 		if len(entries) == 0 {
@@ -4653,10 +4922,27 @@ check_builtin_jmag_kmag :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		panic("Invalid type")
 	}
 
-	// C++ Reference: check_builtin.cpp:3883-3885
-	if type_hint != nil && check_is_castable_to(ctx, operand, type_hint) {
-		operand.type = type_hint
-	}
+	// #1112: A TYPE-HINT ABSORPTION TAIL WAS DELETED HERE:
+	//
+	//     if type_hint != nil && check_is_castable_to(ctx, operand, type_hint) {
+	//         operand.type = type_hint
+	//     }
+	//
+	// C++'s real/imag arm (check_builtin.cpp) and its jmag/kmag arm BOTH end at the type switch
+	// above with a bare `break` — NEITHER contains a type_hint reference anywhere. The tail exists
+	// in the reference only on the conj arm that FOLLOWS them, which is where it was copied from.
+	// Both port sites carried a citation pointing at code that is not there.
+	//
+	// UPSTREAM FIXED THIS AND THE PORT DID NOT INHERIT THE FIX — the same shape as #1067: a defect
+	// this project filed (UPSTREAM-646), repaired on the C++ side by the master merge of
+	// 2026-08-16, and left live here, silently un-fixing something already closed.
+	// Reported by the mirc agent in CHECKER_ISSUES.
+	//
+	// MEASURED: `c := complex(1.5, 2.5); x: f32 = real(c)`
+	//     oracle: "Cannot assign value 'real(c)' of type 'f64' to 'f32' in a variable declaration"
+	//     port:   accepted — real(complex128) absorbed the f32 context instead of staying f64.
+	// OVER-acceptance: a program only the port accepts builds for any consumer of the port and
+	// fails the moment the reference sees the same source.
 
 	return true
 }
@@ -4721,9 +5007,31 @@ check_builtin_expand_values :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp, the BuiltinProc_expand_values arm, VERBATIM:
+	//     Type *type = base_type(operand->type);
+	//     if (!is_type_struct(type) && !is_type_array(type)) {
+	//         gbString type_str = type_to_string(operand->type);
+	//         error(call, "Expected a struct or array type to 'expand_values', got '%s'", type_str);
+	//         return false;
+	//     }
+	// #1205. The port had NO SUCH TEST. It relied on expand_values_tuple_type returning ok=false, and
+	// that helper returns ok=TRUE for a non-struct/array (an untyped integer becomes a one-element
+	// tuple), so `expand_values(42)` was SILENTLY ACCEPTED where the reference rejects it -- an
+	// over-permissiveness, not a wording difference. The port's own message was also invented
+	// ("'expand_values' requires a struct or array type, got %s", unquoted type) and, being on an
+	// unreachable branch, could never have been observed.
+	// MEASURED on $S/phase2/wit_bimsg/bm_expand (`a, b := expand_values(42)`): the oracle emits the
+	// assignment-count error AND this one; the port emitted only the former.
+	// NOTE the printed type is operand.type, NOT the base -- matching the reference.
+	base := base_type(operand.type)
+	if !is_type_struct(base) && !is_type_array(base) {
+		error_node(call, "Expected a struct or array type to 'expand_values', got '%s'", type_to_string(operand.type))
+		return false
+	}
+
 	result, ok := expand_values_tuple_type(ctx, operand.type)
 	if !ok {
-		error_node(call, "'expand_values' requires a struct or array type, got %s", type_to_string(operand.type))
+		error_node(call, "Expected a struct or array type to 'expand_values', got '%s'", type_to_string(operand.type))
 		return false
 	}
 	operand.mode = .Value
@@ -4731,61 +5039,258 @@ check_builtin_expand_values :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 	return true
 }
 
-// check_builtin_compress_values handles compress_values() builtin
-// compress_values(a, b, c, ...) compresses individual values into a struct
-// C++ Reference: check_builtin.cpp:3921-3990
-check_builtin_compress_values :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
-	if len(call.args) < 1 {
-		error_node(call, "'compress_values' requires at least 1 argument")
-		return false
-	}
+// check_builtin_compress_values handles compress_values() builtin.
+//
+// compress_values(a, b, c, ...) takes VALUES -- never a type -- flattens any tuple-typed argument
+// (a multi-return call contributes all of its values), and produces either the caller's hinted
+// type, a fixed array when every value shares a type, or a fresh anonymous struct otherwise.
+//
+// C++ Reference: check_builtin.cpp BuiltinProc_compress_values.
+//
+// THE PORT'S ENTIRE IMPLEMENTATION WAS INVENTED. It demanded a TYPE as the first argument and
+// required that type to be a struct, so every correct call was REJECTED and the builtin was
+// effectively unusable. All five of its diagnostics --
+//     "'compress_values' requires at least 1 argument"
+//     "First argument to 'compress_values' must be a type"
+//     "'compress_values' expected %d values for struct '%s', got %d"
+//     "Cannot assign '%s' to field '%s' of type '%s'"
+//     "'compress_values' requires a struct type, got %s"
+// -- appear NOWHERE in src/. The reference emits exactly two messages, both below. Rewritten
+// whole rather than patched, because no part of the original corresponded to anything.
+check_builtin_compress_values :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr, type_hint: ^Type) -> bool {
+	builtin_name := "compress_values"
 
-	// The first argument should be a type
-	check_expr_or_type(ctx, operand, call.args[0])
-	if operand.mode != .Type {
-		error_node(call.args[0], "First argument to 'compress_values' must be a type")
-		return false
-	}
+	// C++: `Operand *ops = temporary_alloc_array<Operand>(ce->args.count);`
+	ops := make([]Operand, len(call.args), context.temp_allocator)
 
-	target_type := operand.type
-	bt := base_type(target_type)
-
-	// Must be a struct type
-	if st, is_struct := bt.variant.(Type_Struct); is_struct {
-		// Check remaining arguments against struct fields
-		field_count := len(st.fields)
-		arg_count := len(call.args) - 1
-
-		if arg_count != field_count {
-			error_node(call, "'compress_values' expected %d values for struct '%s', got %d", field_count, type_to_string(target_type), arg_count)
+	value_count := 0
+	for arg, i in call.args {
+		op := &ops[i]
+		// check_multi_expr, NOT check_expr: a tuple-producing call is a legal argument here and
+		// contributes all of its values. This is the whole point of the builtin.
+		check_multi_expr(ctx, op, arg)
+		if op.mode == .Invalid {
 			return false
 		}
 
-		// Check each argument against corresponding field type
-		for i := 1; i < len(call.args); i += 1 {
-			arg: Operand
-			check_expr(ctx, &arg, call.args[i])
-			if arg.mode == .Invalid {
-				return false
-			}
+		if op.type == nil || op.type == t_invalid {
+			// C++ emits and CONTINUES -- it does not return -- so a later argument is still
+			// checked and the count below still advances.
+			s := expr_to_string(op.expr)
+			defer delete(s)
+			error(op.expr, "Invalid expression to '%s', got %s", builtin_name, s)
+		}
 
-			field_idx := i - 1
-			if field_idx < len(st.fields) {
-				field := st.fields[field_idx]
-				if !check_is_assignable_to(ctx, &arg, field.type) {
-					error_node(call.args[i], "Cannot assign '%s' to field '%s' of type '%s'", type_to_string(arg.type), field.token.text, type_to_string(field.type))
-					return false
+		if is_type_tuple(op.type) {
+			value_count += len(op.type.variant.(Type_Tuple).variables)
+		} else {
+			value_count += 1
+		}
+	}
+
+	// C++: GB_ASSERT(value_count >= 1). Unreachable given the builtin's arity of 1, and a crash
+	// is never the contract -- fall through defensively instead.
+	if value_count == 1 {
+		// A single value compresses to itself, hint or no hint.
+		operand^ = ops[0]
+		return true
+	}
+
+	// C++: if a type hint is present AND its shape matches the value count exactly, adopt it and
+	// assign each value into the corresponding slot. A MISMATCH IS NOT AN ERROR -- it simply
+	// falls through to the inference below. Note the hint adopted is the ORIGINAL type_hint, not
+	// its base type.
+	if type_hint != nil {
+		th := base_type(type_hint)
+		if th != nil {
+			if hint_struct, is_struct := th.variant.(Type_Struct); is_struct {
+				if value_count == len(hint_struct.fields) {
+					index := 0
+					for _, i in call.args {
+						op := &ops[i]
+						if is_type_tuple(op.type) {
+							for v in op.type.variant.(Type_Tuple).variables {
+								x: Operand
+								x.mode = .Value
+								x.type = entity_type(v)
+								check_assignment(ctx, &x, entity_type(hint_struct.fields[index]), builtin_name)
+								index += 1
+								if x.mode == .Invalid {
+									return false
+								}
+							}
+						} else {
+							check_assignment(ctx, op, entity_type(hint_struct.fields[index]), builtin_name)
+							index += 1
+							if op.mode == .Invalid {
+								return false
+							}
+						}
+					}
+
+					operand.type = type_hint
+					operand.mode = .Value
+					return true
+				}
+			} else if is_type_array_like(th) {
+				if i64(value_count) == get_array_type_count(th) {
+					elem := base_array_type(th)
+					for _, i in call.args {
+						op := &ops[i]
+						if is_type_tuple(op.type) {
+							for v in op.type.variant.(Type_Tuple).variables {
+								x: Operand
+								x.mode = .Value
+								x.type = entity_type(v)
+								check_assignment(ctx, &x, elem, builtin_name)
+								if x.mode == .Invalid {
+									return false
+								}
+							}
+						} else {
+							check_assignment(ctx, op, elem, builtin_name)
+							if op.mode == .Invalid {
+								return false
+							}
+						}
+					}
+
+					operand.type = type_hint
+					operand.mode = .Value
+					return true
 				}
 			}
 		}
+	}
 
-		operand.type = target_type
+	// Does every value share one type? If so the result is a fixed array, otherwise an anonymous
+	// struct of v0..vN.
+	all_types_the_same := true
+	last_type: ^Type = nil
+	arg_loop: for _, i in call.args {
+		op := &ops[i]
+		if is_type_tuple(op.type) {
+			if last_type == nil {
+				// *** FAITHFUL REPRODUCTION OF AN UPSTREAM DEFECT -- DO NOT "FIX" HERE. ***
+				// C++ Reference: check_builtin.cpp, inside this exact branch:
+				//
+				//     if (last_type == nullptr) {
+				//         op->type->Tuple.variables[0]->type;
+				//     }
+				//
+				// That is an expression statement with NO EFFECT: the assignment to `last_type`
+				// was omitted. So when the first value-producing argument is a TUPLE, last_type
+				// stays null, are_types_identical(nullptr, non-null) returns false on the very
+				// first comparison, and all_types_the_same is forced false.
+				//
+				// MEASURED on the reference compiler, and it is observable:
+				//     compress_values(two())  where two :: proc() -> (int, int)
+				//         -> struct {v0: int, v1: int}   ("Cannot index 'x' of type ...")
+				//     compress_values(1, 2)
+				//         -> [2]int                      (indexes fine)
+				// Same element types, same count, different result type -- purely from the
+				// missing assignment. Filed upstream; reproduced here because the reference's
+				// behaviour is the contract and this one is not a crash.
+				_ = op.type.variant.(Type_Tuple).variables[0]
+			}
+			for v in op.type.variant.(Type_Tuple).variables {
+				if !are_types_identical(last_type, entity_type(v)) {
+					all_types_the_same = false
+					break arg_loop
+				}
+				last_type = entity_type(v)
+			}
+		} else {
+			if last_type == nil {
+				last_type = op.type
+			} else {
+				if !are_types_identical(last_type, op.type) {
+					all_types_the_same = false
+					break arg_loop
+				}
+				last_type = op.type
+			}
+		}
+	}
+
+	if all_types_the_same {
+		elem_type := default_type(last_type)
+		if is_type_untyped(elem_type) {
+			s := expr_to_string(call)
+			defer delete(s)
+			error(call, "Invalid use of '%s' in '%s'", s, builtin_name)
+			return false
+		}
+
+		operand.type = alloc_type_array(elem_type, i64(value_count))
 		operand.mode = .Value
 		return true
 	}
 
-	error_node(call, "'compress_values' requires a struct type, got %s", type_to_string(target_type))
-	return false
+	// C++: the generated fields live in a scope with NO parent (create_scope(c->info, nullptr)),
+	// unlike soa_zip's, which parents to the builtin package.
+	st := alloc_type_struct_complete()
+	scope := create_scope(nil, ctx.checker.allocator)
+
+	fields := make([dynamic]^Entity, 0, value_count, ctx.checker.allocator)
+
+	// One shared helper for both the tuple and non-tuple arms: C++ spells the body out twice,
+	// identically, differing only in which type it reads.
+	add_field :: proc(
+		ctx: ^Checker_Context,
+		scope: ^Scope,
+		fields: ^[dynamic]^Entity,
+		index: ^int,
+		t_in: ^Type,
+		err_node: ^ast.Node,
+		builtin_name: string,
+	) -> bool {
+		t := default_type(t_in)
+		if is_type_untyped(t) {
+			s := expr_to_string(err_node)
+			defer delete(s)
+			error(err_node, "Invalid use of '%s' in '%s'", s, builtin_name)
+			return false
+		}
+		name := fmt.aprintf("v%d", index^, allocator = ctx.checker.allocator)
+		e := alloc_entity_field(scope, make_token_ident(name), t, false, i32(index^), .Resolved)
+		append(fields, e)
+		scope_insert(scope, e)
+		index^ += 1
+		return true
+	}
+
+	index := 0
+	for _, i in call.args {
+		op := &ops[i]
+		if is_type_tuple(op.type) {
+			for v in op.type.variant.(Type_Tuple).variables {
+				if !add_field(ctx, scope, &fields, &index, entity_type(v), op.expr, builtin_name) {
+					return false
+				}
+			}
+		} else {
+			if !add_field(ctx, scope, &fields, &index, op.type, op.expr, builtin_name) {
+				return false
+			}
+		}
+	}
+
+	ts := &st.variant.(Type_Struct)
+	ts.scope = scope
+	ts.fields = fields
+	ts.tags = make([dynamic]string, len(fields), ctx.checker.allocator)
+	ts.names = make(map[string]^Entity, len(fields), ctx.checker.allocator)
+	for f in fields {
+		ts.names[f.token.text] = f
+	}
+
+	// C++: `gb_unused(type_size_of(st));` -- forces the layout (offsets) to be computed now.
+	_ = type_size_of(st)
+
+	operand.type = st
+	operand.mode = .Value
+	return true
 }
 
 // check_builtin_soa_zip handles soa_zip() builtin
@@ -5364,7 +5869,14 @@ check_builtin_type_is_subtype_of :: proc(ctx: ^Checker_Context, operand: ^Operan
 	sub_op: Operand
 	check_expr_or_type(ctx, &sub_op, call.args[0])
 	if sub_op.mode != .Type {
-		error_node(call.args[0], "'type_is_subtype_of' requires type arguments")
+		// C++ Reference: check_builtin.cpp:8080-8085 -- `"'%.*s' expects a type, got %s"` with
+		// expr_to_string of the operand's own expression. #1209: the port's "requires type arguments"
+		// was INVENTED and named no offender. MEASURED on $S/phase2/wit_bimsg3/b3_subtype_bad:
+		//     oracle: 'type_is_subtype_of' expects a type, got 3
+		//     port:   'type_is_subtype_of' requires type arguments
+		// The correct form already existed in this file (check_builtin.odin:9320) for a sibling
+		// builtin, so this was one arm out of step with its own neighbour.
+		error_node(call.args[0], "'type_is_subtype_of' expects a type, got %s", expr_to_string(call.args[0]))
 		return false
 	}
 
@@ -5372,7 +5884,16 @@ check_builtin_type_is_subtype_of :: proc(ctx: ^Checker_Context, operand: ^Operan
 	super_op: Operand
 	check_expr_or_type(ctx, &super_op, call.args[1])
 	if super_op.mode != .Type {
-		error_node(call.args[1], "'type_is_subtype_of' requires type arguments")
+		// C++ Reference: check_builtin.cpp:8087-8092, the second of the pair.
+		//
+		// ARGUMENT ORDER CHECKED AND CORRECT, despite appearances: C++ names args[0] `op_super` and
+		// args[1] `op_sub`, which reads as the opposite of the port's naming. MEASURED with #assert
+		// rather than trusted either way ($S/phase2/wit_bimsg3):
+		//     type_is_subtype_of(Derived, Base) -> assertion PASSES on BOTH
+		//     type_is_subtype_of(Base, Derived) -> assertion FAILS  on BOTH
+		// so args[0] is the SUBTYPE on both sides and the port's names are the accurate ones.
+		// A VARIABLE NAME IN THE REFERENCE IS NOT A SPECIFICATION.
+		error_node(call.args[1], "'type_is_subtype_of' expects a type, got %s", expr_to_string(call.args[1]))
 		return false
 	}
 
@@ -5421,30 +5942,59 @@ check_builtin_type_field_index_of :: proc(ctx: ^Checker_Context, operand: ^Opera
 	}
 
 	// First argument: type
-	check_expr_or_type(ctx, operand, call.args[0])
-	if operand.mode != .Type {
-		error_node(call.args[0], "'type_field_index_of' requires a type as first argument")
+	// #1103: SEVENTH INSTANCE OF THE FOUR-NEAR-IDENTICAL-ENTRY-POINTS CLASS. C++ resolves the
+	// type argument with check_type; the port used check_expr_or_type. Only check_type runs the
+	// check_type_internal dispatcher, whose Addressing_Type arm carries the guard:
+	//
+	//     if (!ctx->in_polymorphic_specialization) {
+	//         Type *t = base_type(o.type);
+	//         if (t && is_type_polymorphic_record_unspecialized(t)) {
+	//             error(e, "Invalid use of a non-specialized polymorphic type '%s'", ...);
+	//         }
+	//     }
+	//
+	// The port HAS that arm and it is faithful — check_expr_or_type simply never reaches it.
+	// MEASURED on `intrinsics.type_field_index_of(Foo, "x")` with a polymorphic Foo (both
+	// compilers exit 1, so the verdict corpus called both cells matching):
+	//     oracle: "Invalid use of a non-specialized polymorphic type 'Foo'"
+	//     port:   that diagnostic MISSING entirely.
+	if ft_type := check_type(ctx, call.args[0]); ft_type != nil {
+		operand.mode = .Type
+		operand.type = ft_type
+		operand.expr = call.args[0]
+	} else {
+		operand.mode = .Invalid
+	}
+	// #1225. C++ Reference: check_builtin.cpp:8199-8232. The port had THREE INVENTED GATES here,
+	// all found by the new reverse audit ($S/revaudit.py), which looks for diagnostics the port
+	// emits that the reference never does:
+	//
+	//  1. "requires a type as first argument" -- C++ says "Expected a type for '%s'".
+	//  2. "requires a struct type, got %s" -- C++ HAS NO SUCH CHECK. It goes straight to
+	//     lookup_field, which simply finds no entity on a non-struct. Witness v_fieldidx
+	//     (`type_field_index_of(int, "a")`):
+	//         oracle: 'int' has no field named 'a'
+	//         port:   'type_field_index_of' requires a struct type, got int
+	//     The port's gate is an OVER-REJECTION in wording and reports a different fact.
+	//  3. the constant-string test was split into two gates with two invented messages; C++ has
+	//     ONE test (not string, OR not constant, OR the value is not a string) and ONE message.
+	//     Witness v_fieldstr:
+	//         oracle: Expected a constant string for field argument
+	//         port:   'type_field_index_of' requires a constant string for field name
+	if operand.mode != .Type || operand.type == t_invalid {
+		error_node(call.args[0], "Expected a type for '%s'", "type_field_index_of")
 		return false
 	}
 
 	struct_type := operand.type
 	bt := base_type(struct_type)
-	if !is_type_struct(bt) {
-		error_node(call.args[0], "'type_field_index_of' requires a struct type, got %s", type_to_string(struct_type))
-		return false
-	}
 
 	// Second argument: field name (string)
 	name_op: Operand
 	check_expr(ctx, &name_op, call.args[1])
-	if name_op.mode != .Constant {
-		error_node(call.args[1], "'type_field_index_of' requires a constant string for field name")
-		return false
-	}
-
 	field_name, is_string := name_op.value.(string)
-	if !is_string {
-		error_node(call.args[1], "'type_field_index_of' requires a string for field name")
+	if !is_type_string(name_op.type) || name_op.mode != .Constant || !is_string {
+		error_node(call.args[1], "Expected a constant string for field argument")
 		return false
 	}
 
@@ -5623,7 +6173,18 @@ check_builtin_type_variant_type_of :: proc(ctx: ^Checker_Context, operand: ^Oper
 	x: Operand
 	check_expr_or_type(ctx, &x, call.args[1])
 	if !is_type_integer(x.type) || x.mode != .Constant {
-		error_node(call, "Expected a constant integer for 'type_variant_type_of'")
+		// C++ Reference: check_builtin.cpp:7693
+		//     error(call, "Expected a constant integer for '%.*s", LIT(builtin_name));
+		// THE CLOSING QUOTE IS MISSING IN THE REFERENCE. It is a typo -- every sibling in this family
+		// closes the quote (check_builtin.cpp:5155, :6641, and the hardcoded soa_struct one at :5208) --
+		// but it is observable output, so per the standing ruling a reference quirk is the contract.
+		// #1202. Witness $S/phase2/wit_constint/ci_variant:
+		//     oracle: Expected a constant integer for 'type_variant_type_of
+		//     port:   Expected a constant integer for 'type_variant_type_of'
+		// Reported upstream in the diagnostic-typo aggregate; reproduced here until it is settled.
+		// NOTE the reference passes builtin_name, which for this path prints WITHOUT the "intrinsics."
+		// prefix -- measured, and matching the port's existing literal.
+		error_node(call, "Expected a constant integer for 'type_variant_type_of")
 		operand.mode = .Type
 		operand.type = t_invalid
 		return false
@@ -6211,6 +6772,12 @@ check_builtin_bit_count :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		}
 	} else if !is_type_integer_like(x.type) {
 		error_node(x.expr, "Values passed to '%s' must be an integer-like type (integer, boolean, enum, bit_set), got %s", builtin_name, type_to_string(x.type))
+	} else if x.type == t_llvm_bool {
+		// #1218. C++:5670-5674, the third arm of the chain. UNREACHABLE FROM USER SOURCE in both
+		// compilers: t_llvm_bool's name is "llvm bool", which contains a space and so cannot be
+		// written as an identifier, and it is not registered in any scope. Ported for fidelity;
+		// NO WITNESS IS POSSIBLE, so it is recorded as unadjudicated rather than verified.
+		error_node(x.expr, "Invalid type passed to '%s', got %s", builtin_name, type_to_string(x.type))
 	}
 
 	type := default_type(x.type)
@@ -6315,6 +6882,9 @@ check_builtin_byte_swap :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		}
 	} else if !is_type_integer_like(x.type) && !is_type_float(x.type) {
 		error_node(x.expr, "Values passed to 'byte_swap' must be an integer-like type (integer, boolean, enum, bit_set) or float, got %s", type_to_string(x.type))
+	} else if x.type == t_llvm_bool {
+		// #1218. C++:5803-5807. Same unreachable-from-source arm as in check_builtin_bit_count.
+		error_node(x.expr, "Invalid type passed to 'byte_swap', got %s", type_to_string(x.type))
 	}
 
 	// C++ Reference: check_builtin.cpp:5793-5800 (merge ebac23eb0), verbatim rationale:
@@ -6563,7 +7133,19 @@ check_builtin_fused_mul_add :: proc(ctx: ^Checker_Context, operand: ^Operand, ca
 	}
 
 	if is_type_untyped(x.type) {
-		error_node(x.expr, "Expected a typed floating point value or #simd vector for 'fused_mul_add'")
+		// C++ Reference: check_builtin.cpp:5980-5985 -- the message carries a `, got %s` clause naming
+		// the untyped type, which the port dropped:
+		//     gbString xts = type_to_string(x.type);
+		//     error(x.expr, "Expected a typed floating point value or #simd vector for '%.*s', got %s",
+		//           LIT(builtin_name), xts);
+		// #1206. MEASURED on $S/phase2/wit_bimsg2/b2_fma_mix (`fused_mul_add(1.0, 2.0, 3)`):
+		//     oracle: ... for 'fused_mul_add', got untyped float
+		//     port:   ... for 'fused_mul_add'
+		// Both reject, so only OUTPUT comparison could see it. NOTE the type is printed UNQUOTED here
+		// (`got %s`, not `got '%s'`) -- unlike most of its neighbours, and reproduced as-is.
+		// builtin_name is not in scope in this function, and the port's existing literal already
+		// matches what the reference prints for this arm, so only the clause is added.
+		error_node(x.expr, "Expected a typed floating point value or #simd vector for 'fused_mul_add', got %s", type_to_string(x.type))
 		return false
 	}
 
@@ -6734,7 +7316,10 @@ check_builtin_alloca :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^as
 	}
 
 	if !is_type_integer(sz.type) || !is_type_integer(al.type) {
-		error_node(operand.expr, "Both parameters to '%s' must be integers", builtin_name)
+		// #1237: C++ check_builtin.cpp:5525 writes "must integers" -- the word "be" is MISSING.
+		// The port had silently repaired the grammar. Fourth instance of that class after #1226,
+		// #1229 and #1231. Agreeing is the job.
+		error_node(operand.expr, "Both parameters to '%s' must integers", builtin_name)
 		return false
 	}
 
@@ -7113,17 +7698,35 @@ check_builtin_is_package_imported :: proc(ctx: ^Checker_Context, operand: ^Opera
 		return false
 	}
 
-	// Get the package path from the constant string
-	pkg_path, _ := x.value.(string)   // raw string, as C++ reads ev.value_string
+	// C++ Reference: check_builtin.cpp:5098-5106. The argument is a package NAME, and C++ scans
+	// the package table comparing `pkg->name` against it:
+	//
+	//     for (auto const &entry : c->info->packages) {
+	//         AstPackage *pkg = entry.value;
+	//         if (pkg->name == pkg_name) { value = true; break; }
+	//     }
+	//
+	// The port did `ctx.info.packages[pkg_name]` instead -- a lookup in a map KEYED BY PACKAGE
+	// PATH (build_infrastructure.odin:465-466 writes `info.packages[key]` where key is the
+	// resolved fullpath). "fmt" is never a key, so the lookup missed every time and the builtin
+	// folded to false for EVERY argument. Measured against the reference by the rexcode/mir
+	// session: reference answers true/true/true/false for runtime/fmt/os/intrinsics, port
+	// answered false four times -- the last agreeing only because false is correct there.
+	// Filed as CHECKER_ISSUES/CHECKER-is-package-imported-always-answers-false.md.
+	//
+	// This was invisible to every instrument here: a folded constant that is merely WRONG emits
+	// no diagnostic, so the verdict corpus, the text sweep and the 323-package parity run all
+	// pass on it. It took compiling the probe a second time and PRINTING the value.
+	pkg_name, _ := x.value.(string)   // raw string, as C++ reads ev.value_string
 
-	// Check if the package is imported by looking up in the checker's packages map
-	// C++ Reference: check_builtin.cpp:3795-3820
 	is_imported := false
-
-	// Check if the package exists in the loaded packages
 	if ctx.info != nil {
-		_, found := ctx.info.packages[pkg_path]
-		is_imported = found
+		for _, pkg in ctx.info.packages {
+			if pkg != nil && pkg.name == pkg_name {
+				is_imported = true
+				break
+			}
+		}
 	}
 
 	operand.mode = .Constant
@@ -7329,38 +7932,58 @@ check_builtin_wasm_memory_grow :: proc(ctx: ^Checker_Context, operand: ^Operand,
 	builtin_name := "wasm_memory_grow"
 
 	if !is_arch_wasm() {
-		error_node(call, "'%s' is only available on WebAssembly targets", builtin_name)
+		// C++ Reference: check_builtin.cpp:8497/8536/8564/8621 -- all four wasm arms share
+		//     error(call, "'%.*s' is only allowed on wasm targets", LIT(builtin_name));
+		// #1211. TWO of the port's four sites had an INVENTED wording ("is only available on
+		// WebAssembly targets") while the OTHER TWO (check_builtin.odin:7832, :7922) already had the
+		// reference's text -- so half the family disagreed with the other half IN THE SAME FILE.
+		// Fifth instance of that shape after #1187a, #1201, #1209 and the objc period in #1210.
+		// Witnesses $S/phase2/wit_bimsg4/b4_wasm_grow and b4_wasm_size (checked on a non-wasm host, so
+		// the guard fires).
+		error_node(call, "'%s' is only allowed on wasm targets", builtin_name)
 		return false
 	}
 
-	if len(call.args) != 2 {
-		error_node(call, "'%s' expects 2 arguments", builtin_name)
+	// #1217. C++ Reference: check_builtin.cpp:8502-8522. The port had THREE inventions here:
+	//   * an arity message the table already handles (kept only as a silent bounds guard);
+	//   * "First argument to '%s' (memory index) must be a constant integer" -- THE REFERENCE
+	//     REQUIRES NO CONSTANT. It only requires a value assignable to uintptr, so the port
+	//     OVER-REJECTED. Witness w_grow_nonconst (`i := uintptr(0)`): oracle ACCEPTS, port rejected.
+	//   * check_assignment for the delta, whose message is its own rather than C++'s.
+	// C++ ORDER: check both operands, THEN convert both, THEN test both.
+	if len(call.args) < 2 {
 		return false
 	}
 
-	// First argument: memory index (i32)
-	x: Operand
-	check_expr(ctx, &x, call.args[0])
-
-	if x.mode == .Invalid {
+	index: Operand
+	check_expr(ctx, &index, call.args[0])
+	if index.mode == .Invalid {
+		return false
+	}
+	delta: Operand
+	check_expr(ctx, &delta, call.args[1])
+	if delta.mode == .Invalid {
 		return false
 	}
 
-	if x.mode != .Constant || !is_type_integer(x.type) {
-		error_node(x.expr, "First argument to '%s' (memory index) must be a constant integer", builtin_name)
+	convert_to_typed(ctx, &index, t_uintptr)
+	if index.mode == .Invalid {
+		return false
+	}
+	convert_to_typed(ctx, &delta, t_uintptr)
+	if delta.mode == .Invalid {
 		return false
 	}
 
-	// Second argument: delta (uintptr)
-	y: Operand
-	check_expr(ctx, &y, call.args[1])
-
-	if y.mode == .Invalid {
+	if !is_operand_value(index) || !check_is_assignable_to(ctx, &index, t_uintptr) {
+		error_node(index.expr, "'%s' expected a uintptr for the memory index, got '%s' of type %s",
+			builtin_name, expr_to_string(index.expr), type_to_string(index.type))
 		return false
 	}
 
-	check_assignment(ctx, &y, t_uintptr, builtin_name)
-	if y.mode == .Invalid {
+	if !is_operand_value(delta) || !check_is_assignable_to(ctx, &delta, t_uintptr) {
+		error_node(delta.expr, "'%s' expected a uintptr for the memory delta, got '%s' of type %s",
+			builtin_name, expr_to_string(delta.expr), type_to_string(delta.type))
 		return false
 	}
 
@@ -7375,25 +7998,39 @@ check_builtin_wasm_memory_size :: proc(ctx: ^Checker_Context, operand: ^Operand,
 	builtin_name := "wasm_memory_size"
 
 	if !is_arch_wasm() {
-		error_node(call, "'%s' is only available on WebAssembly targets", builtin_name)
+		// C++ Reference: check_builtin.cpp:8497/8536/8564/8621 -- all four wasm arms share
+		//     error(call, "'%.*s' is only allowed on wasm targets", LIT(builtin_name));
+		// #1211. TWO of the port's four sites had an INVENTED wording ("is only available on
+		// WebAssembly targets") while the OTHER TWO (check_builtin.odin:7832, :7922) already had the
+		// reference's text -- so half the family disagreed with the other half IN THE SAME FILE.
+		// Fifth instance of that shape after #1187a, #1201, #1209 and the objc period in #1210.
+		// Witnesses $S/phase2/wit_bimsg4/b4_wasm_grow and b4_wasm_size (checked on a non-wasm host, so
+		// the guard fires).
+		error_node(call, "'%s' is only allowed on wasm targets", builtin_name)
 		return false
 	}
 
-	if len(call.args) != 1 {
-		error_node(call, "'%s' expects 1 argument", builtin_name)
+	// #1217. C++ Reference: check_builtin.cpp:8534-8552 -- same shape as wasm_memory_grow, one
+	// argument. The port's "must be a constant integer" was invented and OVER-REJECTED; witness
+	// w_size_nonconst (`i := uintptr(0)`): oracle ACCEPTS, port rejected.
+	if len(call.args) < 1 {
 		return false
 	}
 
-	// First argument: memory index (i32)
-	x: Operand
-	check_expr(ctx, &x, call.args[0])
-
-	if x.mode == .Invalid {
+	index: Operand
+	check_expr(ctx, &index, call.args[0])
+	if index.mode == .Invalid {
 		return false
 	}
 
-	if x.mode != .Constant || !is_type_integer(x.type) {
-		error_node(x.expr, "Argument to '%s' (memory index) must be a constant integer", builtin_name)
+	convert_to_typed(ctx, &index, t_uintptr)
+	if index.mode == .Invalid {
+		return false
+	}
+
+	if !is_operand_value(index) || !check_is_assignable_to(ctx, &index, t_uintptr) {
+		error_node(index.expr, "'%s' expected a uintptr for the memory index, got '%s' of type %s",
+			builtin_name, expr_to_string(index.expr), type_to_string(index.type))
 		return false
 	}
 
@@ -8000,37 +8637,51 @@ check_builtin_constant_utf16_cstring :: proc(ctx: ^Checker_Context, operand: ^Op
 check_builtin_x86_cpuid :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "x86_cpuid"
 
+	// #1217. C++ Reference: check_builtin.cpp:8664-8694.
 	if !is_arch_x86() {
-		error_node(call, "'%s' is only available on x86/x86_64 targets", builtin_name)
+		error_node(call, "'%s' is only allowed on x86 targets (i386, amd64)", builtin_name)
 		return false
 	}
 
-	if len(call.args) != 2 {
-		error_node(call, "'%s' expects 2 arguments (leaf, subleaf)", builtin_name)
+	// The reference has NO arity check here -- the builtin table enforces it before dispatch, as
+	// witness x_cpuid_arity confirms ("Too few arguments for 'intrinsics.x86_cpuid'", identical on
+	// both sides). The port's "expects 2 arguments (leaf, subleaf)" was therefore an invented
+	// message that can never fire. Kept only as a SILENT bounds guard, since the reference indexes
+	// args[0] and args[1] unguarded and relies on that same invariant.
+	if len(call.args) < 2 {
 		return false
 	}
 
-	x: Operand
-	check_expr(ctx, &x, call.args[0])
-
-	if x.mode == .Invalid {
+	// C++ uses check_expr_with_type_hint + convert_to_typed + are_types_identical with its OWN
+	// diagnostic. The port used check_assignment, which emits a DIFFERENT message and does not
+	// fail the builtin. Witness x_cpuid_i64:
+	//     oracle  Assignment count mismatch '4' = '1'  AND  'x86_cpuid' expected a u32, got i64
+	//     port    Cannot assign value 'a' of type 'i64' to 'u32' in x86_cpuid   (one line only)
+	// The reference's ORDER is: check both operands, THEN convert both, THEN compare both.
+	ax: Operand
+	check_expr_with_type_hint(ctx, &ax, call.args[0], t_u32)
+	if ax.mode == .Invalid {
 		return false
 	}
-
-	check_assignment(ctx, &x, t_u32, builtin_name)
-	if x.mode == .Invalid {
+	cx: Operand
+	check_expr_with_type_hint(ctx, &cx, call.args[1], t_u32)
+	if cx.mode == .Invalid {
 		return false
 	}
-
-	y: Operand
-	check_expr(ctx, &y, call.args[1])
-
-	if y.mode == .Invalid {
+	convert_to_typed(ctx, &ax, t_u32)
+	if ax.mode == .Invalid {
 		return false
 	}
-
-	check_assignment(ctx, &y, t_u32, builtin_name)
-	if y.mode == .Invalid {
+	convert_to_typed(ctx, &cx, t_u32)
+	if cx.mode == .Invalid {
+		return false
+	}
+	if !are_types_identical(ax.type, t_u32) {
+		error_node(ax.expr, "'%s' expected a u32, got %s", builtin_name, type_to_string(ax.type))
+		return false
+	}
+	if !are_types_identical(cx.type, t_u32) {
+		error_node(cx.expr, "'%s' expected a u32, got %s", builtin_name, type_to_string(cx.type))
 		return false
 	}
 
@@ -8048,25 +8699,28 @@ check_builtin_x86_cpuid :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 check_builtin_x86_xgetbv :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.Call_Expr) -> bool {
 	builtin_name := "x86_xgetbv"
 
+	// #1217. C++ Reference: check_builtin.cpp:8697-8714 -- same shape as x86_cpuid above.
 	if !is_arch_x86() {
-		error_node(call, "'%s' is only available on x86/x86_64 targets", builtin_name)
+		error_node(call, "'%s' is only allowed on x86 targets (i386, amd64)", builtin_name)
 		return false
 	}
 
-	if len(call.args) != 1 {
-		error_node(call, "'%s' expects 1 argument (xcr index)", builtin_name)
+	// Silent bounds guard only; the table enforces arity, and the reference has no check here.
+	if len(call.args) < 1 {
 		return false
 	}
 
-	x: Operand
-	check_expr(ctx, &x, call.args[0])
-
-	if x.mode == .Invalid {
+	cx: Operand
+	check_expr_with_type_hint(ctx, &cx, call.args[0], t_u32)
+	if cx.mode == .Invalid {
 		return false
 	}
-
-	check_assignment(ctx, &x, t_u32, builtin_name)
-	if x.mode == .Invalid {
+	convert_to_typed(ctx, &cx, t_u32)
+	if cx.mode == .Invalid {
+		return false
+	}
+	if !are_types_identical(cx.type, t_u32) {
+		error_node(cx.expr, "'%s' expected a u32, got %s", builtin_name, type_to_string(cx.type))
 		return false
 	}
 
@@ -8086,22 +8740,29 @@ check_builtin_valgrind_client_request :: proc(ctx: ^Checker_Context, operand: ^O
 	builtin_name := "valgrind_client_request"
 	ARG_COUNT :: 7
 
-	if len(call.args) != ARG_COUNT {
-		error_node(call, "'%s' expects %d arguments", builtin_name, ARG_COUNT)
+	// #1218. C++ Reference: check_builtin.cpp:8726-8746. The arity is asserted from the builtin
+	// table (GB_ASSERT), not diagnosed -- the table rejects a wrong count before dispatch, so the
+	// port's "expects %d arguments" could never fire. Kept as a silent bounds guard.
+	if len(call.args) < ARG_COUNT {
 		return false
 	}
 
-	// All 7 arguments must be uintptr
-	for arg in call.args {
+	// All 7 arguments must be uintptr. C++ uses convert_to_typed + are_types_identical with its
+	// own message; the port used check_assignment, whose message is different. Witness m_valgrind:
+	//     oracle  'valgrind_client_request' expected a uintptr, got string
+	//     port    Cannot assign value 's' of type 'string' to 'uintptr' in valgrind_client_request
+	for i in 0 ..< ARG_COUNT {
 		x: Operand
-		check_expr_with_type_hint(ctx, &x, arg, t_uintptr)
-
+		check_expr_with_type_hint(ctx, &x, call.args[i], t_uintptr)
 		if x.mode == .Invalid {
 			return false
 		}
-
-		check_assignment(ctx, &x, t_uintptr, builtin_name)
+		convert_to_typed(ctx, &x, t_uintptr)
 		if x.mode == .Invalid {
+			return false
+		}
+		if !are_types_identical(x.type, t_uintptr) {
+			error_node(x.expr, "'%s' expected a uintptr, got %s", builtin_name, type_to_string(x.type))
 			return false
 		}
 	}
@@ -8191,9 +8852,61 @@ check_builtin_concatenate :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 		return false
 	}
 
-	if !is_type_array(first.type) && !is_type_string(first.type) {
-		error_node(first.expr, "Arguments to '%s' must be arrays or strings", builtin_name)
+	// C++ Reference: check_builtin.cpp:5383-5395, the FIRST-argument checks, in this order:
+	//     if (lhs.mode != Addressing_Constant) {
+	//         error(lhs.expr, "'%.*s' expects a constant array or slice", LIT(builtin_name));
+	//         return false;
+	//     }
+	//     operand->type = lhs.type; operand->mode = Addressing_Value;
+	//     if (!is_type_slice(lhs.type) && !is_type_array(lhs.type)) {
+	//         gbString a = type_to_string(lhs.type);
+	//         error(lhs.expr, "'%.*s' expects a constant array or slice, got %s", LIT(builtin_name), a);
+	//         return false;
+	//     }
+	//
+	// #1207. The port had NEITHER, and instead an INVENTED check accepting arrays OR STRINGS
+	// ("Arguments to '%s' must be arrays or strings"). Two measured divergences fall out of that,
+	// both in $S/phase2/wit_bimsg2:
+	//   b2_concat_nonconst  a non-constant array -> oracle "'concatenate' expects a constant array or
+	//                       slice", the port SILENTLY ACCEPTED it (no constant test existed);
+	//   b2_concat_str       `concatenate("ab", "cd")` -> oracle "'concatenate' expects a constant array
+	//                       or slice, got untyped string", the port ACCEPTED it. THIS REFERENCE DOES NOT
+	//                       SUPPORT STRINGS here; the port's string machinery below is therefore
+	//                       unreachable for a first argument and is left in place rather than ripped out
+	//                       in the same edit.
+	// Control b2_concat_ok (two constant arrays) is clean on both sides before AND after.
+	//
+	// STILL DIVERGENT AND RECORDED, NOT FIXED HERE: the reference applies the SAME PAIR of checks to
+	// each `extra` argument (check_builtin.cpp:5425 and :5441) and requires
+	// lhs.value.kind == ExactValue_Compound; the port's per-argument loop below has its own invented
+	// "All arguments to '%s' must have the same type" instead. That is a whole-function port and is
+	// deliberately not attempted at the end of a tick.
+	if first.mode != .Constant {
+		error_node(first.expr, "'%s' expects a constant array or slice", builtin_name)
 		return false
+	}
+	operand.type = first.type
+	operand.mode = .Value
+
+	if !is_type_slice(first.type) && !is_type_array(first.type) {
+		error_node(first.expr, "'%s' expects a constant array or slice, got %s", builtin_name, type_to_string(first.type))
+		return false
+	}
+
+	// C++ Reference: check_builtin.cpp:5396-5411. Two checks the port never had at all: the constant
+	// must actually BE a compound literal, and a `field = value` element inside it is rejected
+	// outright. #1213. Measured in $S/phase2/wit_concat2 -- c2_fv_lhs: oracle rejects, port SILENT.
+	// The elem diagnostic anchors on the ELEMENT, not on the argument, per `error(elem, ...)`.
+	if first_compound, is_compound := first.value.(Exact_Value_Compound); !is_compound {
+		error_node(first.expr, "Expected a compound literal value for '%s', got '%s'", builtin_name, exact_value_to_string(first.value))
+		return false
+	} else if first_cl, ok := first_compound.expr.derived.(^ast.Comp_Lit); ok {
+		for elem in first_cl.elems {
+			if _, is_field_value := elem.derived_expr.(^ast.Field_Value); is_field_value {
+				error_node(elem, "'%s' does not allow the use of 'field = value' to be concatenated together", builtin_name)
+				return false
+			}
+		}
 	}
 
 	total_count: i64 = 0
@@ -8210,33 +8923,78 @@ check_builtin_concatenate :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 		total_count = arr.count
 	}
 
-	// Check remaining arguments
+	// C++ Reference: check_builtin.cpp:5415-5450, the `extra` loop, ported structurally rather than
+	// approximated. #1208 completes what #1207 started on the first argument.
+	//
+	// C++ does, per extra argument:
+	//   * a TYPE-HINTED check when lhs is a slice (check_expr_with_type_hint(..., lhs.type)), plain
+	//     check_expr otherwise -- the hint is what lets an untyped compound literal adopt the slice type;
+	//   * `extra.mode != Addressing_Constant` -> "'%s' expects a constant array or slice";
+	//   * if lhs is a SLICE: are_types_identical(lhs.type, extra.type) ->
+	//     "'%s' expects constant values of the same slice type, got '%s' vs '%s'";
+	//   * if lhs is an ARRAY: !is_type_array(extra.type) -> "'%s' expects a constant array or slice,
+	//     got %s", then element types identical -> "'%s' expects constant values of the same
+	//     element-type, got '%s' vs '%s'".
+	//
+	// THE PORT HAD THREE INVENTED MESSAGES AND NO CONSTANT TEST. Measured, all three in
+	// $S/phase2/wit_bimsg2:
+	//   b2_concat_x_nonconst  non-constant extra -> oracle rejects, port SILENT (over-permissive)
+	//   b2_concat_x_str       string extra       -> oracle "...got untyped string",
+	//                                              port "All arguments to '%s' must have the same type"
+	//   b2_concat_x_scalar    scalar extra       -> oracle "...got untyped integer",
+	//                                              port "Arguments to '%s' must be arrays or strings"
+	// The string branch is gone because THIS REFERENCE DOES NOT SUPPORT STRINGS in concatenate at all --
+	// #1207 established that on the first argument, and the same is true here.
 	for i := 1; i < len(call.args); i += 1 {
 		arg: Operand
-		check_expr(ctx, &arg, call.args[i])
+		if is_type_slice(first.type) {
+			check_expr_with_type_hint(ctx, &arg, call.args[i], first.type)
+		} else {
+			check_expr(ctx, &arg, call.args[i])
+		}
 
 		if arg.mode == .Invalid {
 			return false
 		}
 
-		if is_type_string(arg.type) {
-			if !is_type_string(first.type) {
-				error_node(arg.expr, "All arguments to '%s' must have the same type", builtin_name)
-				return false
-			}
-			if str, ok := arg.value.(string); ok {
-				total_count += i64(len(str))
-			}
-		} else if is_type_array(arg.type) {
-			arr := base_type(arg.type).variant.(Type_Array)
-			if !are_types_identical(arr.elem, elem_type) {
-				error_node(arg.expr, "All arrays in '%s' must have the same element type", builtin_name)
-				return false
-			}
-			total_count += arr.count
-		} else {
-			error_node(arg.expr, "Arguments to '%s' must be arrays or strings", builtin_name)
+		if arg.mode != .Constant {
+			error_node(arg.expr, "'%s' expects a constant array or slice", builtin_name)
 			return false
+		}
+
+		if is_type_slice(first.type) {
+			if !are_types_identical(first.type, arg.type) {
+				error_node(arg.expr, "'%s' expects constant values of the same slice type, got '%s' vs '%s'",
+					builtin_name, type_to_string(first.type), type_to_string(arg.type))
+				return false
+			}
+		} else if is_type_array(first.type) {
+			if !is_type_array(arg.type) {
+				error_node(arg.expr, "'%s' expects a constant array or slice, got %s", builtin_name, type_to_string(arg.type))
+				return false
+			}
+			extra_elem := base_array_type(arg.type)
+			if !are_types_identical(elem_type, extra_elem) {
+				error_node(arg.expr, "'%s' expects constant values of the same element-type, got '%s' vs '%s'",
+					builtin_name, type_to_string(elem_type), type_to_string(extra_elem))
+				return false
+			}
+			arr := base_type(arg.type).variant.(Type_Array)
+			total_count += arr.count
+		}
+
+		// C++ Reference: check_builtin.cpp:5458-5473 -- the SAME pair of checks as the first
+		// argument, applied per extra argument, AFTER its type checks. #1213.
+		if arg_compound, is_compound := arg.value.(Exact_Value_Compound); !is_compound {
+			error_node(arg.expr, "Expected a compound literal value for '%s', got '%s'", builtin_name, exact_value_to_string(arg.value))
+			return false
+		} else if arg_cl, ok := arg_compound.expr.derived.(^ast.Comp_Lit); ok {
+			for elem in arg_cl.elems {
+				if _, is_field_value := elem.derived_expr.(^ast.Field_Value); is_field_value {
+					error_node(elem, "'%s' does not allow the use of 'field = value' to be concatenated together", builtin_name)
+					return false
+				}
+			}
 		}
 	}
 
@@ -8343,9 +9101,41 @@ check_builtin_soa_struct :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp:5207-5212. FOUR things differed here, and #1203 fixes all of
+	// them; every error path in the reference's soa_struct arm does the SAME three steps.
+	//   (a) the message was INVENTED. C++ says
+	//         error(call, "Expected a constant integer for 'intrinsics.soa_struct'");
+	//       and hardcodes the qualified name; the port said "First argument to 'soa_struct' must be a
+	//       constant integer", with builtin_name printing UNqualified.
+	//   (b) the anchor was count_op.expr; C++ anchors every one of these on `call`.
+	//   (c) *** the port returned false WITHOUT setting operand.mode/type, so the caller saw a failed
+	//       type expression and emitted a SECOND, cascading error. *** C++ sets
+	//         operand->mode = Addressing_Type; operand->type = t_invalid;
+	//       first, which is precisely what suppresses that cascade. MEASURED on
+	//       $S/phase2/wit_constint/ci_soa: oracle ONE error, port TWO --
+	//         "'intrinsics.soa_struct(nv2, struct {a: int})' is not a type"  <- the cascade
+	//         "First argument to 'soa_struct' must be a constant integer"    <- the invented one
+	//       This is the FOURTH instance of the same failure-path shape, after #1184, #1187b and #1193.
 	if count_op.mode != .Constant || !is_type_integer(count_op.type) {
-		error_node(count_op.expr, "First argument to '%s' must be a constant integer", builtin_name)
+		error_node(call, "Expected a constant integer for 'intrinsics.soa_struct'")
+		operand.mode = .Type
+		operand.type = t_invalid
 		return false
+	}
+
+	// C++ Reference: check_builtin.cpp:5213-5218 -- a check the port did not have AT ALL.
+	if count_op.mode == .Constant {
+		if bi, bi_ok := count_op.value.(big.Int); bi_ok {
+			bi_copy := bi
+			// big.is_neg returns (bool, Error) -- the port's existing idiom at
+			// check_expr.odin:11690 and check_expr_helpers.odin:1643 discards the error the same way.
+			if neg, _ := big.is_neg(&bi_copy); neg {
+				error_node(call, "Negative array element length")
+				operand.mode = .Type
+				operand.type = t_invalid
+				return false
+			}
+		}
 	}
 
 	// Second argument: struct type
@@ -8356,8 +9146,13 @@ check_builtin_soa_struct :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		return false
 	}
 
+	// C++ Reference: check_builtin.cpp:5222-5227 -- same three steps, and the message is again
+	// hardcoded with the qualified name (note its odd phrasing, "Expected a type 'intrinsics.soa_struct'",
+	// reproduced verbatim rather than tidied).
 	if type_op.mode != .Type {
-		error_node(type_op.expr, "Second argument to '%s' must be a type", builtin_name)
+		error_node(call, "Expected a type 'intrinsics.soa_struct'")
+		operand.mode = .Type
+		operand.type = t_invalid
 		return false
 	}
 
@@ -8514,8 +9309,32 @@ check_builtin_type_field_type :: proc(ctx: ^Checker_Context, operand: ^Operand, 
 	}
 
 	// First argument: struct/union type
+	// #1103: SEVENTH INSTANCE OF THE FOUR-NEAR-IDENTICAL-ENTRY-POINTS CLASS. C++ resolves the
+	// type argument with check_type; the port used check_expr_or_type. Only check_type runs the
+	// check_type_internal dispatcher, whose Addressing_Type arm carries the guard:
+	//
+	//     if (!ctx->in_polymorphic_specialization) {
+	//         Type *t = base_type(o.type);
+	//         if (t && is_type_polymorphic_record_unspecialized(t)) {
+	//             error(e, "Invalid use of a non-specialized polymorphic type '%s'", ...);
+	//         }
+	//     }
+	//
+	// The port HAS that arm and it is faithful — check_expr_or_type simply never reaches it.
+	// MEASURED on `intrinsics.type_field_index_of(Foo, "x")` with a polymorphic Foo (both
+	// compilers exit 1, so the verdict corpus called both cells matching):
+	//     oracle: "Invalid use of a non-specialized polymorphic type 'Foo'"
+	//     port:   that diagnostic MISSING entirely.
+	// NOTE: the comment BELOW already quoted C++ correctly as `check_type(c, ce->args[0])`;
+	// only the call disagreed with it. Sixth comment-right/code-wrong in this campaign.
 	type_op: Operand
-	check_expr_or_type(ctx, &type_op, call.args[0])
+	if ft_type := check_type(ctx, call.args[0]); ft_type != nil {
+		type_op.mode = .Type
+		type_op.type = ft_type
+		type_op.expr = call.args[0]
+	} else {
+		type_op.mode = .Invalid
+	}
 
 	// C++ Reference: check_builtin.cpp:7309-7322.
 	//     Type *bt = check_type(c, ce->args[0]);
@@ -9159,7 +9978,28 @@ check_builtin_type_integer_to_unsigned :: proc(ctx: ^Checker_Context, operand: ^
 		return false
 	}
 
-	// C++ line 6946: Type *u_type = &basic_types[bt->Basic.kind + 1];
+	// C++ Reference: check_builtin.cpp, the arm immediately after the untyped check --
+	//     if (bt->Basic.kind == Basic_rune) {
+	//         error(operand->expr, "Type %s does not have an unsigned integer mapping for '%.*s'",
+	//               t, LIT(builtin_name));
+	//         return false;
+	//     }
+	// (located by SEARCHING the message text; every line citation in this file predates the
+	// a58490711 master merge and cannot be trusted.)
+	//
+	// #1067 — ADDED BY THE MERGE, AND IT IS THE FIX FOR MY OWN UPSTREAM REPORT.
+	// `rune` carries BasicFlag_Integer and is not unsigned, so it reached the `kind + 1` mapping
+	// below and produced the WRONG TYPE: rune's successor in basic_types is f16. That was filed
+	// as COMPILER_ISSUES/done/UPSTREAM-641-type-integer-to-unsigned-rune-returns-f16.md; upstream
+	// took the report and added this guard. The port still implemented the old, buggy behaviour,
+	// so a bug I reported became a parity gap the moment the fix landed.
+	if basic.kind == .Rune {
+		type_str := type_to_string(type_op.type)
+		error_node(call.args[0], "Type %s does not have an unsigned integer mapping for '%s'", type_str, builtin_name)
+		return false
+	}
+
+	// C++: Type *u_type = &basic_types[bt->Basic.kind + 1];
 	operand.mode = .Type
 	operand.type = basic_type_singletons[Basic_Kind(int(basic.kind) + 1)]
 
@@ -9413,6 +10253,32 @@ check_builtin_type_union_tag_offset :: proc(ctx: ^Checker_Context, operand: ^Ope
 
 	// Tag offset is variant_block_size (where tag starts after payload)
 	bt := base_type(type_op.type)
+
+	// C++ Reference: check_builtin.cpp:7549-7550, and the comment there is the whole point:
+	//
+	//     // NOTE(jakubtomsu): forces calculation of variant_block_size
+	//     type_size_of(u);
+	//
+	// variant_block_size is not computed when the union type is created; it is filled in as a
+	// side effect of laying the type out. The port read the field WITHOUT forcing that, so the
+	// answer depended on whether something else had already sized the union.
+	//
+	// At FILE scope something always has, which is why the port answered 8 there and looked
+	// correct. For a union declared INSIDE a procedure nothing had, so the field was still 0 --
+	// and 0 is wrong on its own terms: an 8-byte tag cannot sit at offset 0 of a 16-byte union
+	// whose payload starts there. Reported by the rexcode/mir session, which measured 0 locally
+	// and 8 globally for the same declaration; filed as
+	// CHECKER_ISSUES/CHECKER-union-tag-offset-is-zero-for-a-local-union.md.
+	//
+	// This is the ONLY one of the four union builtins that forces the layout: type_union_tag_type,
+	// type_union_base_tag_value and type_convert_variants_to_pointers do not call type_size_of in
+	// C++ either, and the tag TYPE was already correct in both positions. Adding the call to the
+	// siblings would be a divergence, not a consistency fix.
+	//
+	// The order matters: `bt.variant.(Type_Union)` yields a COPY, so the layout must be forced
+	// BEFORE the variant is extracted or the copy carries the stale zero.
+	type_size_of(bt)
+
 	union_type := bt.variant.(Type_Union)
 	tag_offset := union_type.variant_block_size
 

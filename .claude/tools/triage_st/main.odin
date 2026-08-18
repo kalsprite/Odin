@@ -65,6 +65,14 @@ main :: proc() {
 	defer delete(paths)
 	for a in args[1:] {
 		switch a {
+		case "-no-rtti":
+			// The harness silently IGNORED this flag until tick 191, so every -no-rtti witness
+			// measured a port with no_rtti UNSET -- three cells "matched" or "diverged" for
+			// reasons that had nothing to do with the checker. The oracle additionally REFUSES
+			// -no-rtti unless the target is freestanding or -bedrock is given; that validation
+			// lives in the driver, not the checker library, so it is deliberately not modelled
+			// here -- the harness's job is to be able to express what the oracle accepts.
+			checker.build_context.no_rtti = true
 		case "-bedrock":
 			// main.cpp:1669-1673 -- `-bedrock` is a COMPOSITE, not a single bool. Setting only
 			// .bedrock here would make the harness disagree with the oracle about init/fini.

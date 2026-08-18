@@ -464,8 +464,22 @@ is_entity_exported_simple :: proc(e: ^Entity, allow_builtin := false) -> bool {
 		return false
 	}
 
-	// C++ line 323: File flags check - not available without Checker_Info
-	// Use is_entity_exported_with_info for complete checking
+	// C++ line 323: if (e->file != nullptr && (e->file->flags & (AstFile_IsPrivatePkg|AstFile_IsPrivateFile)) != 0)
+	// This check WAS omitted here, justified by a comment claiming the file flags are "not
+	// available without Checker_Info". That claim is false: has_file_flag (and every wrapper over
+	// it, including is_file_private/is_file_private_to_pkg) NEVER READS `info` -- it returns
+	// `flag in file.flags`, and set_file_flags writes straight to `file.flags`. The flags live on
+	// the ast.File node, exactly as they do on AstFile in the reference, so no side table and no
+	// Checker_Info is involved. check_collect.odin:1098 already reads ctx.scope.file.flags
+	// directly. The `info` parameter on those helpers is vestigial.
+	// Omitting it made this overload a WEAKER predicate than the reference's single function, and
+	// it is the overload the two-argument call sites resolve to -- notably check_expr.odin:6115,
+	// the site that reports "'%s' is not exported by '%s'".
+	if e.file != nil {
+		if .Is_Private_Pkg in e.file.flags || .Is_Private_File in e.file.flags {
+			return false
+		}
+	}
 
 	// C++ line 327: String name = e->token.string;
 	name := e.token.text

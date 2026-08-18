@@ -503,6 +503,8 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 		n.node.stmt_base.derived = n
 		n.node.derived_stmt = n
 		n.label = cast(^ast.Ident)clone_ast_node(n.label, file)
+		// C++'s Ast_RangeStmt arm clones `init` too. #1175.
+		n.init = cast(^ast.Stmt)clone_ast_node(n.init, file)
 		n.vals = clone_ast_array_helper(n.vals)
 		n.expr = cast(^ast.Expr)clone_ast_node(n.expr, file)
 		n.body = cast(^ast.Stmt)clone_ast_node(n.body, file)
@@ -515,6 +517,9 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 		n.node.stmt_base.tav = {}
 		n.node.stmt_base.derived = n
 		n.node.derived_stmt = n
+		// C++'s Ast_UnrollRangeStmt arm clones `args`. Its `init` has NO port counterpart
+		// (ast.odin's Unroll_Range_Stmt has no such member), so only args applies. #1175.
+		n.args = clone_ast_array_helper(n.args)
 		n.val0 = cast(^ast.Expr)clone_ast_node(n.val0, file)
 		n.val1 = cast(^ast.Expr)clone_ast_node(n.val1, file)
 		n.expr = cast(^ast.Expr)clone_ast_node(n.expr, file)
@@ -750,6 +755,8 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 		n.node.expr_base.derived = n
 		n.node.derived_expr = n
 		n.elem = cast(^ast.Expr)clone_ast_node(n.elem, file)
+		// C++ clones the tag as well (the `#soa` / `#simd` Basic_Directive). #1175.
+		n.tag = cast(^ast.Expr)clone_ast_node(n.tag, file)
 		return n
 
 	case ^ast.Matrix_Index_Expr:
@@ -804,8 +811,18 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 		n.node.expr_base.tav = {}
 		n.node.expr_base.derived = n
 		n.node.derived_expr = n
+		// C++ Reference: the Ast_StructType arm of clone_ast clones SIX members --
+		// fields, polymorphic_params, align, min_field_align, max_field_align, where_clauses.
+		// The port cloned only three. Every arm here begins `n^ = variant^`, a SHALLOW copy, so an
+		// un-cloned member still POINTS AT THE ORIGINAL SUBTREE: a cloned struct type shared its
+		// field list with the generic declaration it was instantiated from, so anything written into
+		// those nodes while checking one instantiation was visible to the template and to siblings.
+		// #1175. Found by clonevet.py comparing per-kind cloned FIELD SETS, not arm presence.
+		n.fields = cast(^ast.Field_List)clone_ast_node(n.fields, file)
 		n.poly_params = cast(^ast.Field_List)clone_ast_node(n.poly_params, file)
 		n.align = cast(^ast.Expr)clone_ast_node(n.align, file)
+		n.min_field_align = cast(^ast.Expr)clone_ast_node(n.min_field_align, file)
+		n.max_field_align = cast(^ast.Expr)clone_ast_node(n.max_field_align, file)
 		n.where_clauses = clone_ast_array_helper(n.where_clauses)
 		return n
 

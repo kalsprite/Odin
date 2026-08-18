@@ -251,10 +251,12 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 	if ac.is_static {
 		error(e.token, "@(static) is not supported for global variables, nor required")
 	}
-	// Check: @(thread_local) not allowed on blank identifier
-	if len(ac.thread_local_model) > 0 && is_blank_ident_string(e.token.text) {
-		error(e.token, "The 'thread_local' attribute is not allowed to be applied to '_'")
-	}
+	// C++ Reference: NONE. check_global_variable_decl's whole thread_local handling is three
+	// assignments (check_decl.cpp:1707-1725: copy the model, then clear it for wasm and for
+	// -no-thread-local). There is NO blank-identifier test. The message exists in the reference at
+	// exactly ONE site, check_stmt.cpp:2283, in the LOCAL variable path -- which the port already
+	// has at check_stmt.odin. This copy was the local rule pasted into the global path, and it
+	// rejected `@(thread_local="default") _: int`, which the reference accepts.
 	if ac.rodata {
 		e_var.is_rodata = true
 	}
@@ -298,12 +300,15 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 		}
 		init_entity_foreign_library(ctx, e)
 		if is_arch_wasm() && e_var.foreign_library != nil {
-			// LEDGER 346: `{` is a format verb in Odin's fmt; C++'s printf passes it through.
-			// Unescaped this printed "'foreign %!(MISSING ARGUMENT)%!(MISSING CLOSE BRACE)".
-			// C++ Reference: src/check_decl.cpp check_global_variable_decl
-			// C++ Reference: check_decl.cpp:1753 -- ONE brace. Odin's fmt is printf-style
-			// (`%` verbs), so `{{` is not an escape here; it renders as two braces.
-			error(e.token, "A foreign variable declaration can not be scoped to a module and must be declared in a 'foreign {' (without a library) block")
+			// LEDGER 346 diagnosed this correctly and then reverted the fix on a WRONG premise:
+			// "Odin's fmt is printf-style, so `{{` is not an escape here". It IS an escape.
+			// core:fmt accepts BOTH `%` verbs and `{}` verbs, so a bare `{` opens a verb and
+			// `{{` collapses to one brace. Measured with a 3-line probe (tick 169) and with
+			// witness $S/phase2/wit_brace/br_foreignmod (tick 170), which showed the port
+			// emitting the literal text "'foreign %!(MISSING ARGUMENT)%!(MISSING CLOSE BRACE)"
+			// where the oracle emits "'foreign {' (without a library) block".
+			// C++ Reference: check_decl.cpp:1753 -- ONE brace in the output.
+			error(e.token, "A foreign variable declaration can not be scoped to a module and must be declared in a 'foreign {{' (without a library) block")
 		}
 	}
 
@@ -936,7 +941,11 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 	decl := decl_info_of_entity(e)
 	if decl != nil && len(decl.attributes) > 0 {
 		ac := Attribute_Context{}
-		check_decl_attributes(ctx, decl.attributes[:], &ac, .Const)
+		// subject_pos threaded (#1173). The reference raises the non-file-scope @(private)
+		// diagnostic from check_collect_value_decl with the DECL node (checker.cpp:4921), so it
+		// lands on the declaration's NAME. Without this the port fell back to `elem` and pointed
+		// inside the attribute: oracle col 13 (`X`) vs port col 4 (`private`).
+		check_decl_attributes(ctx, decl.attributes[:], &ac, .Const, e.token.pos)
 
 		// #999: the eight per-attribute rejections that stood here were MOVED into
 		// check_decl_attributes (check_decl_helpers.odin), which is where C++ performs them --
@@ -1129,7 +1138,7 @@ check_proc_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info) {
 	ac := make_attribute_context(proc_variant.link_prefix, proc_variant.link_suffix)
 
 	if d != nil {
-		check_decl_attributes(ctx, d.attributes, &ac, .Proc)
+		check_decl_attributes(ctx, d.attributes, &ac, .Proc, e.token.pos)
 	}
 
 	// C++ Reference: check_decl.cpp check_proc_decl
@@ -1666,20 +1675,20 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 
 			// C++ Reference: check_decl.cpp:1784-1787
 			if e == nil {
-				// Provide helpful error message with AST node type information
-				// C++ uses ast_strings[arg->kind] to show the node kind
-				// In Odin, we identify the node type from the tagged union variant
-				node_type_name := "unknown"
-				#partial switch _ in arg.derived {
-				case ^ast.Ident: node_type_name = "identifier"
-				case ^ast.Selector_Expr: node_type_name = "selector expression"
-				case ^ast.Call_Expr: node_type_name = "call expression"
-				case ^ast.Paren_Expr: node_type_name = "parenthesized expression"
-				case ^ast.Unary_Expr: node_type_name = "unary expression"
-				case ^ast.Binary_Expr: node_type_name = "binary expression"
-				case: node_type_name = "expression"
-				}
-				error(arg, "Expected a valid entity name in procedure group, got %s", node_type_name)
+				// C++ Reference: check_decl.cpp:1877 --
+				//     error(arg, "Expected a valid entity name in procedure group, got %.*s",
+				//           LIT(ast_strings[arg->kind]));
+				// The port hand-enumerated SIX node kinds with a catch-all "expression", so every
+				// other kind printed the wrong name: `g :: proc{1}` gave "got expression" where the
+				// oracle gives "got basic literal", and its "parenthesized expression" is spelled
+				// "parentheses expression" in ast_strings.
+				// ast_kind_string IS the port's ast_strings table, and a mechanical diff of it
+				// against src/parser.hpp's AST_KIND list found ZERO text differences across all 77
+				// arms -- so using it is exactly the reference's behaviour, and the hand-written
+				// list was a second, wrong copy of a table the port already had.
+				// Found by the TEXT instrument (wit_b3rest/a_procgroup_lit); the verdict corpus
+				// cannot see it, since both compilers reject either way.
+				error(arg, "Expected a valid entity name in procedure group, got %s", ast_kind_string(arg))
 				continue
 			}
 
@@ -1798,7 +1807,7 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 
 	// C++ Reference: check_decl.cpp check_proc_group_decl
 	ac := Attribute_Context{}
-	check_decl_attributes(ctx, d.attributes, &ac, .Proc_Group)
+	check_decl_attributes(ctx, d.attributes, &ac, .Proc_Group, pg_entity.token.pos)
 	check_objc_methods(ctx, pg_entity, &ac)
 }
 
@@ -2009,6 +2018,21 @@ check_foreign_import_attributes :: proc(ctx: ^Checker_Context, attributes: []^as
 				name := a.name
 				if name == "require" {
 					ac.require_declaration = true
+				} else if name == "force" {
+					// C++ Reference: checker.cpp:5689-5695 -- `force` shares the `require` arm:
+					//     } else if (name == "force" || name == "require") {
+					//         if (value != nullptr) { error(elem, "Expected no parameter for '%.*s'", LIT(name)); }
+					//         else if (name == "force") { error(elem, "'force' was replaced with 'require'"); }
+					//         ac->require_declaration = true;
+					// The port had NO `force` arm here at all, so `@(force)` on a foreign import was
+					// SILENTLY ACCEPTED -- the deprecation notice never appeared and
+					// require_declaration was never set. Witness $S/phase2/wit_fi/fi_force.
+					// `force` is separately handled for PROCEDURE declarations
+					// (check_decl_helpers.odin, `case "cold", "force"`, an optional boolean); that is
+					// a DIFFERENT contract for a different decl kind, which is why its presence there
+					// did not cover this.
+					error(elem, "'force' was replaced with 'require'")
+					ac.require_declaration = true
 				} else if name == "export" {
 					ac.is_export = true
 				} else if name == "ignore_duplicates" {
@@ -2059,6 +2083,30 @@ check_foreign_import_attributes :: proc(ctx: ^Checker_Context, attributes: []^as
 						} else if o.mode != .Invalid {
 							error(elem, "Expected an integer value for '%s'", name)
 						}
+
+					// C++ Reference: checker.cpp:5689-5697 and :5713-5718. These three take NO
+					// parameter, and in every case the reference STILL SETS ITS FLAG after
+					// complaining -- the error does not abort the arm:
+					//     force/require:      error("Expected no parameter for '%.*s'"); ac->require_declaration = true;
+					//     ignore_duplicates:  error("Expected no parameter for '%.*s'"); ac->ignore_duplicates    = true;
+					// The port's Field_Value switch had no arms for them, so `@(force=1)` and
+					// `@(ignore_duplicates=1)` were silently accepted AND left the flags unset.
+					// Witnesses $S/phase2/wit_fi/fi_force_val and fi_igndup_val.
+					// NOTE the reference's if/else-if: when a value IS present only the
+					// "Expected no parameter" message is emitted, never also the `force`
+					// deprecation notice. Reproduced exactly.
+					case "force", "require":
+						error(elem, "Expected no parameter for '%s'", name)
+						ac.require_declaration = true
+
+					case "ignore_duplicates":
+						error(elem, "Expected no parameter for '%s'", name)
+						ac.ignore_duplicates = true
+
+					// C++ Reference: checker.cpp:5686-5688 -- `export` accepts a value without
+					// complaint and simply sets the flag, so `@(export=1)` must still set it.
+					case "export":
+						ac.is_export = true
 					}
 				}
 			}

@@ -60,7 +60,7 @@ entity_of_node :: proc(info: ^Checker_Info, expr: ^ast.Node) -> ^Entity {
 		// and every caller then saw an absent entity where one exists. LEDGER #174: a commented-out
 		// panic is the reference DECLINING to enforce an invariant; the surrounding code is the
 		// behaviour.
-		return get_ast_entity(info, expr)
+		return get_ast_entity(info, expr_unparen)
 
 	case ^ast.Selector_Expr:
 		// C++ Reference: checker.cpp entity_of_node -- C++ uses unselector_expr (a LOOP over
@@ -75,13 +75,13 @@ entity_of_node :: proc(info: ^Checker_Info, expr: ^ast.Node) -> ^Entity {
 		// C++ Reference: checker.cpp entity_of_node
 		// In C++: return cc->implicit_entity
 		// In Odin: retrieve from ast_entity_map
-		return get_ast_entity(info, expr)
+		return get_ast_entity(info, expr_unparen)
 
 	case ^ast.Call_Expr:
 		// C++ Reference: checker.cpp entity_of_node
 		// In C++: return ce->entity_procedure_of
 		// In Odin: retrieve from ast_entity_map
-		return get_ast_entity(info, expr)
+		return get_ast_entity(info, expr_unparen)
 
 	case ^ast.Ternary_When_Expr:
 		// C++ Reference: checker.cpp entity_of_node -- C++ uses `goto retry` after selecting
@@ -452,37 +452,36 @@ Attribute_Decl_Kind :: enum {
 	"no_sanitize_address",
 	"no_sanitize_memory", "no_sanitize_thread", "objc_implement", "objc_is_class_method",
 	"objc_name", "objc_selector", "objc_type", "optimization_mode", "private", "require",
-	"require_results", "require_target_feature", "test",
+	"require_results", "require_target_feature", "tag", "test",
 }
 @(rodata) attr_names_var := [?]string{
 	"export", "link_name", "link_prefix", "link_section", "link_suffix", "linkage", "private",
-	"require", "rodata", "static", "thread_local",
+	"require", "rodata", "static", "tag", "thread_local",
 }
 @(rodata) attr_names_const := [?]string{
 	"link_name", "link_prefix", "link_suffix", "linkage", "private", "require", "rodata",
-	"static", "thread_local",
+	"static", "tag", "thread_local",
 }
 @(rodata) attr_names_type := [?]string{
 	"deprecated", "objc_class", "objc_context_provider", "objc_implement", "objc_ivar",
-	"objc_superclass", "private", "raddbg_type_view",
+	"objc_superclass", "private", "raddbg_type_view", "tag",
 }
 @(rodata) attr_names_proc_group := [?]string{
-	"objc_is_class_method", "objc_name", "objc_type", "private", "require_results",
+	"objc_is_class_method", "objc_name", "objc_type", "private", "require_results", "tag",
 }
 @(rodata) attr_names_foreign_block := [?]string{
-	"default_calling_convention", "link_prefix", "link_suffix", "private", "require_results",
+	"default_calling_convention", "link_prefix", "link_suffix", "private", "require_results", "tag",
 }
 @(rodata) attr_names_foreign_import := [?]string{
-	"export", "extra_linker_flags", "force", "ignore_duplicates", "priority_index", "require",
+	"export", "extra_linker_flags", "force", "ignore_duplicates", "priority_index", "require", "tag",
 }
-@(rodata) attr_names_import := [?]string{"require"}
+@(rodata) attr_names_import := [?]string{"require", "tag"}
 
 attribute_is_valid_for_kind :: proc(name: string, kind: Attribute_Decl_Kind) -> bool {
-	// C++ handles `builtin` before the table is consulted (checker.cpp:4623), gated on the
-	// declaration being in base:runtime, so it is never subject to the per-kind tables.
-	if name == "builtin" {
-		return true
-	}
+	// C++ handles `builtin` before the table is consulted (checker.cpp:4631), gated on the
+	// declaration being in base:runtime, so it is never subject to the per-kind tables. That gate
+	// now lives in check_decl_attributes; this function must NOT wave "builtin" through, or the
+	// out-of-runtime case is accepted everywhere.
 	table: []string
 	switch kind {
 	case .Proc:           table = attr_names_proc[:]
@@ -504,6 +503,42 @@ attribute_is_valid_for_kind :: proc(name: string, kind: Attribute_Decl_Kind) -> 
 
 // report_unknown_attribute emits C++'s unknown-attribute diagnostic, honouring the two build
 // flags that suppress it. C++ Reference: checker.cpp:4627-4633.
+// string_is_valid_identifier is a FAITHFUL port of src/string.cpp:1238, INCLUDING ITS DEFECT.
+//
+// Do NOT replace this with is_string_an_identifier (entity_helpers.odin) or is_valid_identifier
+// (check_decl.odin). Those are ports of DIFFERENT reference functions and they behave differently:
+//   * is_string_an_identifier ports checker.cpp:4998-5020, which walks EVERY rune correctly.
+//   * is_valid_identifier is ASCII-only and treats '_' as legal everywhere.
+//   * THIS ports string.cpp:1238, whose loop never advances its decode pointer:
+//         w = utf8_decode(str.text, str.len, &r);      // str.text, never str.text + offset
+//     so it re-decodes the FIRST rune on every iteration. That rune has already satisfied the
+//     rune_count==0 test, so the branch meant to validate characters 2..n can never fail. The net
+//     behaviour is: reject empty, reject a leading invalid UTF-8 sequence, reject a non-letter
+//     first character, ACCEPT ANYTHING AFTER THE FIRST CHARACTER.
+//
+// MEASURED on the reference via @(objc_name=...), which is its caller:
+//     "foo" ok   "_foo" ok   "ábc" ok   "a1234" ok   "a b" OK   "a!@#$%^" OK
+//     "1abc" rejected   "" rejected
+// Filed upstream as
+// COMPILER_ISSUES/UPSTREAM-UNFILED-string-is-valid-identifier-only-checks-the-first-rune.md,
+// but it is not a crash, so per Jon's ruling the reference behaviour IS the contract and the port
+// reproduces it. Using any of the correct validators here would reject `objc_name="a b"`, which the
+// reference accepts.
+string_is_valid_identifier :: proc(str: string) -> bool {
+	// C++ line 1239: if (str.len <= 0) return false;
+	if len(str) == 0 {
+		return false
+	}
+	// C++ line 1247-1250: the single decode that this function ever really performs.
+	r, _ := utf8.decode_rune_in_string(str)
+	if r == utf8.RUNE_ERROR {
+		return false
+	}
+	// C++ line 1252-1255: rune_count == 0 -> must be rune_is_letter. is_letter
+	// (check_import_export.odin) is already the faithful port of unicode.cpp:15, '_' included.
+	return is_letter(r)
+}
+
 report_unknown_attribute :: proc(elem: ^ast.Node, name: string) {
 	if build_context.ignore_unknown_attributes || name in build_context.custom_attributes {
 		return
@@ -536,6 +571,27 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 	original_link_prefix := ac != nil ? ac.link_prefix : ""
 	original_link_suffix := ac != nil ? ac.link_suffix : ""
 
+	// C++ Reference: checker.cpp:4580-4581. A per-CALL set of element names, used for the
+	// duplicate-attribute diagnostic below. The port had NO set, no map, and no such diagnostic
+	// anywhere in this loop -- the check existed ONLY in the hand-rolled foreign-block copy in
+	// check_stmt.odin, which is where an earlier fix landed instead of here.
+	seen_attrs := make(map[string]bool, context.temp_allocator)
+	defer delete(seen_attrs)
+
+	// C++ Reference: checker.cpp:4583-4594. `@(builtin)` is legal ONLY inside base:runtime, and
+	// the reference computes that with TWO branches: a file scope in the runtime package, or a
+	// PROC scope whose parent is such a file scope.
+	is_runtime := false
+	if ctx.scope != nil {
+		if .File in ctx.scope.flags && ctx.scope.file != nil && is_package_runtime(ctx.scope.file.pkg) {
+			is_runtime = true
+		} else if .Proc in ctx.scope.flags && ctx.scope.parent != nil &&
+		   .File in ctx.scope.parent.flags && ctx.scope.parent.file != nil &&
+		   is_package_runtime(ctx.scope.parent.file.pkg) {
+			is_runtime = true
+		}
+	}
+
 	// Process each attribute
 	// C++ Reference: checker.cpp:4253-4299
 	for attr in attributes {
@@ -557,6 +613,39 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				}
 			case:
 				error(elem, "Invalid attribute element")
+				continue
+			}
+
+			// C++ Reference: checker.cpp:4626-4629. DUPLICATE DETECTION, and note it `continue`s:
+			// the handler never runs for the repeat, so the FIRST value wins. The port had no
+			// duplicate check at all, which meant `@(cold, cold)` was silently accepted AND
+			// `@(link_name="a") @(link_name="b")` silently took "b" where the reference keeps "a".
+			if name in seen_attrs {
+				error(elem, "Previous declaration of '%s'", name)
+				continue
+			}
+			seen_attrs[name] = true
+
+			// C++ Reference: checker.cpp:4631-4633. `@(builtin)` is exempt ONLY inside
+			// base:runtime; everywhere else it must fall through to the unknown-attribute path.
+			// The port instead special-cased "builtin" as unconditionally valid in
+			// attribute_is_valid_for_kind (now removed), so `@(builtin) foo :: proc() {}` in ANY
+			// package was accepted.
+			if name == "builtin" && is_runtime {
+				continue
+			}
+
+			// The user tag. C++ Reference: checker.cpp:3711 defines
+			// `#define ATTRIBUTE_USER_TAG_NAME "tag"` and makes it the FIRST arm of ALL EIGHT
+			// declaration-attribute handlers (3717, 3788, 3842, 4294, 4440, 4465, 5579, 5680),
+			// each requiring a string value. The port had "tag" in NO table and only in a
+			// local-variable exemption list, so `@(tag="anything")` was rejected as an unknown
+			// attribute for every declaration kind.
+			if name == "tag" {
+				ev := check_decl_attribute_value(ctx, value)
+				if _, is_str := ev.(string); !is_str {
+					error(elem, "Expected a string value for '%s'", name)
+				}
 				continue
 			}
 
@@ -607,6 +696,21 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 					error(elem, "@(%s) is not supported for compile time constant value declarations", name)
 					continue
 				}
+			}
+
+			// C++ Reference: checker.cpp:4921-4923. The non-file-scope test for @(private) runs
+			// during COLLECTION, for every value declaration check_collect_value_decl handles --
+			// local constants, types and procedures included, not only variables. The port's only
+			// copy of this message sits inside the `.Var` arm below, so `@(private) X :: 1`,
+			// `@(private) T :: struct{}` and `@(private) f :: proc(){}` inside a procedure body
+			// were all silently accepted.
+			if kind != .Var && ctx.curr_proc_decl != nil && name == "private" {
+				if subject_pos.line != 0 {
+					error(subject_pos, "Attribute 'private' is not allowed on a non file scope entity")
+				} else {
+					error(elem, "Attribute 'private' is not allowed on a non file scope entity")
+				}
+				continue
 			}
 
 			if kind == .Var && ctx.curr_proc_decl != nil {
@@ -726,6 +830,19 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 					ac.is_export = exact_value_to_bool(ev)
 				} else {
 					error(value, "Expected either a boolean or no parameter for 'export'")
+					// C++ Reference: checker.cpp:3861-3862 -- this arm `return false`s, and the
+					// shared loop then ALSO reports the unknown-attribute error (4635-4641). So
+					// the reference emits TWO diagnostics for `@(export=42)` and the port emitted
+					// one. report_unknown_attribute already applies the
+					// -ignore-unknown-attributes / -custom-attribute guards.
+					report_unknown_attribute(elem, name)
+				}
+				// C++ Reference: checker.cpp:4366-4368 -- the VAR export arm re-tests
+				// thread_local at its tail. Without it the check is ORDER-SENSITIVE: the port
+				// caught `@(export, thread_local)` (thread_local arm runs second and tests
+				// is_export) but NOT `@(thread_local, export)`. The reference catches both.
+				if kind == .Var && len(ac.thread_local_model) != 0 {
+					error(elem, "An exported variable cannot be thread local")
 				}
 				continue
 			}
@@ -759,7 +876,13 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				raw, ok := ev.(string)
 				if ok {
 					ac.link_prefix = raw
-					if !is_foreign_name_valid(ac.link_prefix) {
+					// C++ Reference: checker.cpp:4051 (and 3737, 4406) guard on NON-EMPTY:
+					// `ac->link_prefix.len != 0 && !is_foreign_name_valid(...)`.
+					// is_foreign_name_valid("") is false on both sides, so without the length
+					// term the port rejected `@(link_prefix="")`, which the reference allows.
+					// The reference deliberately has NO such guard on link_name/link_section,
+					// and the port matches there -- so this is the prefix/suffix pair only.
+					if len(ac.link_prefix) != 0 && !is_foreign_name_valid(ac.link_prefix) {
 						error(elem, "Invalid link prefix: %s", ac.link_prefix)
 					}
 				} else {
@@ -778,7 +901,8 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				raw, ok := ev.(string)
 				if ok {
 					ac.link_suffix = raw
-					if !is_foreign_name_valid(ac.link_suffix) {
+					// C++ Reference: checker.cpp:4063 -- same non-empty guard as link_prefix.
+					if len(ac.link_suffix) != 0 && !is_foreign_name_valid(ac.link_suffix) {
 						error(elem, "Invalid link suffix: %s", ac.link_suffix)
 					}
 				} else {
@@ -816,8 +940,24 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				continue
 			}
 
-			// @(require) - C++ line 3602-3612
 			if name == "require" {
+				// TWO DIFFERENT CONTRACTS, one per declaration kind, and the port had only the
+				// procedure one:
+				//   * VAR  (checker.cpp:4350-4355): NO parameter is permitted, and
+				//     require_declaration is forced TRUE regardless -- so `@(require=false)`
+				//     is BOTH a diagnostic AND still requires the declaration. The port silently
+				//     stored `false`, a wrong computed value as well as a missing error.
+				//   * PROC (checker.cpp:3886-3895): an OPTIONAL boolean.
+				// (.Const rejects "require" earlier via the unsupported-attribute list, and
+				// .Import/.Foreign_Import use the wording "Expected no parameter for 'require'"
+				// but are not reachable in this port -- see the dead-table note.)
+				if kind == .Var {
+					if value != nil {
+						error(elem, "'require' does not have any parameters")
+					}
+					ac.require_declaration = true
+					continue
+				}
 				ev := check_decl_attribute_value(ctx, value)
 				if ev == nil {
 					ac.require_declaration = true
@@ -831,17 +971,31 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 
 			// @(linkage="...") - C++ line 3570-3601
 			if name == "linkage" {
+				// C++ Reference: checker.cpp:3865-3885. THREE divergences here, and note the two
+				// failure paths differ in KIND:
+				//   * non-string: the reference's wording is "Expected either a string 'linkage'"
+				//     (awkward but exact) and it `return false`s, so the shared loop ALSO reports
+				//     the unknown-attribute error -- two diagnostics, where the port gave one.
+				//   * invalid kind: an ERROR_BLOCK header "Valid kinds:" followed by FOUR
+				//     error_line continuations, then `return true` -- ONE diagnostic. The port had
+				//     collapsed the four lines into a single comma-joined sentence.
 				ev := check_decl_attribute_value(ctx, value)
-				_, ok := ev.(string)
+				linkage, ok := ev.(string)
 				if !ok {
-					error(value, "Expected a string for 'linkage'")
+					error(value, "Expected either a string 'linkage'")
+					report_unknown_attribute(elem, name)
 					continue
 				}
-				linkage, _ := ev.(string)   // raw, as C++ does
 				if linkage == "internal" || linkage == "strong" || linkage == "weak" || linkage == "link_once" {
 					ac.linkage = linkage
 				} else {
-					error(elem, "Invalid linkage '%s'. Valid kinds: internal, strong, weak, link_once", linkage)
+					begin_error_block()
+					error(elem, "Invalid linkage '%s'. Valid kinds:", linkage)
+					error_line("\tinternal\n")
+					error_line("\tstrong\n")
+					error_line("\tweak\n")
+					error_line("\tlink_once\n")
+					end_error_block()
 				}
 				continue
 			}
@@ -883,10 +1037,25 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 					ac.thread_local_model = "default"
 				} else if v_str, ok := ev.(string); ok {
 					model := v_str
-					if model == "default" || model == "localdynamic" || model == "initialexec" || model == "localexec" {
+					// C++ Reference: checker.cpp:4324-4328 lists FIVE models; "globaldynamic" was dropped.
+					if model == "default" || model == "globaldynamic" || model == "localdynamic" || model == "initialexec" || model == "localexec" {
 						ac.thread_local_model = model
 					} else {
-						error(elem, "Invalid thread local model '%s'. Valid models: default, localdynamic, initialexec, localexec", model)
+						// #1229. C++ Reference: checker.cpp:4331-4338. The message ENDS at
+						// "Valid models:" and the five models follow as SEPARATE error_line
+						// continuations inside an ERROR_BLOCK -- one per line. The port inlined
+						// them into the message instead, and its inline list also OMITTED
+						// "globaldynamic" (the accept-list above has it, so this was a text-only
+						// defect -- witnesses n_tls_globaldynamic/default/localexec all match,
+						// which is how I know the behaviour was right and only the text wrong).
+						begin_error_block()
+						defer end_error_block()
+						error(elem, "Invalid thread local model '%s'. Valid models:", model)
+						error_line("\tdefault\n")
+						error_line("\tglobaldynamic\n")
+						error_line("\tlocaldynamic\n")
+						error_line("\tinitialexec\n")
+						error_line("\tlocalexec\n")
 					}
 				} else {
 					error(elem, "Expected either no value or a string for '%s'", name)
@@ -905,6 +1074,31 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 				} else {
 					error(elem, "Expected a string value for '%s'", name)
 				}
+				continue
+			}
+
+			// The DEPRECATED bare `@(deferred=p)`. C++ Reference: checker.cpp:3908-3924. The port
+			// listed "deferred" in attr_names_proc but the dispatch below matches only the seven
+			// `deferred_*` names, so it passed the table check and fell all the way to
+			// report_unknown_attribute -- giving "Unknown attribute element name 'deferred'" where
+			// the reference gives the deprecation message AND still records the deferred procedure
+			// with kind = .Out. A name accepted by a table with no handler to receive it.
+			if name == "deferred" {
+				if value != nil {
+					o: Operand
+					check_expr(ctx, &o, value)
+					e := entity_of_node(&ctx.checker.info, o.expr)
+					if e != nil && e.kind == .Procedure {
+						error(elem, "'%s' is not allowed any more, please use one of the following instead: 'deferred_none', 'deferred_in', 'deferred_out'", name)
+						if ac.deferred_procedure.entity != nil {
+							error(elem, "Previous usage of a 'deferred_*' attribute")
+						}
+						ac.deferred_procedure.kind = .Out
+						ac.deferred_procedure.entity = e
+						continue
+					}
+				}
+				error(elem, "Expected a procedure entity for '%s'", name)
 				continue
 			}
 
@@ -927,8 +1121,14 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 					continue
 				}
 
-				// Check for duplicate deferred attributes (C++ checker.cpp:3647,3663,3679,3695,3711)
-				if ac.deferred_procedure.entity != nil {
+				// Duplicate detection applies to the whole deferred family EXCEPT
+				// "deferred_none". C++ Reference: the check is present at checker.cpp:3944-3946
+				// (deferred_in), 3960, 3976, 3992, 4008, 4024 -- and DELIBERATELY ABSENT from
+				// deferred_none's arm at 3925-3937, which assigns the kind and entity with no
+				// prior-usage test. The port folded all seven names into one arm and applied the
+				// check to every one, so `@(deferred_in=a, deferred_none=b)` was rejected where
+				// the reference accepts it (ending with kind=none, entity=b).
+				if name != "deferred_none" && ac.deferred_procedure.entity != nil {
 					error(elem, "Previous usage of a 'deferred_*' attribute")
 					continue
 				}
@@ -958,12 +1158,26 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			// @(raddbg_type_view="view_string") - C++ line 3842-3850
 			// RAD Debugger type view annotation for custom type visualizers
 			if name == "raddbg_type_view" {
+				// #1220. C++ Reference: checker.cpp:4527-4541. THREE-WAY, not two-way:
+				//   Invalid (no value at all) -> accept, `@(raddbg_type_view)` is legal;
+				//   String                    -> accept, and reject an EMPTY one;
+				//   anything else             -> "Expected a string or no value for '%s'".
+				// The port had a two-way test with an invented message, so it BOTH
+				// over-permitted (empty string silently accepted -- witness c_raddbg_e, where
+				// the oracle rejects and the port said nothing) and mis-worded the other arm
+				// (c_raddbg_n: "Expected a string value for" vs "a string or no value for").
 				ev := check_decl_attribute_value(ctx, value)
-				if v_str, ok := ev.(string); ok {
+				if ev == nil {
+					ac.raddbg_type_view = true
+				} else if v_str, ok := ev.(string); ok {
 					ac.raddbg_type_view = true
 					ac.raddbg_type_view_string = v_str
+
+					if len(v_str) == 0 {
+						error(elem, "Expected a non-empty string for '%s'", name)
+					}
 				} else {
-					error(elem, "Expected a string value for '%s'", name)
+					error(elem, "Expected a string or no value for '%s'", name)
 				}
 				continue
 			}
@@ -971,20 +1185,39 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			// Objective-C attributes - C++ check_decl.cpp check_type_decl
 			// @(objc_class="ClassName") - ObjC class binding
 			if name == "objc_class" {
+				// C++ Reference: checker.cpp:4474-4480 -- the test is
+				// `ev.kind != ExactValue_String || ev.value_string == ""`, and the message says
+				// NON-EMPTY. The port tested only "is a string", so `@(objc_class="")` was
+				// accepted, and for a non-string value the wording differed too.
 				ev := check_decl_attribute_value(ctx, value)
-				if v_str, ok := ev.(string); ok {
+				if v_str, ok := ev.(string); ok && v_str != "" {
 					ac.objc_class = v_str
 				} else {
-					error(elem, "Expected a string value for '%s'", name)
+					error(elem, "Expected a non-empty string value for '%s'", name)
 				}
 				continue
 			}
 
 			// @(objc_name="name") - ObjC method name
+			// C++ Reference: checker.cpp:3794 (proc_group_attribute) and :4147
+			// (proc_decl_attribute) -- both arms are IDENTICAL:
+			//     if (ev.kind == ExactValue_String) {
+			//         if (string_is_valid_identifier(ev.value_string)) { ac->objc_name = ...; }
+			//         else { error(elem, "Invalid identifier for '%.*s', got '%.*s'", ...); }
+			//     } else { error(elem, "Expected a string value for '%.*s'", LIT(name)); }
+			// The port had NO validation at all -- it assigned any string. Witness
+			// $S/phase2/wit_objcname/on_digit `@(objc_name="1abc")`: oracle rejects with
+			// "Invalid identifier for 'objc_name', got '1abc'", the port accepted it silently.
+			// See string_is_valid_identifier above for why that specific predicate is required
+			// rather than either of the port's two correct identifier validators.
 			if name == "objc_name" {
 				ev := check_decl_attribute_value(ctx, value)
 				if v_str, ok := ev.(string); ok {
-					ac.objc_name = v_str
+					if string_is_valid_identifier(v_str) {
+						ac.objc_name = v_str
+					} else {
+						error(elem, "Invalid identifier for '%s', got '%s'", name, v_str)
+					}
 				} else {
 					error(elem, "Expected a string value for '%s'", name)
 				}
@@ -992,10 +1225,25 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			}
 
 			// @(objc_selector="selector:name:") - ObjC selector
+			// C++ Reference: checker.cpp:4198-4208 -- the THIRD caller of
+			// string_is_valid_identifier in the checker, and identical in shape to objc_name:
+			//     if (string_is_valid_identifier(ev.value_string)) { ac->objc_selector = ...; }
+			//     else { error(elem, "Invalid identifier for '%.*s', got '%.*s'", ...); }
+			// The port had no validation, exactly as objc_name did before #1190. Witnesses
+			// $S/phase2/wit_objcsel/sel_bad `objc_selector="1bad"` and sel_empty `objc_selector=""`:
+			// oracle emits "Invalid identifier for 'objc_selector', got '...'", the port emitted
+			// only the LATER objc_name/objc_type diagnostic.
+			// The buggy first-rune-only predicate is REQUIRED here rather than merely tolerated: a
+			// real selector is `initWithFrame:` and a correct identifier check would REJECT the
+			// colon. sel_colon is the control that pins that -- both compilers accept it.
 			if name == "objc_selector" {
 				ev := check_decl_attribute_value(ctx, value)
 				if v_str, ok := ev.(string); ok {
-					ac.objc_selector = v_str
+					if string_is_valid_identifier(v_str) {
+						ac.objc_selector = v_str
+					} else {
+						error(elem, "Invalid identifier for '%s', got '%s'", name, v_str)
+					}
 				} else {
 					error(elem, "Expected a string value for '%s'", name)
 				}
@@ -1014,10 +1262,29 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			}
 
 			// @(objc_superclass=SuperType) - ObjC superclass
+			// C++ Reference: checker.cpp:4491-4499 (type_decl_attribute):
+			//     Type *objc_superclass = check_type(c, value);
+			//     if (objc_superclass != nullptr) { ac->objc_superclass = objc_superclass; }
+			//     else { error(value, "'%.*s' expected a named type", LIT(name)); }
+			// The port assigned UNCONDITIONALLY and had no error arm at all.
+			//
+			// The `value != nil` guard is KEPT DELIBERATELY and is NOT in the reference here: the
+			// reference calls check_type(c, nullptr) and DIES --
+			//     src/checker.cpp(52): Assertion Failure: `expr != nullptr`
+			// on `@(objc_superclass)` with no value, reproduced 3/3 alone, rc=132 (SIGILL). Filed
+			// upstream. Jon's ruling stands: a reference quirk is the contract EXCEPT when it is a
+			// crash, so the port diagnoses instead. The guard is the reference's OWN idiom for this
+			// -- its objc_type arm (checker.cpp:3815) does exactly `if (value == nullptr) { error(
+			// elem, "Expected a type for '%.*s'", ...); }` -- so this is its shape, applied to the
+			// two neighbours where it forgot it.
 			if name == "objc_superclass" {
 				if value != nil {
 					type_val := check_type(ctx, value)
-					ac.objc_superclass = type_val
+					if type_val != nil {
+						ac.objc_superclass = type_val
+					} else {
+						error(value, "'%s' expected a named type", name)
+					}
 				} else {
 					error(elem, "Expected a type for '%s'", name)
 				}
@@ -1025,10 +1292,29 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			}
 
 			// @(objc_ivar=FieldType) - ObjC instance variable type
+			// C++ Reference: checker.cpp:4501-4509:
+			//     if (objc_ivar != nullptr && objc_ivar->kind == Type_Named) { ac->objc_ivar = ...; }
+			//     else { error(value, "'%.*s' expected a named type", LIT(name)); }
+			// The port had NEITHER half of that condition. Witness $S/phase2/wit_osc/oiv_basic,
+			// `@(objc_ivar=int)`: oracle "'objc_ivar' expected a named type", port silently accepted
+			// and then reported the LATER objc_implement error instead -- a different diagnostic for
+			// the same program.
+			// NOT is_type_named(): that port helper returns TRUE for Type_Basic (types.odin:4593),
+			// which is the Odin sense of "named" and NOT the reference's test here. The reference
+			// compares the KIND against Type_Named exactly, which is precisely why `int` -- a
+			// Type_Basic -- is rejected. Testing the variant directly keeps that distinction.
 			if name == "objc_ivar" {
 				if value != nil {
 					type_val := check_type(ctx, value)
-					ac.objc_ivar = type_val
+					is_named := false
+					if type_val != nil {
+						_, is_named = type_val.variant.(Type_Named)
+					}
+					if is_named {
+						ac.objc_ivar = type_val
+					} else {
+						error(value, "'%s' expected a named type", name)
+					}
 				} else {
 					error(elem, "Expected a type for '%s'", name)
 				}
@@ -1301,8 +1587,10 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			//                        across the corpus, all of base/runtime's @(builtin).
 			//   ignore_duplicates -> handled in check_decl.odin.
 			// Both are genuine C++ attributes, so accepting them is parity, not a hole.
+			// "builtin" was REMOVED from this list: it is handled by the is_runtime gate at the
+			// top of the loop, and accepting it here defeated that gate.
 			switch name {
-			case "builtin", "ignore_duplicates":
+			case "ignore_duplicates":
 				continue
 			}
 
@@ -1446,7 +1734,20 @@ is_foreign_name_valid :: proc(name: string) -> bool {
 			case '-', '$', '.', '_', ':':
 				// explicitly permitted leaders
 			case:
-				if !unicode.is_alpha(r) {
+				// C++ Reference: checker.cpp:3691 -- `if (!gb_char_is_alpha(cast(char)rune))`.
+				// TWO things the port got wrong with unicode.is_alpha, and the SECOND is the reason
+				// this is not simply "restrict to ASCII":
+				//   1. gb_char_is_alpha (gb.h) is ASCII-ONLY: (c>='A'&&c<='Z')||(c>='a'&&c<='z').
+				//      So `@(link_name="ábc")` is REJECTED by the reference and was ACCEPTED here.
+				//   2. the rune is TRUNCATED to a single char first, so a non-ASCII leader whose LOW
+				//      BYTE lands in ASCII alpha is ACCEPTED by the reference. `š` is U+0161, low byte
+				//      0x61 = 'a', so `@(link_name="šbc")` is accepted -- and a naive
+				//      `is_ascii_alpha(r)` rewrite would have REJECTED it and introduced a NEW
+				//      divergence in the opposite direction.
+				// Both cells are witnesses: wit_link/lk_nonascii_lead (was DIVERGENT) and
+				// wit_link/lk_trunc_lead (must STAY matching). #1181, B3-b finding T1.8.
+				b := u8(r)
+				if !((b >= 'A' && b <= 'Z') || (b >= 'a' && b <= 'z')) {
 					return false
 				}
 			}
@@ -1657,27 +1958,31 @@ signature_parameter_similar_enough :: proc(x, y: ^Type) -> bool {
 
 			// C++ Reference: check_decl.cpp signature_parameter_similar_enough
 			// Check field-by-field compatibility
+			// C++ Reference: check_decl.cpp:884-901. The reference's inner loop does
+			// `if (!similar) goto end;`, and `end:` is BELOW the HACK `return true` -- so a
+			// dissimilar field escapes the whole struct arm and lands on are_types_identical.
+			// The port used `break`, which leaves only the INNER LOOP, after which
+			// `if all_similar` fails and control fell into the unconditional `return true`
+			// below -- reporting two structurally different structs as ABI-compatible.
+			// *** The port's old comment here CLAIMED that was intentional ("This is intentional
+			// for foreign function interface compatibility"). The reference does not do it. ***
+			// WITNESSED: two foreign procs under one @(link_name="sym"), params `struct{a: f32}`
+			// vs `struct{b: i32}` (same size and align, one field each): oracle reports
+			// "Redeclaration of foreign procedure 'sym' with different type signatures", port was
+			// silent. A different-ARITY pair was caught by both, which is what proved the
+			// surrounding path was live and localised the defect to this arm.
 			if len(x_struct.fields) == len(y_struct.fields) {
-				all_similar := true
 				for i in 0 ..< len(x_struct.fields) {
 					a := x_struct.fields[i]
 					b := y_struct.fields[i]
 					if !signature_parameter_similar_enough(a.type, b.type) {
-						all_similar = false
-						break
+						// C++ `goto end`: past the HACK return, to the identical-types test.
+						return are_types_identical(x, y)
 					}
 				}
-				// C++ Reference: check_decl.cpp signature_parameter_similar_enough
-				// HACK NOTE(bill): Allow this for the time being until it becomes a practical problem
-				// If all fields are similar, the structs are ABI-compatible
-				if all_similar {
-					return true
-				}
 			}
-			// C++ Reference: check_decl.cpp signature_parameter_similar_enough
-			// HACK NOTE(bill): Allow structs with same size/alignment to be ABI-compatible
-			// even if field types differ. This is intentional for foreign function interface
-			// compatibility and will remain until it becomes a practical problem.
+			// HACK NOTE(bill), and it IS the reference's: reached when the field counts DIFFER, or
+			// when every field was similar enough.
 			return true
 		}
 	}
@@ -1965,43 +2270,24 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 	//   (528) and the zero-size check `type_size_of(e->type) > 0` (602). The port has both inside its
 	//   objc block, which runs later -- so nothing reads `e.type` before it is set.
 	//
-	// **NOT INVESTIGATED:** whether an attribute whose VALUE names the type being declared
-	// (e.g. a self-referential `@(objc_superclass=Self)`) resolves differently when the entity's type
-	// is still nil. Resolution goes through the SCOPE, where the entity exists either way, so this is
-	// unlikely -- but it is not measured, and it is the one edge this enumeration does not cover.
+	// **THAT EDGE HAS NOW BEEN MEASURED, AND IT WAS A REAL DEFECT -- see #1194.** This note used to
+	// read "NOT INVESTIGATED: whether an attribute whose VALUE names the type being declared resolves
+	// differently when the entity's type is still nil ... this is unlikely". It was not unlikely. The
+	// supposition ("resolution goes through the SCOPE, where the entity exists either way") is correct
+	// about finding the ENTITY and irrelevant to the failure: what the referenced procedure's
+	// PARAMETER needs is the entity's TYPE, which was still t_invalid while the attributes ran.
+	// `@(objc_context_provider=prov)` with `prov :: proc(self: ^P)` cached `proc(^invalid type)`.
+	// FIXED by moving this whole block to C++'s position (after e->type = named AND after
+	// named->Named.base = base); the enumeration above therefore no longer describes the port, and is
+	// kept only as the record of how the order difference was reasoned about before it was measured.
 	//
 	// CITATION CORRECTED (#610): cited 592-609, the objc_superclass / zero-size region. C++ processes
 	// type-decl attributes at `if (decl != nullptr) { AttributeContext ac = {};
 	// check_decl_attributes(ctx, decl->attributes, type_decl_attribute, &ac); ... }` = 520-524.
 	// This was the FIRST citation in the proc, so its too-high anchor inverted the four that follow (#52).
-	// Process type declaration attributes (raddbg_type_view, etc.)
-	// If ac is not provided, process attributes from the entity's decl_info
-	local_ac := Attribute_Context{}
-	effective_ac := ac
-	if effective_ac == nil {
-		decl := decl_info_of_entity(e)
-		if decl != nil && len(decl.attributes) > 0 {
-			check_decl_attributes(ctx, decl.attributes[:], &local_ac, .Type)
-			effective_ac = &local_ac
-		}
-	}
-
-	// C++ Reference: check_decl.cpp check_type_decl
-	// `e->deprecated_message = ac.deprecated_message;`
-	// C++ guards this with `if (decl != nullptr)`, which is the condition under
-	// which effective_ac is non-nil here.
-	if effective_ac != nil {
-		e.deprecated_message = effective_ac.deprecated_message
-	}
 
 	// C++ Reference: check_decl.cpp check_type_decl
 	// Process explicit type annotation if provided
-	if type_expr != nil {
-		type_type := check_type(ctx, type_expr)
-		if type_type != nil && !is_type_typeid(type_type) {
-			error(type_expr, "Expected 'typeid' for type declaration annotation, got '%s'", type_to_string(type_type))
-		}
-	}
 
 	is_distinct := is_type_distinct(init_expr)
 	te := remove_type_alias_clutter(init_expr)
@@ -2021,6 +2307,7 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 			type_name.is_type_alias = true
 		}
 	}
+
 
 	check_type_path_push(ctx, e)
 	bt := check_type_expr(ctx, te, named)
@@ -2074,8 +2361,82 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 		}
 	}
 
+	// C++ Reference: check_decl.cpp:509-518. The reference emits NO bespoke message here; it
+	// builds an Addressing_Type operand and runs check_assignment against the annotation, giving
+	// "Cannot assign 'Foo', a type, to a constant declaration" anchored at INIT_EXPR. The port's
+	// "Expected 'typeid' for type declaration annotation" has 0 hits in src/ and anchored at
+	// type_expr, so text AND position were both wrong.
+	//
+	// *** POSITION IN THE PROCEDURE IS PART OF THE FIX, AND IT TOOK TWO MOVES. *** The reference runs
+	// this at 509, i.e. AFTER `e->type = bt` (504) and AFTER is_type_alias (507). Placed at the
+	// port's original spot (before set_entity_type) the operand type was NIL and the message read
+	// "Cannot assign '<no type>'". Placed after the FIRST set_entity_type(e, named) it read
+	// "Cannot assign 'X'" -- the entity's own name -- because for an ALIAS the reference has already
+	// re-pointed e->type at the aliased type by then. Only after the `!is_distinct` block, where
+	// set_entity_type(e, bt) runs, does it print 'Foo' like the oracle. Each wrong position produced
+	// a plausible message naming the wrong thing.
+	if type_expr != nil {
+		type_type := check_type(ctx, type_expr)
+		if type_type != nil && !is_type_typeid(type_type) {
+			operand := Operand{}
+			operand.mode = .Type
+			operand.type = entity_type(e)
+			operand.expr = init_expr
+			check_assignment(ctx, &operand, type_type, "constant declaration")
+		}
+	}
+
 	// C++ Reference: check_decl.cpp check_type_decl
 	//
+	// #1194. MOVED HERE from the TOP of check_type_decl. C++'s order is
+	//     465  e->type = named;
+	//     479  named->Named.base = base;
+	//     522  check_decl_attributes(ctx, decl->attributes, type_decl_attribute, &ac);
+	//     524  e->deprecated_message = ac.deprecated_message;
+	// so the attribute VALUES are resolved only once the declared type is BOTH assigned to the entity
+	// AND has its base filled in. The port ran them first, before `named` even existed.
+	//
+	// #610 dispositioned that order difference as INERT by enumerating what the handler touches, and
+	// recorded the single edge its enumeration did not cover:
+	//     "**NOT INVESTIGATED:** whether an attribute whose VALUE names the type being declared
+	//      ... resolves differently when the entity's type is still nil."
+	// That edge is a real defect. MEASURED with
+	//     @(objc_class="P", objc_implement, objc_context_provider=prov)
+	//     P :: struct { using _: Foundation.Object }
+	//     prov :: proc(self: ^P) -> runtime.Context { ... }
+	// resolving the attribute value `prov` forces prov's signature, whose parameter names ^P, while
+	// P's entity type was still t_invalid -- the port cached `proc(^invalid type)` where the reference
+	// has `proc(^P)`, and then reported a spurious "must take as a parameter a single pointer".
+	// Witnesses $S/phase2/wit_ocp/ocp_reveal_p and ocp_ok.
+	//
+	// POSITION MATTERS TWICE OVER: placing this immediately after set_entity_type(e, named) -- after
+	// the entity has its type but BEFORE named.base is filled -- makes `^P` resolve to a Named type
+	// with a nil base and produces "Invalid type usage 'P'" instead. Measured, not guessed. It has to
+	// go after BOTH assignments, which is exactly where C++ has it.
+	//
+	// objc_context_provider is the ONLY type attribute whose value is a PROCEDURE, so it is the only
+	// one that can form this TYPE -> PROC -> TYPE cycle; @(deferred_in=) and @(objc_ivar=) were both
+	// measured and MATCH.
+	// Process type declaration attributes (raddbg_type_view, etc.)
+	// If ac is not provided, process attributes from the entity's decl_info
+	local_ac := Attribute_Context{}
+	effective_ac := ac
+	if effective_ac == nil {
+		decl := decl_info_of_entity(e)
+		if decl != nil && len(decl.attributes) > 0 {
+			check_decl_attributes(ctx, decl.attributes[:], &local_ac, .Type, e.token.pos)
+			effective_ac = &local_ac
+		}
+	}
+
+	// C++ Reference: check_decl.cpp check_type_decl
+	// `e->deprecated_message = ac.deprecated_message;`
+	// C++ guards this with `if (decl != nullptr)`, which is the condition under
+	// which effective_ac is non-nil here.
+	if effective_ac != nil {
+		e.deprecated_message = effective_ac.deprecated_message
+	}
+
 	// ORDER DIFFERENCE, DISPOSITIONED INERT (#610). The port emits this BEFORE the raddbg block
 	// below; C++ has raddbg (609-614) first and this (618-621) second. Inert for the same reason
 	// #666 dispositioned check_call_expr's Step 11: the two blocks share no state -- raddbg reads
@@ -2437,8 +2798,22 @@ check_objc_methods :: proc(ctx: ^Checker_Context, e: ^Entity, ac: ^Attribute_Con
 				}
 			} else if !has_body {
 				// C++ lines 1149-1164: Imported Objective-C methods
-				if len(ac.objc_selector) == 0 {
-					error(e.token, "The @(objc_selector) attribute is required for imported Objective-C methods.")
+				// C++ Reference: check_decl.cpp:1154 --
+				//     if (ac.objc_selector == "The @(objc_selector) attribute is required for imported Objective-C methods.") {
+				//         return;
+				//     } else if (proc.calling_convention != ProcCC_CDecl) { ... }
+				// The reference COMPARES the selector against that literal STRING. It is not a
+				// diagnostic there and the condition is effectively never true (nobody writes that
+				// sentence as a selector), so the branch is a no-op and control falls through to the
+				// calling-convention check. `grep -rn "attribute is required for imported" src/` finds
+				// that ONE line and no error() call.
+				// #1179: the port had turned it into a MEANINGFUL emptiness test AND an error, so it
+				// rejected imported ObjC methods the reference accepts. B3-b finding T2.10, now
+				// WITNESSED: on `@(objc_type=Foo, objc_name="bar") Foo_bar :: proc "c" (self: ^Foo) ---`
+				// plus a misspelled selector, the oracle emits ONE error (the typo) and the port emitted
+				// TWO. Reproduced verbatim rather than "repaired" -- and note objc_selector already
+				// defaults to objc_name upstream (check_decl.cpp:1098), so emptiness is unlikely anyway.
+				if ac.objc_selector == "The @(objc_selector) attribute is required for imported Objective-C methods." {
 					return
 				} else if proc_type.calling_convention != .C {
 					error(e.token, "Imported Objective-C methods must use the \"c\" calling convention")

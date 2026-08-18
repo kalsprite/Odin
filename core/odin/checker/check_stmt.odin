@@ -774,9 +774,37 @@ check_stmt_list :: proc(ctx: ^Checker_Context, stmts: []^ast.Stmt, flags: Stmt_F
 		ctx.stmt_flags = prev_stmt_flags
 	}
 
+	// #1089. C++ Reference: check_stmt.cpp check_stmt_list:
+	//
+	//     bool ft_ok = (flags & Stmt_FallthroughAllowed) != 0;
+	//     flags &= ~Stmt_FallthroughAllowed;        // <-- STRIPPED FOR EVERY STATEMENT
+	//     ...
+	//     u32 new_flags = flags;
+	//     if (ft_ok && i+1 == max) { new_flags |= Stmt_FallthroughAllowed; }
+	//
+	// `fallthrough` is legal ONLY as the last statement of a case body. C++ enforces that by
+	// clearing the permission from the base flags and re-granting it to the final statement
+	// alone.
+	//
+	// THE PORT NEVER STRIPPED IT. The comment that stood here claimed the strip was unnecessary
+	// because "our implementation handles fallthrough validation differently" — it does not.
+	// `new_flags := flags` already carried .Fallthrough_Allowed, so the conditional re-add below
+	// was a NO-OP and every statement in the list kept the permission.
+	//
+	// The likely origin: Odin procedure parameters are immutable, so C++'s in-place
+	// `flags &= ~...` cannot be transcribed literally. It needs a local, which is what this is.
+	//
+	// MEASURED — and note BOTH compilers exit 1, so the verdict corpus called this cell matching.
+	// Only comparing OUTPUT exposed it:
+	//     oracle: "'fallthrough' statement in illegal position, expected at the end of a
+	//              'case' block"  AND  "Statements after this 'fallthrough' are never executed"
+	//     port:   the second one only — it MISSES the actual error and reports the follow-on.
+	//
+	// NOTE the strip comes AFTER the check_scope_decls call above, exactly as in the reference
+	// (C++ strips at :73, having called check_scope_decls at :69) — that call still sees the
+	// unstripped flags.
 	ft_ok := .Fallthrough_Allowed in flags
-	// Note: C++ uses flags without fallthrough for nested statements, but our implementation
-	// handles fallthrough validation differently, so flags2 is not needed
+	base_flags := flags - {.Fallthrough_Allowed}
 
 	// Find last non-empty statement
 	// C++ Reference: check_stmt.cpp check_stmt_list
@@ -823,7 +851,9 @@ check_stmt_list :: proc(ctx: ^Checker_Context, stmts: []^ast.Stmt, flags: Stmt_F
 			continue
 		}
 
-		new_flags := flags
+		// base_flags has .Fallthrough_Allowed removed; it is re-granted to the LAST statement
+		// only, which is what makes the conditional meaningful rather than a no-op.
+		new_flags := base_flags
 		if ft_ok && i + 1 == max {
 			new_flags += {.Fallthrough_Allowed}
 		}
@@ -1055,42 +1085,100 @@ check_expr_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 	// This check must happen BEFORE the kind == .Stmt early return to catch discarded results
 	#partial switch e in expr.derived {
 	case ^ast.Call_Expr:
-		// Check if procedure has require_results flag
-		// Use entity_of_node to get the procedure entity, then get its type
-		proc_entity := entity_of_node(ctx.info, e.expr)
-		if proc_entity != nil {
-			proc_type := get_entity_type(proc_entity)
-			if proc_type != nil {
-				bt := base_type(proc_type)
-				if bt != nil && bt.kind == .Proc {
-					pt := bt.variant.(Type_Proc)
-					if pt.require_results {
-						expr_str := expr_to_string(e.expr)
-						defer delete(expr_str)
-						error_node(node, "'%s' requires that its results must be handled", expr_str)
-					}
+		// #1082. C++ Reference: check_stmt.cpp check_stmt, the Ast_CallExpr arm. THREE
+		// divergences were fixed here at once (B2-d findings 2, 3 and 4):
+		//
+		//  (a) THE ENTIRE BUILTIN BRANCH WAS MISSING. C++:
+		//        Type *t = base_type(type_of_expr(ce->proc));
+		//        if (t && t->kind == Type_Proc) { do_require = t->Proc.require_results; }
+		//        else if (check_stmt_internal_builtin_proc_id(ce->proc, &builtin_id)) {
+		//            auto const &bp = builtin_procs[builtin_id];
+		//            do_require = bp.kind == Expr_Expr && !bp.ignore_results;
+		//        }
+		//      so `len(s)`, `min(1,2)` and `size_of(int)` as bare STATEMENTS are rejected by the
+		//      reference and were accepted silently here. Note the port's Builtin_Proc_Info
+		//      already CARRIES `ignore_results` and had ZERO readers — the same read-but-never-
+		//      written/written-but-never-read shape as #1022's root.
+		//      `ignore_results` IS set true in the reference, for 26 entries (all the atomic_*
+		//      family, syscall, syscall_bsd, objc_send, objc_register_selector,
+		//      objc_register_class, objc_ivar_get). The port's table set NONE of them — see
+		//      #1083 in checker.odin. Wiring this branch up without that table fix rejected
+		//      `intrinsics.syscall(...)` inside base/runtime and broke the whole compile.
+		//
+		//  (b) THE TYPE CAME FROM THE ENTITY, NOT THE EXPRESSION. C++ uses
+		//      `type_of_expr(ce->proc)`; the port used entity_of_node -> get_entity_type. When
+		//      the callee is not a plain entity reference — parenthesised, indexed, the result
+		//      of another call — entity_of_node yields nil and the whole require_results test
+		//      was skipped. require_results lives on the TYPE, so it travels with the type.
+		//
+		//  (c) The reference reports the qualified name when the builtin was reached through a
+		//      different spelling than its own (e.g. `intrinsics.type_is_integer`).
+		builtin_id := Builtin_Proc_Id.Invalid
+		do_require := false
+
+		t := base_type(type_of_expr(e.expr, ctx.info))
+		if t != nil && t.kind == .Proc {
+			pt := t.variant.(Type_Proc)
+			do_require = pt.require_results
+		} else if id, is_builtin := check_stmt_internal_builtin_proc_id(ctx, e.expr); is_builtin {
+			builtin_id = id
+			bp := builtin_proc_infos[id]
+			do_require = bp.kind == .Expr && !bp.ignore_results
+		}
+
+		if do_require {
+			expr_str := expr_to_string(e.expr)
+			defer delete(expr_str)
+			if builtin_id != .Invalid {
+				real_name := builtin_proc_infos[builtin_id].name
+				if real_name != expr_str {
+					error_node(node, "'%s' ('%s.%s') requires that its results must be handled", expr_str, BUILTIN_PROC_PKG_NAMES[builtin_proc_infos[builtin_id].pkg], real_name)
+					return
 				}
 			}
+			error_node(node, "'%s' requires that its results must be handled", expr_str)
 		}
 		return
 
 	case ^ast.Selector_Call_Expr:
-		// Check selector call for require_results
+		// C++ Reference: check_stmt.cpp check_stmt, the Ast_SelectorCallExpr arm — same shape as
+		// the CallExpr arm above PLUS a nil-type guard the port did not have:
+		//
+		//     if (t == nullptr) {
+		//         error(node, "'%s' is not a value field nor procedure", expr_str);
+		//         return;
+		//     }
 		if call, ok := e.call.derived.(^ast.Call_Expr); ok {
-			proc_entity := entity_of_node(ctx.info, call.expr)
-			if proc_entity != nil {
-				proc_type := get_entity_type(proc_entity)
-				if proc_type != nil {
-					bt := base_type(proc_type)
-					if bt != nil && bt.kind == .Proc {
-						pt := bt.variant.(Type_Proc)
-						if pt.require_results {
-							expr_str := expr_to_string(call.expr)
-							defer delete(expr_str)
-							error_node(node, "'%s' requires that its results must be handled", expr_str)
-						}
+			sel_builtin_id := Builtin_Proc_Id.Invalid
+			sel_do_require := false
+
+			st := base_type(type_of_expr(call.expr, ctx.info))
+			if st == nil {
+				expr_str := expr_to_string(call.expr)
+				defer delete(expr_str)
+				error_node(node, "'%s' is not a value field nor procedure", expr_str)
+				return
+			}
+			if st.kind == .Proc {
+				pt := st.variant.(Type_Proc)
+				sel_do_require = pt.require_results
+			} else if id, is_builtin := check_stmt_internal_builtin_proc_id(ctx, call.expr); is_builtin {
+				sel_builtin_id = id
+				bp := builtin_proc_infos[id]
+				sel_do_require = bp.kind == .Expr && !bp.ignore_results
+			}
+
+			if sel_do_require {
+				expr_str := expr_to_string(call.expr)
+				defer delete(expr_str)
+				if sel_builtin_id != .Invalid {
+					real_name := builtin_proc_infos[sel_builtin_id].name
+					if real_name != expr_str {
+						error_node(node, "'%s' ('%s.%s') requires that its results must be handled", expr_str, BUILTIN_PROC_PKG_NAMES[builtin_proc_infos[sel_builtin_id].pkg], real_name)
+						return
 					}
 				}
+				error_node(node, "'%s' requires that its results must be handled", expr_str)
 			}
 		}
 		return
@@ -1123,12 +1211,27 @@ check_expr_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 	begin_error_block()
 	defer end_error_block()
 
-	expr_str := expr_to_string(expr)
+	// #1093 (d21). C++ Reference: check_stmt.cpp check_stmt, the unconditional tail:
+	//
+	//     gbString expr_str = expr_to_string(operand.expr);
+	//     error(node, "Expression is not used: '%s'", expr_str);
+	//     if (operand.expr->kind == Ast_BinaryExpr) { ... }
+	//
+	// BOTH use operand.expr — the ORIGINAL expression. The port used `expr`, the
+	// strip_or_return_expr'd one, which also peels ParenExpr. Two consequences, and the second
+	// is the one a text diff catches:
+	//   * the message printed the STRIPPED text: 'x == y' where the oracle prints '(x == y)';
+	//   * the `==` suggestion FIRED for a parenthesised comparison, because the stripped node is
+	//     a Binary_Expr while operand.expr is a Paren_Expr and does not match C++'s test. So the
+	//     port emitted two Suggestion lines the reference does not.
+	// Both exit 1, so the verdict corpus called this cell matching.
+	expr_str := expr_to_string(operand.expr)
 	defer delete(expr_str)
 	error_node(node, "Expression is not used: '%s'", expr_str)
 
 	// C++ Reference: check_stmt.cpp -- suggest assignment for a discarded `==`.
-	#partial switch bin in expr.derived {
+	// Keyed on operand.expr, as C++ keys it: a PARENTHESISED comparison does not match.
+	#partial switch bin in operand.expr.derived {
 	case ^ast.Binary_Expr:
 			if bin.op.kind == .Cmp_Eq {
 				// Check if left-hand side can be assigned to
@@ -1790,15 +1893,39 @@ check_for_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt_F
 		operand: Operand
 		operand.mode = .Invalid
 		check_expr(ctx, &operand, stmt.cond)
+		// C++ Reference: check_stmt.cpp check_for_stmt:
+		//
+		//     if (o.mode != Addressing_Invalid && !is_type_boolean(o.type)) {
+		//         error(fs->cond, "Non-boolean condition in 'for' statement");
+		//     } else {
+		//         Ast *cond = unparen_expr(o.expr);
+		//         if (cond && cond->kind == Ast_BinaryExpr && ...) { warning(cond, ...); }
+		//     }
+		//
+		// #1090: TWO divergences at this call site (the helper itself was already faithful).
+		//   (a) THE TAUTOLOGICAL CHECK RAN UNCONDITIONALLY. C++ puts it in the ELSE, so a
+		//       non-boolean condition gets the error and nothing further; the port could emit
+		//       both.
+		//   (b) NO unparen_expr. C++ tests `unparen_expr(o.expr)`; the port tested `stmt.cond`
+		//       raw, so a PARENTHESISED condition failed the Binary_Expr assertion and the
+		//       warning was never reached at all.
+		//
+		// MEASURED — and BOTH COMPILERS EXIT 0, so no verdict test could ever have seen this.
+		// It surfaced only from the corpus-wide OUTPUT diff:
+		//     `for ; (x >= 0); { break }` with x: uint
+		//     oracle: "Warning: Expression is always true since unsigned numbers are always >= 0"
+		//     port:   nothing at all.
+		//
+		// The warning is anchored on the UNPARENNED node, as C++ anchors it on `cond`.
 		if operand.mode != .Invalid && !is_type_boolean(operand.type) {
 			error_node(stmt.cond, "Non-boolean condition in 'for' statement")
-		}
-
-		// C++ Reference: check_stmt.cpp:2716-2735
-		// Additional check for tautological unsigned comparisons in for loop conditions
-		// This catches patterns like `for i := 0; i >= 0; i += 1` where i is unsigned
-		if be, is_binary := stmt.cond.derived.(^ast.Binary_Expr); is_binary {
-			check_for_loop_tautological_comparison(ctx, stmt.cond, be)
+		} else {
+			cond := unparen_expr(operand.expr)
+			if cond != nil {
+				if be, is_binary := cond.derived.(^ast.Binary_Expr); is_binary {
+					check_for_loop_tautological_comparison(ctx, cond, be)
+				}
+			}
 		}
 
 		viral_flags |= accumulate_viral_flags_from_expr(ctx, stmt.cond)
@@ -1964,7 +2091,25 @@ check_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stm
 		}
 
 		// Check each case expression
-		for case_expr in case_clause.list {
+		for case_expr_raw in case_clause.list {
+			// #1077. C++ Reference: check_stmt.cpp check_switch_stmt:
+			//
+			//     for (Ast *expr : cc->list) {
+			//         expr = unparen_expr(expr);
+			//         if (is_ast_range(expr)) { ... }
+			//
+			// The port used the loop variable RAW, so a PARENTHESISED range case took the
+			// non-range path entirely — checked with check_expr_with_type_hint and compared with
+			// `==` instead of being treated as an interval.
+			// MEASURED: `switch x { case (1..=5): }` — oracle 0, port 1.
+			//
+			// C++ REBINDS `expr`, so every later use in the body sees the unparenned node —
+			// including the error anchors and the expr_to_string in the duplicate-case reports.
+			// Shadowing the loop variable is the faithful spelling of that rebinding.
+			// NOTE: ast.unparen_expr, not the checker's own unparen_expr — the latter is typed
+			// ^Node -> ^Node, and a case list holds ^Expr. The #97 gate caught the difference.
+			case_expr := ast.unparen_expr(case_expr_raw)
+
 			// C++ lines 1196-1254: Handle range expressions in switch cases (e.g., case 1..10:)
 			if is_ast_range(case_expr) {
 				be, is_binary := case_expr.derived.(^ast.Binary_Expr)
@@ -2582,6 +2727,36 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 		return viral_flags
 	}
 
+	// #1092 (d5). C++ Reference: check_stmt.cpp check_type_switch_stmt, IMMEDIATELY after the
+	// "Expected an identifier" check above:
+	//
+	//     if (switch_kind == TypeSwitch_Union) {
+	//         if (is_addressed) {
+	//             if (x.mode != Addressing_Variable && !is_type_pointer(x.type)) {
+	//                 error(lhs->Ident.token, "The element variable '%.*s' cannot be made addressable",
+	//                       LIT(lhs->Ident.token.string));
+	//             }
+	//         }
+	//     }
+	//
+	// ABSENT from the port. `is_addressed` was computed at the top of this procedure and had
+	// exactly ONE reader further down; this, its other reader, did not exist. So
+	// `switch &v in g()` — binding by reference to a non-addressable union VALUE — was accepted
+	// silently.
+	//
+	// MEASURED — and both compilers exit 1, because the cell fails for an UNRELATED reason as
+	// well. That is exactly what hid it from the verdict corpus:
+	//     oracle: "The element variable 'v' cannot be made addressable"
+	//     port:   nothing.
+	// UNION ONLY: an `any` type switch does not get this check in the reference.
+	if switch_kind == .Union && is_addressed {
+		if x.mode != .Variable && !is_type_pointer(x.type) {
+			// The port's ast.Ident carries `name` and its own node position rather than a Token,
+			// so the anchor is the ident NODE (C++ uses lhs->Ident.token, the same position).
+			error_node(lhs_ident, "The element variable '%s' cannot be made addressable", lhs_ident.name)
+		}
+	}
+
 	// C++ lines 1457-1459: Track seen types for duplicate case type detection
 	// KEYED BY CANONICAL TYPE HASH, NOT BY TYPE POINTER. C++ Reference: check_stmt.cpp
 	// check_type_switch_stmt -- `if (type_set_update(&seen, y.type))`. `seen` is a **TypeSet**,
@@ -2654,7 +2829,10 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 					defer end_error_block()
 
 					error_node(type_expr, "'nil' case has already been handled previously")
-					error_line("\t'nil' was already previously seen at %s", token_pos_to_string(nil_seen.pos))
+					// #1232: C++:1531 writes "\t 'nil'" -- TAB THEN A SPACE. The port had the tab only,
+					// a ONE-BYTE difference (oracle 427 bytes vs port 426 on witness z_nilcase) that no
+					// existing cell reached. Found by the new fuzzy audit, not by eye.
+					error_line("\t 'nil' was already previously seen at %s", token_pos_to_string(nil_seen.pos))
 				} else {
 					nil_seen = type_expr
 				}
@@ -2664,7 +2842,11 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 
 			// Case must be a type
 			if y.mode != .Type {
-				error_node(type_expr, "Expected a type as a case, got value")
+				// #1228: C++:1542 formats the OFFENDING EXPRESSION here; the port hardcoded the
+				// word "value". Witness q_tsvalue (`case 1:` in a type switch):
+				//     oracle: Expected a type as a case, got 1
+				//     port:   Expected a type as a case, got value
+				error_node(type_expr, "Expected a type as a case, got %s", expr_to_string(type_expr))
 				continue
 			}
 
@@ -3528,6 +3710,46 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 	return viral_flags
 }
 
+// check_stmt_internal_builtin_proc_id resolves an expression to a builtin procedure id.
+// C++ Reference: check_stmt.cpp check_stmt_internal_builtin_proc_id:
+//
+//     BuiltinProcId id = BuiltinProc_Invalid;
+//     Entity *e = entity_of_node(expr);
+//     if (e != nullptr && e->kind == Entity_Builtin) {
+//         if (e->Builtin.id && e->Builtin.id != BuiltinProc_DIRECTIVE) {
+//             id = cast(BuiltinProcId)e->Builtin.id;
+//         }
+//     }
+//     if (id_) *id_ = id;
+//     return id != BuiltinProc_Invalid;
+//
+// Note the two exclusions C++ applies: a zero/Invalid id, and BuiltinProc_DIRECTIVE — a `#`
+// directive is a builtin entity but is not a results-returning builtin for this purpose.
+// #1082: the port had no counterpart, which is why check_stmt's builtin branch was absent.
+// NOTE ON THE DIRECTIVE EXCLUSION. C++'s enum has a BuiltinProc_DIRECTIVE member
+// ("used for specialized hash-prefixed procedures", checker_builtin_procs.hpp) whose table entry
+// is `{"", 0, true, Expr_Expr, BuiltinProcPkg_builtin}` — an EMPTY name with Expr_Expr kind. Were
+// it not excluded it would satisfy `kind == Expr_Expr && !ignore_results` and make every `#`
+// directive demand its results. The port's Builtin_Proc_Id has NO such member — directives are
+// carried as ^ast.Basic_Directive nodes rather than a builtin id — so the id comparison is
+// unrepresentable here. The exclusion is reproduced at the AST level instead, which is the same
+// set of expressions C++ is ruling out.
+@(private = "file")
+check_stmt_internal_builtin_proc_id :: proc(ctx: ^Checker_Context, expr: ^ast.Node) -> (Builtin_Proc_Id, bool) {
+	if _, is_directive := expr.derived.(^ast.Basic_Directive); is_directive {
+		return .Invalid, false
+	}
+	e := entity_of_node(ctx.info, expr)
+	if e != nil && e.kind == .Builtin {
+		if b, is_builtin := e.variant.(Entity_Builtin); is_builtin {
+			if b.id != .Invalid {
+				return b.id, true
+			}
+		}
+	}
+	return .Invalid, false
+}
+
 // check_assignment_variable validates an assignment to a variable
 // This performs variable-specific validation before delegating to check_assignment
 // C++ Reference: check_stmt.cpp check_assignment_variable
@@ -3552,7 +3774,42 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 		is_blank = is_blank_ident(ident.name)
 	}
 	if is_blank {
-		check_assignment(ctx, rhs, nil, "assignment to '_' identifier")
+		// NOTE: C++ declares its own `String context_name` here, SHADOWING the parameter of the
+		// same name — the blank-assignment path deliberately reports against "assignment to '_'
+		// identifier" rather than the caller's context. Odin's -vet rejects the shadow, so the
+		// local is renamed; the VALUE passed to both check_assignment and the diagnostic is the
+		// same string C++ uses.
+		blank_context_name := "assignment to '_' identifier"
+		check_assignment(ctx, rhs, nil, blank_context_name)
+
+		// #1079. C++ Reference: check_stmt.cpp check_assignment_variable:
+		//
+		//     switch (rhs->mode) {
+		//     case Addressing_ProcGroup: {
+		//         error(rhs->expr, "Cannot assign procedure group '%s' in %.*s",
+		//               expr_str, LIT(context_name));
+		//         rhs->mode = Addressing_Invalid;
+		//     }                                   // <-- NO break: FALLS THROUGH
+		//     case Addressing_Invalid:
+		//         return nullptr;
+		//     default:
+		//         return rhs->type;
+		//     }
+		//
+		// The port had no Addressing_ProcGroup arm at all, so `_ = some_proc_group` was accepted
+		// silently. MEASURED: oracle 1, port 0.
+		//
+		// The missing `break` is deliberate in the reference — the arm sets mode to Invalid and
+		// then falls into the Invalid case, so the net effect is "diagnose, then return nil".
+		// Spelled below as an if that assigns Invalid followed by the existing Invalid test,
+		// which is the same control flow.
+		if rhs.mode == .Proc_Group {
+			expr_str := expr_to_string(rhs.expr)
+			defer delete(expr_str)
+			error(rhs.expr, "Cannot assign procedure group '%s' in %s", expr_str, blank_context_name)
+			rhs.mode = .Invalid
+		}
+
 		if rhs.mode == .Invalid {
 			return nil
 		}
@@ -3854,6 +4111,20 @@ check_foreign_block_decl :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 // check_decl_attributes at checker.cpp:4562 (the previously cited line range
 // 3417-3488 was stale and no longer corresponds to this function)
 check_foreign_block_attributes :: proc(ctx: ^Checker_Context, attributes: [dynamic]^ast.Attribute) {
+	// #1087 (e6b). C++ Reference: checker.cpp check_decl_attributes:
+	//
+	//     if (string_set_update(&set, name)) {
+	//         error(elem, "Previous declaration of '%.*s'", LIT(name));
+	//         continue;
+	//     }
+	//
+	// The set is declared ONCE for the whole call and spans every attribute group, so
+	// `@(link_prefix="a", link_prefix="b")` AND `@(link_prefix="a") @(link_prefix="b")` are both
+	// caught. The port had no duplicate detection at all: the second occurrence simply
+	// overwrote the first. MEASURED: oracle 1, port 0.
+	seen := make(map[string]struct{}, 0, context.temp_allocator)
+	defer delete(seen)
+
 	for attr in attributes {
 		for elem_node in attr.elems {
 			// An attribute element is either a bare identifier (`@(name)`,
@@ -3876,16 +4147,53 @@ check_foreign_block_attributes :: proc(ctx: ^Checker_Context, attributes: [dynam
 					continue
 				}
 			case:
+				// C++: `default: error(elem, "Invalid attribute element"); continue;`
+				error_node(elem_node, "Invalid attribute element")
 				continue
 			}
 
-			// Process attribute value
+			// C++ runs the duplicate test BEFORE dispatching on the name, so a repeated
+			// attribute is reported once and its second occurrence is not processed at all.
+			if _, already := seen[name]; already {
+				error_node(elem_node, "Previous declaration of '%s'", name)
+				continue
+			}
+			seen[name] = {}
+
+			// Process attribute value.
+			// C++ Reference: check_decl_attribute_value, checker.cpp:3644-3662:
+			//     ExactValue ev = {};                       // Invalid
+			//     if (value != nullptr) {
+			//         Operand op = {}; check_expr(c, &op, value);
+			//         if (op.mode) {                        // NOT Addressing_Invalid
+			//             if (op.mode == Addressing_Constant) { ev = op.value; }
+			//             else { error(value, "Expected a constant attribute element"); }
+			//         }
+			//     }
+			//     return ev;
+			// THREE divergences, all in these six lines:
+			//  1. the message was invented -- "Attribute value must be a constant" for the
+			//     reference's "Expected a constant attribute element" (witness zzorder/before).
+			//  2. NO `op.mode` GUARD. The reference stays SILENT when the expression failed to
+			//     check at all (Addressing_Invalid), so a broken value produces one diagnostic
+			//     rather than two; the port added its own on top of the cascade.
+			//  3. `continue` SKIPPED THE ARM. The reference does not skip: it returns an INVALID
+			//     ev and the arm still runs, and every arm treats an invalid ev EXACTLY as it
+			//     treats no value at all -- `private` takes its "Okay" branch, `link_prefix`
+			//     reports "Expected a string value". That is the third instance of this same
+			//     failure-path shape after #1184 and #1187b.
+			// Reproduced by clearing value_node once the value is known not to be a usable
+			// constant, which is precisely what an Invalid ev means to every arm below.
 			operand: Operand
 			if value_node != nil {
 				check_expr(ctx, &operand, value_node)
-				if operand.mode != .Constant {
-					error_node(value_node, "Attribute value must be a constant")
-					continue
+				if operand.mode == .Constant {
+					// usable constant; arms read operand.value
+				} else {
+					if operand.mode != .Invalid {
+						error_node(value_node, "Expected a constant attribute element")
+					}
+					value_node = nil
 				}
 			}
 
@@ -3898,16 +4206,21 @@ check_foreign_block_attributes :: proc(ctx: ^Checker_Context, attributes: [dynam
 					error_node(elem_node, "Expected a string value for 'default_calling_convention'")
 					continue
 				}
+				// C++ Reference: checker.cpp:3722-3733. Every error in this whole function is
+				// anchored on `elem` -- the ATTRIBUTE ELEMENT (`default_calling_convention=...`) --
+				// not on the value. The port anchored on value_node, putting the caret at the value
+				// instead: witnessed 5:3 (oracle) vs 5:30 (port) on $S/phase2/wit_lp/cc_bad and
+				// cc_nonstr, with the message text identical in both.
 				if str, ok := operand.value.(string); ok {
 					cc := string_to_calling_convention(str)
 					if cc == .Invalid {
-						error_node(value_node, "Unknown procedure calling convention: '%s'", str)
+						error_node(elem_node, "Unknown procedure calling convention: '%s'", str)
 					} else {
 						ctx.foreign_context.default_cc = cc
 						ctx.foreign_context.default_cc_set = true
 					}
 				} else {
-					error_node(value_node, "Expected a string value for 'default_calling_convention'")
+					error_node(elem_node, "Expected a string value for 'default_calling_convention'")
 				}
 
 			case "link_prefix":
@@ -3916,14 +4229,33 @@ check_foreign_block_attributes :: proc(ctx: ^Checker_Context, attributes: [dynam
 					error_node(elem_node, "Expected a string value for 'link_prefix'")
 					continue
 				}
+				// C++ Reference: checker.cpp:3734-3744:
+				//     String link_prefix = string_trim_whitespace(ev.value_string);
+				//     if (link_prefix.len != 0 && !is_foreign_name_valid(link_prefix)) {
+				//         error(elem, "Invalid link prefix: '%.*s'", LIT(link_prefix));
+				//     } else {
+				//         c->foreign_context.link_prefix = link_prefix;
+				//     }
+				// THREE divergences, all witnessed under $S/phase2/wit_lp before the edit:
+				//  1. the `len != 0` guard was MISSING, so an EMPTY prefix -- or one that trims to
+				//     empty -- was run through is_foreign_name_valid and REJECTED. Oracle accepts
+				//     both: lp_empty `link_prefix=""` and lp_ws `link_prefix="   "` are CLEAN
+				//     upstream and errored in the port. An over-rejection.
+				//  2. the name was unquoted: oracle "Invalid link prefix: '1bad'", port without the
+				//     quotes (lp_bad; both reject, so only OUTPUT comparison shows it).
+				//  3. the assignment ran UNCONDITIONALLY. The reference assigns only on the accepted
+				//     path, so an invalid prefix leaves foreign_context.link_prefix untouched. This
+				//     is the INVERSE of #1184/#1187b: there the port skipped an assignment the
+				//     reference makes, here it makes one the reference skips.
 				if str, ok := operand.value.(string); ok {
 					link_prefix := strings.trim_space(str)
-					if !is_foreign_name_valid(link_prefix) {
-						error_node(value_node, "Invalid link prefix: %s", link_prefix)
+					if len(link_prefix) != 0 && !is_foreign_name_valid(link_prefix) {
+						error_node(elem_node, "Invalid link prefix: '%s'", link_prefix)
+					} else {
+						ctx.foreign_context.link_prefix = link_prefix
 					}
-					ctx.foreign_context.link_prefix = link_prefix
 				} else {
-					error_node(value_node, "Expected a string value for 'link_prefix'")
+					error_node(elem_node, "Expected a string value for 'link_prefix'")
 				}
 
 			case "link_suffix":
@@ -3932,22 +4264,57 @@ check_foreign_block_attributes :: proc(ctx: ^Checker_Context, attributes: [dynam
 					error_node(elem_node, "Expected a string value for 'link_suffix'")
 					continue
 				}
+				// C++ Reference: checker.cpp:3745-3755 -- identical in shape to link_prefix above,
+				// and it had the identical three divergences (missing `len != 0` guard, unquoted
+				// name, unconditional assignment) plus the value_node anchor. Witnesses ls_empty
+				// and ls_bad.
 				if str, ok := operand.value.(string); ok {
 					link_suffix := strings.trim_space(str)
-					if !is_foreign_name_valid(link_suffix) {
-						error_node(value_node, "Invalid link suffix: %s", link_suffix)
+					if len(link_suffix) != 0 && !is_foreign_name_valid(link_suffix) {
+						error_node(elem_node, "Invalid link suffix: '%s'", link_suffix)
+					} else {
+						ctx.foreign_context.link_suffix = link_suffix
 					}
-					ctx.foreign_context.link_suffix = link_suffix
 				} else {
-					error_node(value_node, "Expected a string value for 'link_suffix'")
+					error_node(elem_node, "Expected a string value for 'link_suffix'")
 				}
 
 			case "private":
-				// C++ Reference: checker.cpp - @(private) or @(private="file"|"package")
+				// C++ Reference: checker.cpp:3758-3776, foreign_block_decl_attribute:
+				//     } else if (name == "private") {
+				//         EntityVisiblityKind kind = EntityVisiblity_PrivateToPackage;
+				//         if (ev.kind == ExactValue_Invalid) {         // Okay
+				//         } else if (ev.kind == ExactValue_String) {
+				//             ... "file" / "package" ...
+				//             else error(value, "'%.*s'  expects no parameter, ...");
+				//         } else {
+				//             error(value, "'%.*s'  expects no parameter, ...");
+				//         }
+				//         c->foreign_context.visibility_kind = kind;
+				//
+				// TWO divergences here, both witnessed before the edit:
+				//
+				// 1. The port INVENTED two messages ("Invalid 'private' value '%s', expected 'file'
+				//    or 'package'" and "Expected a string value for 'private'") where the reference
+				//    emits ONE, for both cases. Note the DOUBLE SPACE after the quoted name -- the
+				//    reference really does have it at these two sites (checker.cpp:3769 and 3772)
+				//    and a SINGLE space at the @(private) ATTRIBUTE site (checker.cpp:4882). The two
+				//    reference sites differ from each other, exactly like the "identifer" pair in
+				//    #1183, so the two port sites must differ the same way. check_collect.odin:1048
+				//    keeps the single-space form because it pairs with checker.cpp:4882.
+				//    These cells AGREE ON VERDICT and differ only in text, so no verdict corpus
+				//    could ever have found them.
+				//
+				// 2. The error paths did `continue`, SKIPPING the visibility assignment. The
+				//    reference falls through and assigns `kind` regardless -- so a malformed
+				//    @(private=...) on a foreign block still makes the block private to the
+				//    package. This is the SAME failure-path shape as #1184 in check_collect.odin;
+				//    reading the sibling is what found it. Witness $S/phase2/xpkg/fbpriv_bogus:
+				//    oracle also reports "'fbsym' is not exported by 'lib'" at the importer, the
+				//    port reported nothing.
 				kind := Entity_Visibility_Kind.Private_To_Package
 				if value_node == nil {
-					// @(private) defaults to package-level privacy
-					kind = .Private_To_Package
+					// Okay -- @(private) with no parameter keeps Private_To_Package.
 				} else if str, ok := operand.value.(string); ok {
 					switch str {
 					case "file":
@@ -3955,12 +4322,10 @@ check_foreign_block_attributes :: proc(ctx: ^Checker_Context, attributes: [dynam
 					case "package":
 						kind = .Private_To_Package
 					case:
-						error_node(value_node, "Invalid 'private' value '%s', expected 'file' or 'package'", str)
-						continue
+						error_node(value_node, "'%s'  expects no parameter, or a string literal containing \"file\" or \"package\"", name)
 					}
 				} else {
-					error_node(value_node, "Expected a string value for 'private'")
-					continue
+					error_node(value_node, "'%s'  expects no parameter, or a string literal containing \"file\" or \"package\"", name)
 				}
 				ctx.foreign_context.visibility_kind = kind
 
@@ -3972,9 +4337,35 @@ check_foreign_block_attributes :: proc(ctx: ^Checker_Context, attributes: [dynam
 				ctx.foreign_context.require_results = true
 
 			case:
-			// Check if it's a user tag (any unrecognized attribute)
-			// C++ line 3420-3424
-			// User tags are allowed but not processed
+				// #1087 (e6). C++ Reference: checker.cpp check_decl_attributes:
+				//
+				//     if (!proc(c, elem, name, value, ac)) {
+				//         if (!build_context.ignore_unknown_attributes &&
+				//             !string_set_exists(&build_context.custom_attributes, name)) {
+				//             ERROR_BLOCK();
+				//             error(elem, "Unknown attribute element name '%.*s'", LIT(name));
+				//             error_line("\tDid you forget to use the build flag ...");
+				//         }
+				//     }
+				//
+				// foreign_block_decl_attribute (checker.cpp) returns false for any name it does
+				// not recognise, and the ONLY free-form name it accepts is ATTRIBUTE_USER_TAG_NAME
+				// == "tag" (which also REQUIRES a string value). The port's terminal arm accepted
+				// every unrecognised name silently, on the theory that anything could be a user
+				// tag. MEASURED: `@(bogus_attribute) foreign lib { }` — oracle 1, port 0.
+				//
+				// report_unknown_attribute already exists in check_decl_helpers.odin and already
+				// honours -ignore-unknown-attributes and -custom-attribute:.
+				if name == "tag" {
+					// C++ ATTRIBUTE_USER_TAG_NAME: accepted, but it must carry a string value.
+					if value_node == nil {
+						error_node(elem_node, "Expected a string value for '%s'", name)
+					} else if _, is_str := operand.value.(string); !is_str {
+						error_node(elem_node, "Expected a string value for '%s'", name)
+					}
+				} else {
+					report_unknown_attribute(elem_node, name)
+				}
 			}
 		}
 	}
@@ -4333,22 +4724,28 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 		}
 
 	case .Constant:
-		error_node(expr, "'using' cannot be applied to a constant")
+		// #1228: ALL FIVE arms below anchor on `us` (the `using` keyword), which is what
+		// C++'s error(us->token, ...) reports. Line 4715 above already documented WHY -- the
+		// error collector merges same-position diagnostics, and the feature-gate rejection sits
+		// on that same token -- but the fix was applied to that ONE arm and not to its five
+		// siblings, so `using g` on a procedure emitted TWO errors where C++ emits one
+		// (witness $S/phase2/wit_stmt/q_usingproc). READ THE SIBLING.
+		error_node(us, "'using' cannot be applied to a constant")
 
 	// C++ Reference: check_stmt.cpp:871-875. Entity_Procedure, Entity_ProcGroup AND
 	// Entity_Builtin share ONE arm and ONE message. The port had split .Builtin out with an
 	// invented "cannot be applied to a builtin" that appears nowhere in src/.
 	case .Procedure, .Proc_Group, .Builtin:
-		error_node(expr, "'using' cannot be applied to a procedure")
+		error_node(us, "'using' cannot be applied to a procedure")
 
 	case .Nil:
-		error_node(expr, "'using' cannot be applied to 'nil'")
+		error_node(us, "'using' cannot be applied to 'nil'")
 
 	case .Label:
-		error_node(expr, "'using' cannot be applied to a label")
+		error_node(us, "'using' cannot be applied to a label")
 
 	case .Invalid:
-		error_node(expr, "'using' cannot be applied to an invalid entity")
+		error_node(us, "'using' cannot be applied to an invalid entity")
 
 	case:
 		// DELIBERATE DIVERGENCE FROM THE REFERENCE — maintainer's decision, do not "fix".
@@ -4567,11 +4964,52 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 
 			case .Array:
 				// Array iteration
-				// C++ Reference: check_stmt.cpp lines 1834-1838
+				// C++ Reference: check_stmt.cpp:1884-1893. The Array arm -- and ONLY the Array
+				// arm -- also admits Addressing_SoaVariable, and the reference explains why:
+				//
+				//     // for #soa container with array element type, the element carries
+				//     // Addressing_SoaVariable, rather than Addressing_Variable; the element
+				//     // itself has no address, but each component does, so for &v in soa[i]
+				//     // is addressable
+				//     is_possibly_addressable = operand.mode == Addressing_Variable ||
+				//                               operand.mode == Addressing_SoaVariable ||
+				//                               is_ptr;
+				//
+				// The port had only `.Variable || is_ptr`, copied from the neighbouring arms, so
+				// `for &v in fixed[1]` over a `#soa[3][4]u16` was rejected with "The element
+				// variable 'v' cannot be made addressable" plus a follow-on "Cannot assign to".
+				// Do NOT add this term to the sibling arms: Enumerated_Array and
+				// Fixed_Capacity_Dynamic_Array deliberately omit it in the reference.
 				#partial switch arr in t.variant {
 				case Type_Array:
-					is_possibly_addressable = operand.mode == .Variable || is_ptr
+					is_possibly_addressable = operand.mode == .Variable ||
+					                          operand.mode == .Soa_Variable ||
+					                          is_ptr
 					append(&vals, arr.elem)
+					append(&vals, t_int)
+				}
+
+			// #1075: THIS ARM WAS ABSENT, so `for x in a` over a `[dynamic; N]T` fell to the
+			// default and reported "Cannot iterate over ...". The kind exists in the port's type
+			// system and check_range_stmt itself already names it in a Suggestion further down.
+			// C++ Reference: check_stmt.cpp check_range_stmt, between the Array and DynamicArray
+			// arms:
+			//
+			//     case Type_FixedCapacityDynamicArray:
+			//         is_possibly_addressable = operand.mode == Addressing_Variable || is_ptr;
+			//         array_add(&vals, t->FixedCapacityDynamicArray.elem);
+			//         array_add(&vals, t_int);
+			//         break;
+			//
+			// NOTE THE ADDRESSABILITY TERM. It is the ARRAY form (`.Variable || is_ptr`), NOT the
+			// `true` used by the Dynamic_Array and Slice arms directly beneath it — a fixed
+			// capacity array is stored inline, so iterating a non-variable does not yield
+			// addressable elements. Copying the neighbouring arm would have been wrong.
+			case .Fixed_Capacity_Dynamic_Array:
+				#partial switch fcda in t.variant {
+				case Type_Fixed_Capacity_Dynamic_Array:
+					is_possibly_addressable = operand.mode == .Variable || is_ptr
+					append(&vals, fcda.elem)
 					append(&vals, t_int)
 				}
 
@@ -4651,7 +5089,23 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 								error_node(operand.expr, "The final type of %d-valued expression must be a boolean, got %s", count, type_str)
 								skip_expr_range_stmt = true
 							} else {
-								max_val_count = count
+								// #1081 (e2). C++ Reference: check_stmt.cpp check_range_stmt:
+								//     max_val_count = count-1;
+								// The trailing element of a multi-return iterator is the loop
+								// CONDITION and is not bindable, so the number of usable values
+								// is one less than the tuple arity. The port stored the full
+								// count, which raised the ceiling checked at the bottom of this
+								// procedure ("Expected a maximum of %d identifiers").
+								//
+								// I had previously filed this as NOT REPRODUCED on the strength
+								// of an exit-status comparison — both compilers reject
+								// `for a, b, c in g()` where g returns (int, f32, bool). They
+								// reject for DIFFERENT REASONS and with different output:
+								//   oracle: "Expected a maximum of 2 identifiers, got 3"
+								//         + "Expected a 4-valued expression on the rhs, ..."
+								//   port:   only the second.
+								// A VERDICT-ONLY CHECK CANNOT SEE A MISSING SECOND DIAGNOSTIC.
+								max_val_count = count - 1
 
 								for entity in tup.variables {
 									append(&vals, get_entity_type(entity))
@@ -4670,6 +5124,52 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 
 								if is_reverse {
 									error_node(node, "#reverse for is not supported for multiple return valued parameters")
+								}
+
+								// #1081 (e4). C++ Reference: check_stmt.cpp check_range_stmt,
+								// immediately after the is_reverse check:
+								//
+								//     Ast *expr = unparen_expr(operand.expr);
+								//     if (expr->kind == Ast_CallExpr) {
+								//         Type *p = base_type(type_of_expr(expr->CallExpr.proc));
+								//         if (p != nullptr && p->kind == Type_Proc) {
+								//             if (p->Proc.require_results) {
+								//                 if (rs->vals.count < max_val_count) {
+								//                     ...error_range(start, end,
+								//                         "Expected %td identifier%s, got %td", ...)
+								//                 }
+								//             }
+								//         }
+								//     }
+								//
+								// Absent from the port entirely: iterating a @(require_results)
+								// procedure while binding FEWER identifiers than it yields
+								// discarded results silently.
+								// MEASURED: `@(require_results) g :: proc() -> (int, int, bool)`
+								// with `for a in g()` — oracle 1, port 0.
+								if len(stmt.vals) > 0 {
+									// NOTE: the checker's own unparen_expr (^Node -> ^Node) here, NOT ast.unparen_expr —
+									// operand.expr is a ^Node. This is the exact inverse of #1077,
+									// where a case list held ^Expr and needed the ast one.
+									iter_expr := unparen_expr(operand.expr)
+									if call, is_call := iter_expr.derived.(^ast.Call_Expr); is_call {
+										pt := base_type(type_of_expr(call.expr, ctx.info))
+										if pt != nil && pt.kind == .Proc {
+											if proc_variant, is_proc := pt.variant.(Type_Proc); is_proc && proc_variant.require_results {
+												if len(stmt.vals) < max_val_count {
+													plural := "s"
+													if max_val_count == 1 {
+														plural = ""
+													}
+													// C++ error_range(start, end, ...): the caret
+													// spans the whole identifier list.
+													start_pos := ast_token_pos(stmt.vals[0])
+													end_pos := node_end_pos(stmt.vals[len(stmt.vals) - 1])
+													error_va(start_pos, end_pos, "Expected %d identifier%s, got %d", max_val_count, plural, len(stmt.vals))
+												}
+											}
+										}
+									}
 								}
 							}
 						}
@@ -5076,6 +5576,27 @@ check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flag
 					val1 = t_int
 					inline_for_depth = exact_value_i64(unroll_count)
 				}
+
+			// #1075: second site, same missing kind. C++ Reference: check_stmt.cpp
+			// check_unroll_range_stmt:
+			//
+			//     case Type_FixedCapacityDynamicArray:
+			//         if (unroll_count > 0) {
+			//             val0 = t->FixedCapacityDynamicArray.elem;
+			//             val1 = t_int;
+			//             inline_for_depth = exact_value_i64(unroll_count);
+			//         }
+			//         break;
+			//
+			// Gated on unroll_count like the Slice/Dynamic_Array arms above (a runtime-length
+			// container has no compile-time trip count), NOT like the Array arm, which can fall
+			// back to tv.count.
+			case Type_Fixed_Capacity_Dynamic_Array:
+				if unroll_count > 0 {
+					val0 = tv.elem
+					val1 = t_int
+					inline_for_depth = exact_value_i64(unroll_count)
+				}
 			}
 		}
 
@@ -5216,9 +5737,21 @@ check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flag
 	}
 
 	// Check body statement
-	// C++ Reference: check_stmt.cpp line 1111
-	// The body is checked with the loop variables in scope
-	viral_flags |= check_stmt(ctx, stmt.body, mod_flags)
+	// C++ Reference: check_stmt.cpp check_unroll_range_stmt, the last two lines:
+	//
+	//     u32 new_flags = mod_flags & ~Stmt_BreakAllowed & ~Stmt_ContinueAllowed;
+	//     check_stmt(ctx, irs->body, new_flags);
+	//
+	// #1080: THE PORT PASSED mod_flags THROUGH UNCHANGED. An `#unroll for` is not a real loop —
+	// it is expanded at compile time — so `break` and `continue` inside it are illegal. C++
+	// STRIPS both permissions before checking the body; the port propagated whatever the
+	// enclosing construct had granted, so a `break` inside an `#unroll for` nested in an
+	// ordinary `for` (or a `switch`) was silently accepted.
+	// MEASURED: oracle 1 ("'break' only allowed in non-inline loops or 'switch' statements"),
+	// port 0.
+	// The body is checked with the loop variables in scope.
+	new_flags := mod_flags - {.Break_Allowed, .Continue_Allowed}
+	viral_flags |= check_stmt(ctx, stmt.body, new_flags)
 
 	return viral_flags
 }
