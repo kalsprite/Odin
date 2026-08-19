@@ -223,8 +223,20 @@ check_deferred_procedures :: proc(c: ^Checker) {
 			assert(src_params.kind == .Tuple)
 			assert(dst_params.kind == .Tuple)
 
+			// C++ Reference: checker.cpp check_deferred_procedures --
+			//     "Deferred procedure '%.*s' parameters do not match the inputs of initial
+			//      procedure '%.*s':\n\t(%s) =/= (%s)"    args: dst, src, dst_str, src_str
+			// The port had invented a flat one-line spelling with the types interpolated mid
+			// sentence and no parentheses. Witness wit_bl219/l_def_in.
 			if !are_types_identical(src_params, dst_params) {
-				error(src.token, "Deferred procedure '%s' parameters %s do not match the inputs of initial procedure '%s' %s", dst.token.text, type_to_string(dst_params), src.token.text, type_to_string(src_params))
+				error(
+					src.token,
+					"Deferred procedure '%s' parameters do not match the inputs of initial procedure '%s':\n\t(%s) =/= (%s)",
+					dst.token.text,
+					src.token.text,
+					type_to_string(dst_params),
+					type_to_string(src_params),
+				)
 				continue
 			}
 
@@ -245,8 +257,17 @@ check_deferred_procedures :: proc(c: ^Checker) {
 			assert(src_results.kind == .Tuple)
 			assert(dst_params.kind == .Tuple)
 
+			// C++ Reference: checker.cpp check_deferred_procedures -- same shape as the inputs
+			// arm above, with "results" in place of "inputs". Witness wit_bl219/l_def_out.
 			if !are_types_identical(src_results, dst_params) {
-				error(src.token, "Deferred procedure '%s' parameters %s do not match the results of initial procedure '%s' %s", dst.token.text, type_to_string(dst_params), src.token.text, type_to_string(src_results))
+				error(
+					src.token,
+					"Deferred procedure '%s' parameters do not match the results of initial procedure '%s':\n\t(%s) =/= (%s)",
+					dst.token.text,
+					src.token.text,
+					type_to_string(dst_params),
+					type_to_string(src_results),
+				)
 				continue
 			}
 
@@ -301,8 +322,19 @@ check_deferred_procedures :: proc(c: ^Checker) {
 
 			// Check if concatenated tuple matches dst_params
 			// C++ Reference: checker.cpp check_deferred_procedures
+			// C++ Reference: checker.cpp check_deferred_procedures. NOTE the wording: the in_out
+			// arm reuses "the results of initial procedure", NOT "the combined inputs and results"
+			// which the port had invented. It reads oddly for an in_out attribute, but a reference
+			// quirk is the contract. Witness wit_bl219/l_def_inout.
 			if !are_types_identical(tsrc, dst_params) {
-				error(src.token, "Deferred procedure '%s' parameters %s do not match the combined inputs and results of initial procedure '%s' %s", dst.token.text, type_to_string(dst_params), src.token.text, type_to_string(tsrc))
+				error(
+					src.token,
+					"Deferred procedure '%s' parameters do not match the results of initial procedure '%s':\n\t(%s) =/= (%s)",
+					dst.token.text,
+					src.token.text,
+					type_to_string(dst_params),
+					type_to_string(tsrc),
+				)
 				continue
 			}
 		}

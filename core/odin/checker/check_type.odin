@@ -632,14 +632,35 @@ make_soa_struct_internal :: proc(ctx: ^Checker_Context, array_type_expr: ^ast.No
 	if !is_polymorphic {
 		if is_type_struct(bt) || is_type_raw_union(bt) {
 			old_ts := &bt.variant.(Type_Struct)
-			elem_fields_ready = len(old_ts.fields) > 0 && sync.atomic_load(&old_ts.fields_wait_signal.counter) == 0
+			elem_fields_ready = len(old_ts.fields) > 0 && wait_signal_is_set(&old_ts.fields_wait_signal)
 		} else if is_type_array(bt) {
 			elem_fields_ready = true
 		}
 	}
 
 	if is_polymorphic {
-		// Nothing to build, and nothing to queue.
+		// t243p. C++ Reference: check_type.cpp:3337-3344 sets is_complete = true for a
+		// polymorphic element, so :3447 runs `add_type_info_type` + `wait_signal_set` for it
+		// exactly as for a concrete one. This port routes that completion through
+		// complete_soa_type (whose is_polymorphic arm mirrors :3337-3344), which is the same
+		// route the elem_fields_ready branch below takes.
+		//
+		// PREVIOUSLY: "Nothing to build, and nothing to queue." That is why
+		// complete_soa_type's `ts.soa_count = 0` was UNREACHABLE CODE -- nothing on the
+		// polymorphic path ever called it. A polymorphic fixed-count #soa therefore kept the
+		// count written in the source, and the port ACCEPTED
+		//     f :: proc(x: #soa[4]$T) -> i32 { return 0 }
+		//     main :: proc() { s: #soa[4]P; _ = f(s) }
+		// which the reference REJECTS with "Cannot assign value 's' of type '#soa[4]P' to
+		// '#soa[0]P'". An OVER-ACCEPTANCE, invisible to a verdict corpus unless the cell is
+		// written by hand: witness wit_polysoa243/pfixed.
+		//
+		// The reference's own '#soa[0]P' is a defect in the reference -- polymorphic
+		// fixed-count #soa parameters are unusable there in EVERY spelling -- and is filed
+		// upstream. Per Jon's ruling the quirk is still the contract, because it is an error
+		// and not a crash, so the port must reject too.
+		add_type_info_type(ctx, t)
+		complete_soa_type(ctx.checker, t, false)
 	} else if elem_fields_ready {
 		// C++ Reference: check_type.cpp make_soa_struct_internal.
 		//
@@ -1182,10 +1203,11 @@ check_struct_type_expr :: proc(ctx: ^Checker_Context, st: ^ast.Struct_Type, type
 		scope = struct_scope,
 	}
 
-	// Initialize wait groups for multi-threaded field resolution
-	st_var := &struct_type.variant.(Type_Struct)
-	sync.wait_group_add(&st_var.polymorphic_wait_signal, 1)
-	sync.wait_group_add(&st_var.fields_wait_signal, 1)
+	// NOTE: the wait signals need no initialization. A zero-valued Wait_Signal is UNSET,
+	// which matches C++ where Type_Struct's futex is zero-initialized and only
+	// wait_signal_set makes it available. (The previous sync.Wait_Group emulation had to
+	// add 1 here, because a zero-valued Wait_Group reads as ALREADY DONE -- the polarity is
+	// inverted between the two. See ast/semantic_types.odin Wait_Signal.)
 
 	type^ = struct_type
 	set_base_type(named_type, struct_type)
@@ -1223,7 +1245,13 @@ check_struct_type :: proc(ctx: ^Checker_Context, struct_type: ^Type, node: ^ast.
 	st := &struct_type.variant.(Type_Struct)
 
 	// Check for #raw_union attribute
-	if node.is_raw_union && min_field_count > 1 {
+	// C++ Reference: check_type.cpp:680-685 --
+	//   Even a one-field `#raw_union` must be marked. RISC-V psABI excludes unions from the
+	//   hardware floating-point convention. `struct{union{f32}}` goes in `a0` where
+	//   `struct{f32}` goes in `fa0`.
+	// The `min_field_count > 1` conjunct was dropped upstream in the abi_conformance PR; keeping
+	// it made `type_is_raw_union` answer false for the zero- and one-field shapes.
+	if node.is_raw_union {
 		st.is_raw_union = true
 		context_str = "struct #raw_union"
 	}
@@ -1252,7 +1280,7 @@ check_struct_type :: proc(ctx: ^Checker_Context, struct_type: ^Type, node: ^ast.
 
 	// Signal that polymorphic processing is complete
 	// C++ Reference: check_type.cpp check_struct_type
-	sync.wait_group_done(&st.polymorphic_wait_signal)
+	wait_signal_set(&st.polymorphic_wait_signal)
 
 	// Check if this is a specialized polymorphic type
 	st.is_poly_specialized = check_record_poly_operand_specialization(ctx, struct_type, poly_operands, &st.is_polymorphic)
@@ -1312,11 +1340,11 @@ check_struct_type :: proc(ctx: ^Checker_Context, struct_type: ^Type, node: ^ast.
 
 		// Signal that field processing is complete
 		// C++ Reference: check_type.cpp check_struct_type
-		sync.wait_group_done(&st.fields_wait_signal)
+		wait_signal_set(&st.fields_wait_signal)
 	} else {
 		// Polymorphic types don't have fields checked now, but we still need to
 		// signal completion so waiters don't block forever
-		sync.wait_group_done(&st.fields_wait_signal)
+		wait_signal_set(&st.fields_wait_signal)
 	}
 
 	// Process alignment attributes
@@ -1516,6 +1544,23 @@ check_struct_fields :: proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, st: ^
 			}
 			entity.scope = ctx.scope
 			entity.state = .Resolved
+			// t203: the id alloc_entity assigns. No checker consumer on either side (see the
+			// enum-member twin below); closes the deviation without claiming a behaviour change.
+			entity.id = 1 + cast(u64)sync.atomic_add(&global_entity_id, 1)
+			// t203: STAMP THE FILE, exactly as alloc_entity does (entity.odin:76). C++ builds
+			// this entity through alloc_entity_field -> INTERNAL_ENTITY_INIT, whose last line is
+			//     e_->file = thread_unsafe_get_ast_file_from_id((token_).pos.file_id);
+			// so in the reference EVERY entity carries its file unconditionally. Both of this
+			// port's hand-built entities (here and the enum member below) skipped it, and a nil
+			// `file` is not inert: is_entity_exported returns early on
+			// `.Is_Private_Pkg in e.file.flags`, so a fileless entity silently reads as EXPORTED
+			// no matter what file it came from. Same class as the nil-`.type` defect fixed above
+			// -- bypassing alloc_entity loses whatever alloc_entity does, not just the type.
+			if len(entity.token.pos.file) > 0 {
+				if f := lookup_source_file(entity.token.pos.file); f != nil {
+					entity.file = f
+				}
+			}
 			// Both type fields, exactly as alloc_entity does. This entity is built by hand
 			// rather than through alloc_entity_field, and it used to set ONLY the variant --
 			// so every struct field in the program had a nil base `.type` while entity_type()
@@ -1530,6 +1575,17 @@ check_struct_fields :: proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, st: ^
 			entity.variant = Entity_Variable {
 				type        = field_type,
 				field_index = field_src_index,
+				// C++ Reference: check_type.cpp:198 --
+				//     field->Variable.field_group_index = field_group_index;
+				// `field_group_index` was COMPUTED here (incremented once per Ast_Field, line
+				// 1456) and then never read -- the one assignment C++ makes from it was missing,
+				// so every struct field in the program carried group 0.
+				// It is only observable through `odin doc`: MEASURED with triage_docbin on
+				// core/unicode/utf8, where the oracle gives Grapheme_Iterator's fifteen fields
+				// groups 0..14 and the port gave 0 for all fifteen.
+				// C++ assigns after add_entity; setting it in the literal is the same because
+				// add_entity does not read the field.
+				field_group_index = field_group_index,
 			}
 			// All struct fields need the .Field flag for lookup
 			entity.flags += {.Field}
@@ -1623,7 +1679,11 @@ check_struct_fields :: proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, st: ^
 					//     port "... of type 'enum int {A}'"
 					// The port both dropped the pointer and expanded the enum inline.
 					type_str := type_to_string(first_type)
-					error(ident, "'using' cannot be applied to the field '%s' of type '%s'", field_name, type_str)
+					// t213: C++ (check_type.cpp:232) passes `name_token`, a TOKEN, so the recorded
+					// end is zero; `error(ident, ...)` resolves to error_node and computes an end
+					// one column past the identifier. Only -json-errors shows the difference --
+					// end_column 21 (oracle) vs 22 (port) -- because both render as one `^`.
+					error(ident.pos, "'using' cannot be applied to the field '%s' of type '%s'", field_name, type_str)
 					continue
 				}
 			}
@@ -1642,7 +1702,9 @@ check_struct_fields :: proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, st: ^
 					// C++ Reference: check_type.cpp check_struct_fields — the subtype arm makes
 					// the same choice as the using arm above: test with `t`, report `first_type`.
 					type_str := type_to_string(first_type)
-					error(ident, "'subtype' cannot be applied to the field '%s' of type '%s'", field_name, type_str)
+					// Sibling of the `using` site above; C++ check_type.cpp:249 also passes
+					// `name_token`.
+					error(ident.pos, "'subtype' cannot be applied to the field '%s' of type '%s'", field_name, type_str)
 				}
 			}
 		}
@@ -2164,8 +2226,8 @@ add_polymorphic_record_entity :: proc(
 
 	// C++ lines 324-333: Add to gen_types array with thread safety
 	found_gen_types := ensure_polymorphic_record_entity_has_gen_types(ctx, original_type)
-	sync.mutex_lock(&found_gen_types.mutex)
-	defer sync.mutex_unlock(&found_gen_types.mutex)
+	sync.recursive_mutex_lock(&found_gen_types.mutex)
+	defer sync.recursive_mutex_unlock(&found_gen_types.mutex)
 
 	// C++ lines 328-332: Check if already in array
 	for prev in found_gen_types.types {
@@ -2487,8 +2549,21 @@ get_record_polymorphic_params :: proc(t: ^Type) -> ^Type_Tuple {
 
 	#partial switch bt.kind {
 	case .Struct:
-		// Wait for polymorphic params to be ready (if using wait groups)
-		// sync.wait_group_wait(&bt.variant.(Type_Struct).polymorphic_wait_signal)
+		// C++ Reference: types.cpp:2462 -- `wait_signal_until_available(&t->Struct.polymorphic_wait_signal);`
+		//
+		// THIS IS A BARRIER, not a nicety, and it had been commented out. It is the READER half
+		// of the polymorphic-record publication protocol: check_struct_type releases this signal
+		// immediately after check_record_polymorphic_params and BEFORE it publishes the entity
+		// into the originating record's gen_types cache (check_type.odin above; C++ 696 then 701,
+		// same order). So every entity a reader can find in that cache is guaranteed to have
+		// released its signal, and waiting here can never deadlock against the publisher.
+		//
+		// Without it, find_polymorphic_record_entity -- which calls this for EVERY cached entity
+		// on every lookup -- reads polymorphic_params out of a struct another worker is still
+		// building. MEASURED: see $S/polyrace.sh.
+		if st_ptr, st_ptr_ok := &bt.variant.(Type_Struct); st_ptr_ok {
+			wait_signal_until_available(&st_ptr.polymorphic_wait_signal)
+		}
 		if st, ok := bt.variant.(Type_Struct); ok {
 			if st.polymorphic_params != nil && st.polymorphic_params.kind == .Tuple {
 				if tuple, tuple_ok := &st.polymorphic_params.variant.(Type_Tuple); tuple_ok {
@@ -2498,8 +2573,12 @@ get_record_polymorphic_params :: proc(t: ^Type) -> ^Type_Tuple {
 		}
 
 	case .Union:
-		// Wait for polymorphic params to be ready (if using wait groups)
-		// sync.wait_group_wait(&bt.variant.(Type_Union).polymorphic_wait_signal)
+		// C++ Reference: types.cpp:2468 -- the union half of the same barrier. check_union_type
+		// releases this signal at the same point in the same order (check_type.odin:3185, then
+		// add_polymorphic_record_entity), so the same no-deadlock argument holds.
+		if ut_ptr, ut_ptr_ok := &bt.variant.(Type_Union); ut_ptr_ok {
+			wait_signal_until_available(&ut_ptr.polymorphic_wait_signal)
+		}
 		if ut, ok := bt.variant.(Type_Union); ok {
 			if ut.polymorphic_params != nil && ut.polymorphic_params.kind == .Tuple {
 				if tuple, tuple_ok := &ut.polymorphic_params.variant.(Type_Tuple); tuple_ok {
@@ -2526,8 +2605,8 @@ find_polymorphic_record_entity :: proc(ctx: ^Checker_Context, original_type: ^Ty
 	}
 
 	// Lock for thread-safe access
-	sync.mutex_lock(&named.gen_types_data.mutex)
-	defer sync.mutex_unlock(&named.gen_types_data.mutex)
+	sync.recursive_mutex_lock(&named.gen_types_data.mutex)
+	defer sync.recursive_mutex_unlock(&named.gen_types_data.mutex)
 
 	// Search through existing specializations
 	for entity in named.gen_types_data.types {
@@ -3064,9 +3143,7 @@ check_union_type_expr :: proc(ctx: ^Checker_Context, ut: ^ast.Union_Type, type: 
 		scope = ctx.scope,
 	}
 
-	// Initialize wait group for multi-threaded polymorphic resolution
-	ut_var := &union_type.variant.(Type_Union)
-	sync.wait_group_add(&ut_var.polymorphic_wait_signal, 1)
+	// NOTE: zero-valued Wait_Signal is UNSET; no initialization required. See above.
 
 	type^ = union_type
 	set_base_type(named_type, union_type)
@@ -3142,7 +3219,7 @@ check_union_type :: proc(ctx: ^Checker_Context, union_type: ^Type, node: ^ast.Un
 
 	// Signal that polymorphic processing is complete
 	// C++ Reference: check_type.cpp - union polymorphic wait signal
-	sync.wait_group_done(&ut.polymorphic_wait_signal)
+	wait_signal_set(&ut.polymorphic_wait_signal)
 
 	// Check if this is a specialized polymorphic type
 	ut.is_poly_specialized = check_record_poly_operand_specialization(ctx, union_type, poly_operands, &ut.is_polymorphic)
@@ -3400,39 +3477,45 @@ check_enum_type :: proc(ctx: ^Checker_Context, enum_type: ^Type, named_type: ^Ty
 
 	// Process each enum field
 	for field, i in node.fields {
-		// Fields can be either:
-		// 1. Field_Value (e.g., Red = 0) - has field and value
-		// 2. Ident (e.g., Red,) - just a name with auto-incremented value
-		ident_node: ^ast.Expr
-		init_node: ^ast.Expr
-		docs: ^ast.Comment_Group
-		comment: ^ast.Comment_Group
-
-		if field_value, is_fv := field.derived.(^ast.Field_Value); is_fv {
-			// Field_Value: name = value
-			ident_node = field_value.field
-			init_node = field_value.value
-			docs = field_value.docs
-			comment = field_value.comment
-		} else if _, is_ident := field.derived.(^ast.Ident); is_ident {
-			// Just an Ident: name with auto-increment
-			ident_node = field
-			init_node = nil
-			docs = nil
-			comment = nil
-		} else {
-			// C++ Reference: check_type.cpp check_enum_type
+		// C++ Reference: check_type.cpp:937-948. The parser emits an ast.Enum_Field_Value for
+		// EVERY member -- valued (`Red = 0`) and bare (`Red,`) alike, with `.value` nil for the
+		// bare form -- exactly as Ast_EnumFieldValue does. So the reference's two rejections are
+		// both reachable and both must be kept distinct:
+		//   1. the node is not an Enum_Field_Value at all (nothing the parser produces today,
+		//      but a hand-built AST can reach it), and
+		//   2. the node's `name` is nil or is not an Ident (`enum { 1 = 2 }`).
+		// Both emit the same text and both `continue`, so the split is invisible in output --
+		// it is kept because the reference keeps it and a future divergence in either arm
+		// should show up as one arm changing, not as a merged arm being re-split.
+		field_value, is_efv := field.derived.(^ast.Enum_Field_Value)
+		if !is_efv {
+			// C++ Reference: check_type.cpp:937-940
 			error(field, "An enum field's name must be an identifier")
 			continue
 		}
+
+		ident_node := field_value.name
+		init_node := field_value.value
 
 		// Validate identifier
-		ident, ident_ok := ident_node.derived.(^ast.Ident)
-		if !ident_ok {
-			// C++ Reference: check_type.cpp check_enum_type
+		// C++ Reference: check_type.cpp:943-946 -- note the diagnostic is anchored on `field`,
+		// the Enum_Field_Value node, NOT on `ident`.
+		ident: ^ast.Ident
+		if ident_node != nil {
+			ok: bool
+			ident, ok = ident_node.derived.(^ast.Ident)
+			if !ok {
+				ident = nil
+			}
+		}
+		if ident == nil {
 			error(field, "An enum field's name must be an identifier")
 			continue
 		}
+
+		// C++ Reference: check_type.cpp:947-948 -- read AFTER the identifier validation.
+		docs := field_value.docs
+		comment := field_value.comment
 
 		name := ident.name
 
@@ -3530,6 +3613,31 @@ check_enum_type :: proc(ctx: ^Checker_Context, enum_type: ^Type, named_type: ^Ty
 			pos  = ident.pos,
 		}
 		entity.scope = ctx.scope
+		// t203: STAMP THE FILE -- see the twin comment on the struct-field entity above.
+		// C++ check_type.cpp:1002 runs INTERNAL_ENTITY_INIT on this entity, which sets e->file.
+		// WITNESS ($S/phase2/wit_priv203/p4), a single file:
+		//     #+private
+		//     package p
+		//     E :: enum { A, B }
+		//     f :: proc() { using E; _ = A }
+		// The reference reports TWO errors -- the `using`-disallowed one, then `Undeclared name: A`
+		// -- because check_using_stmt_entity skips every enum field failing is_entity_exported,
+		// and `#+private` sets AstFile_IsPrivatePkg on the field's file. The port reported ONE:
+		// its own is_entity_exported guard (check_stmt.odin) was already correct, but `field.file`
+		// was nil here, so the guard could never fire and `using` imported members the reference
+		// refuses to import. Drop `#+private` and both agree -- the flag was the whole difference.
+		if len(entity.token.pos.file) > 0 {
+			if f := lookup_source_file(entity.token.pos.file); f != nil {
+				entity.file = f
+			}
+		}
+		// t203: C++ check_type.cpp:1002 INTERNAL_ENTITY_INIT also assigns the unique id, and :1008
+		// assigns `e->identifier = ident`. Both were missing here. The id has NO checker consumer
+		// on either side (the reference reads Entity::id only in llvm_backend_stmt.cpp:2442, for
+		// name mangling), so this is deviation-closing rather than defect-fixing -- recorded as
+		// such, not dressed up as a fix. `identifier` DOES have checker consumers.
+		entity.id = 1 + cast(u64)sync.atomic_add(&global_entity_id, 1)
+		entity.identifier = ident
 		// C++ line 946: entity->flags |= EntityFlag_Visited
 		entity.flags = {.Visited}
 		// C++ line 947: entity->state = EntityState_Resolved
@@ -3582,8 +3690,17 @@ check_bit_set_type_expr :: proc(ctx: ^Checker_Context, bst: ^ast.Bit_Set_Type, t
 	// Create the bit set type
 	bit_set_type := new(Type, ctx.checker.allocator)
 	bit_set_type.kind = .Bit_Set
+	// C++ Reference: check_type.cpp:1282-1283 -- `type->BitSet.node = node; type->BitSet.elem =
+	// t_invalid;`. The `elem = t_invalid` seed is what every EARLY RETURN in this procedure leaves
+	// behind, and the port left `elem` nil instead. The two are not interchangeable downstream:
+	// check_assignment against a nil target takes its `target_type == nil` branch, defaults the
+	// untyped operand and reports nothing, so `bit_set[0..<8; f32]{3}` silently passed the
+	// assignment and then tripped the range check with the oracle-absent "Bit field value out of
+	// bounds, 3 (3) not in the range 0 .. 0", while the oracle reports "Cannot assign value '3' of
+	// type 'untyped integer' to 'invalid type' in a bit_set literal" and skips the range check.
 	bit_set_type.variant = Type_Bit_Set {
 		node = bst,
+		elem = t_invalid,
 	}
 
 	type^ = bit_set_type
@@ -3701,7 +3818,18 @@ check_bit_set_type_expr :: proc(ctx: ^Checker_Context, bst: ^ast.Bit_Set_Type, t
 			if !is_type_integer(u) {
 				u_str := type_to_string(u)
 				error(bst.underlying, "Expected an underlying integer for the bit set, got %s", u_str)
-				return false
+				// C++ Reference: check_type.cpp:1350-1362. The diagnostic is NOT a bail-out on its
+				// own -- C++ only returns when the type is not even a valid bit-field backing type.
+				// An INTEGER ARRAY is diagnosed and then ACCEPTED as the underlying, which is why
+				// `bit_set[0..<8; [2]u8]` gets ONE error from the oracle and then checks `s += {3}`
+				// cleanly against a 16-bit backing. The port bailed on every non-integer.
+				if !is_valid_bit_field_backing_type(u) {
+					// Bare `return;` from a void C++ function whose caller allocated the type and
+					// never inspects a result -- the same shape as the bounds arm above. Returning
+					// false here produced a spurious, oracle-absent second diagnostic,
+					// "'bit_set[0 ..< 8]' is not a type", plus a downstream cascade.
+					return true
+				}
 			}
 			bs_variant.underlying = u
 		}
@@ -3825,7 +3953,12 @@ check_bit_set_type_expr :: proc(ctx: ^Checker_Context, bst: ^ast.Bit_Set_Type, t
 					if !is_type_integer(u) {
 						u_str := type_to_string(u)
 						error(bst.underlying, "Expected an underlying integer for the bit set, got %s", u_str)
-						return false
+						// C++ Reference: check_type.cpp:1468-1476 -- a bare `return;`. NOTE the
+						// deliberate ASYMMETRY with the range-element arm above: THIS site has no
+						// is_valid_bit_field_backing_type escape, so an integer array is rejected
+						// here and accepted there. That asymmetry is C++'s and must be preserved.
+						// Returning false emitted a spurious "'bit_set[E]' is not a type".
+						return true
 					}
 					bs_variant.underlying = u
 					bits = 8 * type_size_of(u)
@@ -3961,16 +4094,30 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 			}
 		}
 
+		// C++ Reference: check_type.cpp check_bit_field_type --
+		//     if (f->name == nullptr || f->name->kind != Ast_Ident) {
+		//         error(field, "A bit_field's field name must be an identifier");
+		//         continue;
+		//     }
+		// The port invented its own wording. Text aligned; the guard itself was already here.
+		// UNREACHABLE FROM SOURCE, and measured so rather than assumed: `bit_field u32 { 1: int | 3 }`
+		// and `{ a.b: int | 3 }` are both refused by the PARSER first, so this and its two siblings
+		// ("Invalid AST for a bit_field", "A bit_field's field must have a type") are AST-INTEGRITY
+		// guards, not user-facing diagnostics. No witness can exist for them, which is why msgaudit
+		// reports them as missing and no corpus cell ever will.
 		if field_name == "" {
-			error_node(ast_field, "bit_field field must have a name")
+			error_node(ast_field, "A bit_field's field name must be an identifier")
 			continue
 		}
 
 		// Check field type
 		// C++ lines 1064-1085
+		// C++ tests `f->type == nullptr` BEFORE calling check_type, with the message below; the
+		// port tests the RESULT of check_type instead. Kept as-is structurally -- restructuring
+		// unreachable code buys nothing -- but the wording is now the reference's.
 		field_type := check_type(ctx, ast_field.type)
 		if field_type == nil || field_type == t_invalid {
-			error_node(ast_field.type, "Invalid field type in bit_field")
+			error_node(ast_field.type, "A bit_field's field must have a type")
 			continue
 		}
 
@@ -6465,9 +6612,43 @@ check_get_results :: proc(ctx: ^Checker_Context, scope: ^Scope, results_node: ^a
 			}
 
 			entity := alloc_entity_param(scope, token, result_type, false, false)
-			// Set field_group_index for unnamed result (C++ line 2337)
+			// t243: C++ sets EntityFlag_Used|EntityFlag_Param|EntityFlag_Result on BOTH arms of
+			// check_get_results (check_type.cpp:2534 unnamed, :2562 named -- resolved by name).
+			// alloc_entity_param already supplies {.Param, .Used}, so .Result was the ONLY flag
+			// this arm lacked; the port set it on the named arm alone.
+			// OBSERVABILITY, established BEFORE changing it rather than assumed: every reference
+			// reader of EntityFlag_Result needs an entity that is reachable, and an unnamed result
+			// is in NO scope and has NO name (token.text == ""), so none can see it --
+			//   check_stmt.cpp:2935           entity_of_node(lhs), needs an ident to assign to
+			//   checker.cpp:796              check_scope_usage_internal, walks scope members
+			//   checker.cpp:461,500,2035,2061 all name-keyed scope lookups
+			// MEASURED on wit_bigres243/unnamed, the one reader an unnamed result could plausibly
+			// reach: `-> ([1 << 20]u8)` warns for the call-site local ONLY on BOTH compilers.
+			// So this is a parity-of-STATE fix with no behavioural delta today. It is made because
+			// a future reader of the flag would silently diverge, NOT to move a corpus cell -- and
+			// it is recorded as such so nobody later mistakes it for a closed divergence.
+			entity.flags += {.Result}
+			// C++ Reference: check_type.cpp check_get_results. C++ branches on `field->names.count
+			// == 0` and assigns -1 only there; the field_group_index assignment lives in the arm
+			// for fields that HAVE names. The port's `is_unnamed_result` is a wider test -- it also
+			// captures a field whose single name is the parser's EMPTY placeholder, which is what
+			// `-> (int, bool)` produces (parser.cpp parse_field_list: a colon-less item becomes
+			// `ast_field(f, [blank ident], type, ...)`, so names.count is 1, not 0). Only the
+			// UNPARENTHESISED form `-> int` reaches parse_results' own `empty_names` path.
+			//
+			// So C++ gives `-> (int, bool)` groups 0 and 1 and `-> bool` -1, while the port gave -1
+			// to all three. MEASURED against `odin doc -doc-format` on a probe carrying all the
+			// forms, and visible in core/unicode/utf8's encode_rune.
+			//
+			// Only the INDEX is corrected here. ONE further difference remains, recorded as open
+			// rather than guessed at: C++ routes a field whose single name is the parser's EMPTY
+			// placeholder through its NAMED arm (names.count == 1), where it calls
+			// add_entity/add_entity_use with that placeholder ident -- so the reference puts an
+			// empty-named entity into the result scope where the port puts none. That changes scope
+			// CONTENTS, which is why it is not being guessed at.
+			// The EntityFlag_Result half of this note is CLOSED as of t243; see the block below.
 			if var_data, var_ok := &entity.variant.(Entity_Variable); var_ok {
-				var_data.field_group_index = -1
+				var_data.field_group_index = len(field.names) == 0 ? -1 : field_group_index
 				// #971: C++ assigns `param->Variable.param_value = param_value` on BOTH the unnamed
 				// and the named arm.
 				var_data.param_value = param_value
@@ -6869,14 +7050,92 @@ check_type_specialization_to_internal :: proc(
 	}
 
 	if modify_type {
+		// C++ Reference: check_type.cpp:1554-1562 --
+		//     // `specialization` may already be published in a polymorphic record's gen_types
+		//     // cache; finalize it under that record's (recursive) gen_types mutex so a
+		//     // concurrent find_polymorphic_record_entity on another thread cannot observe a
+		//     // torn Type.
+		//     GenTypesData *gen_types = gen_types_data_of_specialization(specialization);
+		//     if (gen_types != nullptr) mutex_lock(&gen_types->mutex);
+		//     gb_memmove(specialization, type, gb_size_of(Type));
+		//     if (gen_types != nullptr) mutex_unlock(&gen_types->mutex);
+		//
+		// The port took NO lock here. C++'s single gb_memmove is at least one unsynchronised
+		// store; the port's is three (kind, variant, flags), so the torn window is wider, not
+		// narrower. Reported from a downstream consumer (rexcode-mir) as an intermittent
+		// ~4-5%-of-builds failure to check base/runtime under threads, where
+		// `Map_Cell(T){}` is diagnosed as having type `Map_Cell` -- i.e. a reader walking the
+		// gen_types cache saw an entry that had not yet been finalised -- with the error COUNT
+		// varying run to run on byte-identical input, which is the signature of a per-entry
+		// window rather than one missing instantiation.
+		gen_types := gen_types_data_of_specialization(specialization)
+		if gen_types != nil {
+			sync.recursive_mutex_lock(&gen_types.mutex)
+		}
 		// C++ line 1560: gb_memmove(specialization, type, sizeof(Type)) — change the
 		// actual type while keeping the types defined within it.
-		specialization.kind = type.kind
+		//
+		// PUBLICATION ORDER IS LOAD-BEARING, and it was wrong. `kind` must be stored LAST.
+		// Every reader dispatches on `kind` and then asserts the matching `variant` member
+		// (check_equivalence.odin's 42 `x.variant.(Type_Foo)` sites, and the same pattern
+		// throughout). Storing `kind` FIRST published "I am now a Type_Basic" while `variant`
+		// still held the OLD payload, so a concurrent reader took the .Basic arm and asserted
+		// against a Type_Generic. That is not theoretical: it is the exact captured trap,
+		//     check_equivalence.odin(259:14) type assertion: Invalid type assertion from
+		//     Type_Variant to Type_Basic, actual type: Type_Generic
+		// measured at 3/480 with 16-way concurrency on $S/phase2/wit_polyrace/raceprobe.
+		// Storing the payload first and `kind` last means a reader that observes the NEW kind
+		// is guaranteed (x86-TSO store ordering, plus the explicit atomic release below) to
+		// observe the new variant with it. A reader that observes the OLD kind sees a wholly
+		// old, self-consistent Type, which is what the pre-existing lock already allowed.
+		//
+		// NOTE ON PARITY: C++ tolerates this window because `x->Basic` is a bare union member
+		// access with NO tag check -- a torn read there yields wrong data, not a trap. The port's
+		// tagged union checks, so what is silently benign in the reference is fatal here. Fixing
+		// the ORDER is what makes the port safe without weakening the check, which is strictly
+		// better than matching C++ by removing the check.
 		specialization.variant = type.variant
 		specialization.flags = type.flags
+		sync.atomic_store_explicit(&specialization.kind, type.kind, .Release)
+		if gen_types != nil {
+			sync.recursive_mutex_unlock(&gen_types.mutex)
+		}
 	}
 
 	return true
+}
+
+// gen_types_data_of_specialization returns the Gen_Types_Data of the polymorphic record that
+// `specialization` was instantiated from, when `specialization` has been published into that
+// record's gen_types cache; nil otherwise.
+//
+// C++ Reference: check_type.cpp:1509-1520. The port had no counterpart at all, which is why the
+// in-place finalization above was unsynchronised. The link is the specialization's own type-name
+// entity: add_polymorphic_record_entity stamps `original_type_for_parapoly` on it (check_type.odin
+// above, C++ check_type.cpp:315), so an instantiation can be walked back to its generic parent
+// and hence to the cache it lives in. A nil result means the type is not a published
+// specialization and needs no lock -- NOT that locking failed.
+gen_types_data_of_specialization :: proc(specialization: ^Type) -> ^Gen_Types_Data {
+	if specialization == nil || specialization.kind != .Named {
+		return nil
+	}
+	named, ok := &specialization.variant.(Type_Named)
+	if !ok || named.type_name == nil {
+		return nil
+	}
+	type_name, tn_ok := &named.type_name.variant.(Entity_Type_Name)
+	if !tn_ok {
+		return nil
+	}
+	orig := type_name.original_type_for_parapoly
+	if orig == nil || orig.kind != .Named {
+		return nil
+	}
+	orig_named, orig_ok := &orig.variant.(Type_Named)
+	if !orig_ok {
+		return nil
+	}
+	return orig_named.gen_types_data
 }
 
 // check_type_specialization_to checks whether a concrete type satisfies a polymorphic
@@ -7581,6 +7840,66 @@ is_polymorphic_type_assignable :: proc(
 //   struct { x: int, y: int } -> struct { x: [^]int, y: [^]int, __$len: int, __$cap: int, allocator: mem.Allocator }
 //
 // C++ Reference: check_type.cpp:2955-3055
+// soa_add_entity_to_scope inserts a synthesized #soa field into the struct's scope, reporting a
+// redeclaration if the name is already taken. Blank identifiers are skipped.
+//
+// C++ Reference: check_type.cpp:2996-3004. Lifted out of complete_soa_type in t243p (body
+// unchanged) so that soa_add_extra_fields can reach it -- a nested procedure cannot be called
+// from file scope.
+soa_add_entity_to_scope :: proc(scope: ^Scope, entity: ^Entity) {
+	name := entity.token.text
+	if !is_blank_ident(name) {
+		existing := scope_insert(scope, entity)
+		if existing != nil {
+			redeclaration_error(name, entity, existing)
+		}
+	}
+}
+
+// soa_add_extra_fields appends the synthetic trailing fields every non-Fixed #soa struct carries:
+// __$len for Slice and Dynamic, plus __$cap and allocator for Dynamic. Fixed carries none, so this
+// is a no-op there. `field_count` is the number of real spread fields already written, which is
+// where the extras start; it is 0 for a polymorphic struct.
+//
+// C++ Reference: check_type.cpp:3422-3441, the `if (is_complete && soa_kind != StructSoa_Fixed)`
+// block in make_soa_struct_internal.
+//
+// EXTRACTED IN t243p, AND WHY IT MATTERS. C++ reaches this block from BOTH of its completed paths
+// -- polymorphic (:3344 sets is_complete = true) and concrete (:3382, :3418) -- because the gate is
+// `is_complete`, not the route taken. The port had the block INLINE in complete_soa_type, reachable
+// only from the concrete path, so the polymorphic path silently skipped it. That is the identical
+// failure mode to FIX 9 one level up: a rule with two callers, written once, drifting because the
+// second caller never ran it. Sharing one definition is what stops it recurring.
+soa_add_extra_fields :: proc(checker: ^Checker, ts: ^Type_Struct, scope: ^Scope, field_count: int) {
+	if ts.soa_kind == .Fixed {
+		return
+	}
+
+	// C++ lines 3423-3426: __$len
+	len_token := make_token_ident("__$len")
+	len_field := alloc_entity_field(scope, len_token, t_int, false, i32(field_count) + 0)
+	ts.fields[field_count + 0] = len_field
+	soa_add_entity_to_scope(scope, len_field)
+	len_field.flags += {.Used}
+
+	// C++ lines 3428-3440: __$cap and allocator, Dynamic only
+	if ts.soa_kind == .Dynamic {
+		cap_token := make_token_ident("__$cap")
+		cap_field := alloc_entity_field(scope, cap_token, t_int, false, i32(field_count) + 1)
+		ts.fields[field_count + 1] = cap_field
+		soa_add_entity_to_scope(scope, cap_field)
+		cap_field.flags += {.Used}
+
+		// C++ line 3435: init_mem_allocator(ctx->checker)
+		init_mem_allocator(checker)
+		allocator_token := make_token_ident("allocator")
+		allocator_field := alloc_entity_field(scope, allocator_token, checker.t_allocator, false, i32(field_count) + 2)
+		ts.fields[field_count + 2] = allocator_field
+		soa_add_entity_to_scope(scope, allocator_field)
+		allocator_field.flags += {.Used}
+	}
+}
+
 complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> bool {
 	original_type := t
 	_ = original_type // C++ line 2957: gb_unused
@@ -7606,13 +7925,15 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 	//
 	// This guard is NOT an optimization, and the note that used to sit here calling it one --
 	// and skipping it because "Wait_Group doesn't expose load directly" -- was wrong on both
-	// counts. It is the idempotence guard, and the counter is perfectly readable: an earlier site in this
-	// same file already does `sync.atomic_load(&old_ts.fields_wait_signal.counter)`.
+	// counts. It is the idempotence guard, and since the Wait_Signal port it is a DIRECT
+	// transcription of the C++ line above: wait_signal_is_set is that `.futex.load()`.
 	//
 	// Without it complete_soa_type ran its whole body every time it was called, including the
 	// unconditional `wait_group_done` at the end. alloc_type_struct starts the counter at 1, so
 	// the second completion drove it to -1 and `sync.wait_group_add` panicked with
-	// "sync.Wait_Group negative counter". Two callers reach the same type in ordinary code:
+	// "sync.Wait_Group negative counter" (that was under the old Wait_Group emulation; a
+	// Wait_Signal cannot go negative, but the guard is still required for idempotence and is
+	// what C++ does). Two callers reach the same type in ordinary code:
 	// make_soa_struct_internal completes it inline when the element's fields are ready,
 	// and the selector path completes it again on first field access
 	// (check_expr.odin:4876, complete_soa_type(..., true)). So
@@ -7621,11 +7942,9 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 	// -- valid Odin the oracle accepts silently -- aborted the checker outright, for every #soa
 	// form (slice, array, dynamic) and for a valid field just as much as a misspelled one.
 	//
-	// C++'s futex is SET when complete; Wait_Group counts DOWN to zero, so the port's
-	// equivalent of "already complete" is counter == 0. Every struct that reaches here was
-	// built by alloc_type_struct and therefore starts at 1, so zero unambiguously means a
-	// completion has already run.
-	if sync.atomic_load(&ts.fields_wait_signal.counter) == 0 {
+	// Since the Wait_Signal port the test is the same one C++ makes: the signal is SET exactly
+	// when a completion has already run.
+	if wait_signal_is_set(&ts.fields_wait_signal) {
 		return true
 	}
 
@@ -7647,7 +7966,37 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 	// marks the struct complete without building anything - the real fields appear at instantiation.
 	// Without this the Generic element reaches the assert below and aborts the whole run.
 	if ts.is_polymorphic {
+		// t243p. C++ Reference: check_type.cpp:3337-3344, then :3422 and :3447.
+		//
+		//     if (is_polymorphic) {
+		//         field_count = 0;
+		//         soa_struct->Struct.fields = permanent_slice_make<Entity *>(field_count+extra_field_count);
+		//         soa_struct->Struct.tags   = gb_alloc_array(..., field_count+extra_field_count);
+		//         soa_struct->Struct.soa_count = 0;
+		//         is_complete = true;
+		//     }
+		//
+		// The `is_complete = true` is the whole point: C++ then FALLS THROUGH to the shared
+		// extra-field block (:3422, gated `is_complete && soa_kind != StructSoa_Fixed`) and to
+		// `add_type_info_type` + `wait_signal_set` (:3447, gated `is_complete`). Neither is gated
+		// on HOW the struct got here, so a polymorphic #soa is completed exactly like a concrete
+		// one -- it just has zero spread fields.
+		//
+		// This arm previously did `ts.soa_count = 0; return true`, which looked equivalent to the
+		// C++ comment above it but was not: it returned BEFORE the extra-field block and BEFORE
+		// the wait signal. Two consequences, one latent and one live:
+		//   * no wait signal -- the FIX 9 hang shape, latent here only because polymorphic bodies
+		//     are checked at instantiation with concrete types (5 forms tried, wit_polysoa243).
+		//   * no __$len -- a polymorphic Slice/Dynamic #soa had no length field at all.
+		// The live defect was elsewhere: because make_soa_struct_internal's polymorphic branch
+		// never CALLED complete_soa_type, the `ts.soa_count = 0` above was UNREACHABLE, so the
+		// struct kept the written count and the port ACCEPTED `f :: proc(x: #soa[4]$T)` applied to
+		// `#soa[4]P`, which the reference REJECTS. Witness wit_polysoa243/pfixed.
 		ts.soa_count = 0
+		ts.fields = make([dynamic]^Entity, int(extra_field_count))
+		ts.tags = make([dynamic]string, int(extra_field_count))
+		soa_add_extra_fields(checker, ts, ts.scope, 0)
+		wait_signal_set(&ts.fields_wait_signal)
 		return true
 	}
 
@@ -7712,7 +8061,7 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 		old_ts = &old_struct.variant.(Type_Struct)
 		if wait_to_finish {
 			// Wait for struct fields to be resolved
-			sync.wait_group_wait(&old_ts.fields_wait_signal)
+			wait_signal_until_available(&old_ts.fields_wait_signal)
 		}
 		// Note: If not wait_to_finish, we assume fields are already resolved (callee responsibility)
 
@@ -7725,16 +8074,9 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 		ts.tags = make([dynamic]string, field_count + int(extra_field_count))
 	}
 
-	// C++ lines 2996-3004: Helper to add entity to scope
-	add_entity_to_scope :: proc(scope: ^Scope, entity: ^Entity) {
-		name := entity.token.text
-		if !is_blank_ident(name) {
-			existing := scope_insert(scope, entity)
-			if existing != nil {
-				redeclaration_error(name, entity, existing)
-			}
-		}
-	}
+	// C++ lines 2996-3004: the entity-insert helper was NESTED here until t243p. It is now the
+	// file-scope soa_add_entity_to_scope, because soa_add_extra_fields needs it and a nested
+	// procedure is not reachable from file scope. Body unchanged.
 
 	// C++ lines 3007-3029: Transform fields from source struct.
 	// #754: bounded by `src_field_count`, which is 0 for an ARRAY element -- that branch built
@@ -7761,7 +8103,7 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 
 			// C++ lines 3018-3023: Set flags
 			ts.fields[i] = new_field
-			add_entity_to_scope(scope, new_field)
+			soa_add_entity_to_scope(scope, new_field)
 			new_field.flags += {.Used}
 
 			if ts.soa_kind != .Fixed { 	// Not Fixed
@@ -7776,34 +8118,10 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 		ts.tags[i] = old_ts.tags[i]
 	}
 
-	// C++ lines 3031-3049: Add extra fields for Slice/Dynamic
-	if ts.soa_kind != .Fixed { 	// Not Fixed
-		// C++ lines 3032-3035: Add __$len field
-		len_token := make_token_ident("__$len")
-		len_field := alloc_entity_field(scope, len_token, t_int, false, i32(field_count) + 0)
-		ts.fields[field_count + 0] = len_field
-		add_entity_to_scope(scope, len_field)
-		len_field.flags += {.Used}
-
-		// C++ lines 3037-3048: Add __$cap and allocator for Dynamic
-		if ts.soa_kind == .Dynamic { 	// Dynamic
-			// __$cap field
-			cap_token := make_token_ident("__$cap")
-			cap_field := alloc_entity_field(scope, cap_token, t_int, false, i32(field_count) + 1)
-			ts.fields[field_count + 1] = cap_field
-			add_entity_to_scope(scope, cap_field)
-			cap_field.flags += {.Used}
-
-			// allocator field (requires mem.Allocator type)
-			// C++ line 3043: init_mem_allocator(checker)
-			init_mem_allocator(checker)
-			allocator_token := make_token_ident("allocator")
-			allocator_field := alloc_entity_field(scope, allocator_token, checker.t_allocator, false, i32(field_count) + 2)
-			ts.fields[field_count + 2] = allocator_field
-			add_entity_to_scope(scope, allocator_field)
-			allocator_field.flags += {.Used}
-		}
-	}
+	// C++ lines 3031-3049 / 3422-3441: Add extra fields for Slice/Dynamic.
+	// t243p: extracted to soa_add_extra_fields so the POLYMORPHIC path runs it too. See that
+	// procedure's comment for why sharing it is the actual fix and not a tidy-up.
+	soa_add_extra_fields(checker, ts, scope, field_count)
 
 	// C++ line 3051: Add type info (commented out in C++)
 	// add_type_info_type(ctx, original_type)
@@ -7811,7 +8129,7 @@ complete_soa_type :: proc(checker: ^Checker, t: ^Type, wait_to_finish: bool) -> 
 	// C++ line 3053: Signal completion
 	// Note: For SOA types created via complete_soa_type, the fields_wait_signal
 	// was already initialized in alloc_type_struct, so we signal done here
-	sync.wait_group_done(&ts.fields_wait_signal)
+	wait_signal_set(&ts.fields_wait_signal)
 
 	return true
 }
@@ -7996,3 +8314,4 @@ check_array_count :: proc(ctx: ^Checker_Context, operand: ^Operand, expr: ^ast.E
 is_type_valid_bit_set_range :: proc(t: ^Type) -> bool {
 	return is_type_integer(t) || is_type_rune(t)
 }
+

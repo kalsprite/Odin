@@ -1,0 +1,47 @@
+Deliberate divergences from what the reference producer emits.
+
+An entry here is a decision, not a defect. Every one states what we do, what the
+reference does, and why the difference is the right trade -- an entry without a
+reason is a bug that has been written down rather than fixed.
+
+---
+
+1. The v5 line header stores paths INLINE (DW_FORM_string) rather than as
+   offsets into .debug_line_str (DW_FORM_line_strp).
+
+   Reference: clang and gcc both use DW_FORM_line_strp for v5 headers.
+
+   Why: both forms are legal and every decoder measured here takes either --
+   llvm-dwarfdump, binutils readelf and elfutils eu-readelf all resolve our
+   paths correctly, and the file-table leg of decode-check.sh compares the
+   RESOLVED path rather than the form. Inline keeps `.debug_line` emittable on
+   its own, with no second section and no cross-section fixup, which is exactly
+   the shape a consumer wants for a line-table-only first slice.
+
+   Cost: a program with many units repeats each directory string per unit.
+   That matters at whole-program scale and not before.
+
+   To change: swap the two entries in `emit_tables_v5`'s format arrays to
+   DW_FORM_line_strp, add a `.debug_line_str` table alongside `Str_Table`, and
+   emit a SECOFF32 fixup per path. Nothing else about the shape moves.
+
+---
+
+2. `DW_AT_const_value` for a NEGATIVE constant is written as SLEB
+   (DW_FORM_sdata); the reference writes it in an unsigned form.
+
+   Reference: `odin` emits `linux::AT_FDCWD` as 18446744073709551516 and
+   `os::TIMEOUT_INFINITE` as 9223372036854775808 -- the unsigned readings of
+   -100 and -9223372036854775808.
+
+   Why: the two are the same 64 bits and every reader applies the DIE's own type
+   when interpreting them, so nothing observable changes. `sdata` says what the
+   value IS without requiring the consumer to have already resolved the type,
+   which matters for a dumper that prints a constant before it has followed
+   DW_AT_type -- llvm-dwarfdump is one, which is exactly why the difference is
+   visible at all.
+
+   Cost: none measured. `parity-check.sh` normalises both sides to the 64-bit
+   pattern rather than to either spelling, so a genuine sign error still fails.
+
+   Found 2026-08-18 by the DIE-tree parity leg, in 2 of 196 objects.

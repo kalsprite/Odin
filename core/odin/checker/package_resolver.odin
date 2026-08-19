@@ -42,6 +42,18 @@ resolve_import_path :: proc(import_path_raw: string, current_pkg_path: string, a
 		import_path = import_path[1:len(import_path) - 1]
 	}
 
+	// The len guard above tests the RAW path. `import ""` arrives here as the two-character token
+	// `""`, which survives it and becomes empty only once the quotes come off, so the
+	// `import_path[0]` test further down panicked with "Index 0 is out of range 0..<0".
+	// Witness wit_imppath244/emptystr.
+	//
+	// C++ never reaches resolution for this input at all: determine_path_from_string rejects the
+	// empty file_str with "Invalid import path: ''" (parser.cpp:6220) before any path is built.
+	// Reporting not-ok here lets check_add_import_decl emit exactly that message.
+	if len(import_path) == 0 {
+		return "", false
+	}
+
 	// Check for collection path (contains colon, not Windows drive letter)
 	colon_idx := strings.index_byte(import_path, ':')
 	if colon_idx > 0 {
@@ -173,6 +185,62 @@ is_reserved_package :: proc(import_path: string) -> bool {
 		}
 	}
 	return false
+}
+
+// normalize_deprecated_core_collection rewrites the deprecated `core:` spelling of the three
+// packages that moved to the `base:` collection, and reports whether it did.
+//
+// C++ Reference: parser.cpp:6225-6247, inside determine_path_from_string:
+//
+//	if (collection_name == "core") {
+//	        bool replace_with_base = false;
+//	        if (string_starts_with(file_str, str_lit("runtime")))         { replace_with_base = true; }
+//	        else if (string_starts_with(file_str, str_lit("intrinsics"))) { replace_with_base = true; }
+//	        if (string_starts_with(file_str, str_lit("builtin")))         { replace_with_base = true; }
+//	        if (replace_with_base) { collection_name = str_lit("base"); }
+//	        ...
+//	}
+//
+// C++ does this ONCE, in the parser, and stores the rewritten path on the decl, so every
+// downstream reader already sees `base:`. This port resolves import paths in the CHECKER (see the
+// scope note on parse_setup_file_decls), so the rewrite has to be applied at each of the two
+// points that turn the literal source string into a canonical import path -- the loader's import
+// walk below, and check_add_import_decl.
+//
+// WITHOUT THIS THE PORT DOES NOT MERELY MISS A WARNING, IT OVER-REJECTS. `import "core:runtime"`
+// and `import "core:intrinsics"` -- both still extremely common in real Odin source -- resolved
+// to no package at all and produced "Unable to find package: core:runtime" plus an "Undeclared
+// name" cascade for every use, where the reference resolves them and merely warns. wit_deprec206.
+//
+// PREFIX, NOT EQUALITY. C++ uses string_starts_with, so `core:runtime_foo` is rewritten to
+// `base:runtime_foo` too (and then fails to resolve there, with the base: spelling in the
+// message). That is a reference quirk, and a quirk is the contract -- reproduced deliberately.
+//
+// C++'s third arm is written `} if (...)` rather than `} else if (...)` -- a missing `else`. It is
+// behaviourally inert, because all three arms assign the same constant to the same flag, so this
+// is written as one disjunction rather than replicating the typo.
+normalize_deprecated_core_collection :: proc(
+	import_path: string,
+	allocator := context.allocator,
+) -> (
+	result: string,
+	deprecated: bool,
+) {
+	CORE :: "core:"
+	if !strings.has_prefix(import_path, CORE) {
+		return import_path, false
+	}
+	file_str := import_path[len(CORE):]
+	if !strings.has_prefix(file_str, "runtime") &&
+	   !strings.has_prefix(file_str, "intrinsics") &&
+	   !strings.has_prefix(file_str, "builtin") {
+		return import_path, false
+	}
+	rewritten, err := strings.concatenate({"base:", file_str}, allocator)
+	if err != nil {
+		return import_path, false
+	}
+	return rewritten, true
 }
 
 // current_build_target describes the platform being checked, in the vocabulary
@@ -807,6 +875,19 @@ load_package_with_dependencies :: proc(
 		// both land in the same sorted, counted stream.
 		syntax_parser := parser.default_parser()
 		syntax_parser.err = syntax_error_pos
+		// t204: the WARNING channel had the identical gap and outlived the `err` fix above.
+		// syntax_warning_pos already existed with exactly the parser's Warning_Handler signature;
+		// nothing installed it, so parser warnings fell through to parser.default_parser()'s
+		// default_warning_handler -- a bare fmt.eprintf that renders
+		//     main.odin(3:14): Warning: ...
+		// where the reference's syntax_warning renders
+		//     main.odin(3:14) Syntax Warning: ...
+		// (different prefix AND a spurious colon), uncounted and outside the sorted collector.
+		//
+		// Two parser warnings reach this today: the `#align requires parentheses` family added
+		// this tick (witness wit_pmisc/pm_align) and `#field_align has been deprecated in favour
+		// of #min_field_align`, which has been mis-rendering all along with no witness to show it.
+		syntax_parser.warn = syntax_warning_pos
 		// #307: the parser package has no continuation-line channel of its own, so the driver
 		// supplies one -- same arrangement as `err` above. The block pair is what makes the
 		// continuation ATTACH: error_line_va only appends while an error value is live, and
@@ -901,6 +982,15 @@ load_package_with_dependencies :: proc(
 					if len(stripped_path) >= 2 && stripped_path[0] == '"' {
 						stripped_path = stripped_path[1:len(stripped_path) - 1]
 					}
+
+					// C++ parser.cpp:6236 rewrote the collection before the path was ever
+					// resolved, so the loader must see `base:` here too -- otherwise
+					// `import "core:runtime"` resolves to ODIN_ROOT/core/runtime, which does not
+					// exist, and the package is never queued at all. NO DIAGNOSTIC IS EMITTED ON
+					// THIS PATH: the loader walks each import decl once per PACKAGE load, so
+					// warning here would double-report. check_add_import_decl owns the message.
+					stripped_path, _ = normalize_deprecated_core_collection(stripped_path, allocator)
+					child_import_path = stripped_path
 
 					// Skip reserved/builtin packages - they're handled by the compiler
 					if is_reserved_package(stripped_path) {
@@ -1171,6 +1261,7 @@ check_package_from_path :: proc(path: string, opts := Session_Options{}, allocat
 _check_package :: proc(path: string, allocator := context.allocator) -> (result: Package_Check_Result, checker: ^Checker, checked_files: []^ast.File, root: ^ast.Package) {
 	// Initialize ODIN_ROOT from environment if needed
 	init_odin_root_from_env()
+	init_default_library_collections() // t207: ODIN_ROOT is known here; C++ main.cpp:3814
 
 	// Recorded BEFORE anything else runs, because everything after it is unreliable without a
 	// root. See the field's own comment: this is a precondition failure, not a finding about the
@@ -1217,6 +1308,13 @@ _check_package :: proc(path: string, allocator := context.allocator) -> (result:
 	// need a gate of their own.
 	defer if len(build_context.dump_doc_path) > 0 {
 		dump_doc(c, build_context.dump_doc_path)
+	}
+	// t243t. Same hook, same lifetime reason. This one must run AFTER the dependency-set walk
+	// (check_files.odin:348) has completed, which it does: these defers unwind at the end of
+	// the whole check, and generate_minimum_dependency_set_internal has its own trailing
+	// barrier (check_files.odin:349) so min_dep_count is settled and not racing.
+	defer if len(build_context.dump_mindep_path) > 0 {
+		dump_mindep(c, build_context.dump_mindep_path)
 	}
 
 	// NOTE(#279 part 2): set_error_collector_info(&c.info) belongs here and is NOT yet wired.

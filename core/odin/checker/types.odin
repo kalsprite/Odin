@@ -1431,6 +1431,14 @@ bit_set_to_int :: proc(t: ^Type) -> ^Type {
 	if bs.underlying != nil && is_type_integer(bs.underlying) {
 		return bs.underlying
 	}
+	// C++ Reference: types.cpp:2312-2314 -- the SECOND early return, which the port did not have.
+	// check_bit_set_type_expr's range-element arm accepts an integer ARRAY as the underlying after
+	// diagnosing it (check_type.cpp:1357-1360), so `bit_set[0..<8; [2]u8]` really does reach here
+	// with a non-integer underlying. Without this arm the port fell through to the bit-range
+	// computation and reported a u8/u16/... backing for a type C++ backs with the array itself.
+	if bs.underlying != nil && is_valid_bit_field_backing_type(bs.underlying) {
+		return bs.underlying
+	}
 
 	// Calculate size based on bit range
 	// C++ Reference: types.cpp:4500-4509
@@ -2201,6 +2209,57 @@ is_type_nearly_simple_compare :: proc(t: ^Type) -> bool {
 	case .Simd_Vector:
 		simd := ct.variant.(Type_Simd_Vector)
 		return is_type_nearly_simple_compare(simd.elem)
+	}
+
+	return false
+}
+
+// check_is_assignable_to_using_offset_zero_subtype reports whether `src` is a struct whose `using`
+// subtype chain reaches `dst` with EVERY step at byte offset 0, i.e. whether a `^src` and a `^dst`
+// name the same address.
+//
+// C++ Reference: types.cpp:5106-5139. This is a strictly narrower relation than
+// check_is_assignable_to_using_subtype below: that one accepts an embedded field wherever it sits,
+// this one accepts only a field that shares its container's address, which is what makes it sound
+// to reinterpret a pointer. Its sole caller is check_proc_params_assignable.
+//
+// The loop walks MULTIPLE fields, for #raw_union, but bails on the first field that is not at
+// offset 0 -- a `using` field after a non-empty one cannot be aliased and neither can anything
+// following it.
+check_is_assignable_to_using_offset_zero_subtype :: proc(src, dst: ^Type) -> bool {
+	if src == nil || dst == nil {
+		return false
+	}
+
+	src_struct := base_type(src)
+	if !is_type_struct(src_struct) {
+		return false
+	}
+
+	struc := src_struct.variant.(Type_Struct)
+	for f, i in struc.fields {
+		if f == nil || f.kind != .Variable || (f.flags & Entity_Flags_Is_Subtype) == {} {
+			continue
+		}
+
+		field_type := f.type
+		if field_type == nil {
+			continue
+		}
+
+		// C++ passes the field type out of type_offset_of; the port's type_offset_of has no such
+		// out parameter, and C++ reads it from the same place this does.
+		if type_offset_of(src_struct, i64(i)) != 0 {
+			return false
+		}
+
+		if are_types_identical(field_type, dst) {
+			return true
+		}
+
+		if check_is_assignable_to_using_offset_zero_subtype(field_type, dst) {
+			return true
+		}
 	}
 
 	return false
@@ -3452,7 +3511,29 @@ lookup_field_with_selection :: proc(c: ^Checker, type_: ^Type, field_name: strin
 				return sel
 			}
 
-			struct_type := type.variant.(Type_Struct)
+			// C++ Reference: types.cpp:3904 -- `wait_signal_until_available(&type->Struct.fields_wait_signal);`
+			// sits exactly here, between the is_type_polymorphic early return above and the read of
+			// `type->Struct.fields` below. The order matters both ways: a polymorphic struct has no
+			// fields and never gets its signal set, so waiting BEFORE that early return would hang
+			// forever; and reading the fields without waiting is the race this fixes.
+			//
+			// HISTORY, because this line was in and out of the tree twice (TICKS 229-232). Its
+			// absence was a real, measured divergence -- the read behind `'Cell(T){}' of type 'Cell'
+			// has no field 'data'`, 7/800 in a paired run against $S/phase2/wit_polyrace/raceprobe,
+			// 0/800 with the wait. It was nonetheless BACKED OUT at tick 229 because adding it hung
+			// the checker on ordinary packages (core/container/topological_sort,
+			// core/crypto/legacy/keccak, core/crypto/noise). The cause was NOT this line: it was the
+			// sync.Wait_Group emulation of Wait_Signal, whose wait path took a mutex unconditionally
+			// even when the signal was already set, so every wait site became a new edge in the
+			// checker's lock graph. That is fixed at the primitive (ast.Wait_Signal, TICK 231b/232),
+			// so the wait is restored here in its C++ position.
+			// Pointer, not a copy -- and the wait must happen THROUGH it. See the long note at
+			// check_compound_lit.odin: a by-value Type_Struct copies the wait signal, which both
+			// deadlocks (under the old Wait_Group) and reads a pre-publication snapshot of the
+			// field list (under any implementation).
+			struct_type := &type.variant.(Type_Struct)
+			wait_signal_until_available(&struct_type.fields_wait_signal)
+
 			field_count := len(struct_type.fields)
 
 			if field_count > 0 {
@@ -4406,13 +4487,9 @@ alloc_type_struct :: proc(c: ^Checker) -> ^Type {
 	t := alloc_type(Type_Struct)
 	set_base_type(t, t)
 
-	// Initialize wait groups for multi-threaded field resolution
-	// C++ Reference: check_type.cpp check_struct_type, 681
-	// The wait groups start with count=1, and wait_group_done() is called
-	// when processing completes. This allows other threads to wait on field availability.
-	st := &t.variant.(Type_Struct)
-	sync.wait_group_add(&st.polymorphic_wait_signal, 1)
-	sync.wait_group_add(&st.fields_wait_signal, 1)
+	// Both wait signals are left UNSET, which is the zero value -- exactly as in C++, where
+	// alloc_type does not touch Type_Struct's futexes and only wait_signal_set publishes them.
+	// Contrast alloc_type_struct_complete below, which must now set them EXPLICITLY.
 
 	return t
 }
@@ -4440,11 +4517,22 @@ alloc_type_struct :: proc(c: ^Checker) -> ^Type {
 // A user-declared `E :: struct {}` in the same position is fine, so this is not about empty
 // structs; it is specifically the never-completed synthesised ones.
 //
-// C++'s futex is SET to mean complete; Wait_Group counts DOWN to zero, so the port's equivalent
-// of "already set" is to never add in the first place.
+// POLARITY, AND WHY THIS PROCEDURE CHANGED WHEN Wait_Signal LANDED. Under the old sync.Wait_Group
+// emulation a zero-valued signal read as ALREADY DONE, so "already set" was expressed by NEVER
+// ADDING -- this procedure was correct by doing nothing. Wait_Signal has the opposite polarity
+// (zero == UNSET, matching C++'s futex), so doing nothing here now means NEVER COMPLETE, which is
+// precisely the #278 hang described above. The set must therefore be EXPLICIT, and it is exactly
+// what C++ alloc_type_struct_complete does:
+//     wait_signal_set(&t->Struct.fields_wait_signal);
+//     wait_signal_set(&t->Struct.polymorphic_wait_signal);
 alloc_type_struct_complete :: proc() -> ^Type {
 	t := alloc_type(Type_Struct)
 	set_base_type(t, t)
+
+	st := &t.variant.(Type_Struct)
+	wait_signal_set(&st.fields_wait_signal)
+	wait_signal_set(&st.polymorphic_wait_signal)
+
 	return t
 }
 
@@ -4455,10 +4543,7 @@ alloc_type_union :: proc(c: ^Checker) -> ^Type {
 	t := alloc_type(Type_Union)
 	set_base_type(t, t)
 
-	// Initialize wait group for multi-threaded polymorphic resolution
-	// C++ Reference: check_type.cpp - unions also need polymorphic wait signal
-	ut := &t.variant.(Type_Union)
-	sync.wait_group_add(&ut.polymorphic_wait_signal, 1)
+	// Wait signal left UNSET (the zero value), as in C++.
 
 	return t
 }

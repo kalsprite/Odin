@@ -86,24 +86,6 @@ compound_assign_to_binary_op :: proc(kind: tokenizer.Token_Kind) -> tokenizer.To
 	}
 }
 
-// immutable_hint_offset mirrors what show_error_on_line (src/error.cpp:283) RETURNS, without
-// printing anything: the error position's index within its leading-whitespace-trimmed source
-// line, or -1 when there is no line to align against. This port never renders the source echo
-// (see #204), but C++'s return value still decides WHICH continuation text is emitted, so the
-// value has to be computed even though the line itself is not printed.
-@(private = "file")
-immutable_hint_offset :: proc(ctx: ^Checker_Context, pos: tokenizer.Pos) -> int {
-	if !show_error_line() {
-		return -1
-	}
-	idx := 0
-	line := get_file_line_as_string(&ctx.checker.info, pos, &idx)
-	if len(line) == 0 {
-		return -1
-	}
-	return idx
-}
-
 // is_diverging_expr checks if an expression never returns (e.g., panic)
 // C++ Reference: check_stmt.cpp lines 0-24
 // (STRANDED above a different procedure until #734 -- another procedure was inserted between
@@ -229,7 +211,9 @@ check_scope_decls :: proc(ctx: ^Checker_Context, stmts: []^ast.Stmt) {
 		return a.token.text < b.token.text
 	})
 
-	for entity in scope_map_slot_order(ordered[:], context.temp_allocator) {
+	// scope_map_initial_cap returns the inline capacity for the proc bodies and blocks this
+	// usually runs on, and the reserved capacity when `s` is a file scope (checker.cpp:240-242).
+	for entity in scope_map_slot_order(ordered[:], context.temp_allocator, scope_map_initial_cap(s)) {
 		if entity == nil {
 			continue
 		}
@@ -1583,6 +1567,9 @@ check_unsafe_return :: proc(ctx: ^Checker_Context, o: ^Operand, type: ^Type, exp
 		}
 	}
 	if o.mode == .Constant && is_type_slice(type) && !is_load_directive {
+		// t205 (#307 class): C++ check_stmt.cpp opens an ERROR_BLOCK() around this pair.
+		begin_error_block()
+		defer end_error_block()
 		unsafe_return_error(o, "a compound literal of a slice")
 		error_line("\tNote: A constant slice value will use the memory of the current stack frame\n")
 	}
@@ -2751,9 +2738,12 @@ check_type_switch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags
 	// UNION ONLY: an `any` type switch does not get this check in the reference.
 	if switch_kind == .Union && is_addressed {
 		if x.mode != .Variable && !is_type_pointer(x.type) {
-			// The port's ast.Ident carries `name` and its own node position rather than a Token,
-			// so the anchor is the ident NODE (C++ uses lhs->Ident.token, the same position).
-			error_node(lhs_ident, "The element variable '%s' cannot be made addressable", lhs_ident.name)
+			// t213: the POSITION was right and the END was not. C++ passes a TOKEN
+			// (lhs->Ident.token), and error(Token) leaves end zeroed; error_node computes an end
+			// one column past the identifier. Text mode cannot tell the two apart -- a one-column
+			// span and an empty end both render as a single `^` -- but -json-errors prints
+			// end_column, and the oracle reported 23 against the port's 24. Found by jsoncheck.sh.
+			error(lhs_ident.pos, "The element variable '%s' cannot be made addressable", lhs_ident.name)
 		}
 	}
 
@@ -3106,32 +3096,47 @@ check_branch_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, flags: Stmt_Fl
 	stmt := node.derived.(^ast.Branch_Stmt)
 	token := stmt.tok
 
+	// t203: EVERY diagnostic in this procedure reports on `token`, not on `node`.
+	// C++ check_stmt.cpp:2944 opens the BranchStmt arm with `Token token = bs->token;` and then
+	// calls `error(token, ...)` at all six sites. The port called `error_node(node, ...)` at all
+	// six, which is not a cosmetic difference: error_node supplies the node's END, error_token
+	// supplies `{}`.
+	// Downstream, show_error_on_line branches on `end.file == pos.file`. With no end it takes the
+	// "error is at one spot; no range known" arm and emits exactly one `^` (error.cpp:479). With
+	// the node's end it takes the range arm -- and for a bare keyword statement that range is
+	// degenerate (end.column <= pos.column), so squiggle_length stays 0 and the port printed a
+	// BLANK LINE where the reference draws a caret. Message and POSITION matched exactly, which
+	// is why this survived every text comparison that looked only at the `Error:` line.
+	// Witnesses: wit_1080/{e1_unroll_break_in_for,e1_unroll_break_in_switch,
+	// e1_unroll_continue_in_for,ctl_unroll_break_toplevel}, wit_1089/{ctl_fallthrough_in_if,
+	// d1_fallthrough_midbody}, wit6b/{d1_fallthrough_pos,e1_unroll_break}.
+
 	// Validate based on token kind
 	#partial switch token.kind {
 	case .Break:
 		if .Break_Allowed not_in flags && stmt.label == nil {
-			error_node(node, "'break' only allowed in non-inline loops or 'switch' statements")
+			error(token, "'break' only allowed in non-inline loops or 'switch' statements")
 		}
 
 	case .Continue:
 		if .Continue_Allowed not_in flags && stmt.label == nil {
-			error_node(node, "'continue' only allowed in non-inline loops")
+			error(token, "'continue' only allowed in non-inline loops")
 		}
 
 	case .Fallthrough:
 		// Fallthrough is switch-specific
 		if .Fallthrough_Allowed not_in flags {
 			if .Type_Switch in flags {
-				error_node(node, "'fallthrough' statement not allowed within a type switch statement")
+				error(token, "'fallthrough' statement not allowed within a type switch statement")
 			} else {
-				error_node(node, "'fallthrough' statement in illegal position, expected at the end of a 'case' block")
+				error(token, "'fallthrough' statement in illegal position, expected at the end of a 'case' block")
 			}
 		} else if stmt.label != nil {
-			error_node(node, "'fallthrough' cannot have a label")
+			error(token, "'fallthrough' cannot have a label")
 		}
 
 	case:
-		error_node(node, "Invalid AST: Branch Statement '%s'", token.text)
+		error(token, "Invalid AST: Branch Statement '%s'", token.text)
 	}
 
 	// Handle labeled branches
@@ -3450,7 +3455,9 @@ check_value_decl_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags:
 	if len(vd.names) > 0 && vd.names[0] != nil {
 		vd_pos = vd.names[0].pos
 	}
-	check_decl_attributes(ctx, vd.attributes[:], &ac, .Var, vd_pos)
+	// t204: `vd` IS C++'s `decl` at checker.cpp:4923 -- the ValueDecl node -- so pass it and let
+	// the diagnostic underline the whole declaration instead of collapsing to a bare caret.
+	check_decl_attributes(ctx, vd.attributes[:], &ac, .Var, vd_pos, vd)
 
 	// Apply attributes to entities
 	for i in 0 ..< entity_count {
@@ -4018,7 +4025,19 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 			// the leading-whitespace-trimmed line. Note offset-1, so the text sits one column
 			// LEFT of the caret C++ draws above it; that off-by-one is C++'s, and reproduced.
 			if e != nil && (.For_Value in e.flags || .Switch_Value in e.flags) {
-				offset := immutable_hint_offset(ctx, e.token.pos)
+				// t204: WAS `immutable_hint_offset(ctx, e.token.pos)`, a file-private helper that
+				// computed show_error_on_line's RETURN VALUE without printing anything, because at
+				// the time it was written the port had no source-echo renderer. It has one now --
+				// error.odin's show_error_on_line, same signature, already used by error_va -- and
+				// C++ calls exactly that here (check_stmt.cpp:603,619). The reference emits a
+				// SECOND positioned source echo, pointing at the `v` in `switch v in ...`, before
+				// the aligned note; the port emitted only the note, so the note aligned under a
+				// line that was never printed. Witness wit_expr3/y_switchptr.
+				//
+				// The end argument matters: C++ passes token_pos_end(e->token), and
+				// show_error_on_line stores it on the live error value, which is what makes the
+				// caret under `v` span the token instead of collapsing.
+				offset := show_error_on_line(e.token.pos, token_end_pos(e.token))
 				if offset >= 0 {
 					error_line("\t")
 					for _ in 0 ..< offset - 1 {
@@ -4501,9 +4520,9 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 			is_blank = is_blank_ident(ident.name)
 		}
 		if is_blank {
-			error_node(expr, "'using' in a statement is not allowed with the blank identifier '_'")
+			error(us.pos, "'using' in a statement is not allowed with the blank identifier '_'")
 		} else {
-			error_node(expr, "'using' applied to an unknown entity")
+			error(us.pos, "'using' applied to an unknown entity")
 		}
 		return true
 	}
@@ -4531,7 +4550,10 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 					if found != nil {
 						expr_str := expr_to_string(expr)
 						defer delete(expr_str)
-						error_node(expr, "Namespace collision while 'using' enum '%s' of: %s", expr_str, found.token.text)
+						// C++ Reference: check_stmt.cpp:786 `error(us->token, ...)`. All three
+						// namespace-collision sites in check_using_stmt_entity anchor on the
+						// `using` KEYWORD, not on the expression -- same rule as #1228's five arms.
+						error(us.pos, "Namespace collision while 'using' enum '%s' of: %s", expr_str, found.token.text)
 						return false
 					}
 
@@ -4540,7 +4562,7 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 				}
 			}
 		} else {
-			error_node(expr, "'using' can be only applied to enum type entities")
+			error(us.pos, "'using' can be only applied to enum type entities")
 		}
 
 	case .Import_Name:
@@ -4604,7 +4626,14 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 				return a.token.text < b.token.text
 			})
 
-			for decl in scope_map_slot_order(ordered[:], context.temp_allocator) {
+			// The START CAPACITY matters here: `scope` is the PACKAGE scope of the import being
+			// `using`d, and checker.cpp:261 reserves a package scope to `2*total_pkg_decl_count`
+			// before the first insert. Simulating from the 16-entry inline capacity replays a
+			// different growth history and therefore a different slot layout, which for a package
+			// of any size is a different order -- and this loop RETURNS on the first collision, so
+			// the order picks which diagnostic is printed. scope_map_initial_cap returns the inline
+			// capacity for scopes C++ never reserves, so it is the right call unconditionally.
+			for decl in scope_map_slot_order(ordered[:], context.temp_allocator, scope_map_initial_cap(scope)) {
 				if decl == nil {
 					continue
 				}
@@ -4621,7 +4650,15 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 					// token_pos_to_string. The port passed raw tokenizer.Pos values to "%v",
 					// printing Pos{file = "...", offset = ..., line = ..., column = ...}
 					// instead of file(line:col). LEDGER 287.
-					error_node(expr, "Namespace collision while 'using' import name '%s' of: %s\n\tat %s\n\tat %s", expr_str, found.token.text, token_pos_to_string(found.token.pos), token_pos_to_string(decl.token.pos))
+					// C++ Reference: check_stmt.cpp:819 `error(us->token, ...)` -- the `using`
+					// keyword, not the expression. Measured: probe210_using put the oracle at
+					// (10:2) and the port at (10:8).
+					// It has to be the POSITION form, not error_node(us, ...): C++ hands `error`
+					// a TOKEN, which carries no end position, so the source echo gets a bare `^`.
+					// error_node spans the whole statement and printed `^~~~~~~~^` instead --
+					// caught by the corpus, which compares the echo lines, after the position
+					// itself already matched.
+					error(us.pos, "Namespace collision while 'using' import name '%s' of: %s\n\tat %s\n\tat %s", expr_str, found.token.text, token_pos_to_string(found.token.pos), token_pos_to_string(decl.token.pos))
 					return false
 				}
 			}
@@ -4640,7 +4677,7 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 				// C++ Reference: check_stmt.cpp check_using_stmt_entity
 				// Need to use pointer to variant for wait group
 				st_ptr := &t.variant.(Type_Struct)
-				sync.wait_group_wait(&st_ptr.fields_wait_signal)
+				wait_signal_until_available(&st_ptr.fields_wait_signal)
 
 				found_scope := struct_type.scope
 				if found_scope == nil {
@@ -4704,7 +4741,8 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 						if prev != nil {
 							expr_str := expr_to_string(expr)
 							defer delete(expr_str)
-							error_node(expr, "Namespace collision while using '%s' of: '%s'", expr_str, prev.token.text)
+							// C++ Reference: check_stmt.cpp:853 `error(us->token, ...)`.
+							error(us.pos, "Namespace collision while using '%s' of: '%s'", expr_str, prev.token.text)
 							return false
 						}
 					}
@@ -4719,7 +4757,7 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 			// where C++ emits one.
 			// The port's AST does not store the `using` keyword token separately; the
 			// statement node's own position IS that keyword, which is what C++ reports.
-			error_node(us, "'using' can only be applied to variables of type 'struct'")
+			error(us.pos, "'using' can only be applied to variables of type 'struct'")
 			return false
 		}
 
@@ -4730,22 +4768,22 @@ check_using_stmt_entity :: proc(ctx: ^Checker_Context, us: ^ast.Using_Stmt, expr
 		// on that same token -- but the fix was applied to that ONE arm and not to its five
 		// siblings, so `using g` on a procedure emitted TWO errors where C++ emits one
 		// (witness $S/phase2/wit_stmt/q_usingproc). READ THE SIBLING.
-		error_node(us, "'using' cannot be applied to a constant")
+		error(us.pos, "'using' cannot be applied to a constant")
 
 	// C++ Reference: check_stmt.cpp:871-875. Entity_Procedure, Entity_ProcGroup AND
 	// Entity_Builtin share ONE arm and ONE message. The port had split .Builtin out with an
 	// invented "cannot be applied to a builtin" that appears nowhere in src/.
 	case .Procedure, .Proc_Group, .Builtin:
-		error_node(us, "'using' cannot be applied to a procedure")
+		error(us.pos, "'using' cannot be applied to a procedure")
 
 	case .Nil:
-		error_node(us, "'using' cannot be applied to 'nil'")
+		error(us.pos, "'using' cannot be applied to 'nil'")
 
 	case .Label:
-		error_node(us, "'using' cannot be applied to a label")
+		error(us.pos, "'using' cannot be applied to a label")
 
 	case .Invalid:
-		error_node(us, "'using' cannot be applied to an invalid entity")
+		error(us.pos, "'using' cannot be applied to an invalid entity")
 
 	case:
 		// DELIBERATE DIVERGENCE FROM THE REFERENCE — maintainer's decision, do not "fix".
@@ -5054,6 +5092,14 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 							name := ident.name
 							found := scope_lookup(ctx.scope, name)
 							if found != nil && are_types_identical(get_entity_type(found), mp.key) {
+								// t205 (#307 class): C++ check_stmt.cpp:1926 opens an ERROR_BLOCK()
+								// here. Without it the Suggestion continuation flushes IMMEDIATELY
+								// to stderr while the primary error waits to be position-sorted, so
+								// the Suggestion surfaces ABOVE every sorted diagnostic. The
+								// IDENTICAL diagnostic in the bit_set arm ~110 lines above already
+								// opens the block -- two copies, one patched. Witness wit_eblk205/e2.
+								begin_error_block()
+								defer end_error_block()
 								expr_str := expr_to_string(expr)
 								defer delete(expr_str)
 								error_node(stmt.vals[0], "'%s' shadows a previous declaration which might be ambiguous with 'for (%s in %s)'", name, name, expr_str)
@@ -5072,12 +5118,18 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 
 					count := len(tup.variables)
 					if count < 1 {
+						// t205 (#307 class): C++ check_stmt.cpp:1942 opens an ERROR_BLOCK().
+						begin_error_block()
+						defer end_error_block()
 						check_not_tuple(ctx, &operand)
 						error_line("\tMultiple return valued parameters in a range statement are limited to a minimum of 1 usable values with a trailing boolean for the conditional, got %d\n", count)
 						skip_expr_range_stmt = true
 					} else {
 						MAXIMUM_COUNT :: 100
 						if count > MAXIMUM_COUNT {
+							// t205 (#307 class): C++ check_stmt.cpp:1949 opens an ERROR_BLOCK().
+							begin_error_block()
+							defer end_error_block()
 							check_not_tuple(ctx, &operand)
 							error_line("\tMultiple return valued parameters in a range statement are limited to a maximum of %d usable values with a trailing boolean for the conditional, got %d\n", MAXIMUM_COUNT, count)
 							skip_expr_range_stmt = true
@@ -5198,6 +5250,10 @@ check_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flags: Stmt
 		// Validate we can iterate over this type
 		// C++ Reference: check_stmt.cpp lines 1939-1958
 		if len(vals) == 0 || vals[0] == nil {
+			// t205 (#307 class): C++ check_stmt.cpp:2021 opens an ERROR_BLOCK() spanning this
+			// error and its two Suggestion continuation lines below.
+			begin_error_block()
+			defer end_error_block()
 			expr_str := expr_to_string(operand.expr)
 			type_str := type_to_string(operand.type)
 			defer delete(expr_str)
@@ -5725,6 +5781,10 @@ check_unroll_range_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt, mod_flag
 
 	// Check if accumulated depth exceeds limit
 	if ctx.inline_for_depth >= MAX_INLINE_FOR_DEPTH && prev_inline_for_depth < MAX_INLINE_FOR_DEPTH {
+		// t205 (#307 class): C++ check_stmt.cpp:1135 opens an ERROR_BLOCK() around whichever of
+		// the two errors below fires and its shared continuation line.
+		begin_error_block()
+		defer end_error_block()
 		if prev_inline_for_depth > 0 {
 			// Nested unroll
 			error_node(node, "Nested '#unroll for' loop cannot be inlined as it exceeds the maximum '#unroll for' depth (%d levels >= %d maximum levels)", v, MAX_INLINE_FOR_DEPTH)

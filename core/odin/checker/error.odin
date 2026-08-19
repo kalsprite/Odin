@@ -635,6 +635,16 @@ get_file_line_as_string :: proc(info: ^Checker_Info, pos: tokenizer.Pos, error_s
 		return ""
 	}
 
+	// C++ reads the source buffer AT AND PAST its end on purpose in this procedure: the compiler's
+	// file buffers are NUL-terminated, so `*(start+len)` yields a defined 0. Odin strings carry no
+	// terminator and indexing at len panics, so the terminator is supplied explicitly here. This is
+	// preferable to re-shaping the loops with bounds guards -- guards the reference does not have
+	// change WHERE the loops stop, and that is exactly the divergence this comment exists to avoid
+	// (see the column loop below, and LEDGER #302 for what a reference-absent guard cost once).
+	byte_at :: proc(s: string, i: int) -> u8 {
+		return s[i] if i < len(s) else 0
+	}
+
 	// Calculate offset if not provided (using line/column)
 	offset := pos.offset
 	if pos.line != 0 && offset == 0 {
@@ -649,11 +659,16 @@ get_file_line_as_string :: proc(info: ^Checker_Info, pos: tokenizer.Pos, error_s
 			}
 		}
 		// Navigate to column within the line (UTF-8 aware)
+		// C++ Reference: parser.cpp get_file_line_as_string. The LINE loop above is bounded in the
+		// reference (`while (start+offset < end)`) and is bounded here to match. This COLUMN loop
+		// is NOT bounded in the reference -- it walks past the end freely, and the `len < offset`
+		// test afterwards is what catches it, returning nullptr so no source line is rendered.
+		// The port had an `offset >= len(src) { break }` guard instead, which STOPS at the end and
+		// then renders a line the reference would have declined to render. Removed: the loop can
+		// now run offset past len exactly as the reference does. It cannot spin, because byte_at
+		// answers 0 at and past the end, 0 is not a UTF-8 continuation, so the else arm advances.
 		for i := 1; i < pos.column; i += 1 {
-			if offset >= len(src) {
-				break
-			}
-			c := src[offset]
+			c := byte_at(src, offset)
 			if c & 0x80 != 0 {
 				// Multi-byte UTF-8 character
 				_, width := utf8.decode_rune_in_string(src[offset:])
@@ -665,8 +680,19 @@ get_file_line_as_string :: proc(info: ^Checker_Info, pos: tokenizer.Pos, error_s
 	}
 
 	// Bounds check
-	if offset >= len(src) {
+	// C++ Reference: parser.cpp get_file_line_as_string -- `if (len < offset) return nullptr;`
+	// which ALLOWS offset == len. The port used `>=`, so an error positioned at the very end of a
+	// file bailed out and rendered as `( empty line )` where the reference renders the source line
+	// and its caret. Witnessed by wit_eof202/{eof_unterm_paren,eof_unterm_brace,eof_after_colon}.
+	if offset > len(src) {
 		return ""
+	}
+
+	// C++ Reference: parser.cpp get_file_line_as_string --
+	//     if (offset > 0 && pos.column > 1 && start[offset-1] == '\n') { offset -= 1; }
+	// a column past the first cannot belong to a line the offset has already left
+	if offset > 0 && pos.column > 1 && src[offset - 1] == '\n' {
+		offset -= 1
 	}
 
 	pos_offset := offset
@@ -676,13 +702,15 @@ get_file_line_as_string :: proc(info: ^Checker_Info, pos: tokenizer.Pos, error_s
 	line_end := pos_offset
 
 	// Special case: if we're at a newline, step back one
-	if offset > 0 && src[line_start] == '\n' {
+	// C++: "Prevent an error token that starts at the boundary of a line that leads to an empty
+	// line from advancing off its line."
+	if offset > 0 && byte_at(src, line_start) == '\n' {
 		line_start -= 1
 	}
 
 	// Scan backwards to find line start
 	for line_start >= 0 {
-		if src[line_start] == '\n' {
+		if byte_at(src, line_start) == '\n' {
 			line_start += 1
 			break
 		}
@@ -838,18 +866,18 @@ show_error_on_line :: proc(pos: tokenizer.Pos, end: tokenizer.Pos) -> int {
 
 	// Calculate squiggle padding from grapheme widths
 	// C++ Reference: error.cpp show_error_on_line --
-	//     for (i32 i = error_start_index_graphemes; i > 0; i -= 1) {
-	//         if (graphemes[i].byte_index == window_open_bytes) break;
+	//     // counts the graphemes before the error. It must not read the one at it: an error at
+	//     // the end of a line indexes one past the last grapheme
+	//     for (i32 i = error_start_index_graphemes-1; i >= 0; i -= 1) {
+	//         if (graphemes[i].byte_index < window_open_bytes) break;
 	//         squiggle_padding += graphemes[i].width;
 	//     }
-	// C++ walks indices N, N-1, ..., 1 -- it INCLUDES grapheme N (the error-start cluster) and
-	// EXCLUDES grapheme 0. The port walked N-1 .. 0, i.e. the mirror image: it excluded N and
-	// included 0. Both sum N widths, so they agree whenever every cluster has the same width,
-	// which is why this stayed invisible until a TAB-indented line rendered (LEDGER #302).
-	// The upper index is clamped because graphemes has exactly line_length_graphemes entries and
-	// error_start_index_graphemes can equal that count when the error sits at end-of-line.
-	for i := min(error_start_index_graphemes, line_length_graphemes - 1); i > 0; i -= 1 {
-		if graphemes[i].byte_index == window_open_bytes {
+	// History (LEDGER #302, revisited): the port originally walked N-1 .. 0 and was "corrected"
+	// to the then-current C++ form (N .. 1, break on ==), which read one grapheme past the end
+	// when the error sat at end-of-line and needed the clamp below to stay in bounds. Upstream
+	// has since adopted the port's original direction, so the clamp goes away with it.
+	for i := error_start_index_graphemes - 1; i >= 0; i -= 1 {
+		if graphemes[i].byte_index < window_open_bytes {
 			break
 		}
 		squiggle_padding += graphemes[i].width
@@ -1308,8 +1336,330 @@ ast_token_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
 		if n.field != nil {
 			return ast_token_pos(n.field)
 		}
+	case ^ast.Enum_Field_Value:
+		// C++ parser_pos.cpp:49 -- `return ast_token(node->EnumFieldValue.name);`
+		if n.name != nil {
+			return ast_token_pos(n.name)
+		}
 	}
 	return node.pos
+}
+
+// ast_end_pos is C++ src/parser_pos.cpp:379 --
+//     TokenPos ast_end_pos(Ast *node) { return token_pos_end(ast_end_token(node)); }
+// with ast_end_token (parser_pos.cpp:139-377, 79 arms) inlined into it.
+//
+// WHY THIS EXISTS. error_node's comment argued the port did not need ast_end_token, because
+// core:odin/ast.Node already carries an `end` the parser fills at construction. That argument is
+// wrong, and the reason is the whole point of the reference procedure: for many node kinds C++
+// DELIBERATELY RETURNS SOMETHING OTHER THAN THE SYNTACTIC END. The parser's `end` is the closing
+// token; ast_end_token walks to the last meaningful CHILD and stops there.
+//
+//     Ast_UnionType   C++ -> last VARIANT      parser -> `}`     measured +2 columns
+//     Ast_BitSetType  C++ -> underlying ?: elem parser -> `]`    measured +1 column
+//     Ast_StructType  C++ -> last FIELD        parser -> `}`
+//     Ast_EnumType    C++ -> last field, else base_type, else the `enum` keyword
+//
+// WITNESSED, and the arithmetic matches exactly:
+//     wit_1076/b7_no_nil_poly_one  `U :: union($T: typeid) #no_nil { T }`
+//                                  oracle `^`+28`~`+`^`, port 30 -- the extra ` }`
+//     wit_1107/bounds_mismatch     `f(bit_set[0..<8])`
+//                                  oracle `^`+11`~`+`^`, port 12 -- the extra `]`
+//
+// SHAPE OF THE PORT. C++ returns a Token and converts with token_pos_end. Several of this port's
+// AST nodes keep only a Pos (`tok_pos`, `open`, `close`) or a bare Token_Kind where C++ keeps a
+// whole Token, so returning a Token here is not possible without changing core:odin/ast -- a
+// PUBLIC package (#868). Returning the END POSITION directly is equivalent and needs no API
+// change: every arm that recurses stays a recursion, every arm that names a Token uses
+// token_end_pos, and every arm that names a single-character Pos (`)`, `}`, `]`) advances it by
+// one, which is precisely what token_pos_end would have computed for that token.
+//
+// The few arms where C++ falls back to a KEYWORD token the port does not retain are spelled with
+// that keyword's exact length from node.pos -- `union` 5, `struct` 6, `enum` 4, `return` 6,
+// `using` 5, `case` 4, `typeid` 6. These are fixed-width keywords, so this is exact, not an
+// approximation. Arms where even that is unavailable fall back to `node.end` and say so.
+pos_advance_columns :: proc(p: tokenizer.Pos, n: int) -> tokenizer.Pos {
+	q := p
+	q.offset += n
+	q.column += n
+	return q
+}
+
+// keyword_pos returns the Pos of a record type's introducing keyword.
+//
+// t204. The `tok_pos` field on Struct_Type/Union_Type/Enum_Type exists to mirror C++'s
+// StructType::token, but core:odin/parser assigned it ONLY for matrix/bit_set/bit_field -- these
+// three were left zero. Nothing read the field until ast_end_pos was ported, so the gap was
+// invisible; then `pos_advance_columns({}, 6)` produced a Pos on line 0 and the renderer drew a
+// bare `^` where the oracle underlines `T :: struct`.
+//
+// The parser now assigns all three. This fallback stays anyway: for every one of these nodes the
+// node's own start IS the keyword (`struct`/`union`/`enum` open the type; `#packed` and friends
+// follow the keyword in Odin), so degrading to node.pos is exact, not approximate -- and it means
+// a future node kind that forgets tok_pos loses nothing.
+keyword_pos :: proc(node: ^ast.Node, tok_pos: tokenizer.Pos) -> tokenizer.Pos {
+	if tok_pos.line != 0 {
+		return tok_pos
+	}
+	return node.pos
+}
+
+// token_end_pos is C++ token_pos_end (parser_pos.cpp:123).
+token_end_pos :: proc(t: tokenizer.Token) -> tokenizer.Pos {
+	p := t.pos
+	p.offset += len(t.text)
+	for i := 0; i < len(t.text); i += 1 {
+		if t.text[i] == '\n' {
+			p.line += 1
+			p.column = 1
+		} else {
+			p.column += 1
+		}
+	}
+	return p
+}
+
+ast_end_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
+	if node == nil {
+		return tokenizer.Pos{}
+	}
+	#partial switch n in node.derived {
+	// --- leaves: the parser's own end is already token_pos_end of the node's single token.
+	case ^ast.Ident:            return node.end
+	case ^ast.Implicit:         return token_end_pos(n.tok)
+	case ^ast.Basic_Lit:        return token_end_pos(n.tok)
+	case ^ast.Basic_Directive:  return token_end_pos(n.tok)
+	case ^ast.Bad_Expr:         return node.end
+	case ^ast.Bad_Stmt:         return node.end
+	case ^ast.Bad_Decl:         return node.end
+
+	case ^ast.Proc_Group:       return pos_advance_columns(n.close, 1)
+	case ^ast.Proc_Lit:
+		if n.body != nil {
+			return ast_end_pos(n.body)
+		}
+		return ast_end_pos(n.type)
+	case ^ast.Comp_Lit:         return pos_advance_columns(n.close, 1)
+
+	case ^ast.Tag_Expr:
+		if n.expr != nil {
+			return ast_end_pos(n.expr)
+		}
+		return token_end_pos(n.op)
+	case ^ast.Unary_Expr:
+		if n.expr != nil {
+			return ast_end_pos(n.expr)
+		}
+		return token_end_pos(n.op)
+	case ^ast.Binary_Expr:      return ast_end_pos(n.right)
+	case ^ast.Paren_Expr:       return pos_advance_columns(n.close, 1)
+	case ^ast.Call_Expr:        return pos_advance_columns(n.close, 1)
+	case ^ast.Selector_Expr:    return ast_end_pos(n.field)
+	case ^ast.Selector_Call_Expr: return ast_end_pos(n.call)
+	case ^ast.Implicit_Selector_Expr:
+		if n.field != nil {
+			return ast_end_pos(n.field)
+		}
+		// C++ returns ImplicitSelectorExpr.token, the leading '.'.
+		return pos_advance_columns(node.pos, 1)
+	case ^ast.Index_Expr:        return pos_advance_columns(n.close, 1)
+	case ^ast.Matrix_Index_Expr: return pos_advance_columns(n.close, 1)
+	case ^ast.Slice_Expr:        return pos_advance_columns(n.close, 1)
+	case ^ast.Ellipsis:
+		if n.expr != nil {
+			return ast_end_pos(n.expr)
+		}
+		// C++ returns Ellipsis.token; this port keeps only its Token_Kind, and the spelling
+		// varies (`..`, `..=`, `..<`), so the parser-recorded end is used for the bare form.
+		return node.end
+	case ^ast.Field_Value:       return ast_end_pos(n.value)
+	case ^ast.Enum_Field_Value:
+		// C++ parser_pos.cpp:191-195 -- the value when present, otherwise the name.
+		if n.value != nil {
+			return ast_end_pos(n.value)
+		}
+		return ast_end_pos(n.name)
+	case ^ast.Deref_Expr:        return token_end_pos(n.op)
+	case ^ast.Ternary_If_Expr:   return ast_end_pos(n.y)
+	case ^ast.Ternary_When_Expr: return ast_end_pos(n.y)
+	case ^ast.Or_Else_Expr:      return ast_end_pos(n.y)
+	case ^ast.Or_Return_Expr:    return token_end_pos(n.token)
+	case ^ast.Or_Branch_Expr:
+		if n.label != nil {
+			return ast_end_pos(n.label)
+		}
+		return token_end_pos(n.token)
+	case ^ast.Type_Assertion:    return ast_end_pos(n.type)
+	case ^ast.Type_Cast:         return ast_end_pos(n.expr)
+	case ^ast.Auto_Cast:         return ast_end_pos(n.expr)
+	case ^ast.Inline_Asm_Expr:   return pos_advance_columns(n.close, 1)
+
+	case ^ast.Empty_Stmt:        return node.end
+	case ^ast.Expr_Stmt:         return ast_end_pos(n.expr)
+	case ^ast.Assign_Stmt:
+		if len(n.rhs) > 0 {
+			return ast_end_pos(n.rhs[len(n.rhs) - 1])
+		}
+		return token_end_pos(n.op)
+	case ^ast.Block_Stmt:        return pos_advance_columns(n.close, 1)
+	case ^ast.If_Stmt:
+		if n.else_stmt != nil {
+			return ast_end_pos(n.else_stmt)
+		}
+		return ast_end_pos(n.body)
+	case ^ast.When_Stmt:
+		if n.else_stmt != nil {
+			return ast_end_pos(n.else_stmt)
+		}
+		return ast_end_pos(n.body)
+	case ^ast.Return_Stmt:
+		if len(n.results) > 0 {
+			return ast_end_pos(n.results[len(n.results) - 1])
+		}
+		return pos_advance_columns(node.pos, 6) // C++ ReturnStmt.token -- `return`
+	case ^ast.For_Stmt:           return ast_end_pos(n.body)
+	case ^ast.Range_Stmt:         return ast_end_pos(n.body)
+	case ^ast.Unroll_Range_Stmt:  return ast_end_pos(n.body)
+	case ^ast.Case_Clause:
+		if len(n.body) > 0 {
+			return ast_end_pos(n.body[len(n.body) - 1])
+		}
+		if len(n.list) > 0 {
+			return ast_end_pos(n.list[len(n.list) - 1])
+		}
+		return pos_advance_columns(n.case_pos, 4) // C++ CaseClause.token -- `case`
+	case ^ast.Switch_Stmt:        return ast_end_pos(n.body)
+	case ^ast.Type_Switch_Stmt:   return ast_end_pos(n.body)
+	case ^ast.Defer_Stmt:         return ast_end_pos(n.stmt)
+	case ^ast.Branch_Stmt:
+		if n.label != nil {
+			return ast_end_pos(n.label)
+		}
+		return token_end_pos(n.tok)
+	case ^ast.Using_Stmt:
+		if len(n.list) > 0 {
+			return ast_end_pos(n.list[len(n.list) - 1])
+		}
+		return pos_advance_columns(node.pos, 5) // C++ UsingStmt.token -- `using`
+
+	case ^ast.Value_Decl:
+		if len(n.values) > 0 {
+			return ast_end_pos(n.values[len(n.values) - 1])
+		}
+		if n.type != nil {
+			return ast_end_pos(n.type)
+		}
+		if len(n.names) > 0 {
+			return ast_end_pos(n.names[len(n.names) - 1])
+		}
+		return tokenizer.Pos{} // C++ returns {} here, NOT the node's end.
+
+	case ^ast.Package_Decl:
+		// C++ returns PackageDecl.name (a Token); this port keeps the name as a string, so the
+		// parser-recorded end -- which is the end of that same name -- is used.
+		return node.end
+	case ^ast.Import_Decl:        return token_end_pos(n.relpath)
+	case ^ast.Foreign_Import_Decl:
+		if len(n.fullpaths) > 0 {
+			return ast_end_pos(n.fullpaths[len(n.fullpaths) - 1])
+		}
+		if n.name != nil {
+			return ast_end_pos(n.name)
+		}
+		return token_end_pos(n.foreign_tok)
+	case ^ast.Foreign_Block_Decl: return ast_end_pos(n.body)
+
+	case ^ast.Attribute:
+		// C++ tests each token for Token_Invalid; the port's are Pos, so an unset one is the
+		// zero Pos (line 0).
+		if n.close.line != 0 {
+			return pos_advance_columns(n.close, 1)
+		}
+		if len(n.elems) > 0 {
+			return ast_end_pos(n.elems[len(n.elems) - 1])
+		}
+		if n.open.line != 0 {
+			return pos_advance_columns(n.open, 1)
+		}
+		return pos_advance_columns(node.pos, 1) // C++ Attribute.token -- `@`
+	case ^ast.Field:
+		if n.tag.kind != .Invalid {
+			return token_end_pos(n.tag)
+		}
+		if n.default_value != nil {
+			return ast_end_pos(n.default_value)
+		}
+		if n.type != nil {
+			return ast_end_pos(n.type)
+		}
+		if len(n.names) > 0 {
+			return ast_end_pos(n.names[len(n.names) - 1])
+		}
+		return node.end
+	case ^ast.Field_List:
+		if len(n.list) > 0 {
+			return ast_end_pos(n.list[len(n.list) - 1])
+		}
+		return pos_advance_columns(n.open, 1) // C++ FieldList.token
+
+	case ^ast.Typeid_Type:
+		if n.specialization != nil {
+			return ast_end_pos(n.specialization)
+		}
+		return pos_advance_columns(node.pos, 6) // C++ TypeidType.token -- `typeid`
+	case ^ast.Helper_Type:        return ast_end_pos(n.type)
+	case ^ast.Distinct_Type:      return ast_end_pos(n.type)
+	case ^ast.Poly_Type:
+		if n.specialization != nil {
+			return ast_end_pos(n.specialization)
+		}
+		return ast_end_pos(n.type)
+	case ^ast.Proc_Type:
+		if n.results != nil {
+			return ast_end_pos(n.results)
+		}
+		if n.params != nil {
+			return ast_end_pos(n.params)
+		}
+		return token_end_pos(n.tok)
+	case ^ast.Relative_Type:      return ast_end_pos(n.type)
+	case ^ast.Pointer_Type:       return ast_end_pos(n.elem)
+	case ^ast.Multi_Pointer_Type: return ast_end_pos(n.elem)
+	case ^ast.Array_Type:         return ast_end_pos(n.elem)
+	case ^ast.Dynamic_Array_Type: return ast_end_pos(n.elem)
+	case ^ast.Struct_Type:
+		if n.fields != nil && len(n.fields.list) > 0 {
+			return ast_end_pos(n.fields.list[len(n.fields.list) - 1])
+		}
+		return pos_advance_columns(keyword_pos(node, n.tok_pos), 6) // C++ StructType.token -- `struct`
+	case ^ast.Union_Type:
+		if len(n.variants) > 0 {
+			return ast_end_pos(n.variants[len(n.variants) - 1])
+		}
+		return pos_advance_columns(keyword_pos(node, n.tok_pos), 5) // C++ UnionType.token -- `union`
+	case ^ast.Enum_Type:
+		if len(n.fields) > 0 {
+			return ast_end_pos(n.fields[len(n.fields) - 1])
+		}
+		if n.base_type != nil {
+			return ast_end_pos(n.base_type)
+		}
+		return pos_advance_columns(keyword_pos(node, n.tok_pos), 4) // C++ EnumType.token -- `enum`
+	case ^ast.Bit_Set_Type:
+		if n.underlying != nil {
+			return ast_end_pos(n.underlying)
+		}
+		return ast_end_pos(n.elem)
+	case ^ast.Bit_Field_Type:     return pos_advance_columns(n.close, 1)
+	case ^ast.Map_Type:           return ast_end_pos(n.value)
+	case ^ast.Matrix_Type:        return ast_end_pos(n.elem)
+	}
+
+	// C++ falls off the switch to `return empty_token`, whose token_pos_end is the zero position.
+	// The port instead keeps the parser-recorded end for kinds the reference does not enumerate
+	// (this port's AST has kinds C++'s does not, e.g. Bit_Field_Field); a zero end would disable
+	// the squiggle entirely for them, which is strictly worse than the status quo ante.
+	return node.end
 }
 
 error_node :: proc(node: ^ast.Node, format: string, args: ..any) {
@@ -1343,7 +1693,11 @@ node_end_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
 	if node == nil {
 		return tokenizer.Pos{}
 	}
-	return node.end
+	// t203: WAS `return node.end`. The parser's `end` is the node's SYNTACTIC end -- its closing
+	// token. C++ does not use that: error(Ast*) calls ast_end_pos -> ast_end_token, which for many
+	// kinds stops at the last meaningful CHILD instead. Routing through the ported ast_end_pos is
+	// what makes the caret span what the reference spans (see its comment for the measurements).
+	return ast_end_pos(node)
 }
 
 // error_line outputs a continuation line for a multi-line error
@@ -1705,6 +2059,41 @@ print_errors_standard :: proc(error_values: []Error_Value) {
 	os.write_string(os.stderr, output)
 }
 
+// split_lines_from_array reproduces C++'s splitter for a diagnostic message body.
+//
+// C++ Reference: string.cpp:369-385
+//
+//	for (;;) {
+//	    String line = string_split_iterator(&it, '\n');
+//	    if (line.len == 0) break;
+//	    line = string_trim_trailing_whitespace(line);
+//	    array_add(&lines, line);
+//	}
+//
+// Two properties that core:strings' split_lines does NOT have, and both are output-visible:
+//   - it STOPS at the first empty line, so a message ending in '\n' contributes no extra entry;
+//   - it TRIMS TRAILING WHITESPACE from every line.
+// print_errors_standard already open-codes exactly this (break on empty, trim_right_space);
+// print_errors_json used strings.split_lines and so emitted a spurious "" as the last "msgs"
+// entry of every diagnostic. Witness wit_bf212/j_basic.
+split_lines_from_array :: proc(msg: string, allocator := context.temp_allocator) -> []string {
+	lines := make([dynamic]string, 0, 4, allocator)
+	rest := msg
+	for {
+		line: string
+		if idx := strings.index_byte(rest, '\n'); idx >= 0 {
+			line, rest = rest[:idx], rest[idx + 1:]
+		} else {
+			line, rest = rest, ""
+		}
+		if len(line) == 0 {
+			break
+		}
+		append(&lines, strings.trim_right_space(line))
+	}
+	return lines[:]
+}
+
 // print_errors_json outputs errors in JSON format
 // C++ Reference: error.cpp:942-1008
 print_errors_json :: proc(error_values: []Error_Value) {
@@ -1749,7 +2138,7 @@ print_errors_json :: proc(error_values: []Error_Value) {
 		strings.write_string(&sb, "\t\t\t\"msgs\": [\n")
 
 		msg := string(ev.msg[:])
-		lines := strings.split_lines(msg, context.temp_allocator)
+		lines := split_lines_from_array(msg, context.temp_allocator)
 
 		if len(lines) > 0 {
 			strings.write_string(&sb, "\t\t\t\t\"")
@@ -1769,7 +2158,14 @@ print_errors_json :: proc(error_values: []Error_Value) {
 		strings.write_string(&sb, "\t\t\t]\n")
 		strings.write_string(&sb, "\t\t}")
 
-		if i + 1 != len(global_error_collector.error_values) {
+		// C++ Reference: error.cpp:1003 `if (i+1 != global_error_collector.error_values.count)`.
+		// C++ iterates THAT SAME array, so the two lengths are the same object. The port iterates
+		// `error_values`, a locally-built copy the caller has already merged and deduplicated, so
+		// comparing against the GLOBAL count was comparing an index into one array with the length
+		// of another: whenever the merge removed an entry the last object still got a comma and the
+		// output was invalid JSON. The `"error_count"` field above already uses len(error_values).
+		// Witness wit_bf212/j_basic.
+		if i + 1 != len(error_values) {
 			strings.write_string(&sb, ",")
 		}
 		strings.write_string(&sb, "\n")

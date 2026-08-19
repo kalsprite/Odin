@@ -357,6 +357,14 @@ scope_insert_with_name_with_mutex :: proc(s: ^Scope, name: string, entity: ^Enti
 				if entity != parent_entity {
 					return parent_entity // Cannot shadow result parameter
 				}
+				// t243g: C++ `goto end` is UNCONDITIONAL inside the EntityFlag_Result
+				// block (checker.cpp:460-466 no-mutex, :499-506 mutex), so BOTH
+				// sub-cases skip the insert -- `entity != found` returns the collision,
+				// and `entity == found` returns nullptr WITHOUT inserting. The port
+				// previously returned only in the first sub-case and fell through to
+				// `s.elements[name] = entity`, adding the result entity to the CHILD
+				// scope where the reference leaves it only in the parent proc scope.
+				return nil
 			}
 		}
 	}
@@ -398,6 +406,14 @@ scope_insert_with_name_no_mutex :: proc(s: ^Scope, name: string, entity: ^Entity
 				if entity != parent_entity {
 					return parent_entity // Cannot shadow result parameter
 				}
+				// t243g: C++ `goto end` is UNCONDITIONAL inside the EntityFlag_Result
+				// block (checker.cpp:460-466 no-mutex, :499-506 mutex), so BOTH
+				// sub-cases skip the insert -- `entity != found` returns the collision,
+				// and `entity == found` returns nullptr WITHOUT inserting. The port
+				// previously returned only in the first sub-case and fell through to
+				// `s.elements[name] = entity`, adding the result entity to the CHILD
+				// scope where the reference leaves it only in the parent proc scope.
+				return nil
 			}
 		}
 	}
@@ -679,16 +695,31 @@ create_scope_from_package :: proc(ctx: ^Checker_Context, pkg: ^ast.Package, allo
 // C++ Reference: checker.cpp:341-367
 // Opens a scope for a statement or type node, setting appropriate flags
 check_open_scope :: proc(ctx: ^Checker_Context, node: ^ast.Node) {
-	// NOTE: C++ unparen_expr is not needed in Odin since we work with ast.Node directly
+	// t243h: C++ line 342 is `node = unparen_expr(node);` and the port dropped it. The note that
+	// used to sit here said it was "not needed in Odin since we work with ast.Node directly",
+	// which is simply false: the port has ^ast.Paren_Expr nodes and its own faithful
+	// unparen_expr (check_expr.odin:25, nil-safe exactly like parser.cpp:1950). Without the
+	// strip, a parenthesized `(proc(..))` or `(struct{..})` falls through the #partial switch
+	// below with NO scope flag set -- no .Proc, so scope_lookup_parent never sets
+	// gone_thru_proc and enclosing locals stay visible; no .Type, so check_scope_usage recurses
+	// into the type's scope instead of skipping it (checker.cpp:865) -- and add_scope would key
+	// the scope on the Paren_Expr rather than on the node C++ keys on.
+	// MEASURED FIRST, then changed: 8 witnesses under $S/phase2/wit_paren243 -- parenthesized
+	// proc/struct/union/enum/bit_set types, plus an enclosing-local reference in BOTH
+	// parenthesized and bare form -- are identical on both compilers today, so no divergence
+	// currently reproduces; the callers evidently strip parens before getting here. Restored
+	// regardless, because the reference strips unconditionally and a structural gap masked only
+	// by present-day caller behaviour is a latent divergence, not a non-issue.
 	assert(node != nil, "check_open_scope: node is nil")
+	unparened := unparen_expr(node)
 
 	// Create new scope as child of current scope
 	scope := create_scope(ctx.scope)
-	add_scope(ctx, node, scope)
+	add_scope(ctx, unparened, scope)
 
 	// Set scope flags based on node type
 	// C++ lines 349-360
-	#partial switch n in node.derived {
+	#partial switch n in unparened.derived {
 	case ^ast.Proc_Type:
 		scope.flags += {.Proc}
 	case ^ast.Struct_Type:
@@ -925,17 +956,69 @@ generate_minimum_dependency_set_internal :: proc(c: ^Checker, start: ^Entity) {
 			} else if .Require in e.flags {
 				add_dependency_to_set(c, e)
 			}
-			// C++ 3009-3049 / 3050-3086: the @(init) and @(fini) arms. Only the two lines
-			// that are NOT diagnostics -- see the header note. C++ gates these on its
-			// `is_init` / `is_fini` locals, which are false exactly when one of the
-			// validations failed; the port's equivalent gate is that a rejected procedure
-			// never reaches the roster it appends to.
-			if .Init in e.flags {
-				add_dependency_to_set(c, e)
-			} else if .Fini in e.flags {
-				add_dependency_to_set(c, e)
-			}
+			// C++ 3009-3049 / 3050-3086: the @(init) and @(fini) arms.
+			// t243q: THE ADDS MOVED OUT OF THIS LOOP -- see the roster walk below the loop.
+			// They used to sit here gated on `.Init in e.flags` / `.Fini in e.flags`, which is
+			// NOT C++'s gate and admitted entities C++ excludes. Details at the new site.
 		}
+	}
+
+	// C++ 3047-3049 and 3081-3084: the @(init) / @(fini) dependency-set adds.
+	//
+	//     if (is_init) { add_to_set(c, e); array_add(&c->info.init_procedures, e); }
+	//     if (is_fini) { add_to_set(c, e); array_add(&c->info.fini_procedures, e); }
+	//
+	// t243q. THE GATE IS `is_init`, NOT THE FLAG. C++ computes is_init/is_fini INLINE in this
+	// procedure (checker.cpp:3014-3043) by running the @(init) validations right here, and clears
+	// it on a bad signature, a non-file scope, or a disabled proc. EntityFlag_Init is set
+	// UNCONDITIONALLY when the attribute is parsed (check_decl.cpp:1332), so the flag is true for
+	// procedures C++ deliberately keeps OUT of the set.
+	//
+	// The port moved those validations to check_decl (check_decl.odin:1177-1231, documented there
+	// as equivalent -- and it IS equivalent for the DIAGNOSTICS). What that relocation lost was the
+	// VALUE at this site, where the gate silently degraded to flag presence. The previous comment
+	// here claimed "the port's equivalent gate is that a rejected procedure never reaches the
+	// roster it appends to" -- true of the ROSTER, but this call site is not the roster, so the
+	// comment defended a claim it did not establish.
+	//
+	// THE ROSTER IS EXACTLY THE GATE. C++ adds to the set iff is_init AND appends to the roster iff
+	// is_init, from the same `if`. So roster membership IS is_init, already computed and already
+	// filtered by `sig_ok && eligible` at check_decl.odin:1204/:1220. Walking the rosters is
+	// therefore the faithful gate, not an approximation of one.
+	//
+	// Order-independent: add_dependency_to_set's `min_dep_count` fetch_add guard (FIX 8) makes set
+	// membership commutative, so running these after the entities walk rather than inside it
+	// changes nothing semantically.
+	//
+	// OBSERVABILITY: MEASURED, AND LARGE. An earlier version of this comment claimed the fix was
+	// LATENT because "an ineligible @(init) is a compile error, so no corpus package contains
+	// one". BOTH CLAUSES WERE FALSE and neither had been tested (t243t/t243u).
+	//
+	// Three routes clear C++'s is_init. Two are errors; the third is NOT:
+	//     check_decl.odin:1196  bad signature   -> error()
+	//     check_decl.odin:1934  non-file scope  -> error()
+	//     check_decl.odin:1955  DISABLED @(init) -> warning()   <-- LEGAL CODE, COMPILES CLEAN
+	// and `e.flags += {.Init}` at check_decl.odin:1200 runs UNCONDITIONALLY, before eligibility is
+	// consulted. So a disabled @(init) carries the flag and is deliberately absent from the roster
+	// -- precisely the case the old flag-gate got wrong.
+	//
+	// A corpus package DOES contain one:
+	//     core/encoding/cbor/tags.odin:102  @(private, init, disabled=!INITIALIZE_DEFAULT_TAGS)
+	// disabled under a documented user define AND under either allocator default.
+	//
+	// Measured with -dump-mindep (dump_mindep.odin, built for this) on a program importing
+	// core/encoding/cbor, pre-fix vs post-fix binaries differing ONLY by this change:
+	//     -define:CBOR_INITIALIZE_DEFAULT_TAGS=false   in_set 1138 -> 554   (584 entities removed)
+	//     default (@(init) eligible)                   in_set 1138 -> 1138  (CONTROL, 0-line diff)
+	// It fires exactly on the disabled case and nowhere else. On the REFERENCE the same define is
+	// the difference between a 641152-byte and an 89520-byte binary, with tag_time_marshal /
+	// tags_register_defaults present vs absent -- so pre-fix the port was holding ~584 entities in
+	// the dependency set that C++ drops. Fixed for parity AND for a symptom.
+	for e in c.info.init_procedures {
+		add_dependency_to_set(c, e)
+	}
+	for e in c.info.fini_procedures {
+		add_dependency_to_set(c, e)
 	}
 
 	// C++ 3090-3105 is the Command_test arm, DELIBERATELY NOT PORTED HERE. It needs
@@ -971,11 +1054,25 @@ add_dependency_to_set :: proc(c: ^Checker, entity: ^Entity) {
 		}
 	}
 
-	// C++ Reference: checker.cpp:2582-2584
-	// Use atomic increment to prevent duplicate processing
-	// If this entity was already added (min_dep_count > 0), skip it
-	sync.atomic_add(&entity.min_dep_count, 1)
-	if entity.min_dep_count > 1 {
+	// C++ Reference: checker.cpp:2794 --
+	//     if (entity->min_dep_count.fetch_add(1, std::memory_order_relaxed) > 0) { return; }
+	// fetch_add returns the OLD value, so EXACTLY ONE caller ever sees 0 and proceeds; every
+	// other caller sees >0 and returns. That single-winner guarantee is the whole point of the
+	// guard -- it is what makes the dependency walk happen once per entity.
+	//
+	// t243j: the port previously did an atomic_add and then a SEPARATE, non-atomic read:
+	//     sync.atomic_add(&entity.min_dep_count, 1)
+	//     if entity.min_dep_count > 1 { return }
+	// Single-threaded that is equivalent (the read observes old+1, so `> 1` iff `old > 0`), which
+	// is why it has never misbehaved: the port drives this walk from one thread today. Under
+	// concurrency it LOSES THE WALK ENTIRELY -- two threads first-visiting the same entity can
+	// both increment before either reads, both observe 2, and BOTH return, so the entity's
+	// dependencies are never added to the minimum dependency set. That failure emits nothing, so
+	// no TEXT-DIFF would ever reveal it.
+	// sync.atomic_add returns the old value, MEASURED not assumed (v=5; atomic_add(&v,1) returned
+	// 5, v became 6), and the port already relies on that at entity.odin:44 and
+	// check_type.odin:1528 -- this site was the lone outlier.
+	if sync.atomic_add(&entity.min_dep_count, 1) > 0 {
 		return
 	}
 
@@ -1181,32 +1278,101 @@ scope_map_initial_cap :: proc(scope: ^Scope) -> u32 {
 // scope_map_initial_cap. It defaults to the inline capacity for scopes that are never reserved
 // (proc bodies, blocks, parameter scopes).
 scope_map_slot_order :: proc(entities: []^Entity, allocator := context.temp_allocator, start_cap: u32 = SCOPE_MAP_INLINE_CAP) -> []^Entity {
+	// The unkeyed form hashes each entity's OWN token text, which is the scope key for every
+	// caller that reaches here -- proc bodies, blocks, parameter and field scopes, where a name
+	// is bound to the entity that carries it. Only a PACKAGE scope can bind one entity under a
+	// second name (`to_dynamic :: clone_to_dynamic`), and that caller uses the keyed form below.
+	keys := make([]string, len(entities), context.temp_allocator)
+	for e, i in entities {
+		keys[i] = e.token.text
+	}
+	_, out := scope_map_slot_order_keyed(keys, entities, allocator, start_cap)
+	return out
+}
+
+// scope_map_slot_order_keyed is scope_map_slot_order with the map KEY given separately from the
+// entity, and it returns the keys permuted alongside the entities.
+//
+// C++'s ScopeMap is keyed by the INTERNED NAME (`pkg->scope->elements.keys[i]`), and
+// odin_doc_add_pkg_entries reads that key back out for the entry's name -- docs_writer.cpp:1105
+// `entry.name = odin_doc_write_string(w, interned.string());` -- rather than the entity's token.
+// The two differ whenever one entity is bound under a second name:
+//     core/slice/slice.odin:501  to_dynamic       :: clone_to_dynamic
+//     core/slice/sort.odin:387   is_sorted_by_cmp :: is_sorted_cmp
+// Both names are separate SLOTS holding the SAME Entity *. So the key decides two things the
+// unkeyed form could not express -- which slot the binding lands in, and what the entry is
+// called -- and an entity-keyed side map (which is what the doc writer had) cannot hold both
+// names at once: the second write silently replaces the first.
+scope_map_slot_order_keyed :: proc(
+	keys: []string,
+	entities: []^Entity,
+	allocator := context.temp_allocator,
+	start_cap: u32 = SCOPE_MAP_INLINE_CAP,
+) -> ([]string, []^Entity) {
+	assert(len(keys) == len(entities))
 	cap_ := start_cap
-	slots := make([]Scope_Map_Slot, cap_, context.temp_allocator)
+	slots := make([]Scope_Map_Keyed_Slot, cap_, context.temp_allocator)
 
 	count: u32 = 0
-	for e in entities {
+	for e, i in entities {
 		// C++ Reference: src/checker.hpp:392 -- grow at 75% load BEFORE inserting, rehashing
 		// in old-slot order (not insertion order), which can permute the result.
 		if count >= cap_ - (cap_ >> 2) {
 			new_cap := cap_ << 1
-			new_slots := make([]Scope_Map_Slot, new_cap, context.temp_allocator)
-			for i in 0..<cap_ {
-				if slots[i].hash != 0 {
-					scope_map_sim_insert(new_slots, new_cap - 1, slots[i].hash, slots[i].e)
+			new_slots := make([]Scope_Map_Keyed_Slot, new_cap, context.temp_allocator)
+			for j in 0..<cap_ {
+				if slots[j].hash != 0 {
+					scope_map_sim_insert_keyed(new_slots, new_cap - 1, slots[j].hash, slots[j].key, slots[j].e)
 				}
 			}
 			slots, cap_ = new_slots, new_cap
 		}
-		scope_map_sim_insert(slots, cap_ - 1, scope_map_hash(e.token.text), e)
+		scope_map_sim_insert_keyed(slots, cap_ - 1, scope_map_hash(keys[i]), keys[i], e)
 		count += 1
 	}
 
+	out_keys := make([dynamic]string, 0, len(entities), allocator)
 	out := make([dynamic]^Entity, 0, len(entities), allocator)
 	for i in 0..<cap_ {
 		if slots[i].hash != 0 {
+			append(&out_keys, slots[i].key)
 			append(&out, slots[i].e)
 		}
 	}
-	return out[:]
+	return out_keys[:], out[:]
+}
+
+// Scope_Map_Keyed_Slot is Scope_Map_Slot carrying the map KEY alongside the entity. The key has
+// to live IN the slot rather than in a parallel array because scope_map_sim_insert_keyed is
+// Robin Hood hashing: an insert DISPLACES richer entries as it probes, so a slot's occupant
+// changes identity mid-insert and a side array indexed by slot would decouple from it.
+Scope_Map_Keyed_Slot :: struct {
+	hash: u32,
+	key:  string,
+	e:    ^Entity,
+}
+
+// scope_map_sim_insert_keyed is scope_map_sim_insert with the key carried through the swap. Kept
+// as a separate procedure rather than generalising the original: the unkeyed form has eight call
+// sites in the checker proper and this is a doc-writer concern.
+scope_map_sim_insert_keyed :: proc(slots: []Scope_Map_Keyed_Slot, mask: u32, hash_in: u32, key_in: string, e_in: ^Entity) {
+	hash, key, e := hash_in, key_in, e_in
+	pos := hash & mask
+	dist: u32 = 0
+	for {
+		s := &slots[pos]
+		if s.hash == 0 {
+			s.hash, s.key, s.e = hash, key, e
+			return
+		}
+		existing := (pos - s.hash) & mask
+		if dist > existing {
+			s.hash, hash = hash, s.hash
+			s.key, key = key, s.key
+			s.e, e = e, s.e
+			dist = existing
+		}
+		dist += 1
+		pos = (pos + 1) & mask
+	}
 }

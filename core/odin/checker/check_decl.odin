@@ -79,7 +79,18 @@ check_init_variable :: proc(ctx: ^Checker_Context, e: ^Entity, operand: ^Operand
 			add_type_and_value(ctx, operand.expr, .Value, entity_t, exact_value_typeid(operand.type))
 			return entity_t
 		} else {
-			// ERROR_BLOCK()
+			// t204: C++ check_decl.cpp:53 opens an ERROR_BLOCK() here and the port had it
+			// COMMENTED OUT. Without the bracket, error_line writes straight through while the
+			// diagnostic itself goes into the sorted collector, so the continuation came out
+			// BEFORE the error it belongs to:
+			//     port:    "\tThe type of the variable 'x' cannot be inferred ..."
+			//              "main.odin(2:23) Error: Cannot assign a type 'int' to variable 'x'"
+			//     oracle:  the same two lines in the opposite order.
+			// Witness wit_b3rest/a_infer_type. This is the #307 failure mode again -- third
+			// occurrence -- and the giveaway is a diff whose only content is line ORDER.
+			begin_error_block()
+			defer end_error_block()
+
 			t_str := type_to_string(operand.type)
 
 			if is_type_polymorphic(operand.type) {
@@ -232,7 +243,7 @@ check_global_variable_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr:
 	decl := decl_info_of_entity(e)
 	assert(decl == ctx.decl)
 	if decl != nil {
-		check_decl_attributes(ctx, decl.attributes, &ac, .Var, e.token.pos)
+		check_decl_attributes(ctx, decl.attributes, &ac, .Var, e.token.pos, decl.decl_node)
 	}
 
 	// C++ Reference: check_decl.cpp:1631-1634
@@ -945,7 +956,9 @@ check_const_decl :: proc(ctx: ^Checker_Context, e: ^Entity, type_expr: ^ast.Expr
 		// diagnostic from check_collect_value_decl with the DECL node (checker.cpp:4921), so it
 		// lands on the declaration's NAME. Without this the port fell back to `elem` and pointed
 		// inside the attribute: oracle col 13 (`X`) vs port col 4 (`private`).
-		check_decl_attributes(ctx, decl.attributes[:], &ac, .Const, e.token.pos)
+		// t204: decl_node is C++'s `decl` at checker.cpp:4923. Threading it supplies the END the
+		// bare Pos could not, so `@(private) X :: 1` in a proc body underlines `X :: 1`.
+		check_decl_attributes(ctx, decl.attributes[:], &ac, .Const, e.token.pos, decl.decl_node)
 
 		// #999: the eight per-attribute rejections that stood here were MOVED into
 		// check_decl_attributes (check_decl_helpers.odin), which is where C++ performs them --

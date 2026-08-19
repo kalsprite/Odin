@@ -346,6 +346,14 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// documented but empty, so `min_dep_count` never rose above zero and the loop inside
 	// check_unchecked_bodies found nothing to do.
 	generate_minimum_dependency_set_internal(c, c.info.entry_point)
+	// C++ Reference: checker.cpp:3218 -- generate_minimum_dependency_set's own trailing barrier,
+	// immediately after its call to generate_minimum_dependency_set_internal. The walk dispatches
+	// add_dependency_to_set_worker tasks (checker.cpp:2904), so the set is not complete when the
+	// call returns; check_unchecked_bodies below reads min_dep_count and would race it.
+	// NOTE this belongs to the WRAPPER only. The second call at checker.cpp:7780 ("update minimum
+	// dependency set again") is to _internal directly and deliberately has no wait -- the merge at
+	// 7787 supplies it.
+	thread_pool_wait()
 	//
 	// SCOPE (task #272, decided by enumerating every reader of min_dep_count in C++):
 	//   llvm_backend*.cpp x5, main.cpp:3408          -> CODEGEN, out of scope for a checker
@@ -410,6 +418,11 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 
 	// Final queue drain
 	check_merge_queues_into_arrays(c)
+	// C++ Reference: checker.cpp:7788 -- the reference repeats the barrier here even though
+	// check_merge_queues_into_arrays now ends with one. Kept for the same reason it is kept there:
+	// the merge's own wait covers work the merge spawned, this one covers anything check_test
+	// _procedures above left in flight.
+	thread_pool_wait()
 
 	// =========================================================================
 	// Phase 7: Validation (Cycle Detection, Entry Point)
@@ -431,6 +444,19 @@ check_files :: proc(c: ^Checker, files: []^ast.File) -> bool {
 	// Check entry point
 	// C++ Reference: checker.cpp:7441-7463
 	check_entry_point(c)
+
+	// C++ Reference: checker.cpp:7813-7814 --
+	//     thread_pool_wait();
+	//     GB_ASSERT(c->procs_to_check.count == 0);
+	// The barrier is the last one in check_parsed_files and the assertion is what gives it teeth:
+	// by this point every procedure body must have been consumed, either by a worker or by the
+	// sequential path. A non-empty procs_to_check here means bodies were scheduled and never
+	// checked -- silently missing diagnostics, which no text comparison can detect because the
+	// output is simply shorter on both a passing and a failing package. GB_ASSERT is active in
+	// every C++ build (it is not debug-gated), so this is the reference's behaviour, not a
+	// debug-only aid. It sits BEFORE the safety phase below, exactly as it does at 7814.
+	thread_pool_wait()
+	assert(len(c.procs_to_check) == 0, "procs_to_check must be empty after the final barrier")
 
 	// Safety net: any procedure that is .Used but whose body was never checked gets checked
 	// here, and every Proc_Info is moved into info.all_procedures.
@@ -773,6 +799,16 @@ check_merge_queues_into_arrays :: proc(c: ^Checker) {
 			break
 		}
 	}
+
+	// C++ Reference: checker.cpp:7459 -- the LAST statement of check_merge_queues_into_arrays.
+	//
+	// This procedure is a MERGE POINT: seven pipeline sites call it precisely to reach a state
+	// where the queues are empty and the arrays are authoritative. A drain that spawns work --
+	// complete_soa_type is the live example -- leaves that guarantee only half-kept unless the
+	// merge also waits, so the reference ends it with a barrier and the next phase reads arrays
+	// that are actually final. thread_pool_wait is nil-safe and tests `tasks_left != 0` as its
+	// loop condition, so with no pool or nothing outstanding this costs one atomic load.
+	thread_pool_wait()
 }
 
 // =============================================================================

@@ -43,6 +43,7 @@ ast_kind_string :: proc(node: ^ast.Node) -> string {
 	case ^ast.Dynamic_Array_Type: return "dynamic array type"
 	case ^ast.Ellipsis: return "ellipsis"
 	case ^ast.Empty_Stmt: return "empty statement"
+	case ^ast.Enum_Field_Value: return "enum field value"
 	case ^ast.Enum_Type: return "enum type"
 	case ^ast.Expr_Stmt: return "expression statement"
 	case ^ast.Field: return "field"

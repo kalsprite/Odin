@@ -472,6 +472,15 @@ Type_Struct :: ast.Type_Struct
 // Type_Union is re-declared from ast.Type_Union
 Type_Union :: ast.Type_Union
 
+// Wait_Signal and its operations are re-declared from ast.
+// C++ Reference: src/threading.cpp:122-135. These replace an earlier sync.Wait_Group
+// emulation whose wait path took a mutex unconditionally; see the long note at
+// ast/semantic_types.odin Wait_Signal and COVERAGE.md TICK 231b.
+Wait_Signal :: ast.Wait_Signal
+wait_signal_until_available :: ast.wait_signal_until_available
+wait_signal_set :: ast.wait_signal_set
+wait_signal_is_set :: ast.wait_signal_is_set
+
 // Union_Kind is re-declared from ast.Union_Kind
 Union_Kind :: ast.Union_Kind
 
@@ -1338,6 +1347,12 @@ Checker :: struct {
 	t_type_info_matrix: ^Type, // Type_Info_Matrix
 	t_type_info_soa_pointer: ^Type, // Type_Info_Soa_Pointer
 	t_type_info_bit_field: ^Type, // Type_Info_Bit_Field
+	// C++ Reference: types.cpp:709 `t_type_info_fixed_capacity_dynamic_array`, resolved at
+	// checker.cpp:3546. The port had NO field for it, so init_core_type_info resolved 59 of C++'s
+	// 61 core type-info types. Found by diffing the two functions' ASSIGNED-NAME SETS, the same
+	// arm-set method that found the add_min_dep_type_info omissions -- and it is the same type kind
+	// again (LEDGER #709, #515): fixed-capacity dynamic arrays are the recurring blind spot.
+	t_type_info_fixed_capacity_dynamic_array: ^Type, // Type_Info_Fixed_Capacity_Dynamic_Array
 	t_type_info_named_ptr: ^Type, // ^Type_Info_Named
 	t_type_info_integer_ptr: ^Type, // ^Type_Info_Integer
 	t_type_info_rune_ptr: ^Type, // ^Type_Info_Rune
@@ -1365,6 +1380,8 @@ Checker :: struct {
 	t_type_info_matrix_ptr: ^Type, // ^Type_Info_Matrix
 	t_type_info_soa_pointer_ptr: ^Type, // ^Type_Info_Soa_Pointer
 	t_type_info_bit_field_ptr: ^Type, // ^Type_Info_Bit_Field
+	// C++ Reference: types.cpp:738, built at checker.cpp:3575.
+	t_type_info_fixed_capacity_dynamic_array_ptr: ^Type, // ^Type_Info_Fixed_Capacity_Dynamic_Array
 	t_allocator: ^Type, // core:runtime.Allocator
 	t_allocator_ptr: ^Type, // ^Allocator
 	t_allocator_error: ^Type, // core:runtime.Allocator_Error

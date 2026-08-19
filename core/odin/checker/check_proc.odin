@@ -554,7 +554,29 @@ check_procedure_bodies :: proc(c: ^Checker) {
 
 		// Process all procedures in procs_to_check array
 		// C++ Reference: checker.cpp check_procedure_bodies
-		for i in 0 ..< len(c.procs_to_check) {
+		// THE BOUND MUST BE RE-READ EVERY ITERATION. C++ spells this `for_array(i,
+		// c->procs_to_check)`, and for_array_off (common.cpp:39) expands to
+		//     for (isize i = 0; i < (array).count; i++)
+		// which reloads `.count` on every test. That is load-bearing here, not incidental:
+		// consume_proc_info CHECKS A BODY, and checking a body that contains a procedure literal
+		// reaches check_procedure_later (check_expr.cpp:7380). On this path
+		// global_procedure_body_in_worker_queue is FALSE -- it is only set on the parallel branch
+		// below -- so check_procedure_later takes its `else` arm and APPENDS to procs_to_check.
+		// C++ therefore consumes those newly-discovered bodies in the SAME loop, and keeps going
+		// until the array stops growing.
+		//
+		// `for i in 0 ..< len(c.procs_to_check)` evaluates its bound ONCE, so the port checked only
+		// the entries present when the loop started -- and then `clear` a few lines down DISCARDED
+		// every body appended during the pass. MEASURED, not assumed: a probe binary printing the
+		// count either side of this loop showed the array growing 302 -> 493 on a two-proc witness,
+		// 323 -> 522 on core/crypto, and 3325 -> 8220 on core/odin/parser. Thousands of bodies per
+		// package were being dropped here.
+		//
+		// The port still reached the right ANSWER because check_unchecked_bodies sweeps up
+		// whatever this loop missed, which is exactly why no corpus cell and no parity package ever
+		// showed it. That makes this a PHASE divergence rather than a missing-diagnostic one: the
+		// bodies were checked, in the wrong phase, via the safety net rather than the main loop.
+		for i := 0; i < len(c.procs_to_check); i += 1 {
 			// Cooperative cancellation, mirroring the worker path below: once the error cap
 			// is hit every further diagnostic is dropped, so there is nothing to gain from
 			// checking the remaining bodies. See CPP_DEVIATIONS.md [EMBED-1].
@@ -1286,6 +1308,16 @@ ast_file_vet_style :: proc(file: ^ast.File) -> bool {
 	return .Style in flags
 }
 
+// ast_file_vet_deprecated checks if deprecation vetting is enabled for a file
+// C++ Reference: parser.cpp:56-58
+//
+// Gates the severity of the `core:` -> `base:` import deprecation: error under
+// `#+vet deprecated`, warning otherwise (parser.cpp:6241-6246).
+ast_file_vet_deprecated :: proc(file: ^ast.File) -> bool {
+	flags := ast_file_vet_flags(file)
+	return .Deprecated in flags
+}
+
 // scope_insert_no_mutex is defined in scope.odin
 
 // add_deps_from_child_to_parent propagates dependencies from nested to parent proc
@@ -1675,8 +1707,15 @@ check_scope_usage_internal :: proc(c: ^Checker, scope: ^Scope, vet_flags_param: 
 		// fires on a plain `odin check`.
 		// MEASURED, and note BOTH compilers exit 0 because it is a WARNING:
 		//     `big :: proc() -> (buf: [1 << 20]u8) { return }`
-		//     oracle: warns for the named result `buf` AND for the local at the call site
-		//     port:   the call-site local only
+		// t243: CLOSED. RE-MEASURED BYTE-IDENTICAL on both forms (witness wit_bigres243):
+		//     named   `-> (buf: [1 << 20]u8)`: both warn for `buf` AND for the call-site local
+		//     unnamed `-> ([1 << 20]u8)`     : both warn for the call-site local ONLY
+		// This note previously ended "port: the call-site local only", recording the named result
+		// as MISSING on the port side. That divergence no longer reproduces; it was closed by a
+		// later change elsewhere and the note was never revisited. A stale claim here is worse
+		// than no claim, because a comment asserting a MEASURED gap invites the next reader to
+		// "fix" a path that is already at parity. RE-MEASURE before trusting any divergence a
+		// comment reports -- including this one.
 		} else if e.kind == .Variable &&
 		   ((.Param not_in e.flags && .Using not_in e.flags && .Static not_in e.flags && .Field not_in e.flags) ||
 		    .Result in e.flags) {
@@ -2216,6 +2255,31 @@ default_type :: proc(t: ^Type) -> ^Type {
 
 // type_align_of returns the alignment requirement of a type in bytes
 // C++ Reference: checker.cpp (various locations)
+// type_target_max_align ports C++ type_target_max_align (src/types.cpp), added upstream 2026-08-17.
+//
+// C++ Reference:
+//     // The largest alignment the target permits. The i386 System V psABI caps every scalar at 4,
+//     // unlike Windows. Anything that derives its alignment from a COMPONENT rather than from its
+//     // own size has to be capped here too.
+//     gb_internal i64 type_target_max_align(void) {
+//         i64 max_align = build_context.max_align;
+//         if (build_context.metrics.arch == TargetArch_i386 &&
+//             build_context.metrics.os != TargetOs_windows) {
+//             max_align = gb_min(max_align, 4);
+//         }
+//         return max_align;
+//     }
+//
+// UNWITNESSABLE ON THIS TARGET, like #1115 before it: the i386 arm is the only thing that makes
+// this differ from build_context.max_align, and the corpus runs amd64. Ported by reading.
+type_target_max_align :: proc() -> int {
+	max_align := int(build_context.max_align)
+	if build_context.metrics.arch == .I386 && build_context.metrics.os != .Windows {
+		max_align = min(max_align, 4)
+	}
+	return max_align
+}
+
 type_align_of :: proc(t: ^Type) -> int {
 	if t == nil {
 		return 1
@@ -2252,10 +2316,22 @@ type_align_of :: proc(t: ^Type) -> int {
 			return int(build_context.ptr_size)
 		case .Any, .Typeid:
 			return 8 // C++ returns a literal 8 for both, not a word
+		// A complex aligns to one component and a quaternion to one of its four. Both are now
+		// capped by type_target_max_align() -- upstream 2026-08-17, because a type that derives
+		// its alignment from a COMPONENT rather than from its own size still must not exceed what
+		// the target permits. C++ Reference: types.cpp type_align_of_internal --
+		//     case Basic_complex32: case Basic_complex64: case Basic_complex128:
+		//         return gb_min(type_size_of_internal(t, path) / 2, type_target_max_align());
+		//     case Basic_quaternion64: case Basic_quaternion128: case Basic_quaternion256:
+		//         return gb_min(type_size_of_internal(t, path) / 4, type_target_max_align());
+		// The port's `max(..., 1)` floor is NOT in the reference and is dropped with this change:
+		// no complex or quaternion basic has a size small enough to reach it, so it never fired,
+		// and keeping it would be a guard the reference does not have (see LEDGER #302 on what
+		// that costs).
 		case .Complex32, .Complex64, .Complex128:
-			return max(basic.size / 2, 1)
+			return min(basic.size / 2, type_target_max_align())
 		case .Quaternion64, .Quaternion128, .Quaternion256:
-			return max(basic.size / 4, 1)
+			return min(basic.size / 4, type_target_max_align())
 		}
 		// Every remaining basic (the plain integers, floats, booleans and runes) aligns
 		// to its own size.
@@ -2268,7 +2344,9 @@ type_align_of :: proc(t: ^Type) -> int {
 		// reference and 16 here.
 		// KNOWN, UNWITNESSABLE-ON-THIS-TARGET divergence, fixed by reading rather than by probe;
 		// see the note in COVERAGE.md about why that is still worth doing.
-		return clamp(next_pow2_int(basic.size), 1, int(build_context.max_align)) if basic.size > 0 else 1
+		// The cap became type_target_max_align() upstream 2026-08-17; on i386 non-Windows that is
+		// 4 rather than build_context.max_align.
+		return clamp(next_pow2_int(basic.size), 1, type_target_max_align()) if basic.size > 0 else 1
 
 	// C++ has NO explicit Type_Pointer / Type_MultiPointer / Type_Proc arm in
 	// type_align_of_internal -- all three fall to its tail,
@@ -2428,11 +2506,14 @@ type_align_of :: proc(t: ^Type) -> int {
 		total_size := int(sv.count) * elem_size
 		// Round up to power of 2
 		// #1115 (B2-h h6). C++ Reference: types.cpp type_align_of_internal, case Type_SimdVector:
-		//     return gb_clamp(next_pow2(type_size_of_internal(t, path)), 1, build_context.max_simd_align*2);
-		// The port hard-coded 64 and omitted next_pow2. 64 == max_simd_align*2 on amd64
-		// (max_simd_align 32), so this target cannot witness it; max_simd_align is 16 on i386,
-		// arm32 and wasm, where the reference caps at 32 and the port capped at 64.
-		return clamp(next_pow2_int(total_size), 1, int(build_context.max_simd_align) * 2) if total_size > 0 else 1
+		//     return gb_clamp(next_pow2(type_size_of_internal(t, path)), 1, build_context.max_simd_align);
+		// The port hard-coded 64 and omitted next_pow2. 64 == max_simd_align*2 on amd64 as
+		// max_simd_align then stood (32), so this target could not witness it.
+		// UPSTREAM 2026-08-17 dropped the `*2` AND re-tabled max_simd_align on every target
+		// (build_settings.odin): 512 for x86 and riscv, 16 for arm64 and darwin, 8 for arm32.
+		// Both halves are needed -- the multiplier and the table are one change, and porting
+		// either alone gives a cap that matches no target.
+		return clamp(next_pow2_int(total_size), 1, int(build_context.max_simd_align)) if total_size > 0 else 1
 
 	case .Fixed_Capacity_Dynamic_Array:
 		// C++ Reference: types.cpp type_align_of_internal, case Type_FixedCapacityDynamicArray:
@@ -2496,8 +2577,21 @@ type_align_of :: proc(t: ^Type) -> int {
 // C++'s rule, and its own comment explains WHY it is not simply the element alignment: the strategy
 // is ZERO PADDING. Padding each column to its natural alignment would be faster, but Odin
 // deliberately trades that away so third-party libraries can assume a matrix is densely packed.
-// Alignment is therefore derived from the TOTAL size -- the largest power of two that divides it --
-// floored at the element's own alignment and capped at max_simd_align.
+//
+// *** UPSTREAM 2026-08-17 REPLACED THE WHOLE COMPUTATION. *** The total-size derivation above --
+// largest power of two dividing the total, floored at the element alignment, capped at
+// max_simd_align -- is gone. row_count, column_count and elem_size are now unused (C++ marks all
+// three `gb_unused`), and the answer is simply the ELEMENT's alignment, clamped:
+//
+//     gb_internal i64 matrix_align_of(Type *t, struct TypePath *tp) {
+//         gb_unused(row_count); gb_unused(column_count); gb_unused(elem_size);
+//         return gb_clamp(elem_align, 1, build_context.max_simd_align);
+//     }
+//
+// Which lands, ironically, close to the `return type_align_of(mat.elem)` the port started with and
+// #514 replaced -- but NOT identical to it, because of the clamp, and it was still right to fix:
+// the old port answer disagreed with the reference of its day on all six linalg identity constants.
+// The zero-padding rationale still holds, it is just no longer what sets the alignment.
 //
 // The commented-out `prev_pow2(elem_align * row_count)` line is preserved in C++ as the rejected
 // alternative; it is not ported, and this note is here so that a future reader who finds it does
@@ -2505,24 +2599,7 @@ type_align_of :: proc(t: ^Type) -> int {
 @(private = "file")
 matrix_align_of :: proc(mat: Type_Matrix) -> int {
 	elem_align := type_align_of(mat.elem)
-	elem_size := type_size_of(mat.elem)
-
-	row_count := max(int(mat.row_count), 1)
-	column_count := max(int(mat.column_count), 1)
-
-	total_expected_size := row_count * column_count * elem_size
-
-	min_alignment := prev_pow2_int(total_expected_size)
-	// C++ divides by min_alignment unguarded; prev_pow2 of a positive value is >= 1, so it cannot
-	// be zero there. The extra `min_alignment > 0` test here is a division-by-zero guard for the
-	// total == 0 case (a zero-sized element), which in C++ skips the loop via its first condition
-	// and would trap in Odin only if the second were evaluated. Same result, no panic.
-	for total_expected_size != 0 && min_alignment > 0 && total_expected_size % min_alignment != 0 {
-		min_alignment >>= 1
-	}
-	min_alignment = max(min_alignment, elem_align)
-
-	return min(min_alignment, int(build_context.max_simd_align))
+	return clamp(elem_align, 1, int(build_context.max_simd_align))
 }
 
 // prev_pow2_int ports C++ prev_pow2(i64) (src/common.cpp:535) -- the largest power of two <= n.

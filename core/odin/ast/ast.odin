@@ -366,6 +366,35 @@ Field_Value :: struct {
 	comment: ^Comment_Group, // possibly nil
 }
 
+// Enum_Field_Value is the node for ONE member of an enum declaration -- `A`, or `B = 2`. EVERY
+// member is one of these, valued or not; `value` is nil for a bare member.
+//
+// C++ Reference: parser.hpp:512-518 --
+//     AST_KIND(EnumFieldValue, "enum field value", struct {
+//             Ast *name; Ast *value; CommentGroup *docs; CommentGroup *comment; })
+//
+// WHY IT NOW EXISTS. This AST previously omitted the kind and had enum fields reuse Field_Value,
+// which only the `name = value` form produces -- a BARE member stayed a plain ^Ident, and an
+// Ident has nowhere to put a comment group. So the parser dropped both the leading docs and the
+// trailing comment of every bare member before the checker ever saw them, and no amount of work
+// downstream could recover them. MEASURED with docbin.sh across 24 packages: after every other
+// divergence was closed this was the ONLY remaining one, and it was present in 12 of the 13
+// still-failing packages -- core:io documents Error / Seek_From / Stream_Mode with leading
+// comments on bare members, and half the standard library re-exports io.
+//
+// This is an API change to a PUBLIC package (#868) and was NOT made unilaterally: the three
+// candidate designs (this one, Field_Value with a nil value, and additive parallel arrays on
+// Enum_Type) were put to Jon with their costs, and this one -- exact C++ parity -- was chosen.
+// Out-of-tree consumers that switch over enum field nodes need an arm for it; in-tree there were
+// none outside checker/parser/ast.
+Enum_Field_Value :: struct {
+	using node: Expr,
+	name:    ^Expr,
+	value:   ^Expr,          // nil for a bare member
+	docs:    ^Comment_Group, // possibly nil
+	comment: ^Comment_Group, // possibly nil
+}
+
 Ternary_If_Expr :: struct {
 	using node: Expr,
 	x:    ^Expr,
@@ -1111,6 +1140,7 @@ Any_Node :: union {
 	^Matrix_Index_Expr,
 	^Call_Expr,
 	^Field_Value,
+	^Enum_Field_Value,
 	^Ternary_If_Expr,
 	^Ternary_When_Expr,
 	^Or_Else_Expr,
@@ -1198,6 +1228,7 @@ Any_Expr :: union {
 	^Matrix_Index_Expr,
 	^Call_Expr,
 	^Field_Value,
+	^Enum_Field_Value,
 	^Ternary_If_Expr,
 	^Ternary_When_Expr,
 	^Or_Else_Expr,
@@ -1306,6 +1337,7 @@ node_kind_string :: proc(node: ^Node) -> string {
 	case ^Slice_Expr: return "slice expression"
 	case ^Call_Expr: return "call expression"
 	case ^Field_Value: return "field value"
+	case ^Enum_Field_Value: return "enum field value"
 	case ^Ternary_If_Expr: return "ternary if expression"
 	case ^Ternary_When_Expr: return "ternary when expression"
 	case ^Or_Else_Expr: return "or_else expression"

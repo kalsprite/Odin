@@ -380,6 +380,15 @@ write_expr_to_string :: proc(builder: ^strings.Builder, node: ^ast.Node, shortha
 		strings.write_string(builder, " = ")
 		write_expr_to_string(builder, derived.value, shorthand)
 
+	case ^ast.Enum_Field_Value:
+		// C++ Reference: src/check_expr.cpp:13269-13275 -- the ` = value` half is emitted only
+		// when a value is present, so a bare member prints as just its name.
+		write_expr_to_string(builder, derived.name, shorthand)
+		if derived.value != nil {
+			strings.write_string(builder, " = ")
+			write_expr_to_string(builder, derived.value, shorthand)
+		}
+
 	// ===== Nodes C++'s printer handles that the port did not (#250) =====
 	//
 	// C++ Reference: src/check_expr.cpp write_expr_to_string. Each of these fell to the

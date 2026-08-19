@@ -355,13 +355,13 @@ extract_enum_type :: proc(
 	// Extract enum fields - append directly to enum_info.fields
 	if et.fields != nil {
 		for field in et.fields {
-			if field_ident, is_ident := field.derived.(^ast.Ident); is_ident {
-				token := make_token_from_ident(field_ident)
-				entity := alloc_entity_constant(enum_info.scope, token, type, {}, allocator)
-				append(&enum_info.fields, entity)
-				scope_insert(enum_info.scope, entity)
-			} else if fv, is_fv := field.derived.(^ast.Field_Value); is_fv {
-				if fv_ident, fv_ident_ok := fv.field.derived.(^ast.Ident); fv_ident_ok {
+			// The parser wraps EVERY enum member -- valued and bare alike -- in an
+			// ast.Enum_Field_Value, mirroring Ast_EnumFieldValue (parser.cpp:920-929). This
+			// used to branch on ^ast.Ident (bare) vs ^ast.Field_Value (valued); both arms are
+			// now unreachable, so the two are merged into the single node the parser emits.
+			// The name lives in `.name` regardless of whether `.value` is present.
+			if efv, is_efv := field.derived.(^ast.Enum_Field_Value); is_efv && efv.name != nil {
+				if fv_ident, fv_ident_ok := efv.name.derived.(^ast.Ident); fv_ident_ok {
 					token := make_token_from_ident(fv_ident)
 					entity := alloc_entity_constant(enum_info.scope, token, type, {}, allocator)
 					append(&enum_info.fields, entity)

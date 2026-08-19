@@ -1,6 +1,9 @@
 package checker
 
+import "base:runtime"
 import "core:odin/ast"
+import "core:os"
+import "core:path/filepath"
 import "core:strings"
 
 /*
@@ -219,12 +222,19 @@ Command_Kind_Bit :: enum {
 Command_Does_Check :: Command_Kind{.Run, .Build, .Check, .Doc, .Test, .Strip_Semicolon}
 Command_Does_Build :: Command_Kind{.Run, .Build, .Test}
 
-// C++: build_settings.cpp:251-256
+// C++: build_settings.cpp:250-255 `enum CmdDocFlag : u32`.
+//
+// THE BIT POSITIONS ARE PART OF THE CONTRACT, not an implementation detail: this is a `bit_set`
+// with an explicit u32 backing, so the numeric value is what a caller sets and what the doc-format
+// writer serialises. The port was missing In_Source_Order entirely, which pushed All_Packages and
+// Doc_Format down one bit each -- so a caller following C++'s numbering and asking for
+// AllPackages (1<<2) got Doc_Format, and asking for DocFormat (1<<3) got nothing at all.
 Cmd_Doc_Flag :: distinct bit_set[Cmd_Doc_Flag_Bit;u32]
 Cmd_Doc_Flag_Bit :: enum {
-	Short        = 0,
-	All_Packages = 1,
-	Doc_Format   = 2,
+	Short           = 0, // CmdDocFlag_Short         = 1<<0
+	In_Source_Order = 1, // CmdDocFlag_InSourceOrder = 1<<1
+	All_Packages    = 2, // CmdDocFlag_AllPackages   = 1<<2
+	Doc_Format      = 3, // CmdDocFlag_DocFormat     = 1<<3
 }
 
 // C++: build_settings.cpp:257-261
@@ -471,6 +481,13 @@ Build_Context :: struct {
 	// (false) is the branch that uses map_desired_position / __dynamic_map_check_grow etc.
 	dynamic_map_calls:                  bool,
 	no_threaded_checker:                bool,
+	// thread_count is the number of WORKER threads the checker's pool is built for; the pool
+	// allocates thread_count+1 slots because slot 0 is the main thread (thread_pool.cpp:52).
+	// C++: build_settings.cpp:633, defaulted in init_build_context (build_settings.cpp:1749-1750)
+	// to `gb_max(affinity.thread_count, 1)`, i.e. the LOGICAL core count -- not cores-1.
+	// Set explicitly by `-thread-count:N` (main.cpp:1076-1086), which clamps a non-positive N to 1
+	// after printing "%s expected a positive non-zero number, got %s".
+	thread_count:                       int,
 	no_rtti:                            bool,
 	source_code_location_info:          Source_Code_Location_Info,
 	max_error_count:                    int,
@@ -534,6 +551,13 @@ Build_Context :: struct {
 	// reasoning as dump_model_path: the Checker is a stack local in check_package_from_path, so
 	// this cannot be an accessor handed back to the caller.
 	dump_doc_path:                      string,
+
+	// t243t. -dump-mindep:<path> writes the MINIMUM DEPENDENCY SET. Deliberately NOT a
+	// dump_model v4 column: min_dep_count is excluded there as scheduling-sensitive
+	// (dump_model.odin:76), and adding it would change DUMP_MODEL_SCHEMA, which
+	// modeldiff_hybrid.py refuses to compare across (#405) -- breaking every modelsweep run.
+	// Same stack-local lifetime reasoning as the two above.
+	dump_mindep_path:                   string,
 }
 
 // Global build context instance
@@ -556,6 +580,72 @@ add_library_collection :: proc(name: string, path: string) {
 		path = strings.trim_space(path),
 	}
 	append(&library_collections, lc)
+}
+
+// init_default_library_collections registers the collections the compiler defines itself.
+//
+// C++ Reference: main.cpp:3814-3828 registers `base`, `core` and `vendor` relative to
+// odin_root_dir() ("NOTE(bill): 'core' cannot be (re)defined by the user"), and main.cpp:4143-4146
+// adds `shared` afterwards if nothing has claimed that name yet.
+//
+// THIS IS THE MISSING WRITER FOR library_collections. add_library_collection and
+// find_library_collection_path were both ported, but NOTHING EVER CALLED THE WRITER, so the table
+// was permanently empty and every lookup returned found=false. check_decl.odin:2257 had already
+// noticed and worked around it in place ("library_collections is currently never populated, report
+// every ..."), which is the tell: a reader that has grown a workaround for its own writer being
+// absent. Porting the "Unknown library collection" diagnostic on top of an empty table would have
+// rejected EVERY collection import in the tree, so the writer has to land first.
+//
+// `system` is deliberately absent, matching C++: it is special-cased in determine_path_from_string
+// (parser.cpp:6249-6256) and restricted to `foreign import`, never resolved through this table.
+//
+// THE TABLE TRACKS ODIN_ROOT; IT IS NOT REGISTER-ONCE. C++ can register these exactly once at
+// startup because a compiler process has one root for its whole life. This port is a LIBRARY whose
+// caller may check two packages under two different roots in one process --
+// check_package_from_path sets build_context.ODIN_ROOT from opts.odin_root and restores it with a
+// `defer` (package_resolver.odin:1226-1230), so a register-once table would hand the second check
+// the FIRST check's paths. That is the same cross-contamination shape as LEDGER #358, which cost 37
+// spurious "Unable to find package: core:fmt" diagnostics on a second check in one process.
+// So the root the defaults were built against is recorded, and they are rebuilt when it moves.
+//
+// Only the four DEFAULT names are rebuilt; anything else in the table (a user `-collection:`) is
+// left untouched, because it is not derived from ODIN_ROOT.
+//
+// Idempotent, and safe to call from each of the entry points that establish ODIN_ROOT.
+@(private = "file")
+library_collections_root: string
+
+DEFAULT_LIBRARY_COLLECTIONS :: []string{"base", "core", "vendor", "shared"}
+
+init_default_library_collections :: proc() {
+	if len(build_context.ODIN_ROOT) == 0 {
+		return
+	}
+	if library_collections_root == build_context.ODIN_ROOT && len(library_collections) > 0 {
+		return
+	}
+
+	// Drop only the ROOT-DERIVED entries, keeping user-registered collections.
+	for i := len(library_collections) - 1; i >= 0; i -= 1 {
+		for name in DEFAULT_LIBRARY_COLLECTIONS {
+			if library_collections[i].name == name {
+				ordered_remove(&library_collections, i)
+				break
+			}
+		}
+	}
+
+	// C++ compiler_errors out when a default collection cannot be found; this port is a library, so
+	// a missing directory simply leaves the name unregistered and the ordinary "Unknown library
+	// collection" diagnostic reports it.
+	for name in DEFAULT_LIBRARY_COLLECTIONS {
+		path, join_err := filepath.join({build_context.ODIN_ROOT, name}, runtime.heap_allocator())
+		if join_err != nil {
+			continue
+		}
+		add_library_collection(name, path)
+	}
+	library_collections_root = build_context.ODIN_ROOT
 }
 
 // C++: build_settings.cpp:1029-1036
@@ -609,7 +699,7 @@ target_windows_i386 := Target_Metrics {
 	ptr_size       = 4,
 	int_size       = 4,
 	max_align      = I386_MAX_ALIGNMENT,
-	max_simd_align = 16,
+	max_simd_align = 512,
 	target_triplet = "i386-pc-windows-msvc",
 }
 
@@ -619,7 +709,7 @@ target_windows_amd64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = AMD64_MAX_ALIGNMENT,
-	max_simd_align = 32,
+	max_simd_align = 512,
 	target_triplet = "x86_64-pc-windows-msvc",
 }
 
@@ -629,7 +719,7 @@ target_linux_i386 := Target_Metrics {
 	ptr_size       = 4,
 	int_size       = 4,
 	max_align      = I386_MAX_ALIGNMENT,
-	max_simd_align = 16,
+	max_simd_align = 512,
 	target_triplet = "i386-pc-linux-gnu",
 }
 
@@ -639,7 +729,7 @@ target_linux_amd64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = AMD64_MAX_ALIGNMENT,
-	max_simd_align = 32,
+	max_simd_align = 512,
 	target_triplet = "x86_64-pc-linux-gnu",
 }
 
@@ -649,7 +739,7 @@ target_linux_arm64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = 16,
-	max_simd_align = 32,
+	max_simd_align = 16,
 	target_triplet = "aarch64-linux-elf",
 }
 
@@ -659,7 +749,7 @@ target_linux_arm32 := Target_Metrics {
 	ptr_size       = 4,
 	int_size       = 4,
 	max_align      = 8,
-	max_simd_align = 16,
+	max_simd_align = 8,
 	target_triplet = "arm-unknown-linux-gnueabihf",
 }
 
@@ -669,7 +759,7 @@ target_linux_riscv64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = 16,
-	max_simd_align = 32,
+	max_simd_align = 512,
 	target_triplet = "riscv64-linux-gnu",
 }
 
@@ -679,7 +769,7 @@ target_darwin_amd64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = AMD64_MAX_ALIGNMENT,
-	max_simd_align = 32,
+	max_simd_align = 16,
 	target_triplet = "x86_64-apple-macosx", // NOTE: Changes during initialization based on build flags.
 }
 
@@ -689,7 +779,7 @@ target_darwin_arm64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = 16,
-	max_simd_align = 32,
+	max_simd_align = 16,
 	target_triplet = "arm64-apple-macosx", // NOTE: Changes during initialization based on build flags.
 }
 
@@ -699,7 +789,7 @@ target_freebsd_i386 := Target_Metrics {
 	ptr_size       = 4,
 	int_size       = 4,
 	max_align      = I386_MAX_ALIGNMENT,
-	max_simd_align = 16,
+	max_simd_align = 512,
 	target_triplet = "i386-unknown-freebsd-elf",
 }
 
@@ -709,7 +799,7 @@ target_freebsd_amd64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = AMD64_MAX_ALIGNMENT,
-	max_simd_align = 32,
+	max_simd_align = 512,
 	target_triplet = "x86_64-unknown-freebsd-elf",
 }
 
@@ -719,7 +809,7 @@ target_freebsd_arm64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = 16,
-	max_simd_align = 32,
+	max_simd_align = 16,
 	target_triplet = "aarch64-unknown-freebsd-elf",
 }
 
@@ -729,7 +819,7 @@ target_openbsd_amd64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = AMD64_MAX_ALIGNMENT,
-	max_simd_align = 32,
+	max_simd_align = 512,
 	target_triplet = "x86_64-unknown-openbsd-elf",
 }
 
@@ -739,7 +829,7 @@ target_netbsd_amd64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = AMD64_MAX_ALIGNMENT,
-	max_simd_align = 32,
+	max_simd_align = 512,
 	target_triplet = "x86_64-unknown-netbsd-elf",
 }
 
@@ -749,7 +839,7 @@ target_netbsd_arm64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = 16,
-	max_simd_align = 32,
+	max_simd_align = 16,
 	target_triplet = "aarch64-unknown-netbsd-elf",
 }
 
@@ -761,7 +851,7 @@ target_freestanding_wasm32 := Target_Metrics {
 	ptr_size       = 4,
 	int_size       = 4,
 	max_align      = 8,
-	max_simd_align = 16,
+	max_simd_align = 512,
 	target_triplet = "wasm32-freestanding-js",
 }
 
@@ -771,7 +861,7 @@ target_js_wasm32 := Target_Metrics {
 	ptr_size       = 4,
 	int_size       = 4,
 	max_align      = 8,
-	max_simd_align = 16,
+	max_simd_align = 512,
 	target_triplet = "wasm32-js-js",
 }
 
@@ -781,7 +871,7 @@ target_wasi_wasm32 := Target_Metrics {
 	ptr_size       = 4,
 	int_size       = 4,
 	max_align      = 8,
-	max_simd_align = 16,
+	max_simd_align = 512,
 	target_triplet = "wasm32-wasi-js",
 }
 
@@ -791,7 +881,7 @@ target_orca_wasm32 := Target_Metrics {
 	ptr_size       = 4,
 	int_size       = 4,
 	max_align      = 8,
-	max_simd_align = 16,
+	max_simd_align = 512,
 	target_triplet = "wasm32-wasi-js",
 }
 
@@ -801,7 +891,7 @@ target_freestanding_wasm64p32 := Target_Metrics {
 	ptr_size       = 4,
 	int_size       = 8,
 	max_align      = 8,
-	max_simd_align = 16,
+	max_simd_align = 512,
 	target_triplet = "wasm32-freestanding-js",
 }
 
@@ -811,7 +901,7 @@ target_js_wasm64p32 := Target_Metrics {
 	ptr_size       = 4,
 	int_size       = 8,
 	max_align      = 8,
-	max_simd_align = 16,
+	max_simd_align = 512,
 	target_triplet = "wasm32-js-js",
 }
 
@@ -821,7 +911,7 @@ target_wasi_wasm64p32 := Target_Metrics {
 	ptr_size       = 4,
 	int_size       = 8,
 	max_align      = 8,
-	max_simd_align = 16,
+	max_simd_align = 512,
 	target_triplet = "wasm32-wasi-js",
 }
 
@@ -831,7 +921,7 @@ target_freestanding_amd64_sysv := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = AMD64_MAX_ALIGNMENT,
-	max_simd_align = 32,
+	max_simd_align = 512,
 	target_triplet = "x86_64-pc-none-gnu",
 	abi            = .SysV,
 }
@@ -842,7 +932,7 @@ target_freestanding_amd64_win64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = AMD64_MAX_ALIGNMENT,
-	max_simd_align = 32,
+	max_simd_align = 512,
 	// #961: was "x86_64-pc-none-msvc". C++ build_settings.cpp gives this target
 	// "x86_64-pc-windows-msvc" -- the vendor/OS component is `windows`, not `none`, even though
 	// the Odin-level OS is Freestanding. Found by field-comparing the metrics tables, which
@@ -868,7 +958,7 @@ target_freestanding_amd64_mingw := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = AMD64_MAX_ALIGNMENT,
-	max_simd_align = 32,
+	max_simd_align = 512,
 	target_triplet = "x86_64-pc-windows-gnu",
 	abi            = .Win64,
 }
@@ -879,7 +969,7 @@ target_freestanding_arm64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = 16,
-	max_simd_align = 32,
+	max_simd_align = 16,
 	target_triplet = "aarch64-none-elf",
 }
 
@@ -889,7 +979,7 @@ target_freestanding_arm32 := Target_Metrics {
 	ptr_size       = 4,
 	int_size       = 4,
 	max_align      = 8,
-	max_simd_align = 16,
+	max_simd_align = 8,
 	// #961: was "arm-unknown-unknown-gnueabihf". C++ gives this target "arm-none-eabihf" -- three
 	// components, not four. Same field-comparison as the win64 triple above.
 	target_triplet = "arm-none-eabihf",
@@ -901,7 +991,7 @@ target_freestanding_riscv64 := Target_Metrics {
 	ptr_size       = 8,
 	int_size       = 8,
 	max_align      = 16,
-	max_simd_align = 32,
+	max_simd_align = 512,
 	target_triplet = "riscv64-unknown-gnu",
 }
 
@@ -1032,6 +1122,15 @@ ensure_build_context_initialized :: proc() {
 //   subtarget: Optional subtarget modifier (iPhone, Android, etc.)
 init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subtarget = .Default) {
 	bc := &build_context
+
+	// C++: build_settings.cpp:1748-1751
+	//     gb_affinity_init(&bc->affinity);
+	//     if (bc->thread_count == 0) { bc->thread_count = gb_max(bc->affinity.thread_count, 1); }
+	// gb_affinity's thread_count is the LOGICAL processor count, which is what
+	// os.get_processor_core_count() returns here.
+	if bc.thread_count == 0 {
+		bc.thread_count = max(os.get_processor_core_count(), 1)
+	}
 
 	// C++: build_settings.cpp:1714-1715
 	bc.ODIN_VENDOR = "odin"

@@ -88,63 +88,21 @@ Import_Path_Item :: struct {
 	decl: ^ast.Stmt, // C++ line 5172: Import declaration
 }
 
-// check_import_decl_attributes processes attributes on import declarations
-// C++ Reference: checker.cpp:5237-5252 (import_decl_attribute)
-//
-// Import declarations support the following attributes:
-// - @(require): Forces the import to be used even if not referenced
-// - @(user_tag="..."): User-defined tag for metadata
-check_import_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribute, ac: ^Attribute_Context) {
-	if len(attributes) == 0 {
-		return
-	}
-
-	// Process each attribute (C++ line 5253-5300)
-	for attr in attributes {
-		// attr is already ^ast.Attribute, no need to type-switch
-		for elem in attr.elems {
-			name := ""
-			value: ^ast.Expr = nil
-
-			// Extract attribute name and value (C++ line 5258-5281)
-			#partial switch e in elem.derived {
-			case ^ast.Ident:
-				name = e.name
-			case ^ast.Field_Value:
-				// Attribute with value like @(user_tag="metadata")
-				if field_ident, ok := e.field.derived.(^ast.Ident); ok {
-					name = field_ident.name
-					value = e.value
-				}
-			case:
-				error(elem, "Invalid attribute element")
-				continue
-			}
-
-			// Process import-specific attributes
-			// C++ Reference: checker.cpp:5237-5252
-			if name == "require" {
-				// @(require) attribute - forces import to be used
-				// C++ line 5244-5249
-				if value != nil {
-					error(elem, "Expected no parameter for '%s'", name)
-				}
-				ac.require_declaration = true
-			} else if name == "user_tag" {
-				// @(user_tag="...") attribute - user-defined metadata
-				// C++ line 5238-5243
-				// NOTE: We validate but don't store the value (user tags are metadata only)
-				if value == nil {
-					error(elem, "Expected a string value for '%s'", name)
-					continue
-				}
-				// NOTE: Accepts any expression - full constant validation would need check_expr
-			}
-			// Other attributes are silently ignored for imports
-			// (C++ returns false which triggers unknown attribute warning in check_decl_attributes)
-		}
-	}
-}
+// NOTE: check_import_decl_attributes (a hand-rolled attribute walk) USED TO LIVE HERE and was
+// deleted in t208. It diverged from C++ in two ways at once, and each hid the other:
+//   * it matched the user tag as "user_tag"; C++ spells it "tag"
+//     (`#define ATTRIBUTE_USER_TAG_NAME "tag"`, checker.cpp:3712, and import_decl_attribute at
+//     checker.cpp:5580 makes it the first arm)
+//   * it had NO unknown-attribute arm -- its own closing comment admitted as much: "Other
+//     attributes are silently ignored for imports (C++ returns false which triggers unknown
+//     attribute warning in check_decl_attributes)"
+// Because unknown names were never reported, BOTH spellings were silently accepted, so a probe
+// using `tag` saw no divergence and the wrong-name half looked like a non-defect. `user_tag` is the
+// probe that separates them: the reference rejects it as unknown, the port accepted it.
+// check_add_import_decl now calls the generic check_decl_attributes with kind .Import, which is
+// what C++ does (checker.cpp:5646 passes import_decl_attribute to check_decl_attributes). That
+// dispatcher already had the correct attr_names_import table {"require","tag"} and
+// report_unknown_attribute -- WITH NO CALLER PASSING .Import, so the table was dead.
 
 // check_add_import_decl processes an import declaration and adds imported package to scope
 // C++ Reference: checker.cpp:5254-5336
@@ -188,6 +146,117 @@ check_add_import_decl :: proc(ctx: ^Checker_Context, import_decl: ^ast.Import_De
 	} else {
 		error_node(import_decl, "Import path is required")
 		return
+	}
+
+	// C++ parser.cpp:6225-6247 (determine_path_from_string). `core:runtime`, `core:intrinsics`
+	// and `core:builtin` are rewritten to the `base:` collection and the deprecation is reported.
+	// The loader applies the same rewrite so the package actually resolves; the DIAGNOSTIC is
+	// emitted only here, because this runs exactly once per import decl whereas the loader's walk
+	// revisits each decl on every package load.
+	//
+	// SEVERITY IS VET-GATED, and the two arms differ in more than wording: parser.cpp:6241 uses
+	// do_error(node, ...) -- an Ast* overload, so the caret spans the whole decl -- while :6244
+	// uses do_warning(ast_token(node), ...), a bare token with no end, which is why the reference
+	// prints the warning WITHOUT a source-line snippet and the error WITH one. Reproduced by
+	// passing node_end_pos for the error and {} for the warning. wit_deprec206 pins both arms.
+	//
+	// `use_check_errors` defaults to false at the parse-time call site (parser.cpp:6156-6157), so
+	// these are syntax_error/syntax_warning, not error/warning -- hence the "Syntax " prefix.
+	if rewritten, is_deprecated := normalize_deprecated_core_collection(
+		import_path,
+		ctx.checker.allocator,
+	); is_deprecated {
+		file_str := rewritten[len("base:"):]
+		if ast_file_vet_deprecated(get_file_from_node(ctx.info, import_decl)) {
+			syntax_error_va(
+				ast_token_pos(import_decl),
+				node_end_pos(import_decl),
+				"import \"core:%s\" has been deprecated in favour of \"base:%s\"",
+				file_str,
+				file_str,
+			)
+		} else {
+			syntax_warning_pos(
+				ast_token_pos(import_decl),
+				"import \"core:%s\" has been deprecated in favour of \"base:%s\"",
+				file_str,
+				file_str,
+			)
+		}
+		import_path = rewritten
+	}
+
+	// C++ parser.cpp:6248-6272, the two checks that immediately FOLLOW the core->base rewrite in
+	// determine_path_from_string. Both were absent, and both are over-permissiveness rather than
+	// wording drift -- the port accepted input the reference rejects, or invented its own message.
+	//
+	//	} else if (!find_library_collection_path(collection_name, &base_dir)) {
+	//	        do_error(node, "Unknown library collection: '%.*s'", LIT(collection_name));
+	//	...
+	//	if (is_package_name_reserved(file_str)) {
+	//	        *path = file_str;
+	//	        if (collection_name == "core" || collection_name == "base") { return true; }
+	//	        else { do_error(node, "The package '%.*s' must be imported with the 'base' library
+	//	                             collection: 'base:%.*s'", ...); }
+	//	}
+	//
+	// NOTE the reserved-name gate is reached with an EMPTY collection_name for a bare
+	// `import "builtin"` -- no colon means the collection block above is skipped entirely -- and ""
+	// is neither "core" nor "base", which is exactly why the bare spelling is an error. That is the
+	// case wit_bh206/h_builtin_bare pins; the port accepted it silently.
+	//
+	// syntax_error, not error: do_error is &syntax_error at the default use_check_errors=false
+	// (parser.cpp:6156). wit_bh206/h_coll_unknown showed the port emitting its own invented
+	// "Unable to find package: bogus:thing" instead of "Unknown library collection: 'bogus'".
+	{
+		// C++ parser.cpp:6196-6200, and it comes FIRST -- before the collection lookup and before
+		// the reserved-name gate:
+		//
+		//	String file_str = {};
+		//	if (colon_pos == 0) {
+		//	        do_error(node, "Expected a collection name");
+		//	        return false;
+		//	}
+		//
+		// A LEADING colon is not "an empty collection name"; it is its own diagnostic, and the
+		// reference bails immediately. The port fell through to package resolution and invented
+		// "Error: Unable to find package: :foo" where the oracle says
+		// "Syntax Error: Expected a collection name". Witness wit_bi213/i_leading_colon.
+		// split_import_collection cannot report this case -- it returns an empty collection for a
+		// leading colon AND for no colon at all -- so the test is on the raw path.
+		if len(import_path) > 0 && import_path[0] == ':' {
+			syntax_error_va(
+				ast_token_pos(import_decl),
+				node_end_pos(import_decl),
+				"Expected a collection name",
+			)
+			return
+		}
+
+		collection_name, file_str := split_import_collection(import_path)
+		if collection_name != "" && collection_name != "system" {
+			if _, found := find_library_collection_path(collection_name); !found {
+				syntax_error_va(
+					ast_token_pos(import_decl),
+					node_end_pos(import_decl),
+					"Unknown library collection: '%s'",
+					collection_name,
+				)
+				return
+			}
+		}
+		if is_package_name_reserved(file_str) &&
+		   collection_name != "core" &&
+		   collection_name != "base" {
+			syntax_error_va(
+				ast_token_pos(import_decl),
+				node_end_pos(import_decl),
+				"The package '%s' must be imported with the 'base' library collection: 'base:%s'",
+				file_str,
+				file_str,
+			)
+			return
+		}
 	}
 
 	// Resolve package from import path (C++ line 5264-5290)
@@ -259,7 +328,7 @@ check_add_import_decl :: proc(ctx: ^Checker_Context, import_decl: ^ast.Import_De
 	// Check attributes for @(require) and other import attributes
 	// C++ Reference: checker.cpp:5303-5307
 	ac := Attribute_Context{}
-	check_import_decl_attributes(ctx, import_decl.attributes[:], &ac)
+	check_decl_attributes(ctx, import_decl.attributes[:], &ac, .Import)
 	if ac.require_declaration {
 		force_use = true
 	}
@@ -797,6 +866,30 @@ check_export_entities_in_pkg :: proc(c: ^Checker, pkg: ^ast.Package) {
 // is_package_name_reserved checks if a package name is a reserved system package
 is_package_name_reserved :: proc(name: string) -> bool {
 	return name == "builtin" || name == "intrinsics"
+}
+
+// split_import_collection splits "core:fmt" into ("core", "fmt").
+//
+// C++ Reference: parser.cpp:6168-6205 inside determine_path_from_string -- the FIRST ':' splits,
+// and a path with no colon has an empty collection and is entirely file_str.
+//
+// The Windows-drive special case at parser.cpp:6177-6185 is deliberately not reproduced: it is
+// guarded by `!is_import_decl_path`, and every caller here IS an import decl.
+//
+// A leading colon (colon_pos == 0) makes C++ report "Expected a collection name" (parser.cpp:6197)
+// and bail. That diagnostic is NOT ported yet and is queued separately -- this helper only reports
+// the split, returning an empty collection for that case so no caller mistakes ":foo" for a
+// collection named "".
+split_import_collection :: proc(import_path: string) -> (collection: string, file_str: string) {
+	for i in 0 ..< len(import_path) {
+		if import_path[i] == ':' {
+			if i == 0 {
+				return "", import_path[1:]
+			}
+			return import_path[:i], import_path[i + 1:]
+		}
+	}
+	return "", import_path
 }
 
 // get_invalid_import_name extracts the last path component for error messages

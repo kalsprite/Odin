@@ -556,7 +556,19 @@ report_unknown_attribute :: proc(elem: ^ast.Node, name: string) {
 // it. Only the `private`-on-a-local diagnostic needs it: C++ raises that one from
 // check_collect_value_decl with the DECL node, not from the attribute handler with `elem`, so it
 // points at the variable's name rather than at the attribute. #1000.
-check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribute, ac: ^Attribute_Context, kind: Attribute_Decl_Kind, subject_pos := tokenizer.Pos{}) {
+//
+// `subject_node` (t204) is that same DECLARATION as a NODE, and is preferred over `subject_pos`
+// whenever the caller has it. C++ checker.cpp:4923 is `error(decl, ...)` -- a NODE -- and a node
+// carries an END, so the reference underlines the whole declaration:
+//     @(private) X :: 1          oracle `^~~~~^`   (X :: 1)
+//     @(private) T :: struct{}   oracle `^~~~~~~~~~^`  (T :: struct)
+// Threading only a Pos threw the end away and the port drew a bare `^`. The second case also
+// confirms ast_end_pos's Struct_Type arm: C++'s ast_end_token returns the last meaningful CHILD,
+// so an empty struct ends at the `struct` keyword, not at the closing brace.
+//
+// subject_pos is KEPT as the fallback rather than replaced: not every caller has a decl node, and
+// the pos path is still strictly better than falling all the way back to `elem`.
+check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribute, ac: ^Attribute_Context, kind: Attribute_Decl_Kind, subject_pos := tokenizer.Pos{}, subject_node: ^ast.Node = nil) {
 	// C++ Reference: checker.cpp:4228 - Early return if no attributes
 	if len(attributes) == 0 {
 		return
@@ -705,7 +717,9 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 			// `@(private) T :: struct{}` and `@(private) f :: proc(){}` inside a procedure body
 			// were all silently accepted.
 			if kind != .Var && ctx.curr_proc_decl != nil && name == "private" {
-				if subject_pos.line != 0 {
+				if subject_node != nil {
+					error_node(subject_node, "Attribute 'private' is not allowed on a non file scope entity")
+				} else if subject_pos.line != 0 {
 					error(subject_pos, "Attribute 'private' is not allowed on a non file scope entity")
 				} else {
 					error(elem, "Attribute 'private' is not allowed on a non file scope entity")
@@ -738,7 +752,9 @@ check_decl_attributes :: proc(ctx: ^Checker_Context, attributes: []^ast.Attribut
 					// #1000: reported at the DECLARATION when the caller supplied its position,
 					// which is what C++ does -- `error(decl, ...)` in check_collect_value_decl.
 					// Falls back to `elem` when it was not supplied, so no caller is obliged to.
-					if subject_pos.line != 0 {
+					if subject_node != nil {
+						error_node(subject_node, "Attribute 'private' is not allowed on a non file scope entity")
+					} else if subject_pos.line != 0 {
 						error(subject_pos, "Attribute 'private' is not allowed on a non file scope entity")
 					} else {
 						error(elem, "Attribute 'private' is not allowed on a non file scope entity")
@@ -2315,9 +2331,35 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 
 	base := base_type(bt)
 
-	// C++ Reference: check_decl.cpp check_type_decl
-	// For distinct enum types, clone the enum to have separate field entities
-	if is_distinct && is_type_enum(base) {
+	// C++ Reference: check_decl.cpp:476-478, verbatim --
+	//     if (is_distinct && bt->kind == Type_Named && base->kind == Type_Enum) {
+	//             base = clone_enum_type(ctx, base, named);
+	//     }
+	//
+	// THE MIDDLE CONDITION WAS MISSING, and it is the one that decides whether the clone happens
+	// at all in the common case. clone_enum_type exists for the `Y :: distinct X` edge case named
+	// in its own comment -- X is already a NAMED enum, so Y needs its own copies of X's members
+	// retyped to Y. A plain
+	//     E :: enum { A, B, C }
+	// is ALSO is_distinct (only `E :: X` over an existing type is an alias), but its `bt` is the
+	// enum type itself, not a Named, so the reference does not clone: the entities check_enum_type
+	// just built are the final ones. Without the guard the port cloned EVERY enum declaration in
+	// every package -- a second scope, a second entity per member, and a second add_entity_use --
+	// and then discarded the originals.
+	//
+	// The clone is not a faithful copy, which is how this surfaced. It carries token, type, value,
+	// file, identifier, flags, docs and comment (check_decl.cpp:435-439 copies exactly those, and
+	// the port matches) but NOT Entity_Constant.init_expr, the field upstream PR #7289 added for
+	// enum members. So every explicitly-valued member lost its initialiser expression and the doc
+	// writer fell through to exact_value_to_string.
+	// MEASURED with docbin.sh: for `Greater = +1` / `Alias = Alias_Src` / `Expr = 2 + 3` the
+	// oracle records init="+1" / "Alias_Src" / "2 + 3" and the port recorded "1" / "-1" / "5" --
+	// the folded VALUES, which is a different thing from the source text and in the alias case
+	// loses the referenced name entirely.
+	//
+	// FOUND BY POINTER: the entity check_enum_type built and the entity the doc writer read had
+	// different addresses, which is what sent the search here rather than into the doc writer.
+	if is_distinct && bt.kind == .Named && base.kind == .Enum {
 		base = clone_enum_type(ctx, base, named)
 	}
 
@@ -2424,7 +2466,7 @@ check_type_decl :: proc(ctx: ^Checker_Context, e: ^Entity, init_expr: ^ast.Expr,
 	if effective_ac == nil {
 		decl := decl_info_of_entity(e)
 		if decl != nil && len(decl.attributes) > 0 {
-			check_decl_attributes(ctx, decl.attributes[:], &local_ac, .Type, e.token.pos)
+			check_decl_attributes(ctx, decl.attributes[:], &local_ac, .Type, e.token.pos, decl.decl_node)
 			effective_ac = &local_ac
 		}
 	}

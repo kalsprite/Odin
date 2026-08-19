@@ -20,7 +20,38 @@ EIGHTBYTE :: 8
 // aggregate, so there is one function rather than the previous two -- the split
 // into `classify_aggregate` and `classify_scalar` was where `i128` and `f80`
 // got inconsistent treatment.
+// classify stamps the object's SIZE onto the Location and calls classify_sysv_body.
+//
+// A wrapper rather than a stamp at each return site, and the count is the
+// argument: this classifier has dozens of them, and `classify_signature`'s own
+// note about stamping centrally says why -- "one line to get wrong instead of a
+// dozen". The wrapper cannot be bypassed by a new return site added later.
+//
+// WHY IT EXISTS. `Direct.size` and `Sret.size` are the FOOTPRINT -- how much
+// stack to reserve, how many bytes to copy, how far the callee may write. They
+// were stamped only by `classify_signature`, so a consumer driving classify and
+// assign itself -- a public, documented path -- read ZERO. Zero is a plausible
+// footprint, not an obviously-absent one, which is the unclaimed-default hazard
+// `Param_Shape` was given an INVALID zero to prevent three files away.
+//
+// The size was never unavailable: it is a PARAMETER of this procedure. Nothing
+// had to be derived, only carried.
 classify :: proc(
+	size, align: u32,
+	fields: []abi.Field,
+	conv: ^abi.Convention,
+	pos: abi.Position,
+	shape: abi.Param_Shape,
+	flags: abi.Param_Flags,
+	buf: []abi.Piece, // caller-owned; size it with abi.pieces_needed
+) -> abi.Location {
+	loc := classify_sysv_body(size, align, fields, conv, pos, shape, flags, buf)
+	abi.stamp_size(&loc, size)
+	return loc
+}
+
+@(private)
+classify_sysv_body :: proc(
 	size, align: u32,
 	fields: []abi.Field,
 	conv: ^abi.Convention,
@@ -585,6 +616,12 @@ SSE_ARGS  := [?]u16{
 WIN64_SSE := [?]u16{u16(x86.XMM0), u16(x86.XMM1), u16(x86.XMM2), u16(x86.XMM3)}
 
 @(private) SYSV_BASE := abi.Convention{
+	// ARGUMENT EXTENSION -- see `Convention.arg_extend_to`.
+	// x86-64 SysV widens i8/i16 to 32 bits, signed or zero by the declared type,
+	// and normalises a bool. `int` is already 32 bits so nothing happens to it.
+	arg_extend_to        = 4,
+	arg_extend_signed_at = 0,
+	bool_arg_normalised  = true,
 	id = .SYSV,
 	name         = "sysv",
 	varargs      = .SYSV_AL,
@@ -619,6 +656,35 @@ WIN64_SSE := [?]u16{u16(x86.XMM0), u16(x86.XMM1), u16(x86.XMM2), u16(x86.XMM3)}
 	// bare form -- which is what distinguishes this row from AAPCS64's.
 	// Measured: `v4i8 r(void)` is `movl g4(%rip), %eax`, and
 	// `void a(v4i8 x, int t)` leaves `t` in %esi, so the vector took %edi.
+	//
+	// AND LANE KIND DOES NOT PARTICIPATE -- asked separately, because the
+	// measurement above could not answer it and read as though it had.
+	//
+	// Both probes used INTEGER lanes, which is exactly the case where clang and
+	// gcc agree, so they pinned the NUMBER and said nothing about the RULE. The
+	// two compilers disagree on precisely one row:
+	//
+	//   vector_size(4) of signed char   int lanes     clang %edi   gcc %edi
+	//   vector_size(4) of short         int lanes     clang %edi   gcc %edi
+	//   vector_size(4) of _Float16      FLOAT lanes   clang %edi   gcc %xmm0
+	//   vector_size(8) of short         int lanes     clang %xmm0  gcc %xmm0
+	//
+	// clang classifies every sub-eightbyte vector INTEGER whatever the lanes;
+	// gcc consults the lane type at that width. On the letter gcc has the
+	// better claim -- an eightbyte is classified by merging the classes of
+	// overlapping fields, and float fields are SSE -- but the psABI's vector
+	// text predates `_Float16`, so this is a thin region rather than a
+	// contradiction. Executed: an Odin caller against a gcc-built peer returns
+	// 0 where a clang-built one returns 13.
+	//
+	// THIS ROW FOLLOWS CLANG, BY DECISION, and the decision is the user's:
+	// clang is this project's conformance oracle and is preferred over gcc
+	// where the two differ. Filed for the record as
+	// COMPILER_ISSUES/UPSTREAM-UNFILED-abi-four-byte-float-lane-vector-disagrees-between-gcc-and-clang.md
+	//
+	// `Field.vec_is_float` already carries lane kind and AAPCS32 already reads
+	// it for this same kind of decision, so gcc's rule COULD be expressed here
+	// without a new field. It is deliberately not.
 	min_vector_bytes = 8,
 	// `ret_vector_regs` IS SET HERE NOW, and the note it replaces is a good
 	// record of why a field can stop being redundant.
@@ -722,7 +788,38 @@ win64_odin       :: proc "contextless" () -> abi.Convention { return abi.compose
 //     AAPCS64 or RISC-V, where `f32` and `struct{f32}` classify alike, and it is
 //     why `classify` takes `is_aggregate`.
 //   * Everything else is passed as a pointer to a caller copy.
+// classify_win64 stamps the object's SIZE onto the Location and calls classify_win64_body.
+//
+// A wrapper rather than a stamp at each return site, and the count is the
+// argument: this classifier has dozens of them, and `classify_signature`'s own
+// note about stamping centrally says why -- "one line to get wrong instead of a
+// dozen". The wrapper cannot be bypassed by a new return site added later.
+//
+// WHY IT EXISTS. `Direct.size` and `Sret.size` are the FOOTPRINT -- how much
+// stack to reserve, how many bytes to copy, how far the callee may write. They
+// were stamped only by `classify_signature`, so a consumer driving classify and
+// assign itself -- a public, documented path -- read ZERO. Zero is a plausible
+// footprint, not an obviously-absent one, which is the unclaimed-default hazard
+// `Param_Shape` was given an INVALID zero to prevent three files away.
+//
+// The size was never unavailable: it is a PARAMETER of this procedure. Nothing
+// had to be derived, only carried.
 classify_win64 :: proc(
+	size, align: u32,
+	fields: []abi.Field,
+	conv: ^abi.Convention,
+	pos: abi.Position,
+	shape: abi.Param_Shape,
+	flags: abi.Param_Flags,
+	buf: []abi.Piece, // caller-owned; size it with abi.pieces_needed
+) -> abi.Location {
+	loc := classify_win64_body(size, align, fields, conv, pos, shape, flags, buf)
+	abi.stamp_size(&loc, size)
+	return loc
+}
+
+@(private)
+classify_win64_body :: proc(
 	size, align: u32,
 	fields: []abi.Field,
 	conv: ^abi.Convention,
@@ -899,6 +996,11 @@ classify_win64 :: proc(
 // matching the IR would be encoding a codegen heuristic as if it were the ABI.
 // `max_by_value` here therefore only ever sees the scalars the probe passes.
 @(private) CDECL_BASE := abi.Convention{
+	// ARGUMENT EXTENSION -- see `Convention.arg_extend_to`.
+	// Same as SysV: i386 widens to 32 bits and normalises a bool.
+	arg_extend_to        = 4,
+	arg_extend_signed_at = 0,
+	bool_arg_normalised  = true,
 	id = .CDECL,
 	// A complex of at most two words comes back in EAX:EDX. Measured, and
 	// upstream reached the same bound: "return a complex of eight bytes or
@@ -962,6 +1064,13 @@ classify_win64 :: proc(
 }
 
 @(private) WIN64_BASE := abi.Convention{
+	// ARGUMENT EXTENSION -- see `Convention.arg_extend_to`.
+	// WIN64 WIDENS NOTHING and still normalises a bool, which is why the bool
+	// fact is its own field. Measured at the call site: `_Bool` compiles to
+	// `testl %ecx,%ecx; setne %cl` and `unsigned char` to no instruction at all.
+	arg_extend_to        = 0,
+	arg_extend_signed_at = 0,
+	bool_arg_normalised  = true,
 	id = .WIN64,
 	name         = "win64",
 	varargs      = .WIN64_DUPLICATE,

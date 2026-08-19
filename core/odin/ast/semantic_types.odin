@@ -484,7 +484,17 @@ Gen_Procs_Data :: struct {
 // Gen_Types_Data stores specialized polymorphic type instances
 Gen_Types_Data :: struct {
 	types: [dynamic]^Entity,
-	mutex: sync.Mutex,
+	// C++ Reference: src/checker.hpp:680-683 --
+	//     struct GenTypesData { Array<Entity *> types; RecursiveMutex mutex; };
+	// RECURSIVE, not plain. The port had sync.Mutex, which was inert while the only holders
+	// were the two short comparison loops in add_/find_polymorphic_record_entity, but stops
+	// being inert once check_type_specialization_to_internal takes this lock to finalise a
+	// specialization in place (check_type.cpp:1554-1562). The reference picked a re-entrant
+	// mutex for that structure deliberately; substituting a plain one converts a race into a
+	// potential self-deadlock, which is a strictly worse failure. Note this is NOT the same
+	// lock as Type_Named.gen_types_data_mutex below, which guards only the allocation of this
+	// struct and whose C++ counterpart really is a plain BlockingMutex.
+	mutex: sync.Recursive_Mutex,
 }
 
 // ============================================================================
@@ -1094,6 +1104,75 @@ Type_Map :: struct {
 	debug_metadata_type: ^Type,
 }
 
+// ============================================================================
+// Wait_Signal -- set-once completion signal
+// ============================================================================
+
+// Wait_Signal is a completion signal that starts unset, is set EXACTLY ONCE, and never
+// resets. Waiting on an already-set signal must cost one atomic load and NO LOCK.
+//
+// C++ Reference: src/threading.cpp:122-135
+//     struct Wait_Signal { Futex futex; };
+//     void wait_signal_until_available(Wait_Signal *ws) {
+//         if (ws->futex.load() == 0) { futex_wait(&ws->futex, 0); }
+//     }
+//     void wait_signal_set(Wait_Signal *ws) {
+//         ws->futex.store(1);
+//         futex_broadcast(&ws->futex);
+//     }
+//
+// WHY THIS IS NOT sync.Wait_Group. The port previously emulated this with sync.Wait_Group
+// (add 1 at allocation, done at completion, wait to block). That emulation is NOT equivalent,
+// and the difference is not a detail: core/sync/extended.odin:78 is
+//     wait_group_wait :: proc "contextless" (wg: ^Wait_Group) {
+//         guard(&wg.mutex)                                   // <-- taken UNCONDITIONALLY
+//         for atomic_load(&wg.counter) != 0 { cond_wait(&wg.cond, &wg.mutex) }
+//     }
+// so it acquires a mutex BEFORE it ever examines the condition. C++'s already-set path takes
+// no lock at all. Every wait site therefore became a new edge in the checker's lock graph,
+// which deadlocked the checker on ordinary packages (core/container/topological_sort,
+// core/crypto/legacy/keccak, core/crypto/noise) while a bounded-spin probe on the CONDITION
+// fired zero times across 120 packages, 150 runs on each hanging package, and 300 on the
+// witness. Both observations were true: the condition never blocked, and the mutex hung it.
+// The defect was in the PRIMITIVE, so it was live at every existing wait site, not only the
+// missing ones. See COVERAGE.md TICK 231b.
+//
+// WHY THIS IS A `for` AND NOT C++'s `if`. A CHARACTER-FOR-CHARACTER transcription would be
+// wrong here, because the two futex_wait primitives do not agree. C++'s Linux futex_wait
+// (threading.cpp:741) LOOPS internally and returns only on EAGAIN -- i.e. only once the value
+// has actually changed; an ordinary wake re-enters FUTEX_WAIT. Odin's sync.futex_wait is
+// single-shot and is documented to return on a spurious wakeup. Porting the `if` literally
+// would let a spurious wake fall through and read fields that are not yet published. The loop
+// reproduces C++'s SEMANTICS (block until set) on top of Odin's weaker primitive, which is
+// what parity means here.
+Wait_Signal :: struct {
+	futex: sync.Futex,
+}
+
+// wait_signal_until_available blocks until the signal is set. Returns immediately, with no
+// lock and no syscall, if it is already set.
+// C++ Reference: threading.cpp:126 wait_signal_until_available
+wait_signal_until_available :: proc "contextless" (ws: ^Wait_Signal) {
+	for sync.atomic_load(&ws.futex) == 0 {
+		sync.futex_wait(&ws.futex, 0)
+	}
+}
+
+// wait_signal_set marks the signal available and wakes every waiter. Idempotent.
+// C++ Reference: threading.cpp:132 wait_signal_set
+wait_signal_set :: proc "contextless" (ws: ^Wait_Signal) {
+	sync.atomic_store(&ws.futex, 1)
+	sync.futex_broadcast(&ws.futex)
+}
+
+// wait_signal_is_set is a non-blocking query, for the sites that test completion instead of
+// waiting on it.
+// C++ Reference: the direct `t->Struct.fields_wait_signal.futex.load()` reads, e.g.
+// check_type.cpp is_type_comparable's struct arm.
+wait_signal_is_set :: proc "contextless" (ws: ^Wait_Signal) -> bool {
+	return sync.atomic_load(&ws.futex) != 0
+}
+
 Type_Struct :: struct {
 	fields:                  [dynamic]^Entity,
 	names:                   map[string]^Entity,
@@ -1107,8 +1186,8 @@ Type_Struct :: struct {
 	is_poly_specialized:     bool,
 	polymorphic_params:      ^Type,
 	polymorphic_parent:      ^Type,
-	polymorphic_wait_signal: sync.Wait_Group,
-	fields_wait_signal:      sync.Wait_Group,
+	polymorphic_wait_signal: Wait_Signal,
+	fields_wait_signal:      Wait_Signal,
 	is_packed:               bool,
 	is_raw_union:            bool,
 	is_all_or_none:          bool,  // #all_or_none attribute
@@ -1136,7 +1215,7 @@ Type_Union :: struct {
 	is_poly_specialized:     bool,
 	polymorphic_params:      ^Type,
 	polymorphic_parent:      ^Type,
-	polymorphic_wait_signal: sync.Wait_Group,
+	polymorphic_wait_signal: Wait_Signal,
 	variant_block_size:      i64,
 	custom_align:            i64,
 	tag_size:                i16,

@@ -6,7 +6,6 @@ import "core:fmt"
 import "core:math/big"
 import "core:mem"
 import "core:odin/ast"
-import "core:os"
 import "core:sync"
 import "core:time"
 /*
@@ -192,10 +191,18 @@ init_checker :: proc(c: ^Checker, allocator := context.allocator) {
 		// C++ Reference: main.cpp:15-20 (ThreadPool initialization)
 		// The global thread pool is shared across all checkers
 		if global_thread_pool == nil && !build_context.no_threaded_checker {
-			// Use hardware thread count (or minimum of 1 worker)
-			// C++ uses same approach: worker_count = max(1, cpu_count - 1)
-			cpu_count := os.get_processor_core_count()
-			worker_count := max(1, cpu_count - 1) // Leave one core for main thread
+			// C++ Reference: main.cpp:16-20
+			//     isize thread_count = gb_max(build_context.thread_count, 1);
+			//     isize worker_count = thread_count; // +1
+			//     thread_pool_init(&global_thread_pool, worker_count, "ThreadPoolWorker");
+			// The worker count is the FULL thread count, and thread_pool_init then allocates
+			// worker_count+1 slots (thread_pool.cpp:52) because slot 0 is the main thread. The
+			// port computed `max(1, cpu_count - 1)` and a comment claimed C++ did the same; it
+			// does not, so the pool ran one worker short of the reference on every machine.
+			// build_context.thread_count already carries the -thread-count override, and defaults
+			// to the logical core count in init_build_context.
+			ensure_build_context_initialized()
+			worker_count := max(build_context.thread_count, 1)
 			global_thread_pool = thread_pool_init(worker_count, runtime.default_allocator())
 		}
 
@@ -331,7 +338,23 @@ create_builtin_package :: proc(name: string, allocator := context.allocator) -> 
 	pkg.name = name
 	pkg.kind = .Normal
 	pkg.scope = create_scope(nil, allocator) // No parent scope for builtin packages
-	pkg.scope.flags += {.Pkg}
+	// t205: C++ checker.cpp create_builtin_package sets THREE flags and back-links the package:
+	//     pkg->scope->flags |= ScopeFlag_Pkg | ScopeFlag_Global | ScopeFlag_Builtin;
+	//     pkg->scope->pkg = pkg;
+	// The port set only {.Pkg}. Scope_Flag_Bit.Builtin was therefore READ IN THREE PLACES AND
+	// WRITTEN IN NONE -- the silently-zero-field class. Two consequences, both real:
+	//   1. create_scope's "do not chain onto the builtin scope" guard (scope.odin, mirroring C++
+	//      `parent != builtin_pkg->scope`) could never fire, so every package scope and every
+	//      universe enum scope was chained into builtin_scope.head_child under one shared mutex.
+	//   2. write_canonical_entity_name's `.Builtin` arm was unreachable, so a universe-scope enum
+	//      VALUE (a Constant, e.g. an Odin_OS_Type member) fell past the Type_Name escape added by
+	//      LEDGER #482 and hit panic(). #482 patched the symptom one arm too late; this is the
+	//      arm C++ actually exits through.
+	pkg.scope.flags += {.Pkg, .Global, .Builtin}
+	pkg.scope.pkg = pkg
+	// NOTE: C++ also sets `pkg->kind = Package_Builtin`, but ast.Package_Kind has no Builtin member
+	// and core/odin/ast is PUBLIC (#868), so adding one is an API change rather than a checker fix.
+	// Left as .Normal deliberately and recorded, not silently ignored.
 	return pkg
 }
 
@@ -357,6 +380,7 @@ init_builtin_packages :: proc(info: ^Checker_Info, allocator := context.allocato
 	// Initialize ODIN_ROOT from environment if not set.
 	// The loader needs it to resolve `base:runtime` and every other collection path.
 	init_odin_root_from_env()
+	init_default_library_collections() // t207: ODIN_ROOT is known here; C++ main.cpp:3814
 
 	// NOTE: base:runtime is deliberately NOT created here, and info.runtime_package is left nil.
 	//

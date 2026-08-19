@@ -2179,8 +2179,21 @@ check_builtin_objc_block :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 	}
 
 	// C++:690-692 -- the builtin yields a POINTER to the specialized block type, as a value.
-	operand.mode = .Value
+	//
+	// t204: C++ writes `*operand = poly_op;` FIRST -- a wholesale overwrite with the freshly
+	// zeroed `Operand poly_op = {}` -- and only then sets type and mode. The port assigned mode
+	// and type onto the EXISTING operand, so every other field survived. In particular
+	// `operand.value` still held the constant from the capture argument:
+	//     x: int = intrinsics.objc_block(3, h)
+	// left value = 3, and check_integer_exceed_suggestion's guard is
+	// `is_type_integer(target) && operand.value is an integer` -- which then passed and appended
+	// a continuation the reference never emits:
+	//     "The maximum value that can be represented by 'int' is '9223372036854775807'"
+	// Witness wit_oblock/ob_restype_cap. A STALE OPERAND FIELD, not a wrong guard: the guard is
+	// term-for-term identical to C++'s, which is why reading it in isolation found nothing.
+	operand^ = Operand{}
 	operand.type = alloc_type_pointer(specialized)
+	operand.mode = .Value
 	return true
 }
 
@@ -5435,6 +5448,25 @@ check_builtin_soa_zip :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 			ts.names[f.token.text] = f
 			ts.tags[i] = ""
 		}
+		// t243o: C++ sets the fields wait signal on this freshly-minted element struct
+		// (check_builtin.cpp:4846, `wait_signal_set(&elem->Struct.fields_wait_signal);`).
+		// Dropping it is a HANG, not a cosmetic gap: Wait_Signal has futex polarity where
+		// zero == UNSET, so an unsignalled struct makes lookup_field_with_selection block
+		// forever at types.odin:3535 (wait_signal_until_available). Reproduced at
+		// -thread-count:1 and at -no-threads, so it is NOT a race -- a lone worker waits
+		// on a signal nobody will ever set. Witness: wit_soazip243/zfield (soa_zip then
+		// z[0].a); zlen/zunzip/namedsoa stay clean because they never reach the wait.
+		// The sibling struct-construction sites all set it: check_builtin.odin:9238,
+		// check_type.odin:8052, types.odin:4533.
+		// Deliberately NOT ported from the same C++ block:
+		//   * `elem->Struct.node = dummy_node_struct` (:4843) -- dummy_node_struct is a
+		//     locally allocated Ast_Invalid placeholder (:4783), not `call`; the port
+		//     leaves node nil, carrying the same "no meaningful node" meaning. Assigning
+		//     `call` would be a port invention that could move diagnostic positions.
+		//   * `type_set_offsets(elem)` (:4844) / `type_set_offsets(soa_type)` (:4850) --
+		//     the port has no type_set_offsets at all; offsets are computed lazily by
+		//     type_size_of (types.odin:4087). Architectural and pre-existing.
+		wait_signal_set(&ts.fields_wait_signal)
 	}
 
 	operand.mode = .Value
@@ -8621,13 +8653,36 @@ check_builtin_constant_utf16_cstring :: proc(ctx: ^Checker_Context, operand: ^Op
 		return false
 	}
 
-	// C++ Reference: check_builtin.cpp:7784-7788
-	// Use type_hint to determine return type
+	// C++ Reference: check_builtin.cpp:8483-8488 (the old citation here said 7784-7788, which
+	// now lands in the #packed branch of check_builtin_procedure -- see the citation-drift note
+	// below; resolve by NAME, never by the line number alone).
+	//
+	//     operand->mode = Addressing_Value;
+	//     if (type_hint != nullptr && is_type_cstring16(type_hint)) {
+	//         operand->type = type_hint;
+	//     } else {
+	//         operand->type = alloc_type_multi_pointer(t_u16);
+	//     }
+	//
+	// The port had THREE differences from that in one `if`, and they cancelled on the obvious
+	// witness. base/intrinsics/intrinsics.odin:263 declares this `-> [^]u16`, so the reference is
+	// right on both rows where they disagree:
+	//
+	//     x: T = intrinsics.constant_utf16_cstring("hi")
+	//     T           reference  port(before)
+	//     string16    REJECT     accept        <-- the hint predicate tested string16, not cstring16
+	//     cstring16   accept     accept        <-- AGREED, but via the reference's `then` and the
+	//                                             port's `else`: an agreement for the wrong reason
+	//     [^]u16      accept     REJECT        <-- the default was t_cstring16, not [^]u16
+	//
+	// The middle row is the type named in the builtin and in its own error text, i.e. the first
+	// thing anyone probes, and probing only it goes green while both real behaviours are wrong.
+	// Found by clODIN on the frozen tree; the witness asserts all three rows for that reason.
 	operand.mode = .Value
-	if type_hint != nil && is_type_string16(type_hint) {
-		operand.type = t_string16
+	if type_hint != nil && is_type_cstring16(type_hint) {
+		operand.type = type_hint
 	} else {
-		operand.type = t_cstring16
+		operand.type = alloc_type_multi_pointer(t_u16)
 	}
 
 	return true
@@ -9199,7 +9254,7 @@ check_builtin_soa_struct :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		}
 
 		// Mark as completed
-		sync.wait_group_done(&ts.fields_wait_signal)
+		wait_signal_set(&ts.fields_wait_signal)
 
 	} else if is_type_struct(elem) {
 		// Struct case: use make_soa_struct_fixed

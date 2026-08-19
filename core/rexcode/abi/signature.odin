@@ -102,7 +102,12 @@ Param :: struct {
 // alignment to `Param` that a caller could set inconsistently with the first.
 // stamp_size records the object's size on whichever Location variant carries
 // one. `Stack` already has a size, set by the classifier from the same number.
-@(private)
+//
+// EXPORTED, because the arch packages are separate packages and each one's
+// public `classify` now wraps its body to stamp. It was private while
+// `classify_signature` was the only stamper, and that was exactly the state in
+// which the direct classify+assign path returned a zero footprint on a
+// documented public route.
 stamp_size :: proc(loc: ^Location, size: u32) {
 	// `v` is a copy in a value switch and immutable; take it, edit it, put it
 	// back.
@@ -114,6 +119,14 @@ stamp_size :: proc(loc: ^Location, size: u32) {
 	if n, is_n := loc.(Indirect); is_n {
 		n.size = size
 		loc^ = n
+		return
+	}
+	// SRET, and its absence here was the bug this arm exists to prevent: the
+	// variant whose whole purpose is a store through a caller-owned pointer was
+	// the one that could not say how many bytes to store. See `Sret.size`.
+	if r, is_r := loc.(Sret); is_r {
+		r.size = size
+		loc^ = r
 	}
 }
 
@@ -395,6 +408,17 @@ Call_Layout :: struct {
 	ret_ptrs: []Location,
 
 	// The language's own hidden arguments -- Odin's `^Context` -- placed last.
+	//
+	// LAST means after `ret_ptrs`, not merely after the declared arguments, and
+	// the diagram above is the authority: `[sret] declared args
+	// ret_ptrs(0..n-2) context`. Restated here because a consumer reading this
+	// field's own comment can act on "placed last" without seeing the diagram,
+	// and emitting the context before the hidden return pointers puts every
+	// argument from that point on one slot out.
+	//
+	// Nothing needs to reconstruct the order to emit the call: each Location
+	// carries its own `reg` or `offset`, already assigned in this sequence. The
+	// order is here to be checked against, not to be re-derived from.
 	implicit: []Location,
 
 	// How the result comes back. `Sret` here means the caller supplies storage

@@ -311,6 +311,24 @@ Direct :: struct {
 	//
 	// Size a buffer with `pieces_needed`. Slicing instead of inlining a
 	// worst-case array took `Direct` from 132 bytes to 24.
+	//
+	// A CACHED `Location` IS NOT REUSABLE, and this is the footgun the
+	// borrowing buys. `classify` fills in the CLASSIFICATION -- class, offset,
+	// width -- and never writes `Piece.reg`; placement is `assign` and
+	// `assign_result`, which write `pieces[i].reg` IN PLACE, through this
+	// slice, into the caller's buffer.
+	//
+	// So the obvious optimisation is wrong in a quiet way. Classification
+	// really is call-site-independent, so a backend caches it per type and
+	// hands the same `Location` to `assign` at every call site -- and the first
+	// assignment stamps that site's register numbers into the cache, which the
+	// next site then reads as its own. It is right until two call sites of the
+	// same type disagree, and it fails as wrong registers rather than as a
+	// crash.
+	//
+	// Cache the pieces as a TEMPLATE and copy them into a fresh buffer before
+	// assigning. Raised from outside by a consuming backend about to build
+	// exactly that cache.
 	pieces: []Piece,
 	// How many leading pieces are in REGISTERS. The rest, if any, sit on the
 	// stack at `stack_offset` and follow contiguously one word apart.
@@ -341,10 +359,23 @@ Direct :: struct {
 	// `layout.args[i]` and remembering which of the two to use, which is the
 	// kind of bookkeeping an ABI layer exists to remove.
 	//
-	// Stamped by `classify_signature` for every Location it produces. A
-	// hand-built call that uses `classify` directly gets 0, and `assign` then
-	// falls back to the piece sum -- exact whenever the pieces tile the object,
-	// which is every shape but a trailing-padding one.
+	// Stamped by every public `classify` entry point AND by
+	// `classify_signature`, so both routes carry it.
+	//
+	// It used to be stamped only by `classify_signature`, and the direct
+	// classify+assign path -- public, documented, and the one a backend driving
+	// assignment itself takes -- returned 0. A zero footprint is a PLAUSIBLE
+	// answer rather than an obviously missing one, which is the unclaimed-default
+	// hazard `Param_Shape` was given an INVALID zero to prevent. Raised from
+	// outside: a consuming backend was about to write against this field on
+	// exactly that path.
+	//
+	// Each arch's `classify` is now a thin wrapper that stamps and calls its
+	// body, rather than a stamp at each of the dozens of return sites -- the
+	// same reasoning `classify_signature` records for stamping centrally, and a
+	// wrapper a new return site cannot bypass. `oracle --arch=X` checks the
+	// number on every corpus type on every target (5064 Locations on x86-64);
+	// deleting the stamp reports `bare_i8 ARGUMENT carries 0, object is 1 bytes`.
 	size:         u32,
 }
 
@@ -421,6 +452,126 @@ Stack :: struct {
 // Universal -- 3126 return positions, present on all five targets.
 Sret :: struct {
 	align: u32,
+	// HOW MANY BYTES THE CALLEE MAY WRITE through the hidden pointer.
+	//
+	// `Direct`, `Indirect` and `Stack` all carry a size; this variant did not,
+	// and it is the one where the number is most dangerous to guess. The callee
+	// owns a store through a pointer the CALLER allocated, so a consumer that
+	// rounds the size up writes off the end of the caller's object.
+	//
+	// That is not hypothetical. A consuming backend copied through the sret
+	// pointer an eightbyte at a time whatever the result size, so returning a
+	// 3-byte `struct #packed{u8,u16}` wrote EIGHT bytes -- a five-byte
+	// out-of-bounds write into the caller's frame, for every returned aggregate
+	// whose size is not a multiple of eight. On one compiler's frame layout the
+	// overrun landed in padding and every test passed; on another it landed on
+	// the next local, and for a 5-byte return clang emits `leaq 13(%rsp), %rdi`
+	// -- three bytes below the stack canary at 16, so the store was writing over
+	// the stack protector's own slot.
+	//
+	// The API could not have told them otherwise: `Sret{align = 4}` says where
+	// to write and nothing about how far. `Direct.size`'s comment already argues
+	// this case -- "a consumer keeping `params[i].size` in step with
+	// `layout.args[i]` and remembering which of the two to use is the kind of
+	// bookkeeping an ABI layer exists to remove" -- and the argument is stronger
+	// here, because getting it wrong is memory corruption rather than a wrong
+	// register.
+	//
+	// Stamped by `classify_signature`, like the other three.
+	size:  u32,
+}
+
+// Arg_Extension is what a caller must do to a narrow integer argument before
+// the call.
+Arg_Extension :: enum u8 {
+	NONE, // hand it over as it is
+	SIGN, // widen with the sign bit
+	ZERO, // widen with zeroes
+}
+
+// arg_extension answers, for one scalar integer argument, whether the caller
+// must widen it and how.
+//
+// A PROCEDURE rather than a flag on `Piece`, deliberately, and the reason is
+// that the answer needs a fact the classifier is never given: the SIGNEDNESS of
+// the source type. `Field` carries class, size, alignment and three
+// disambiguating booleans, and none of them says signed-vs-unsigned -- because
+// no ABI surveyed classifies on it. This one rule reads it, and threading a
+// fourth boolean through every `Field` and every classifier to serve a decision
+// no classifier makes would put the fact in the wrong place.
+//
+// So the convention publishes the rule and the front end -- which HAS the
+// declared type -- asks. `size` is the source type's width in bytes,
+// `is_signed` its declared signedness, `is_bool` set for a boolean.
+//
+// AGGREGATES ARE NOT EXTENDED. This is for a scalar argument; a struct is
+// coerced by the classifier and no part of it is widened, so a caller must not
+// ask this about one. Measured: `struct{i8}` on x86-64 is `i8` with no
+// attribute at all, beside a bare `signed char` that is `i8 signext`.
+arg_extension :: proc "contextless" (conv: ^Convention, size: u32, is_signed: bool,
+                                     is_bool := false) -> (kind: Arg_Extension, to: u32) {
+	if conv == nil { return .NONE, 0 }
+	// The BOOL rule is asked first and is not a width rule: a bool may need
+	// normalising on a convention that widens nothing (win64), and may need
+	// nothing on one that widens (aarch64-linux widens nothing either way).
+	if is_bool {
+		if !conv.bool_arg_normalised { return .NONE, 0 }
+		// Zero, always: the guarantee is "0 or 1", which sign extension of a
+		// one-bit value would turn into 0 or -1.
+		return .ZERO, max(size, 1)
+	}
+	if conv.arg_extend_to == 0 || size == 0 { return .NONE, 0 }
+	if size >= conv.arg_extend_to { return .NONE, 0 }
+	// RISC-V's exception, applied before the signedness test rather than after:
+	// at this width the register's contents are defined by the ISA convention
+	// and not by the declared type.
+	if conv.arg_extend_signed_at != 0 && size == conv.arg_extend_signed_at {
+		return .SIGN, conv.arg_extend_to
+	}
+	return is_signed ? .SIGN : .ZERO, conv.arg_extend_to
+}
+
+// location_rebind copies a Location's pieces into `buf` and returns the copy.
+//
+// This is the primitive that makes a CLASSIFICATION CACHE safe, and it exists
+// because the obvious cache is wrong in a way that stays quiet. Classification
+// really is call-site-independent -- `classify` writes class, offset and width
+// and never touches `Piece.reg` -- so a backend caches the answer per type and
+// reuses it. But `Direct.pieces` is a slice of the buffer the caller supplied,
+// a `Location` is a union holding that slice HEADER, and `assign` /
+// `assign_result` write `pieces[i].reg` THROUGH it. Copying the Location does
+// not copy the pieces, so the second call site's assignment overwrites the
+// first's registers in place.
+//
+// MEASURED on `struct{f64, f64}` under SysV, one cached classification assigned
+// at two call sites, the second preceded by two f64 arguments:
+//
+//     site A      xmm0, xmm1
+//     site B      xmm2, xmm3
+//     site A now  xmm2, xmm3     <- A's own Location, held by value
+//
+// A is right until B exists, which is why it survives a test suite: the smallest
+// program that can fail needs the same type at two call sites with different
+// preceding arguments. `oracle --cache-alias` is that program, and it asserts
+// BOTH halves -- that the hazard is still real without this call, and that this
+// call still removes it.
+//
+// Raised from outside by a consuming backend that had "cache the Location on the
+// type" written down as a step.
+//
+// Size `buf` with `pieces_needed`, the same as for `classify`. Returns nil and
+// false if it is too small -- a truncated piece list is a wrong answer that
+// looks like a right one, and refusing is this package's response to that.
+// The three piece-free variants pass through unchanged: they have nothing to
+// alias, so calling this on every Location is correct and needs no branch at
+// the call site.
+location_rebind :: proc(loc: Location, buf: []Piece) -> (Location, bool) {
+	d, is_direct := loc.(Direct)
+	if !is_direct { return loc, true }
+	if len(buf) < len(d.pieces) { return nil, false }
+	copy(buf[:len(d.pieces)], d.pieces)
+	d.pieces = buf[:len(d.pieces)]
+	return d, true
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +752,61 @@ Convention :: struct {
 	// That is what separates it from the one-element-vector case this package
 	// declines, where clang contradicts ITSELF at the same size and count.
 	narrow_float_vector_returns_int: bool,
+
+	// ---------------------------------------------------------------------
+	// ARGUMENT EXTENSION -- three fields, because the measurement has three
+	// independent axes and collapsing them loses a target each time.
+	//
+	// This axis was ENTIRELY ABSENT from the model until a consuming backend
+	// hit it: `Piece` carries class, offset, width and register, and nothing
+	// said "widen this to 32 bits with sign extension first". clang's IR says
+	// it with `signext`/`zeroext`, and this oracle's decoder used to STRIP both
+	// before comparing -- so every run this project has ever done was silent
+	// about it while reporting zero disagreements.
+	//
+	// Measured, `long f(<T> x)` declared per target, clang 22.1.8:
+	//
+	//   target          i8/u8      i16/u16    int      uint     _Bool
+	//   x86_64-linux    sign/zero  sign/zero  --       --       zero
+	//   x86_64-win64    --         --         --       --       zero
+	//   aarch64-linux   --         --         --       --       --
+	//   darwin-arm64    sign/zero  sign/zero  --       --       zero
+	//   riscv64-linux   sign/zero  sign/zero  SIGN     SIGN     zero
+	//   riscv32-linux   sign/zero  sign/zero  --       --       zero
+	//   armv7-hf        sign/zero  sign/zero  --       --       zero
+	//   i386-linux      sign/zero  sign/zero  --       --       zero
+	//
+	// FOUR distinct rows, not the two a first look suggests. aarch64-linux
+	// extends NOTHING, not even a bool, while Apple's aarch64 extends like
+	// x86-64 -- the same Darwin-vs-Linux split this package exists to carry.
+	// Win64 extends ONLY the bool. And riscv64 sign-extends `unsigned int`,
+	// confirmed in the assembly: `sext.w a0, a0` for both `int` and
+	// `unsigned int`, because LP64 holds 32-bit values sign-extended in 64-bit
+	// registers whatever their declared signedness.
+
+	// Integer arguments NARROWER than this are widened to it before the call.
+	// 0 means the convention extends nothing. Bytes, not bits.
+	arg_extend_to: u32,
+	// A width at which the extension is SIGNED whatever the source type says.
+	//
+	// Only RISC-V LP64 sets it, and without it a `u32` argument there comes out
+	// zero-extended, which is what the register must NOT hold. Below this width
+	// the sign follows the declared type as usual -- `u8` on riscv64 really is
+	// zero-extended -- so this is one width and not a threshold.
+	arg_extend_signed_at: u32,
+	// Whether a BOOLEAN argument arrives guaranteed to be 0 or 1.
+	//
+	// Separate from the widths above because it is a different claim and the
+	// targets disagree about it independently: win64 extends no integer and
+	// still normalises a bool, and aarch64-linux normalises nothing at all.
+	// Measured on win64: `_Bool` compiles to `testl %ecx,%ecx; setne %cl` at the
+	// call site and `unsigned char` to no instruction whatsoever.
+	//
+	// A validity guarantee rather than a width: a bool is one byte with two
+	// legal values, and a caller that hands over any other byte has broken a
+	// promise the callee is entitled to rely on.
+	bool_arg_normalised: bool,
+
 	// Where a VECTOR-class piece goes, when that is not the float file.
 	//
 	// Empty on every convention but one, and falls back to `float_regs`. i386

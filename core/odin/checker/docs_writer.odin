@@ -11,7 +11,7 @@ C++ References:
 - docs_format.cpp (format definitions)
 - docs_writer.cpp (writer implementation)
 
-Format version: 0.3.1
+Format version: 0.3.2
 Magic string: "odindoc\0"
 */
 
@@ -30,7 +30,14 @@ ODIN_DOC_MAGIC_STRING :: "odindoc\x00"
 
 ODIN_DOC_VERSION_MAJOR :: 0
 ODIN_DOC_VERSION_MINOR :: 3
-ODIN_DOC_VERSION_PATCH :: 1
+// C++ Reference: docs_format.cpp:18 -- `#define OdinDocVersionType_Patch 2`. The port was pinned at
+// 1, so every .odin-doc it wrote announced a format one revision older than the one it actually
+// encodes. A consumer that version-gates (odin-doc renderers do) would decode the file under the
+// wrong schema, which is worse than refusing it. Bumped WITH the two schema additions this tick
+// restores -- Doc_Type_Kind.Fixed_Capacity_Dynamic_Array and the Array generic-count pair -- which
+// are what 0.3.2 IS (upstream commits "Add fixed capacity dynamic array to the doc-format" and
+// "Add generic count of arrays to to doc-format").
+ODIN_DOC_VERSION_PATCH :: 2
 
 ODIN_DOC_TYPE_ELEMS_CAP :: 4
 
@@ -128,6 +135,12 @@ Doc_Type_Kind :: enum u32 {
 	Matrix            = 23,
 	Soa_Pointer       = 24,
 	Bit_Field         = 25,
+	// C++ Reference: docs_format.cpp:86 -- `OdinDocType_FixedCapacityDynamicArray = 26`. The port
+	// had no enumerator, and doc_write_type had no arm, so `[dynamic; N]T` fell out of its
+	// `#partial switch` and was written as kind 0 (Invalid) with no element type and no capacity.
+	// The FOURTH time this type kind has turned out to be the blind spot (LEDGER #709
+	// add_min_dep_type_info, #515 type_size_of/type_align_of, tick 226's init_core_type_info).
+	Fixed_Capacity_Dynamic_Array = 26,
 }
 
 // Type-specific flags
@@ -504,27 +517,33 @@ doc_get_item :: proc(w: ^Doc_Writer, t: ^Item_Tracker($T), index: u32) -> ^T {
 	return cast(^T)(raw_data(w.data[t.offset + size_of(T) * int(index):]))
 }
 
+// doc_write_string_without_cache writes a string and neither consults nor populates the cache.
+// C++ Reference: docs_writer.cpp odin_doc_write_string_without_cache.
+doc_write_string_without_cache :: proc(w: ^Doc_Writer, str: string) -> Doc_String {
+	if w.state == .Preparing {
+		w.strings.cap += len(str) + 1
+		return {}
+	}
+
+	assert(w.strings.len + len(str) + 1 <= w.strings.cap)
+
+	offset := w.strings.offset + w.strings.len
+	copy(w.data[offset:], str)
+	w.data[offset + len(str)] = 0
+	w.strings.len += len(str) + 1
+
+	return Doc_String{offset = u32(offset), length = u32(len(str))}
+}
+
 // doc_write_string writes a string with caching
+// C++ Reference: docs_writer.cpp odin_doc_write_string
 doc_write_string :: proc(w: ^Doc_Writer, str: string) -> Doc_String {
 	// Check cache
 	if cached, found := w.string_cache[str]; found {
 		return cached
 	}
 
-	result: Doc_String
-	if w.state == .Preparing {
-		w.strings.cap += len(str) + 1
-	} else {
-		assert(w.strings.len + len(str) + 1 <= w.strings.cap)
-
-		offset := w.strings.offset + w.strings.len
-		copy(w.data[offset:], str)
-		w.data[offset + len(str)] = 0
-		w.strings.len += len(str) + 1
-
-		result = Doc_String{offset = u32(offset), length = u32(len(str))}
-	}
-
+	result := doc_write_string_without_cache(w, str)
 	w.string_cache[str] = result
 	return result
 }
@@ -576,7 +595,13 @@ basic_type_name :: proc(type: ^Type) -> string {
 	// Return the name based on the kind
 	#partial switch basic.kind {
 	case .Invalid:
-		return ""
+		// C++ Reference: types.cpp:484 -- the basic-type table's entry for Basic_Invalid carries
+		// `STR_LIT("invalid type")`, and odin_doc_type writes `type->Basic.name` unconditionally,
+		// so the reference records that text rather than a blank. It is REACHED in ordinary code:
+		// a PROC GROUP's entity type is t_invalid, so every `proc{...}` in a documented package
+		// hits this arm. MEASURED on core/unicode/utf8, where the oracle documents decode_rune's
+		// type as `invalid type` and the port left it empty.
+		return "invalid type"
 	case .Llvm_Bool:
 		return "llvm bool"
 	case .Bool:
@@ -763,16 +788,33 @@ is_type_alias :: proc(e: ^Entity) -> bool {
 	return false
 }
 
-// doc_write_comment_group serializes a comment group to a Doc_String
-// C++ Reference: docs_writer.cpp:281-367 (append_comment_group_string)
-doc_write_comment_group :: proc(w: ^Doc_Writer, g: ^ast.Comment_Group) -> Doc_String {
-	if g == nil || len(g.list) == 0 {
-		return {}
+// doc_append_comment_group_string appends a rendered comment group to buf and reports whether it
+// wrote anything.
+//
+// C++ Reference: docs_writer.cpp odin_doc_append_comment_group_string. Split out from
+// doc_write_comment_group because the reference has the same split, and the PACKAGE doc string
+// (odin_doc_pkg_doc_string) is the caller that needs the appending form: it concatenates the
+// package-declaration comment of EVERY file in the package into one buffer.
+doc_append_comment_group_string :: proc(buf: ^strings.Builder, g: ^ast.Comment_Group) -> bool {
+	if g == nil {
+		return false
 	}
 
-	// Build the comment string
-	buf := strings.builder_make()
-	defer strings.builder_destroy(&buf)
+	// C++ Reference: docs_writer.cpp:290-297 -- the early bail. `len` is the sum of each comment's
+	// length PLUS one newline each, so `len <= g->list.count` means every comment in the group is
+	// empty text. The port had no such test and would emit a run of bare newlines for that group.
+	total := 0
+	for comment_token in g.list {
+		total += len(comment_token.text)
+		total += 1 // for \n
+	}
+	if total <= len(g.list) {
+		return false
+	}
+
+	// `count` is the number of LINES actually emitted. C++ uses it twice: to suppress leading blank
+	// lines inside a block comment, and to decide whether the group gets its trailing newline.
+	count := 0
 
 	for comment_token in g.list {
 		comment := comment_token.text
@@ -811,8 +853,9 @@ doc_write_comment_group :: proc(w: ^Doc_Writer, g: ^ast.Comment_Group) -> Doc_St
 		// Process content
 		if slash_slash {
 			// Single line comment
-			strings.write_string(&buf, comment)
-			strings.write_byte(&buf, '\n')
+			strings.write_string(buf, comment)
+			strings.write_byte(buf, '\n')
+			count += 1
 		} else {
 			// Multi-line comment - process line by line
 			pos := 0
@@ -825,24 +868,84 @@ doc_write_comment_group :: proc(w: ^Doc_Writer, g: ^ast.Comment_Group) -> Doc_St
 				line := comment[pos:end]
 				pos = end + 1
 
+				// C++ Reference: docs_writer.cpp:335-340 -- a WHITESPACE-ONLY line is dropped while
+				// nothing has been emitted yet, which is what strips the leading blank line of the
+				// customary `/*\n * text\n */` layout. Once any line has been written, later blank
+				// lines are kept, because inside a doc comment they are paragraph breaks.
+				if len(strings.trim_space(line)) == 0 && count == 0 {
+					continue
+				}
+
 				// Remove "* " prefix from block comments
 				if strings.has_prefix(line, "* ") {
 					line = line[2:]
 				}
 
-				strings.write_string(&buf, line)
-				strings.write_byte(&buf, '\n')
+				strings.write_string(buf, line)
+				strings.write_byte(buf, '\n')
+				count += 1
 			}
 		}
 	}
 
-	result := strings.to_string(buf)
-	// Trim trailing newlines
-	for len(result) > 0 && result[len(result) - 1] == '\n' {
-		result = result[:len(result) - 1]
+	// C++ Reference: docs_writer.cpp:362-366 -- one EXTRA newline terminates a non-empty group, so
+	// a one-line doc comment renders as "text\n\n". The port trimmed every trailing newline
+	// instead, which is the opposite operation: MEASURED on core/unicode/utf8, the oracle records
+	// LOCB's docs as "The default lowest and highest continuation byte.\n\n" and the port recorded
+	// it with no terminator at all. It matters downstream because the paragraph separator is what
+	// lets a renderer concatenate groups.
+	if count > 0 {
+		strings.write_byte(buf, '\n')
+		return true
+	}
+	return false
+}
+
+// doc_write_pkg_doc_string renders a package's documentation: the package-declaration doc comment
+// of every file in the package, concatenated.
+//
+// C++ Reference: docs_writer.cpp odin_doc_pkg_doc_string --
+//     for_array(i, pkg->files) { if (f->pkg_decl) { odin_doc_append_comment_group_string(&buf,
+//         f->pkg_decl->PackageDecl.docs); } }
+//
+// FILE ORDER IS OUTPUT ORDER here, so it uses sorted_files for the same reason doc_write_docs does:
+// C++ walks pkg->files, which check_create_file_scopes has already sorted by basename, while the
+// port's pkg.files is a map.
+doc_write_pkg_doc_string :: proc(w: ^Doc_Writer, pkg: ^ast.Package) -> Doc_String {
+	if pkg == nil {
+		return {}
 	}
 
-	return doc_write_string(w, result)
+	buf := strings.builder_make()
+	defer strings.builder_destroy(&buf)
+
+	for file in sorted_files(pkg.files) {
+		if file.pkg_decl != nil {
+			doc_append_comment_group_string(&buf, file.pkg_decl.docs)
+		}
+	}
+
+	return doc_write_string_without_cache(w, strings.to_string(buf))
+}
+
+// doc_write_comment_group serializes a comment group to a Doc_String
+// C++ Reference: docs_writer.cpp odin_doc_comment_group_string
+doc_write_comment_group :: proc(w: ^Doc_Writer, g: ^ast.Comment_Group) -> Doc_String {
+	if g == nil {
+		return {}
+	}
+
+	buf := strings.builder_make()
+	defer strings.builder_destroy(&buf)
+	doc_append_comment_group_string(&buf, g)
+
+	// WRITTEN WITHOUT THE CACHE, as C++ does (odin_doc_comment_group_string calls
+	// odin_doc_write_string_without_cache). Two entities with identical doc text get two spans in
+	// the reference's output; sharing one span here would make the port's strings section a
+	// different size from the reference's for the same input. Uncached is also what makes freeing
+	// the builder safe -- nothing retains the bytes past the call, unlike doc_write_string, which
+	// keeps them as a map KEY.
+	return doc_write_string_without_cache(w, strings.to_string(buf))
 }
 
 // doc_write_attributes serializes entity attributes
@@ -867,7 +970,7 @@ doc_write_attributes :: proc(w: ^Doc_Writer, attrs: []^ast.Attribute) -> Doc_Arr
 			}
 
 			name_str := ""
-			value_str := ""
+			value_expr: ^ast.Expr
 
 			#partial switch e in elem.derived {
 			case ^ast.Ident:
@@ -877,13 +980,18 @@ doc_write_attributes :: proc(w: ^Doc_Writer, attrs: []^ast.Attribute) -> Doc_Arr
 				if field_ident, is_ident := e.field.derived.(^ast.Ident); is_ident {
 					name_str = field_ident.name
 				}
-				value_str = expr_to_string(e.value)
+				value_expr = e.value
 			}
 
 			if len(name_str) > 0 {
 				append(&doc_attrs, Doc_Attribute{
 					name = doc_write_string(w, name_str),
-					value = doc_write_string(w, value_str),
+					// C++ Reference: docs_writer.cpp:459 --
+					//     doc_attrib.value = odin_doc_expr_string(w, value);
+					// i.e. the same `-short`-aware renderer as an initialiser, not a bare
+					// expr_to_string. It also handles a nil value (an attribute with no `=`),
+					// which the previous `value_str := ""` spelled out separately.
+					value = doc_write_expr_string(w, value_expr),
 				})
 			}
 		}
@@ -904,22 +1012,39 @@ doc_write_where_clauses :: proc(w: ^Doc_Writer, clauses: []^ast.Expr) -> Doc_Arr
 
 	for clause in clauses {
 		if clause != nil {
-			clause_str := expr_to_string(clause)
-			append(&doc_clauses, doc_write_string(w, clause_str))
+			// C++ Reference: docs_writer.cpp:473 -- `clauses[i] = odin_doc_expr_string(w, ...)`,
+			// the `-short`-aware renderer, not a bare expr_to_string.
+			append(&doc_clauses, doc_write_expr_string(w, clause))
 		}
 	}
 
 	return doc_write_slice(w, doc_clauses[:])
 }
 
-// doc_write_init_string serializes an initialization expression to a string
-// C++ Reference: docs_writer.cpp:422-435
-doc_write_init_string :: proc(w: ^Doc_Writer, expr: ^ast.Expr) -> Doc_String {
+// doc_write_expr_string serializes an expression to a Doc_String.
+//
+// C++ Reference: docs_writer.cpp odin_doc_expr_string --
+//     gbString s = write_expr_to_string(..., expr,
+//         use_shorthand || (build_context.cmd_doc_flags & CmdDocFlag_Short));
+//
+// THE `-short` TERM WAS MISSING. This was `doc_write_init_string`, which always called the long
+// renderer, so `odin doc -short -doc-format` produced the same expression text as an unflagged run
+// for initialisers, attribute values and where clauses alike. That is the BINARY-writer half of the
+// same defect tick 227 fixed in the plain-text printer (FIX 9): there the flag was a defaulted
+// parameter no caller passed, here the flag was simply never consulted. Both existed because no
+// instrument could see the flag's effect.
+//
+// `use_shorthand` is the caller's own override, ORed rather than substituted -- an oversized
+// compound literal is rendered short whether or not the flag is set.
+doc_write_expr_string :: proc(w: ^Doc_Writer, expr: ^ast.Node, use_shorthand := false) -> Doc_String {
 	if expr == nil {
 		return {}
 	}
-	init_str := expr_to_string(expr)
-	return doc_write_string(w, init_str)
+	short := use_shorthand || .Short in build_context.cmd_doc_flags
+	s := short ? expr_to_string_shorthand(expr) : expr_to_string(expr)
+	// NOT freed, deliberately: doc_write_string stores the string as a KEY in w.string_cache, so
+	// the bytes must outlive this call. C++ interns for the same reason (string_intern_string).
+	return doc_write_string(w, s)
 }
 
 // ======================================================================================
@@ -1006,7 +1131,38 @@ doc_write_type :: proc(w: ^Doc_Writer, type: ^Type, use_cache := true) -> Doc_Ty
 		doc_type.kind = .Array
 		doc_type.elem_count_len = 1
 		doc_type.elem_counts[0] = v.count
-		doc_type.types = doc_type_as_slice(w, v.elem)
+		// C++ Reference: docs_writer.cpp:565-573 -- when the count is POLYMORPHIC (`[$N]T`) the
+		// reference writes TWO types, element then generic count, and docs_format.cpp:166 documents
+		// the slot ("1=generic index (if exists)"). The port always wrote one, so a polymorphic
+		// array's count parameter was absent from the documentation. Upstream commit
+		// "Add generic count of arrays to to doc-format", which is part of format 0.3.2.
+		if v.generic_count != nil {
+			types := [2]Doc_Type_Index{
+				doc_write_type(w, v.elem),
+				doc_write_type(w, v.generic_count),
+			}
+			doc_type.types = doc_write_slice(w, types[:])
+		} else {
+			doc_type.types = doc_type_as_slice(w, v.elem)
+		}
+
+	case Type_Fixed_Capacity_Dynamic_Array:
+		// C++ Reference: docs_writer.cpp:596-608. Absent from the port entirely -- see the note on
+		// Doc_Type_Kind.Fixed_Capacity_Dynamic_Array. Same shape as the Array arm above: the
+		// capacity is elem_counts[0], and a polymorphic capacity (`[dynamic; $N]T`) adds itself as
+		// a second type.
+		doc_type.kind = .Fixed_Capacity_Dynamic_Array
+		doc_type.elem_count_len = 1
+		doc_type.elem_counts[0] = v.capacity
+		if v.generic_capacity != nil {
+			types := [2]Doc_Type_Index{
+				doc_write_type(w, v.elem),
+				doc_write_type(w, v.generic_capacity),
+			}
+			doc_type.types = doc_write_slice(w, types[:])
+		} else {
+			doc_type.types = doc_type_as_slice(w, v.elem)
+		}
 
 	case Type_Enumerated_Array:
 		doc_type.kind = .Enumerated_Array
@@ -1058,6 +1214,25 @@ doc_write_type :: proc(w: ^Doc_Writer, type: ^Type, use_cache := true) -> Doc_Ty
 			if v.is_raw_union {
 				doc_type.flags |= u32(Doc_Type_Flag_Struct.Raw_Union)
 			}
+			// C++ Reference: docs_writer.cpp:640 --
+			//     if (type->Struct.is_all_or_none) { doc_type.flags |= ..._all_or_none; }
+			// The bit is DECLARED on both sides (Doc_Type_Flag_Struct.All_Or_None) and was assigned
+			// on neither here: the #479/#480 shape, a doc flag that no input could ever set.
+			if v.is_all_or_none {
+				doc_type.flags |= u32(Doc_Type_Flag_Struct.All_Or_None)
+			}
+
+			// C++ Reference: docs_writer.cpp:642-646 -- the custom field-alignment pair, which
+			// docs_format.cpp:153 documents as `.Struct - <=2 count: 0=min_field_align,
+			// 1=max_field_align`. The port never set elem_count_len for a struct at all, so
+			// `#min_field_align`/`#max_field_align` were invisible in the documentation.
+			// The guard is C++'s: the counts are written only when at least one is positive, so an
+			// ordinary struct keeps elem_count_len == 0 rather than gaining a `[0,0]`.
+			if v.custom_min_field_align > 0 || v.custom_max_field_align > 0 {
+				doc_type.elem_count_len = 2
+				doc_type.elem_counts[0] = max(v.custom_min_field_align, 0)
+				doc_type.elem_counts[1] = max(v.custom_max_field_align, 0)
+			}
 
 			// Write fields
 			fields := make([dynamic]Doc_Entity_Index, 0, len(v.fields))
@@ -1071,19 +1246,36 @@ doc_write_type :: proc(w: ^Doc_Writer, type: ^Type, use_cache := true) -> Doc_Ty
 			// Write where clauses from the AST node
 			if v.node != nil {
 				if struct_type, is_struct := v.node.derived.(^ast.Struct_Type); is_struct {
+					// C++ Reference: docs_writer.cpp:657-659 -- `if (st->align) { doc_type
+					// .custom_align = odin_doc_expr_string(w, st->align); }`, immediately before
+					// the where clauses. The port wrote only the where clauses, so `#align(N)` on
+					// a struct never reached the documentation even though Doc_Type.custom_align
+					// exists for exactly this and docs_format.cpp:144 marks it "Used By: .Struct,
+					// .Union".
+					if struct_type.align != nil {
+						doc_type.custom_align = doc_write_expr_string(w, struct_type.align)
+					}
 					doc_type.where_clauses = doc_write_where_clauses(w, struct_type.where_clauses)
 				}
 			}
 
-			// Write tags
-			if len(v.tags) > 0 {
-				tag_strs := make([dynamic]Doc_String, 0, len(v.tags))
-				defer delete(tag_strs)
-				for tag in v.tags {
-					append(&tag_strs, doc_write_string(w, tag))
+			// C++ Reference: docs_writer.cpp:663-673 -- the tags array is sized to
+			// `type->Struct.fields.count` and written UNCONDITIONALLY; when the struct carries no
+			// tags at all the reference still emits one BLANK string per field. The port wrote the
+			// array only when tags existed, so `tags.length` was 0 where the reference says N, and
+			// a consumer indexing tags[i] alongside fields[i] would run off the end.
+			// The port's `tags` is parallel to `fields` when populated, so the loop is over the
+			// FIELD count either way, exactly as C++'s is.
+			tag_strs := make([dynamic]Doc_String, 0, len(v.fields))
+			defer delete(tag_strs)
+			for i in 0 ..< len(v.fields) {
+				tag := ""
+				if i < len(v.tags) {
+					tag = v.tags[i]
 				}
-				doc_type.tags = doc_write_slice(w, tag_strs[:])
+				append(&tag_strs, doc_write_string(w, tag))
 			}
+			doc_type.tags = doc_write_slice(w, tag_strs[:])
 		}
 
 	case Type_Union:
@@ -1109,6 +1301,12 @@ doc_write_type :: proc(w: ^Doc_Writer, type: ^Type, use_cache := true) -> Doc_Ty
 		// Write where clauses from the AST node
 		if v.node != nil {
 			if union_type, is_union := v.node.derived.(^ast.Union_Type); is_union {
+				// C++ Reference: docs_writer.cpp:711-716 -- the union arm writes custom_align from
+				// `ut->align` before its where clauses, the same pair the struct arm writes. Both
+				// halves were missing here for the same reason.
+				if union_type.align != nil {
+					doc_type.custom_align = doc_write_expr_string(w, union_type.align)
+				}
 				doc_type.where_clauses = doc_write_where_clauses(w, union_type.where_clauses)
 			}
 		}
@@ -1158,13 +1356,12 @@ doc_write_type :: proc(w: ^Doc_Writer, type: ^Type, use_cache := true) -> Doc_Ty
 		}
 		doc_type.types = doc_write_slice(w, types[:])
 		doc_type.calling_convention = doc_write_string(w, get_calling_convention_name(v.calling_convention))
-
-		// Write where clauses from the AST node (Proc_Lit has where_clauses)
-		if v.node != nil {
-			if proc_lit, is_proc_lit := v.node.derived.(^ast.Proc_Lit); is_proc_lit {
-				doc_type.where_clauses = doc_write_where_clauses(w, proc_lit.where_clauses)
-			}
-		}
+		// NO where_clauses HERE, DELIBERATELY. C++ Reference: docs_writer.cpp:745-761, the whole
+		// Type_Proc arm -- it writes flags, the two types and the calling convention, and nothing
+		// else. docs_format.cpp:197 scopes the field to ".Struct, .Union" and puts a procedure's
+		// where clauses on the ENTITY instead. The port wrote them onto the TYPE from the Proc_Lit,
+		// which put data in a slot no reader of this format looks at for a proc, and made the type
+		// table disagree with the reference for every `where`-constrained procedure.
 
 	case Type_Bit_Set:
 		doc_type.kind = .Bit_Set
@@ -1252,12 +1449,24 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 	// Determine entity kind
 	kind: Doc_Entity_Kind
 	flags: u64
+	// C++ Reference: docs_writer.cpp:850 -- `i32 field_group_index = -1;`. The port had NO
+	// assignment to doc_entity.field_group_index anywhere, so every entity in every .odin-doc file
+	// carried 0 -- which is a MEANINGFUL value (the first field group), not a blank. MEASURED with
+	// triage_docbin on core/unicode/utf8: the oracle emits -1 for entities that have no group and
+	// 0/1/2/... for the ones that do; the port emitted 0 for all 158.
+	field_group_index: i32 = -1
 	// C++ zeroes pos for Entity_Builtin (docs_writer.cpp:897). Recorded here and applied below,
-	// because the port computes pos AFTER the kind switch rather than inside it.
+	// because the port computes pos AFTER the kind switch rather than inside it. The name is
+	// carried out of the switch the same way, and for the same reason.
 	is_builtin_entity := false
+	builtin_name := ""
 	#partial switch e.kind {
 	case .Constant:
 		kind = .Constant
+		// C++ Reference: docs_writer.cpp:891 -- `field_group_index = e->Constant.field_group_index;`
+		if const_v, const_ok := e.variant.(Entity_Constant); const_ok {
+			field_group_index = const_v.field_group_index
+		}
 	case .Variable:
 		kind = .Variable
 		// C++ Reference: docs_writer.cpp:871-872 --
@@ -1291,6 +1500,22 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 		}
 		if .Static in e.flags {
 			flags |= 1 << u64(Doc_Entity_Flag.Var_Static)
+		}
+		// C++ Reference: docs_writer.cpp:885-889 --
+		//     if (e->flags & EntityFlag_BitFieldField) {
+		//         field_group_index = -cast(i32)e->Variable.bit_field_bit_size;
+		//     } else {
+		//         field_group_index = e->Variable.field_group_index;
+		//     }
+		// A BIT-FIELD FIELD reuses this slot for its BIT SIZE, NEGATED -- docs_format.cpp:257 says
+		// so on the field itself ("For `bit_field`s this is the \"bit_size\""). Writing the group
+		// index there instead would not read as blank, it would read as a plausible wrong width.
+		if var_fg, fg_ok := e.variant.(Entity_Variable); fg_ok {
+			if .Bit_Field_Field in e.flags {
+				field_group_index = -i32(var_fg.bit_field_bit_size)
+			} else {
+				field_group_index = var_fg.field_group_index
+			}
 		}
 	case .Type_Name:
 		kind = .Type_Name
@@ -1336,12 +1561,22 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 		// the zero value `.Builtin` -- which is why reading it labelled intrinsics as Builtin.
 		// The field has since been DELETED (#348); the table is the only authority, as in C++.
 		if bi_v, bi_ok := &e.variant.(ast.Entity_Builtin); bi_ok {
-			switch builtin_proc_infos[bi_v.id].pkg {
+			bp := builtin_proc_infos[bi_v.id]
+			switch bp.pkg {
 			case .Builtin:
 				flags |= 1 << u64(Doc_Entity_Flag.Builtin_Pkg_Builtin)
 			case .Intrinsics:
 				flags |= 1 << u64(Doc_Entity_Flag.Builtin_Pkg_Intrinsics)
 			}
+			// C++ Reference: docs_writer.cpp:907 `name = bp.name;` -- the NAME comes from the
+			// builtin proc table, not from e->token.string. The comment above has claimed this
+			// since #479 and the code never did it; only `pos = {}` was ported. MEASURED with
+			// docbin.sh on core/math/bits: intrinsics declares ALIASES onto the same builtin id,
+			// so `leading_zeros` and `overflowing_add` are entity tokens whose table names are
+			// `count_leading_zeros` and `overflow_add`. The oracle emits the table name for both
+			// -- which is why its dump carries `count_leading_zeros` TWICE and the port's carried
+			// one of each spelling.
+			builtin_name = bp.name
 			is_builtin_entity = true
 		}
 	}
@@ -1349,7 +1584,19 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 	// Common flags
 	// NOTE: Foreign/Export are NOT here -- C++ reads them from the Variable and Procedure
 	// variants (docs_writer.cpp:871/892), which is where the port sets them too. See #479.
-	if .Not_Exported in e.flags {
+	// C++ Reference: docs_writer.cpp:930-932, verbatim --
+	//     if (e->scope && (e->scope->flags & (ScopeFlag_File|ScopeFlag_Pkg)) && !is_entity_exported(e)) {
+	//             flags |= OdinDocEntityFlag_Private;
+	//     }
+	// The port tested `.Not_Exported in e.flags`, which is only the FIRST of the four things
+	// is_entity_exported answers. It also rejects a non-exported entity KIND (allow_builtin
+	// defaults to false at this call site, so EVERY Entity_Builtin is non-exported), a file
+	// carrying IsPrivatePkg/IsPrivateFile, and the single-underscore name. It also dropped the
+	// scope guard entirely, so a parameter or struct field -- whose scope is neither File nor Pkg
+	// -- could pick up the bit that C++ reserves for package-level declarations.
+	// MEASURED with docbin.sh on core/math/bits: the oracle marks all ~30 intrinsics builtins
+	// Private and the port marked none of them.
+	if e.scope != nil && (.File in e.scope.flags || .Pkg in e.scope.flags) && !is_entity_exported(e) {
 		flags |= 1 << u64(Doc_Entity_Flag.Private)
 	}
 
@@ -1368,9 +1615,17 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 	if .Ellipsis in e.flags {
 		flags |= 1 << u64(Doc_Entity_Flag.Param_Ellipsis)
 	}
-	if .C_Var_Arg in e.flags {
-		flags |= 1 << u64(Doc_Entity_Flag.Param_C_Vararg)
-	}
+	// LEDGER B5-d. No Param_C_Vararg write here, and that MATCHES C++, which is the same shape as
+	// the Param_Auto_Cast note above: the bit is DECLARED (docs_format.cpp:227
+	// OdinDocEntityFlag_Param_CVararg) and the entity flag is declared AND set
+	// (entity.cpp:62, check_type.cpp:2344) -- but docs_writer.cpp:922-928 writes exactly seven
+	// param flags and CVararg is not one of them. Verified as a COMPLETE SET, not by deleting the
+	// one arm that looked wrong: with this gone both sides write Using, Const, Ellipsis, NoAlias,
+	// AnyInt, ByPtr, NoBroadcast -- same seven, same order.
+	//
+	// This is why the doc coverage counter must count `Proc(flags=C_Vararg` in the ORACLE dump and
+	// never Param_C_Vararg: the doc bit is the port-only symptom, so it reads 0 in every reference
+	// dump and a counter built on it reports "no coverage needed" for a corpus full of the input.
 	if .No_Alias in e.flags {
 		flags |= 1 << u64(Doc_Entity_Flag.Param_No_Alias)
 	}
@@ -1405,7 +1660,7 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 	doc_entity.kind = kind
 	doc_entity.flags = flags
 	doc_entity.pos = pos
-	doc_entity.name = doc_write_string(w, e.token.text)
+	doc_entity.name = doc_write_string(w, is_builtin_entity ? builtin_name : e.token.text)
 	doc_entity.type = 0 // Set later in update pass
 
 	// C++ Reference: docs_writer.cpp:975 `doc_entity.link_name = odin_doc_write_string(w, link_name);`
@@ -1432,61 +1687,101 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 		}
 	}
 
-	// Serialize init_string, comment, docs, and attributes from decl_info
-	// C++ Reference: docs_writer.cpp:820-870
+	// C++ Reference: docs_writer.cpp:825-841 plus the Variable/Constant arms of the kind switch.
+	// decl_info supplies init_expr, comment and docs; the ENTITY VARIANT is the fallback for each.
+	//
+	// RESOLVED AS AST POINTERS FIRST, THEN WRITTEN ONCE, which is how C++ does it. The port used to
+	// write from decl_info and then test the WRITTEN Doc_String against {} to decide whether to fall
+	// back -- and that is not the same question. In the PREPARING pass doc_write_string returns a
+	// ZERO Doc_String for every input, so the test was unconditionally true in pass 1 and
+	// conditional in pass 2: the two passes sized and wrote different string sets. It only ever
+	// OVER-counted (the capacity assert is `len <= cap`) so it never failed, but a sizing pass that
+	// disagrees with the writing pass is exactly the #484/#489 shape and is not left standing.
+	//
+	// The entity-level fallback itself is #1178 / B3-f finding 7: a struct FIELD or enum MEMBER has
+	// no decl_info, so without it neither its docs nor its comment were ever consulted. Precedence
+	// is C++'s -- decl_info WINS, the variant fills only what decl_info left nil.
+	init_expr: ^ast.Node
+	comment_group: ^ast.Comment_Group
+	docs_group: ^ast.Comment_Group
 	if e.decl_info != nil {
-		doc_entity.init_string = doc_write_init_string(w, e.decl_info.init_expr)
-		doc_entity.comment = doc_write_comment_group(w, e.decl_info.comment)
-		doc_entity.docs = doc_write_comment_group(w, e.decl_info.docs)
+		init_expr = e.decl_info.init_expr
+		comment_group = e.decl_info.comment
+		docs_group = e.decl_info.docs
 		doc_entity.attributes = doc_write_attributes(w, e.decl_info.attributes)
 	}
-
-	// C++ Reference: docs_writer.cpp:836-843 -- the ENTITY-LEVEL FALLBACK, absent from the port:
-	//     if (e->kind == Entity_Variable) {
-	//         if (!comment) { comment = e->Variable.comment; }
-	//         if (!docs)    { docs    = e->Variable.docs; }
-	//     } else if (e->kind == Entity_Constant) { ...same for Constant... }
-	// #1178, the READER half of B3-f finding 7. A struct FIELD or enum MEMBER has no decl_info, so
-	// the block above leaves both empty and the entity's own docs/comment were never consulted.
-	// #1177 restored the WRITER (check_type.odin was discarding f.docs/f.comment and had the
-	// assignments commented out); without this reader the populated fields still went nowhere, which
-	// is exactly what the first verification attempt showed -- the fix looked inert because BOTH
-	// halves were missing and I had only restored one.
-	// Entity_Constant.docs/.comment were ALREADY written by the port (check_type.odin's enum path and
-	// check_decl_helpers) with ZERO readers, so this activates those too.
-	// Note the reference's precedence: decl_info WINS; the entity is only a fallback for empties.
-	if doc_entity.comment == {} || doc_entity.docs == {} {
-		#partial switch v in e.variant {
-		case Entity_Variable:
-			if doc_entity.comment == {} {
-				doc_entity.comment = doc_write_comment_group(w, v.comment)
-			}
-			if doc_entity.docs == {} {
-				doc_entity.docs = doc_write_comment_group(w, v.docs)
-			}
-		case Entity_Constant:
-			if doc_entity.comment == {} {
-				doc_entity.comment = doc_write_comment_group(w, v.comment)
-			}
-			if doc_entity.docs == {} {
-				doc_entity.docs = doc_write_comment_group(w, v.docs)
-			}
+	#partial switch v in e.variant {
+	case Entity_Variable:
+		if comment_group == nil {
+			comment_group = v.comment
+		}
+		if docs_group == nil {
+			docs_group = v.docs
+		}
+		// C++ Reference: docs_writer.cpp:882-884 -- `if (init_expr == nullptr) { init_expr =
+		// e->Variable.init_expr; }`. The port had this fallback for Constants only.
+		if init_expr == nil {
+			init_expr = v.init_expr
+		}
+	case Entity_Constant:
+		if comment_group == nil {
+			comment_group = v.comment
+		}
+		if docs_group == nil {
+			docs_group = v.docs
+		}
+		// ENUM MEMBERS have no Decl_Info -- check_enum_type builds their entities by hand -- so
+		// this is the only source of an initialiser for them. Upstream PR #7289 (merge b9bbcd33b),
+		// #755.
+		if init_expr == nil {
+			init_expr = v.init_expr
 		}
 	}
+	doc_entity.comment = doc_write_comment_group(w, comment_group)
+	doc_entity.docs = doc_write_comment_group(w, docs_group)
 
-	// C++ Reference: docs_writer.cpp odin_doc_add_entity, Entity_Constant arm --
-	//     if (init_expr == nullptr) { init_expr = e->Constant.init_expr; }
-	// added by upstream PR #7289 (merge b9bbcd33b). #755.
+	// C++ Reference: docs_writer.cpp:930-960, the init_string block IN FULL. The port had only the
+	// first branch, so three sources of initialiser text were silently absent from every .odin-doc:
 	//
-	// ENUM MEMBERS have NO Decl_Info -- check_enum_type builds their entities by hand and never
-	// sets one -- so the block above never runs for them and `init_string` stayed empty for every
-	// enum value. This is the declare/write/read trio of #103/#348: the field on Entity_Constant,
-	// the write in check_enum_type, and this read. Two of the three are useless without the third.
-	if doc_entity.init_string == {} {
-		if c, is_const := e.variant.(Entity_Constant); is_const && c.init_expr != nil {
-			doc_entity.init_string = doc_write_init_string(w, c.init_expr)
+	//   * an enum member with an explicit value, whose text comes from the CONSTANT VALUE rather
+	//     than from any expression -- MEASURED on core/unicode/utf8, where the oracle records
+	//     init="0".."4" for base:runtime's Allocator_Error members and the port recorded nothing;
+	//   * a parameter's DEFAULT VALUE, which lives in param_value.original_ast_expr -- the oracle
+	//     records init="context.allocator" for every `allocator := context.allocator` parameter;
+	//   * an IMPLICIT enum value, which C++ deliberately blanks. That one is not a no-op: without
+	//     it the exact-value branch below would invent `init="0"` for a member the user never gave
+	//     a value to, which is worse than the omission it replaces.
+	//
+	// The oversized-compound-literal shorthand is C++'s too (docs_writer.cpp:934-941): a literal
+	// with more than 512 elements renders short REGARDLESS of the -short flag, because the full
+	// text would otherwise be unbounded.
+	if init_expr != nil {
+		use_shorthand := false
+		if e.kind == .Variable {
+			if cl, is_cl := init_expr.derived.(^ast.Comp_Lit); is_cl && len(cl.elems) > 512 {
+				use_shorthand = true
+			}
+		}
+		doc_entity.init_string = doc_write_expr_string(w, init_expr, use_shorthand)
+	} else {
+		#partial switch v in e.variant {
+		case Entity_Constant:
+			if .Implicit_Enum_Value in v.flags {
+				doc_entity.init_string = {}
+			} else if v.param_value.original_ast_expr != nil {
+				doc_entity.init_string = doc_write_expr_string(w, v.param_value.original_ast_expr)
+			} else {
+				// NOT freed: doc_write_string keeps the bytes as a cache KEY. C++ interns the same
+				// string for the same reason.
+				doc_entity.init_string = doc_write_string(w, exact_value_to_string(v.value))
+			}
+		case Entity_Variable:
+			if v.param_value.original_ast_expr != nil {
+				doc_entity.init_string = doc_write_expr_string(w, v.param_value.original_ast_expr)
+			}
 		}
 	}
+	doc_entity.field_group_index = field_group_index
 
 	// Update the written item
 	dst := doc_get_item(w, &w.entities, entity_index)
@@ -1527,8 +1822,29 @@ doc_update_entities :: proc(w: ^Doc_Writer) {
 		doc_write_type(w, e.type)
 	}
 
-	// Second pass: update entity references
-	for e in entities {
+	// SECOND PASS ITERATES THE LIVE CACHE, NOT THE SNAPSHOT. LEDGER #1201.
+	//
+	// C++ Reference: docs_writer.cpp:1006 --
+	//     for (u32 i = 0; i < w->entity_cache.count; i++) {
+	//         auto entry = w->entity_cache.entries[i];
+	//
+	// Only the FIRST loop snapshots (bill's "Double pass, just in case entities are created on
+	// odin_doc_type"). The second walks the ordered map BY INDEX with `count` re-read every
+	// iteration, so entities created DURING the loop are visited too -- and they always are: this
+	// body calls doc_write_type, whose Enum / Struct / Tuple / Bit_Field arms call doc_write_entity
+	// for every member, and it calls doc_write_entity directly for foreign_library and for each
+	// member of a proc group.
+	//
+	// The port ran BOTH loops over the snapshot, so every entity created here kept `type = 0`.
+	// MEASURED on core/unicode/utf8 with triage_docbin: the oracle writes 158 entities and 84 types,
+	// the port 130 and 61, and every procedure parameter, result and enum member came out
+	// `type=<none>` -- C++ asserts `type_index != 0` for exactly these (docs_writer.cpp:1046), which
+	// is the reference calling this state impossible.
+	//
+	// Indexing rather than ranging is load-bearing: `for e in w.entity_order` evaluates the length
+	// once, which is the snapshot behaviour under another spelling.
+	for i := 0; i < len(w.entity_order); i += 1 {
+		e := w.entity_order[i]
 		entity_index := w.entity_cache[e]
 		type_index := doc_write_type(w, e.type)
 
@@ -1603,50 +1919,83 @@ doc_add_pkg_entries :: proc(w: ^Doc_Writer, pkg: ^ast.Package) -> Doc_Array(Doc_
 	//
 	// The name comes from the map KEY in C++ (elements.keys[i]), so it is carried alongside rather
 	// than re-derived from e.token.text -- those are not guaranteed equal (see #31).
-	ordered := make([dynamic]^Entity, 0, len(scope.elements), context.temp_allocator)
-	names := make(map[^Entity]string, len(scope.elements), context.temp_allocator)
+	//
+	// IT WAS CARRIED IN A map[^Entity]string, WHICH CANNOT HOLD THE CASE IT EXISTS FOR. An alias
+	// binds a SECOND name to an entity that already has one:
+	//     core/slice/slice.odin:501  to_dynamic       :: clone_to_dynamic
+	//     core/slice/sort.odin:387   is_sorted_by_cmp :: is_sorted_cmp
+	// C++ has two SLOTS holding the same Entity *, reads each slot's own key, and emits two
+	// entries under two names. Keyed by the entity, the port's second write replaced the first, so
+	// both entries came out under whichever name the map happened to visit last -- MEASURED on
+	// core/slice, where the oracle has `to_dynamic` and `is_sorted_by_cmp` and the port had
+	// `clone_to_dynamic` and `is_sorted_cmp`. The slot SIMULATION had the same blind spot: it
+	// hashed e.token.text, so an alias probed to the target's slot rather than its own.
+	// Both are fixed by carrying (key, entity) as a pair -- scope_map_slot_order_keyed.
+	// EVERY entity goes into the simulation, and the skips are applied to its OUTPUT below.
+	// C++ walks the REAL table, which holds every entity in the package scope, and `continue`s past
+	// the ones it does not want; the survivors therefore come out in their relative order within
+	// the FULL table. Feeding only the survivors builds a different table -- different occupancy,
+	// different collision chains, different growth history -- so their relative order is not the
+	// same one. Filtering after the walk is what reproduces C++.
+	Keyed_Entity :: struct {
+		key: string,
+		e:   ^Entity,
+	}
+	pairs := make([dynamic]Keyed_Entity, 0, len(scope.elements), context.temp_allocator)
 	for name, e in scope.elements {
 		if e == nil {
 			continue
 		}
+		append(&pairs, Keyed_Entity{key = name, e = e})
+	}
+	// The KEY is the final tiebreak, not e.token.text: two bindings of one entity are identical in
+	// every entity-derived field and would otherwise sort nondeterministically against each other.
+	slice.sort_by(pairs[:], proc(a, b: Keyed_Entity) -> bool {
+		if a.e.token.pos.file != b.e.token.pos.file {
+			return a.e.token.pos.file < b.e.token.pos.file
+		}
+		if a.e.token.pos.offset != b.e.token.pos.offset {
+			return a.e.token.pos.offset < b.e.token.pos.offset
+		}
+		if a.e.token.text != b.e.token.text {
+			return a.e.token.text < b.e.token.text
+		}
+		return a.key < b.key
+	})
+	ordered := make([dynamic]^Entity, 0, len(pairs), context.temp_allocator)
+	ordered_keys := make([dynamic]string, 0, len(pairs), context.temp_allocator)
+	for p in pairs {
+		append(&ordered, p.e)
+		append(&ordered_keys, p.key)
+	}
 
-		// Skip non-exportable entities
+	// `scope` is a PACKAGE scope, which checker.cpp:261 reserves to `2*total_pkg_decl_count` before
+	// the first insert; simulating from the 16-entry inline capacity replays the wrong growth
+	// history and lays the table out differently.
+	slot_keys, slot_entities := scope_map_slot_order_keyed(ordered_keys[:], ordered[:], context.temp_allocator, scope_map_initial_cap(scope))
+	for e, slot_i in slot_entities {
+		if e == nil {
+			continue
+		}
+
+		// C++ Reference: the skips inside the slot walk, applied HERE rather than before it -- see
+		// the note above the collection loop.
 		#partial switch e.kind {
 		case .Invalid, .Nil, .Label:
 			continue
 		}
-
 		if e.pkg != pkg {
 			continue
 		}
-
 		if !is_entity_exported(e, true) {
 			continue
 		}
-
 		if len(e.token.text) == 0 {
 			continue
 		}
 
-		append(&ordered, e)
-		names[e] = name
-	}
-	slice.sort_by(ordered[:], proc(a, b: ^Entity) -> bool {
-		if a.token.pos.file != b.token.pos.file {
-			return a.token.pos.file < b.token.pos.file
-		}
-		if a.token.pos.offset != b.token.pos.offset {
-			return a.token.pos.offset < b.token.pos.offset
-		}
-		return a.token.text < b.token.text
-	})
-
-	for e in scope_map_slot_order(ordered[:], context.temp_allocator) {
-		if e == nil {
-			continue
-		}
 		entry := Doc_Scope_Entry{
-			name = doc_write_string(w, names[e]),
+			name = doc_write_string(w, slot_keys[slot_i]),
 			entity = doc_write_entity(w, e),
 		}
 		append(&entries, entry)
@@ -1696,6 +2045,13 @@ doc_write_docs :: proc(w: ^Doc_Writer) {
 			fullpath = doc_write_string(w, pkg.fullpath),
 			name = doc_write_string(w, pkg.name),
 			flags = pkg_flags,
+			// C++ Reference: docs_writer.cpp -- `doc_pkg.docs = odin_doc_pkg_doc_string(w, pkg);`.
+			// The port never assigned Doc_Pkg.docs at all, so the PACKAGE-LEVEL documentation
+			// comment -- the paragraph above `package foo`, which is what a package's landing page
+			// is built from -- was absent from every .odin-doc the port wrote. MEASURED on
+			// core/unicode/utf8: the oracle records "Procedures and constants to support
+			// text-encoding in the `UTF-8` character encoding.\n\n" and the port recorded "".
+			docs = doc_write_pkg_doc_string(w, pkg),
 		}
 
 		pkg_index := doc_write_item(w, &w.pkgs, &doc_pkg)
@@ -1767,3 +2123,4 @@ odin_doc_write :: proc(info: ^Checker_Info, filename: string) -> bool {
 	// Write to file
 	return doc_write_to_file(&w, filename)
 }
+

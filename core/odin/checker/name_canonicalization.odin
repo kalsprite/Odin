@@ -1045,10 +1045,32 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		return
 	}
 
-	// C++ Reference: line 609
-	// NOTE: Cannot reassign parameter in Odin, so use a new variable
-	actual_type := default_type(type)
-	assert(!is_type_untyped(actual_type), "write_type_to_canonical_string: untyped type")
+	// THE REFERENCE'S TWO LINES HERE ARE COMMENTED OUT, AND THE PORT PORTED THEM AS LIVE CODE.
+	//
+	// C++ Reference: name_canonicalization.cpp:609-610, verbatim --
+	//     // type = default_type(type);
+	//     // GB_ASSERT(!is_type_untyped(type));
+	// Both are `//`-disabled in the reference, and the Basic arm below then writes
+	// `type->Basic.name` for whatever it was handed, untyped included. The port ran the
+	// default_type() and asserted, which COLLAPSES every untyped type onto its default:
+	// `untyped integer` hashed identically to `int`, `untyped rune` to `rune`, and so on.
+	//
+	// That is not cosmetic. type_hash_canonical_type is a CACHE KEY -- for the doc writer's
+	// type_cache, for type_info_deps (type_info.odin:270), for the type-switch duplicate-variant
+	// test (check_stmt.odin:37) -- so the collapse made two genuinely distinct types share one
+	// slot, and the first one visited decided what the other resolved to.
+	//
+	// MEASURED with triage_docbin on core/unicode/utf8: the oracle's .odin-doc contains ten
+	// distinct Basic types including BOTH `int` and `untyped integer`, and BOTH `rune` and
+	// `untyped rune`; the port's contained seven, with `int` and `rune` absent entirely because
+	// every reference to them resolved to the untyped entry that got there first. `RUNE_EOF`
+	// documented its type as `untyped rune` where the reference says `rune`.
+	//
+	// dump_doc.odin's #490 note describes this collision as by-design ("`untyped rune` and `rune`
+	// hash identically by design"); the reference's own output is what shows it is not.
+	//
+	// NOTE: Cannot reassign parameter in Odin, so use a new variable.
+	actual_type := type
 
 	#partial switch actual_type.kind {
 	case .Basic:
@@ -1177,9 +1199,17 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		} else if is_type_enum(bs.elem) {
 			write_type_to_canonical_string(w, bs.elem)
 		} else {
+			// t205: C++ name_canonicalization.cpp writes the ELEMENT TYPE between the range
+			// operator and the upper bound, and PARENTHESISES the upper bound:
+			//     lower  ..=  <elem>  (upper)
+			// The port wrote `lower..=upper`, which is the shape of type_to_string's bit_set arm
+			// (src/types.cpp), not the canonical writer's -- a drifted twin. Because the canonical
+			// string IS the typeid digest, dropping the elem made `bit_set[0..=7]` and
+			// `bit_set['\x00'..='\x07']` COLLIDE on one typeid. Witness wit_canon205/{c1,c5}.
 			type_writer_append_fmt(w, "%d", bs.lower)
 			type_writer_appendc(w, CANONICAL_RANGE_OPERATOR)
-			type_writer_append_fmt(w, "%d", bs.upper)
+			write_type_to_canonical_string(w, bs.elem)
+			type_writer_append_fmt(w, "(%d)", bs.upper)
 		}
 		if bs.underlying != nil {
 			type_writer_appendc(w, ";")
@@ -1253,6 +1283,13 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		if struct_type.is_raw_union {
 			type_writer_appendc(w, "#raw_union")
 		}
+		// t205: C++ writes #all_or_none here, between #raw_union and #min_field_align. The port
+		// omitted it, so `struct #all_or_none {a,b}` and `struct {a,b}` shared one canonical name
+		// and therefore one typeid. This is the THIRD writer of this flag -- check_expr.odin's
+		// type_to_string already carries a note that fixing two of them was incomplete. Now three.
+		if struct_type.is_all_or_none {
+			type_writer_appendc(w, "#all_or_none")
+		}
 		if struct_type.custom_min_field_align != 0 {
 			type_writer_append_fmt(w, "#min_field_align(%d)", struct_type.custom_min_field_align)
 		}
@@ -1268,6 +1305,18 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 			assert(f.kind == .Variable, "Struct field must be variable")
 			if i > 0 {
 				type_writer_appendc(w, CANONICAL_FIELD_SEPARATOR)
+			}
+			// t205: C++ prefixes the field name with "#subtype " when the field carries
+			// EntityFlags_IsSubtype (== Using|Subtype, so a `using` field prints BOTH prefixes)
+			// and then "using " for EntityFlag_Using. The port printed neither, collapsing
+			// `using b: B`, `#subtype b: B` and plain `b: B` onto ONE canonical name and one
+			// typeid. The flags are written (check_type.odin) and read elsewhere -- they were
+			// simply never printed here. Witness wit_canon205/{c7,c8}, control c10.
+			if Entity_Flags_Is_Subtype & f.flags != {} {
+				type_writer_appendc(w, "#subtype ")
+			}
+			if .Using in f.flags {
+				type_writer_appendc(w, "using ")
 			}
 			type_writer_append(w, raw_data(f.token.text), len(f.token.text))
 			type_writer_appendc(w, CANONICAL_TYPE_SEPARATOR)
@@ -1350,25 +1399,44 @@ write_type_to_canonical_string :: proc(w: ^Type_Writer, type: ^Type) {
 		}
 
 	case .Generic:
-		// C++ Reference: line 808-824
-		// NOTE: The C++ implementation has two modes:
-		// 1. Doc writer mode: Outputs "$name-id" with optional "/specialized_type"
-		// 2. Normal mode (RTTI/hashing): Outputs either the specialized type or "rawptr" placeholder
+		// C++ Reference: name_canonicalization.cpp:991-1007, all three branches.
 		//
-		// We currently only implement normal mode for RTTI generation and type hashing.
-		// The doc writer mode is used for documentation generation and would require
-		// additional infrastructure (is_in_doc_writer() check).
+		// THE DOC-WRITER BRANCH WAS MISSING, and the comment that stood here said so and then
+		// claimed the remainder "matches the C++ behavior exactly" -- two statements that cannot
+		// both be true. It also called the infrastructure absent: is_in_doc_writer() EXISTS in
+		// this port and is already consulted at the three other C++ sites (the vararg/default-value
+		// site at :612, Union.polymorphic_params at :1227, Struct.polymorphic_params at :1276).
+		// This arm was the only one left out.
+		//
+		// WHAT IT COST. The canonical string is the doc writer's type_cache KEY
+		// (docs_writer.cpp:505-507; the port matches). Collapsing every unspecialized generic to
+		// the literal "rawptr" made them all hash identically, so the first one written won and
+		// every later one returned ITS index -- one shared Doc_Type standing in for every type
+		// parameter in the package. The claim that this "is correct since they're all treated as
+		// pointer-sized opaque types" holds for RTTI, where the hash means layout; it is false for
+		// the doc format, where the hash means identity and the NAME is the payload.
+		// MEASURED with docbin.sh: core/slice rendered `Generic(name=E)` for $T, $U, $V, $K, $S,
+		// []$U and [dynamic]$E alike, and reported 233 types where the oracle reports 296;
+		// core/sort 77 against 81; core/container/queue 92 against 101.
+		//
+		// The id is what separates two generics that share a name -- `$T` in one procedure and
+		// `$T` in the next are different types and must not share a doc entry.
 		generic := actual_type.variant.(Type_Generic)
-		if generic.specialized != nil {
-			// If we have a specialized type, use that instead
-			// C++ Reference: line 819-820
+		if is_in_doc_writer() {
+			type_writer_appendc(w, "$")
+			type_writer_append(w, raw_data(generic.name), len(generic.name))
+			type_writer_append_fmt(w, "-%d", generic.id)
+			if generic.specialized != nil {
+				type_writer_appendc(w, "/")
+				write_type_to_canonical_string(w, generic.specialized)
+			}
+		} else if generic.specialized != nil {
+			// If we have a specialized type, use that instead of panicking
+			// C++ Reference: name_canonicalization.cpp:1000-1002
 			write_type_to_canonical_string(w, generic.specialized)
 		} else {
-			// For unspecialized generics, use "rawptr" as a generic placeholder
-			// C++ Reference: line 822-823
-			// ARCHITECTURAL NOTE: This matches the C++ behavior exactly.
-			// Using "rawptr" ensures all unspecialized generic types hash to the same value,
-			// which is correct since they're all treated as pointer-sized opaque types until specialized.
+			// For unspecialized generics, use a generic placeholder string
+			// C++ Reference: name_canonicalization.cpp:1003-1005
 			type_writer_appendc(w, "rawptr")
 		}
 

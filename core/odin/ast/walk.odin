@@ -133,6 +133,11 @@ walk :: proc(v: ^Visitor, node: ^Node) {
 	case ^Field_Value:
 		walk(v, n.field)
 		walk(v, n.value)
+	case ^Enum_Field_Value:
+		walk(v, n.name)
+		// `value` is nil for a bare member; walk() already tolerates nil, and the arm is written
+		// unconditionally so the two children stay in source order.
+		walk(v, n.value)
 	case ^Ternary_If_Expr:
 		walk(v, n.x)
 		walk(v, n.cond)

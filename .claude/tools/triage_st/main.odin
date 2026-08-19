@@ -3,6 +3,7 @@ package triage_st
 import "core:fmt"
 import "core:os"
 import "core:odin/checker"
+import "core:strconv"
 
 main :: proc() {
 	args := os.args
@@ -106,6 +107,28 @@ main :: proc() {
 			// creation on this flag, so setting it means there is no pool at all -- not merely
 			// fewer cores to schedule one onto.
 			checker.build_context.no_threaded_checker = true
+		case "-vet-style":
+			// t204. Added for the same reason as -no-rtti/-dynamic-literals above (LEDGER #340,
+			// #938): a C++ diagnostic reachable ONLY under a build flag the harness could not
+			// express. parser.cpp:1691's "No need for a trailing comma followed by a %s on the
+			// same line" is gated on ast_file_vet_style, so with no case here the flag fell into
+			// the default arm and became a PHANTOM PACKAGE -- the harness would have checked the
+			// real cell with the feature OFF and reported a clean match for a diagnostic it never
+			// asked for. portwrap's DROPPED FLAG guard caught exactly that and refused to let the
+			// measurement look valid.
+			checker.build_context.vet_flags |= {.Style}
+		case "-vet-semicolon":
+			// Sibling of the above: assign_removal_flag_to_semicolon gates "Found unneeded
+			// semicolon" on `strict_style || .Semicolon in vet_flags`, and only the strict_style
+			// half was reachable from this harness.
+			checker.build_context.vet_flags |= {.Semicolon}
+		case "-strict-style":
+			checker.build_context.strict_style = true
+		case "-json-errors":
+			// t212. Same reason as -vet-style/-no-rtti above: print_errors_json is reachable ONLY
+			// under this flag, so with no case here the flag fell into the default arm, became a
+			// PHANTOM PACKAGE, and the JSON writer could not be graded against the oracle at all.
+			checker.build_context.json_errors = true
 		case "-entry-point":
 			// Undoes the default above. C++ checks `main` unless -no-entry-point is passed, and
 			// the bedrock calling-convention rule lives INSIDE that block -- so without this the
@@ -116,11 +139,44 @@ main :: proc() {
 			// Handled in the default arm rather than as its own case because it carries a value.
 			if len(a) > 8 && a[:8] == "-target:" {
 				// Already consumed by the pre-scan above; swallow it so it is not read as a path.
+			} else if len(a) > 14 && a[:14] == "-thread-count:" {
+				// t211. C++ main.cpp:1076-1086 parses this into build_context.thread_count, which
+				// init_build_context otherwise defaults to the logical core count. Carries a value,
+				// so it lives in the default arm like -target:/-dump-model:.
+				//
+				// C++ clamps a non-positive count to 1 AFTER printing the error, and keeps going.
+				n, ok := strconv.parse_int(a[14:])
+				if !ok || n <= 0 {
+					fmt.eprintf(
+						"-thread-count expected a positive non-zero number, got %s\n",
+						a[14:],
+					)
+					checker.build_context.thread_count = 1
+				} else {
+					checker.build_context.thread_count = n
+				}
 			} else if len(a) > 12 && a[:12] == "-dump-model:" {
 				checker.build_context.dump_model_path = a[12:]
 			} else if len(a) > 10 && a[:10] == "-dump-doc:" {
 				// LEDGER #480. Doc FLAG BITS, which doccmp cannot see.
 				checker.build_context.dump_doc_path = a[10:]
+			} else if len(a) > 8 && a[:8] == "-define:" {
+				// t243t. The checker implements the full six-validation add_defined_value
+				// (build_settings.odin:1787), in C++'s observable order -- but NOTHING in this
+				// harness ever reached it, so every corpus sweep to date has graded exactly ONE
+				// configuration. Anything gated on a #config() value was unreachable from the port
+				// side; core/encoding/cbor's `@(init, disabled=!INITIALIZE_DEFAULT_TAGS)`
+				// (tags.odin:102) is the worked example, and on the REFERENCE it is the difference
+				// between a 641KB and an 89KB binary. Same class as -vet-style/-no-rtti/-json-errors
+				// above: without a case here the flag became a PHANTOM PACKAGE.
+				if derr, detail := checker.add_defined_value(a[8:]); derr != .None {
+					fmt.eprintf("triage_st: -define %v: %s\n", derr, detail)
+					os.exit(2)
+				}
+			} else if len(a) > 13 && a[:13] == "-dump-mindep:" {
+				// t243t. The minimum dependency set -- the only instrument that can grade a
+				// dep-set fix. MUST be run with -no-threads to be deterministic.
+				checker.build_context.dump_mindep_path = a[13:]
 			} else {
 				append(&paths, a)
 			}
@@ -144,4 +200,17 @@ main :: proc() {
 		)
 		checker.print_package_diagnostics(&res)
 	}
+
+	// t213. C++ main.cpp:4310-4311 --
+	//     init_global_thread_pool();
+	//     defer (thread_pool_destroy(&global_thread_pool));
+	// The pool is torn down at the end of main, and the port's destroy_global_thread_pool had ZERO
+	// CALLERS: the checker is a library and cannot know when the process ends, so the DRIVER is the
+	// right host, exactly as it is in the reference. Without this the worker threads are never
+	// signalled or joined.
+	//
+	// This is also the first thing that ever exercises thread_pool_destroy, including the
+	// lost-wakeup fix made while it was still unreachable. threadcheck.sh grades the result: a
+	// deadlock here shows up as a timeout and a double-free as a crash, on all 323 packages.
+	checker.destroy_global_thread_pool()
 }

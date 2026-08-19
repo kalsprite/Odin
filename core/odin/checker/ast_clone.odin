@@ -74,12 +74,17 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 		return n
 
 	case ^ast.Ident:
-		// C++ line 195: n->Ident.entity = nullptr;
 		n := new(ast.Ident)
 		n^ = variant^
 		n.node.expr_base.tav = {}
 		n.node.expr_base.derived = n
 		n.node.derived_expr = n
+		// C++ Reference: parser.cpp:222-224 -- `case Ast_Ident: n->Ident.entity = nullptr;`.
+		// The whole-node copy above carries the GENERIC's resolved entity across, and
+		// entity_of_node reads exactly this field (entity_helpers.odin:266), so without the
+		// clear an instantiation's identifier resolves to the entity of the declaration it was
+		// cloned from instead of being re-resolved in the instantiation's own scope.
+		n.entity = nil
 		return n
 
 	case ^ast.Implicit:
@@ -293,6 +298,18 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 		n.node.expr_base.derived = n
 		n.node.derived_expr = n
 		n.field = cast(^ast.Expr)clone_ast_node(n.field, file)
+		n.value = cast(^ast.Expr)clone_ast_node(n.value, file)
+		return n
+
+	case ^ast.Enum_Field_Value:
+		// C++ parser.cpp:302-304. Note that `docs`/`comment` are carried by the struct copy
+		// and NOT re-cloned, exactly as C++ leaves the CommentGroup pointers shared.
+		n := new(ast.Enum_Field_Value)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		n.name = cast(^ast.Expr)clone_ast_node(n.name, file)
 		n.value = cast(^ast.Expr)clone_ast_node(n.value, file)
 		return n
 
@@ -535,7 +552,11 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 		n.node.derived_stmt = n
 		n.list = clone_ast_array_helper(n.list)
 		n.body = clone_ast_array_helper(n.body)
-		// C++ line 370: n->CaseClause.implicit_entity = nullptr;
+		// C++ Reference: parser.cpp:400 -- `n->CaseClause.implicit_entity = nullptr;`.
+		// Same reasoning as the Ident arm: implicit_entity_of_node reads this field
+		// (entity_helpers.odin:269), so a cloned type-switch clause must not inherit the
+		// implicit variable entity that add_implicit_entity stamped on the original.
+		n.implicit_entity = nil
 		return n
 
 	case ^ast.Switch_Stmt:

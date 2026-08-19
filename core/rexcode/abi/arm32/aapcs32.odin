@@ -32,6 +32,12 @@ A32_S := [?]u16{
 }
 
 @(private) AAPCS32_BASE := abi.Convention{
+	// ARGUMENT EXTENSION -- see `Convention.arg_extend_to`.
+	// AAPCS32 widens i8/i16 to 32 bits and normalises a bool, as measured on
+	// armv7-linux-gnueabihf.
+	arg_extend_to        = 4,
+	arg_extend_signed_at = 0,
+	bool_arg_normalised  = true,
 	id = .AAPCS32,
 	name             = "aapcs32",
 	// The only target that packs the tuple UNCONDITIONALLY: a result tuple too

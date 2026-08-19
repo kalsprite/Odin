@@ -9,7 +9,6 @@ Reference: check_expr.cpp:9549-10728
 import "core:math/big"
 import "core:odin/ast"
 import "core:strings"
-import "core:sync"
 
 // check_compound_literal_field_values checks named field values in struct literals
 // Reference: check_expr.cpp:9549-9702
@@ -492,7 +491,22 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 			break // Empty literal OK
 		}
 
-		ts := variant
+		// NOTE: this MUST be a pointer into the live type, never a copy. It was `ts := variant`,
+		// and `switch variant in t.variant` binds BY VALUE, so `ts` was a stack-local copy of the
+		// whole Type_Struct -- wait signal included. Two distinct defects followed from that one
+		// copy, and it took a peer's gdb thread dump to see the first:
+		//   1. DEADLOCK. The copied sync.Wait_Group carried a copy of its MUTEX, whose word could
+		//      already read 2 (locked-and-contended). A mutex living on the waiting thread's own
+		//      stack can never be unlocked by anyone, so wait_group_wait parked forever with NO
+		//      owner anywhere and 32 workers idle. The dumps put the contended futex word 12KB
+		//      above the waiter's own rsp, at the same offset in 3 of 3 wedges.
+		//   2. STALE READ. The copy was taken BEFORE the wait, so waiting for the fields to be
+		//      published and then reading `ts.fields` read the pre-publication SNAPSHOT anyway.
+		//      That is the `'Cell(T){}' of type 'Cell' has no field 'data'` diagnostic.
+		// Porting Wait_Signal removes the mutex and so cures (1), but on its own it would leave
+		// (2) -- and a copied futex word reading nonzero would make the wait return immediately on
+		// a half-built struct. Taking the pointer is what actually fixes this.
+		ts := &t.variant.(Type_Struct)
 
 		// Handle SOA struct literals
 		// Reference: C++ lines 10022-10026
@@ -731,7 +745,7 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 
 		// Wait for struct fields to be resolved
 		// Reference: C++ lines 9881-9892
-		sync.wait_group_wait(&ts.fields_wait_signal)
+		wait_signal_until_available(&ts.fields_wait_signal)
 
 		field_count := len(ts.fields)
 		min_field_count := field_count
@@ -1266,6 +1280,15 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 		elem_type := bs.elem
 		elem_hint := base_type(bs.elem)
 
+		// C++ Reference: check_expr.cpp:11571-11573 -- `if (is_type_array(bit_set_to_int(t)))
+		// is_constant = false;`, which the port did not have. It is reachable only for a bit_set
+		// whose underlying is an integer ARRAY, and check_bit_set_type_expr's range-element arm
+		// accepts exactly that after diagnosing it (tick 224 FIX 3) -- before that fix the port
+		// could not construct such a type at all, which is why the omission had never mattered.
+		if is_type_array(bit_set_to_int(t)) {
+			is_constant = false
+		}
+
 		// Process each element in the bit_set literal
 		for elem in cl.elems {
 			// Bit_set literals cannot use named fields
@@ -1278,87 +1301,69 @@ check_compound_literal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.No
 				continue
 			}
 
-			// Check if element is a range expression (e.g., .A..=.C)
-			// Reference: C++ lines 10585-10605
-			elem_expr := unparen_expr(elem)
-			if is_ast_range(cast(^ast.Expr)elem_expr) {
-				// Range expression in bit_set
-				if be, is_binary := elem_expr.derived.(^ast.Binary_Expr); is_binary {
-					// Check both endpoints
-					lhs_op, rhs_op: Operand
-					// Range endpoints need the same hint: `.A ..= .C`.
-					check_expr_with_type_hint(ctx, &lhs_op, be.left, elem_hint)
-					check_expr_with_type_hint(ctx, &rhs_op, be.right, elem_hint)
+			// C++ Reference: check_expr.cpp:11575-11617 -- there is NO range special-case in this
+			// loop. The port carried an `is_ast_range` branch with two invented diagnostics of its
+			// own ("Cannot assign this value to bit_set element type"), cited to "C++ lines
+			// 10585-10605", a stale line range of exactly the kind #183 exists to catch. It was not
+			// dead: it SWALLOWED the oracle's error. `bit_set[E]{.A..=.C}` and `bit_set[0..<8]{1..=3}`
+			// are both rejected by the oracle with "Unknown operator '..='" (a range token is not an
+			// operator outside a range context) and the port accepted both silently -- an
+			// UNDER-rejection, 1 oracle diagnostic against 0. Removed; a range element now takes the
+			// ordinary path and check_binary_expr reports it, as in C++.
+			// Single value element
+			// Reference: C++ lines 10607-10630
+			elem_operand := Operand{}
+			// C++ Reference: check_expr.cpp check_compound_literal - check_expr_with_type_hint(c, o, elem, et).
+			// Without the hint every implicit-selector element (`Permission{.Read}`) reaches
+			// check_implicit_selector_expr with a nil hint and fails.
+			check_expr_with_type_hint(ctx, &elem_operand, elem, elem_hint)
 
-					// Both must be assignable to elem_type
-					if lhs_op.mode != .Invalid && !check_is_assignable_to(ctx, &lhs_op, elem_type) {
-						error(be.left, "Cannot assign this value to bit_set element type")
-					}
-					if rhs_op.mode != .Invalid && !check_is_assignable_to(ctx, &rhs_op, elem_type) {
-						error(be.right, "Cannot assign this value to bit_set element type")
-					}
+			// C++ Reference: check_expr.cpp check_compound_literal. There is NO early bail on an
+			// invalid element here. An invented `if elem_operand.mode == .Invalid { continue }`
+			// used to sit above this, which skipped the update below -- so a literal whose
+			// element failed to resolve stayed CONSTANT. Callers that inspect the operand
+			// afterwards then saw a perfectly good constant and dropped their own
+			// diagnostics: `@(fast_math = {.Bad})` lost both "Expected a constant attribute
+			// element" and the outer bit_set error.
+			if elem_operand.mode != .Constant {
+				is_constant = false
+			}
 
-					// Range elements are not constant-time computable in general
-					if lhs_op.mode != .Constant || rhs_op.mode != .Constant {
-						is_constant = false
-					}
+			// `bit_set[E]{.A | .B}` almost certainly means `{.A, .B}`: `|` on an enum
+			// operand is LEGAL (core_type(Enum) is its backing integer, so the binary
+			// expression type-checks), which makes this diagnostic the only thing that
+			// rejects the form. It was missing entirely.
+			// C++ Reference: check_expr.cpp:11583-11597.
+			if be, is_binary := elem.derived.(^ast.Binary_Expr); is_binary {
+				#partial switch be.op.kind {
+				case .Or:
+					error(elem, "Was the following intended? '%s, %s'; if not, surround the expression with parentheses '(%s)'",
+					      expr_to_string(be.left), expr_to_string(be.right), expr_to_string(elem))
 				}
-			} else {
-				// Single value element
-				// Reference: C++ lines 10607-10630
-				elem_operand := Operand{}
-				// C++ Reference: check_expr.cpp check_compound_literal - check_expr_with_type_hint(c, o, elem, et).
-				// Without the hint every implicit-selector element (`Permission{.Read}`) reaches
-				// check_implicit_selector_expr with a nil hint and fails.
-				check_expr_with_type_hint(ctx, &elem_operand, elem, elem_hint)
+			}
 
-				// C++ Reference: check_expr.cpp check_compound_literal. There is NO early bail on an
-				// invalid element here. An invented `if elem_operand.mode == .Invalid { continue }`
-				// used to sit above this, which skipped the update below -- so a literal whose
-				// element failed to resolve stayed CONSTANT. Callers that inspect the operand
-				// afterwards then saw a perfectly good constant and dropped their own
-				// diagnostics: `@(fast_math = {.Bad})` lost both "Expected a constant attribute
-				// element" and the outer bit_set error.
-				if elem_operand.mode != .Constant {
-					is_constant = false
-				}
+			// C++ Reference: check_expr.cpp check_compound_literal — check_assignment against the
+			// DECLARED element type, not a bespoke check_is_assignable_to. The custom
+			// version this replaces compared the operand against elem_type after
+			// hinting with elem_type, which rejected perfectly legal elements whenever
+			// BitSet.elem and the resolved selector type differed only by naming.
+			check_assignment(ctx, &elem_operand, elem_type, "bit_set literal")
+			if elem_operand.mode == .Invalid {
+				continue
+			}
 
-				// `bit_set[E]{.A | .B}` almost certainly means `{.A, .B}`: `|` on an enum
-				// operand is LEGAL (core_type(Enum) is its backing integer, so the binary
-				// expression type-checks), which makes this diagnostic the only thing that
-				// rejects the form. It was missing entirely.
-				// C++ Reference: check_expr.cpp:11583-11597.
-				if be, is_binary := elem.derived.(^ast.Binary_Expr); is_binary {
-					#partial switch be.op.kind {
-					case .Or:
-						error(elem, "Was the following intended? '%s, %s'; if not, surround the expression with parentheses '(%s)'",
-						      expr_to_string(be.left), expr_to_string(be.right), expr_to_string(elem))
-					}
-				}
-
-				// C++ Reference: check_expr.cpp check_compound_literal — check_assignment against the
-				// DECLARED element type, not a bespoke check_is_assignable_to. The custom
-				// version this replaces compared the operand against elem_type after
-				// hinting with elem_type, which rejected perfectly legal elements whenever
-				// BitSet.elem and the resolved selector type differed only by naming.
-				check_assignment(ctx, &elem_operand, elem_type, "bit_set literal")
-				if elem_operand.mode == .Invalid {
+			// C++ Reference: check_expr.cpp check_compound_literal — range bounds check.
+			if elem_operand.mode == .Constant {
+				v := exact_value_to_i64(elem_operand.value)
+				if v < bs.lower || v > bs.upper {
+					s := expr_to_string(elem_operand.expr)
+					defer delete(s)
+					error(
+						elem,
+						"Bit field value out of bounds, %s (%d) not in the range %d .. %d",
+						s, v, bs.lower, bs.upper,
+					)
 					continue
-				}
-
-				// C++ Reference: check_expr.cpp check_compound_literal — range bounds check.
-				if elem_operand.mode == .Constant {
-					v := exact_value_to_i64(elem_operand.value)
-					if v < bs.lower || v > bs.upper {
-						s := expr_to_string(elem_operand.expr)
-						defer delete(s)
-						error(
-							elem,
-							"Bit field value out of bounds, %s (%d) not in the range %d .. %d",
-							s, v, bs.lower, bs.upper,
-						)
-						continue
-					}
 				}
 			}
 		}

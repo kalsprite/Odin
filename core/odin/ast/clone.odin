@@ -172,6 +172,11 @@ clone_node :: proc(node: ^Node) -> ^Node {
 		case ^Field_Value:
 			r.field = clone(r.field)
 			r.value = clone(r.value)
+		case ^Enum_Field_Value:
+			// C++ Reference: parser.cpp:302-304 clones name and value and carries docs/comment
+			// across by the struct copy, which is what the shallow copy above already did here.
+			r.name  = clone(r.name)
+			r.value = clone(r.value)
 		case ^Ternary_If_Expr:
 			r.x    = clone(r.x)
 			r.cond = clone(r.cond)

@@ -26,7 +26,38 @@ import riscv "core:rexcode/isa/riscv"
 // ILP32D are the same rules over a 4- or 8-byte word, and the whole point of a
 // row model is that the second one costs a table entry rather than a file.
 
+// classify stamps the object's SIZE onto the Location and calls classify_riscv_body.
+//
+// A wrapper rather than a stamp at each return site, and the count is the
+// argument: this classifier has dozens of them, and `classify_signature`'s own
+// note about stamping centrally says why -- "one line to get wrong instead of a
+// dozen". The wrapper cannot be bypassed by a new return site added later.
+//
+// WHY IT EXISTS. `Direct.size` and `Sret.size` are the FOOTPRINT -- how much
+// stack to reserve, how many bytes to copy, how far the callee may write. They
+// were stamped only by `classify_signature`, so a consumer driving classify and
+// assign itself -- a public, documented path -- read ZERO. Zero is a plausible
+// footprint, not an obviously-absent one, which is the unclaimed-default hazard
+// `Param_Shape` was given an INVALID zero to prevent three files away.
+//
+// The size was never unavailable: it is a PARAMETER of this procedure. Nothing
+// had to be derived, only carried.
 classify :: proc(
+	size, align: u32,
+	fields: []abi.Field,
+	conv: ^abi.Convention,
+	pos: abi.Position,
+	shape: abi.Param_Shape,
+	flags: abi.Param_Flags,
+	buf: []abi.Piece, // caller-owned; size it with abi.pieces_needed
+) -> abi.Location {
+	loc := classify_riscv_body(size, align, fields, conv, pos, shape, flags, buf)
+	abi.stamp_size(&loc, size)
+	return loc
+}
+
+@(private)
+classify_riscv_body :: proc(
 	size, align: u32,
 	fields: []abi.Field,
 	conv: ^abi.Convention,
@@ -233,6 +264,14 @@ RV_FA := [?]u16{
 }
 
 @(private) LP64D_BASE := abi.Convention{
+	// ARGUMENT EXTENSION -- see `Convention.arg_extend_to`.
+	// LP64 widens to the full 64-bit register, and `arg_extend_signed_at = 4` is
+	// the rule no other target has: a 32-bit value is SIGN-extended whatever its
+	// declared signedness, because that is how RV64 holds one. Confirmed in the
+	// assembly -- `sext.w a0, a0` for both `int` and `unsigned int`.
+	arg_extend_to        = 8,
+	arg_extend_signed_at = 4,
+	bool_arg_normalised  = true,
 	id = .LP64D,
 	name         = "lp64d",
 	varargs      = .INT_REGS,
@@ -354,6 +393,12 @@ ilp32_odin  :: proc "contextless" () -> abi.Convention { return abi.compose(ILP3
 // ILP32D is the same rules over a four-byte word. One row, no new code -- which
 // is the claim being tested, not an assumption being made.
 @(private) ILP32D_BASE := abi.Convention{
+	// ARGUMENT EXTENSION -- see `Convention.arg_extend_to`.
+	// ILP32: the register is 32 bits, so i8/i16 widen to 4 and `int` is already
+	// there. `arg_extend_signed_at` is 0 -- the LP64 rule has nothing to apply to.
+	arg_extend_to        = 4,
+	arg_extend_signed_at = 0,
+	bool_arg_normalised  = true,
 	id = .ILP32D,
 	name         = "ilp32d",
 	// Inherited from LP64D, not measured: Odin has no linux_riscv32 target, so

@@ -64,6 +64,7 @@ acquire_runtime_session :: proc() -> bool {
 	}
 
 	init_odin_root_from_env()
+	init_default_library_collections() // t207: ODIN_ROOT is known here; C++ main.cpp:3814
 
 	// default_allocator, not the caller's: everything reachable from this checker has to outlive
 	// every per-check checker that will borrow it.

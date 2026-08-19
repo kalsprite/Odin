@@ -39,10 +39,46 @@ Type_Desc :: struct {
 	members:    []Member,  // STRUCT, UNION
 	elem:       ^Type_Desc, // ARRAY
 	count:      u32,       // ARRAY
+	// Whether this type is a COMPLEX -- C's `_Complex T`, Odin's `complex64` /
+	// `complex128`.
+	//
+	// Here because without it `param_from_desc` -- the entry point this package
+	// tells a front end to use -- CANNOT produce a correct Param for one, and
+	// says nothing about that. `Param_Flag.IS_COMPLEX` explains at length that
+	// the fact cannot be inferred from the leaves; `desc_flags` derives every
+	// other flag from the tree; and the tree had no way to state this one. So
+	// the recommended route silently gave `_Complex float` the answer for
+	// `struct{float,float}`, which on i386 is the difference between eax:edx and
+	// an sret pointer. Measured through `param_from_desc` on `i386-unknown-linux-gnu`:
+	//
+	//     flags {}             -> Sret
+	//     flags {IS_COMPLEX}   -> Direct[INTEGER eax, INTEGER edx]
+	//
+	// A field on the tree rather than a `flags` parameter on `param_from_desc`,
+	// because a parameter reopens exactly the join that lost
+	// `HAS_EMPTY_MEMBER`: the leaves and the flags have to come from one walk,
+	// or a caller can supply one without the other.
+	//
+	// Read at the TOP LEVEL ONLY -- see `desc_flags`. Raised from outside by a
+	// consuming backend, which found it from its own side: its lowered type had
+	// already dropped complex-ness before a Param was built.
+	is_complex: bool,
 }
 
 Member :: struct {
-	offset: u32, // absolute within the enclosing type; 0 for every union member
+	// Absolute within the ENCLOSING type -- `flatten` adds it to the base it
+	// was called with, so a member's offset is relative to the aggregate that
+	// declares it, not to the outermost one.
+	//
+	// A `UNION`'s members all carry 0, because that is what a union IS. That is
+	// a consequence of the kind, NOT a restriction on this field: a consumer
+	// read it as "members of a union may only be at 0" and was about to model
+	// Odin's tagged union -- payload plus a trailing tag -- as a `UNION` to
+	// obey it. The tag is a real leaf at a real offset and every classifier has
+	// to see it there, so that type is `STRUCT{payload: UNION{...}, tag}` and
+	// only the payload is the union. `flatten` OR-s `in_union` down the walk,
+	// so the payload's leaves come out marked and the tag's do not.
+	offset: u32,
 	type:   ^Type_Desc,
 }
 
@@ -90,15 +126,28 @@ flatten :: proc(t: ^Type_Desc, out: ^[dynamic]Field, base: u32 = 0, in_union := 
 // questions, and a caller that only needs one should not be made to thread the
 // other.
 desc_flags :: proc(t: ^Type_Desc) -> Param_Flags {
+	out := desc_flags_rec(t)
+	// `is_complex` is read HERE and not inside the recursion, and the asymmetry
+	// with `HAS_EMPTY_MEMBER` is the whole point: an empty member anywhere
+	// disqualifies the aggregate that contains it, so that flag propagates
+	// upward, while a complex NESTED in a struct is an ordinary aggregate to
+	// every ABI surveyed. `struct{_Complex float}` is not a complex, and
+	// OR-ing this down the walk would say it is.
+	if t.is_complex { out += {.IS_COMPLEX} }
+	return out
+}
+
+@(private)
+desc_flags_rec :: proc(t: ^Type_Desc) -> Param_Flags {
 	out: Param_Flags
 	switch t.kind {
 	case .SCALAR:
 	case .ARRAY:
 		// The member itself, then its element type.
 		if t.count == 0 { out += {.HAS_EMPTY_MEMBER} }
-		if t.elem != nil { out += desc_flags(t.elem) }
+		if t.elem != nil { out += desc_flags_rec(t.elem) }
 	case .STRUCT, .UNION:
-		for m in t.members { if m.type != nil { out += desc_flags(m.type) } }
+		for m in t.members { if m.type != nil { out += desc_flags_rec(m.type) } }
 	}
 	return out
 }

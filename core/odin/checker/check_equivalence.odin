@@ -109,6 +109,100 @@ are_types_identical_unique_tuples :: proc(x, y: ^Type) -> bool {
 	return are_types_identical_internal(x_unwrapped, y_unwrapped, true)
 }
 
+// are_proc_properties_identical compares the five procedure attributes that are part of a proc
+// type's identity but live outside its parameter and result tuples.
+// C++ Reference: types.cpp:3191-3197. Named here rather than inlined because C++ has TWO callers --
+// are_types_identical_internal's Type_Proc arm and check_distance_between_types' proc arm -- and
+// having one of them drift is exactly how a proc becomes assignable but not identical, or worse,
+// identical but not assignable.
+are_proc_properties_identical :: proc(x, y: ^Type) -> bool {
+	x_proc, x_ok := x.variant.(Type_Proc)
+	y_proc, y_ok := y.variant.(Type_Proc)
+	if !x_ok || !y_ok {
+		return false
+	}
+	return(
+		x_proc.calling_convention == y_proc.calling_convention &&
+		x_proc.c_vararg == y_proc.c_vararg &&
+		x_proc.variadic == y_proc.variadic &&
+		x_proc.diverging == y_proc.diverging &&
+		x_proc.optional_ok == y_proc.optional_ok \
+	)
+}
+
+// check_proc_params_assignable reports whether a value of proc type `src` may be assigned to a
+// variable of proc type `dst` even though the two are not identical.
+//
+// C++ Reference: check_expr.cpp:1060-1101. Results must be identical and the parameter tuples must
+// agree in count and packing; a parameter is then allowed to differ ONLY when both sides are
+// pointers and the source's pointee is a struct that embeds the destination's pointee at offset 0.
+// That is the whole of the relaxation: `proc(^Derived)` is assignable to `proc(^Base)` when Derived
+// `using`-embeds Base first, because the two pointers hold the same address.
+check_proc_params_assignable :: proc(c: ^Checker_Context, dst, src: ^Type) -> bool {
+	dst_proc, dst_ok := dst.variant.(Type_Proc)
+	src_proc, src_ok := src.variant.(Type_Proc)
+	if !dst_ok || !src_ok {
+		return false
+	}
+
+	if dst_proc.params == nil || src_proc.params == nil {
+		return false
+	}
+
+	if !are_types_identical(src_proc.results, dst_proc.results) {
+		return false
+	}
+
+	dst_tuple, dst_tuple_ok := dst_proc.params.variant.(Type_Tuple)
+	src_tuple, src_tuple_ok := src_proc.params.variant.(Type_Tuple)
+	if !dst_tuple_ok || !src_tuple_ok {
+		return false
+	}
+
+	if len(dst_tuple.variables) != len(src_tuple.variables) || dst_tuple.is_packed != src_tuple.is_packed {
+		return false
+	}
+
+	for i in 0 ..< len(dst_tuple.variables) {
+		edst := dst_tuple.variables[i]
+		esrc := src_tuple.variables[i]
+		if edst == nil || esrc == nil {
+			return false
+		}
+
+		if edst.kind != esrc.kind || !are_types_identical(edst.type, esrc.type) {
+			// Pointers to subtype fields that are at byte offset 0 are OK.
+			// C++ tests the RAW kind here, not base_type, so a named pointer type does not
+			// qualify -- matched deliberately.
+			dst_ptr, src_ptr: Type_Pointer
+			dst_is_ptr, src_is_ptr: bool
+			if edst.type != nil {
+				dst_ptr, dst_is_ptr = edst.type.variant.(Type_Pointer)
+			}
+			if esrc.type != nil {
+				src_ptr, src_is_ptr = esrc.type.variant.(Type_Pointer)
+			}
+			if dst_is_ptr && src_is_ptr && is_type_struct(src_ptr.elem) &&
+			   check_is_assignable_to_using_offset_zero_subtype(src_ptr.elem, dst_ptr.elem) {
+				continue
+			}
+
+			return false
+		}
+
+		// NOTE: needed for polymorphic procedures.
+		if edst.kind == .Constant {
+			edst_const := edst.variant.(Entity_Constant)
+			esrc_const := esrc.variant.(Entity_Constant)
+			if !compare_exact_values(.Cmp_Eq, edst_const.value, esrc_const.value) {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
 // are_types_identical_internal is the workhorse type identity checker.
 // It recursively compares type structures for equality.
 //
@@ -116,6 +210,34 @@ are_types_identical_unique_tuples :: proc(x, y: ^Type) -> bool {
 // must match (used for unique type_info entries) or can differ (normal identity check).
 //
 // C++ Reference: types.cpp are_types_identical_internal
+// WHY EVERY `x.variant.(T)` IN THIS PROCEDURE USES THE TWO-VALUE FORM.
+//
+// C++ reads these union members WITHOUT any tag check -- types.cpp's Basic arm is literally
+//     return x->Basic.kind == y->Basic.kind;
+// a bare member access on an untagged union, discriminated only by the separate `kind` field the
+// switch above already tested. The port's union IS tagged, so `x.variant.(T)` asserts, and a
+// single-value assertion TRAPS on mismatch.
+//
+// That difference is not academic. This procedure is the hottest concurrent READER in the checker
+// (find_polymorphic_record_entity calls it for every cached entity on every polymorphic lookup),
+// and a live Type can have `kind` and `variant` disagree for a few instructions while another
+// thread specializes it. In C++ that window yields a wrong comparison; here it yielded a CRASH:
+//     check_equivalence.odin(259:14) type assertion: Invalid type assertion from Type_Variant to
+//     Type_Basic, actual type: Type_Generic
+// measured at ~0.7-2% under 16-way concurrency, and captured by a peer in 15 agreeing backtraces
+// all landing here via are_types_identical <- find_polymorphic_record_entity <- check_call_expr.
+// The trapping thread HOLDS the gen_types mutex and every other polymorphic thread is queued
+// behind it, so the writer is off this path entirely: gen_types_data_of_specialization returns nil
+// when the specialization's kind is not .Named, and check_type_specialization_to_internal then
+// performs its Generic->Basic write with NO lock. C++ has the identical conditional lock, so the
+// window exists in the reference too -- it simply cannot trap there.
+//
+// Returning false on a torn read is the conservative answer and the one closest to C++: under a
+// concurrent write the bytes are arbitrary, so "not identical" is as valid as anything C++ would
+// compute from them, and it degrades to a redundant specialization rather than a dead compiler.
+// THIS IS NOT A FIX FOR THE RACE -- the unlocked write is still open (COVERAGE.md TICK 232b/233).
+// It removes the port-only fatality, which is required because a reference quirk is the contract
+// EXCEPT when it is a crash.
 are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bool {
 	if x == y {
 		return true
@@ -128,41 +250,77 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 	// Note: Type aliases are already unwrapped by the caller (are_types_identical)
 	// C++ Reference: types.cpp are_types_identical_internal (commented out in C++)
 
+	// C++ Reference: types.cpp are_types_identical_internal switches on `x->kind` and then reads
+	// Y's union member WITHOUT ever checking y->kind -- e.g. `case Type_Basic: return
+	// x->Basic.kind == y->Basic.kind;`. C++'s own `if (x->kind != y->kind) return false;` guard
+	// sits a few lines above inside an `#if 0`. So when the kinds differ C++ reinterprets y's
+	// storage as the wrong variant and compares whatever is there, which essentially always
+	// answers "not identical".
+	//
+	// The port's `y.variant.(Type_Basic)` is a CHECKED assertion, so the same mismatch TRAPS.
+	// That is not a theoretical difference: it was observed as a SIGILL at the `.Basic` arm --
+	//     type assertion: Invalid type assertion from Type_Variant to Type_Basic,
+	//     actual type: Type_Basic
+	// (the two disagreeing because the tag is re-read for the panic message after a concurrent
+	// write moved it) at a rate of 1 in 400 runs of $S/phase2/wit_polyrace/raceprobe, while the
+	// ORACLE was 0 in 200 on the same input. A reference quirk is the contract, but not when the
+	// port's realisation of it is a crash -- Jon's `using` ruling.
+	//
+	// Returning false is the deterministic form of C++'s answer, and it is expected to be INERT
+	// on any input where C++ is not already reading garbage. That is the recorded prediction:
+	// if the corpus, parity, jsoncheck or docbin sets move, this blanket guard is wrong and the
+	// fix has to become arm-local (checked assert per y-side read, 21 sites) instead.
+	if x.kind != y.kind {
+		return false
+	}
+
 	#partial switch x.kind {
 	case .Generic:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_gen := x.variant.(Type_Generic)
-		y_gen := y.variant.(Type_Generic)
+		x_gen, x_gen_ok := x.variant.(Type_Generic)
+		if !x_gen_ok { return false }
+		y_gen, y_gen_ok := y.variant.(Type_Generic)
+		if !y_gen_ok { return false }
 		return are_types_identical(x_gen.specialized, y_gen.specialized)
 
 	case .Basic:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_basic := x.variant.(Type_Basic)
-		y_basic := y.variant.(Type_Basic)
+		x_basic, x_basic_ok := x.variant.(Type_Basic)
+		if !x_basic_ok { return false }
+		y_basic, y_basic_ok := y.variant.(Type_Basic)
+		if !y_basic_ok { return false }
 		return x_basic.kind == y_basic.kind
 
 	case .Enumerated_Array:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_ea := x.variant.(Type_Enumerated_Array)
-		y_ea := y.variant.(Type_Enumerated_Array)
+		x_ea, x_ea_ok := x.variant.(Type_Enumerated_Array)
+		if !x_ea_ok { return false }
+		y_ea, y_ea_ok := y.variant.(Type_Enumerated_Array)
+		if !y_ea_ok { return false }
 		return are_types_identical(x_ea.index, y_ea.index) && are_types_identical(x_ea.elem, y_ea.elem)
 
 	case .Array:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_arr := x.variant.(Type_Array)
-		y_arr := y.variant.(Type_Array)
+		x_arr, x_arr_ok := x.variant.(Type_Array)
+		if !x_arr_ok { return false }
+		y_arr, y_arr_ok := y.variant.(Type_Array)
+		if !y_arr_ok { return false }
 		return x_arr.count == y_arr.count && are_types_identical(x_arr.elem, y_arr.elem)
 
 	case .Matrix:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_mat := x.variant.(Type_Matrix)
-		y_mat := y.variant.(Type_Matrix)
+		x_mat, x_mat_ok := x.variant.(Type_Matrix)
+		if !x_mat_ok { return false }
+		y_mat, y_mat_ok := y.variant.(Type_Matrix)
+		if !y_mat_ok { return false }
 		return x_mat.row_count == y_mat.row_count && x_mat.column_count == y_mat.column_count && x_mat.is_row_major == y_mat.is_row_major && are_types_identical(x_mat.elem, y_mat.elem)
 
 	case .Dynamic_Array:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_da := x.variant.(Type_Dynamic_Array)
-		y_da := y.variant.(Type_Dynamic_Array)
+		x_da, x_da_ok := x.variant.(Type_Dynamic_Array)
+		if !x_da_ok { return false }
+		y_da, y_da_ok := y.variant.(Type_Dynamic_Array)
+		if !y_da_ok { return false }
 		return are_types_identical(x_da.elem, y_da.elem)
 
 	case .Fixed_Capacity_Dynamic_Array:
@@ -172,20 +330,26 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		// "Overloaded procedure has the same type as another procedure in the procedure group"
 		// errors in base:runtime. It does not - that count was measured identical before and after
 		// this arm was added. Those come from proc-group overload comparison, not from here.
-		x_fc := x.variant.(Type_Fixed_Capacity_Dynamic_Array)
-		y_fc := y.variant.(Type_Fixed_Capacity_Dynamic_Array)
+		x_fc, x_fc_ok := x.variant.(Type_Fixed_Capacity_Dynamic_Array)
+		if !x_fc_ok { return false }
+		y_fc, y_fc_ok := y.variant.(Type_Fixed_Capacity_Dynamic_Array)
+		if !y_fc_ok { return false }
 		return x_fc.capacity == y_fc.capacity && are_types_identical(x_fc.elem, y_fc.elem)
 
 	case .Slice:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_slice := x.variant.(Type_Slice)
-		y_slice := y.variant.(Type_Slice)
+		x_slice, x_slice_ok := x.variant.(Type_Slice)
+		if !x_slice_ok { return false }
+		y_slice, y_slice_ok := y.variant.(Type_Slice)
+		if !y_slice_ok { return false }
 		return are_types_identical(x_slice.elem, y_slice.elem)
 
 	case .Bit_Set:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_bs := x.variant.(Type_Bit_Set)
-		y_bs := y.variant.(Type_Bit_Set)
+		x_bs, x_bs_ok := x.variant.(Type_Bit_Set)
+		if !x_bs_ok { return false }
+		y_bs, y_bs_ok := y.variant.(Type_Bit_Set)
+		if !y_bs_ok { return false }
 
 		if are_types_identical(x_bs.elem, y_bs.elem) && are_types_identical(x_bs.underlying, y_bs.underlying) {
 			if is_type_enum(x_bs.elem) {
@@ -200,8 +364,10 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		if x == y {
 			return true
 		}
-		x_enum := x.variant.(Type_Enum)
-		y_enum := y.variant.(Type_Enum)
+		x_enum, x_enum_ok := x.variant.(Type_Enum)
+		if !x_enum_ok { return false }
+		y_enum, y_enum_ok := y.variant.(Type_Enum)
+		if !y_enum_ok { return false }
 
 		if len(x_enum.fields) != len(y_enum.fields) {
 			return false
@@ -237,8 +403,10 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 
 	case .Union:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_union := x.variant.(Type_Union)
-		y_union := y.variant.(Type_Union)
+		x_union, x_union_ok := x.variant.(Type_Union)
+		if !x_union_ok { return false }
+		y_union, y_union_ok := y.variant.(Type_Union)
+		if !y_union_ok { return false }
 
 		if len(x_union.variants) == len(y_union.variants) && x_union.kind == y_union.kind {
 			// Check alignment compatibility
@@ -261,8 +429,10 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 
 	case .Struct:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_struct := x.variant.(Type_Struct)
-		y_struct := y.variant.(Type_Struct)
+		x_struct, x_struct_ok := x.variant.(Type_Struct)
+		if !x_struct_ok { return false }
+		y_struct, y_struct_ok := y.variant.(Type_Struct)
+		if !y_struct_ok { return false }
 
 		if x_struct.is_raw_union == y_struct.is_raw_union && len(x_struct.fields) == len(y_struct.fields) && x_struct.is_packed == y_struct.is_packed && x_struct.is_all_or_none == y_struct.is_all_or_none && x_struct.soa_kind == y_struct.soa_kind && x_struct.soa_count == y_struct.soa_count && are_types_identical(x_struct.soa_elem, y_struct.soa_elem) {
 
@@ -314,32 +484,42 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 
 	case .Pointer:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_ptr := x.variant.(Type_Pointer)
-		y_ptr := y.variant.(Type_Pointer)
+		x_ptr, x_ptr_ok := x.variant.(Type_Pointer)
+		if !x_ptr_ok { return false }
+		y_ptr, y_ptr_ok := y.variant.(Type_Pointer)
+		if !y_ptr_ok { return false }
 		return are_types_identical(x_ptr.elem, y_ptr.elem)
 
 	case .Multi_Pointer:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_mp := x.variant.(Type_Multi_Pointer)
-		y_mp := y.variant.(Type_Multi_Pointer)
+		x_mp, x_mp_ok := x.variant.(Type_Multi_Pointer)
+		if !x_mp_ok { return false }
+		y_mp, y_mp_ok := y.variant.(Type_Multi_Pointer)
+		if !y_mp_ok { return false }
 		return are_types_identical(x_mp.elem, y_mp.elem)
 
 	case .Soa_Pointer:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_soa := x.variant.(Type_Soa_Pointer)
-		y_soa := y.variant.(Type_Soa_Pointer)
+		x_soa, x_soa_ok := x.variant.(Type_Soa_Pointer)
+		if !x_soa_ok { return false }
+		y_soa, y_soa_ok := y.variant.(Type_Soa_Pointer)
+		if !y_soa_ok { return false }
 		return are_types_identical(x_soa.elem, y_soa.elem)
 
 	case .Named:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_named := x.variant.(Type_Named)
-		y_named := y.variant.(Type_Named)
+		x_named, x_named_ok := x.variant.(Type_Named)
+		if !x_named_ok { return false }
+		y_named, y_named_ok := y.variant.(Type_Named)
+		if !y_named_ok { return false }
 		return x_named.type_name == y_named.type_name
 
 	case .Tuple:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_tuple := x.variant.(Type_Tuple)
-		y_tuple := y.variant.(Type_Tuple)
+		x_tuple, x_tuple_ok := x.variant.(Type_Tuple)
+		if !x_tuple_ok { return false }
+		y_tuple, y_tuple_ok := y.variant.(Type_Tuple)
+		if !y_tuple_ok { return false }
 
 		if len(x_tuple.variables) == len(y_tuple.variables) && x_tuple.is_packed == y_tuple.is_packed {
 			for i in 0 ..< len(x_tuple.variables) {
@@ -369,37 +549,45 @@ are_types_identical_internal :: proc(x, y: ^Type, check_tuple_names: bool) -> bo
 		}
 
 	case .Proc:
-		// C++ Reference: types.cpp are_types_identical_internal
-		x_proc := x.variant.(Type_Proc)
-		y_proc := y.variant.(Type_Proc)
+		// C++ Reference: types.cpp are_types_identical_internal -- which CALLS
+		// are_proc_properties_identical here rather than spelling the five fields out. The port had
+		// them inlined; routing both this arm and check_distance_between_types' new
+		// check_proc_params_assignable branch through one helper is what keeps "identical" and
+		// "assignable" from drifting apart on the same five attributes.
+		x_proc, x_proc_ok := x.variant.(Type_Proc)
+		if !x_proc_ok { return false }
+		y_proc, y_proc_ok := y.variant.(Type_Proc)
+		if !y_proc_ok { return false }
 		return(
-			x_proc.calling_convention == y_proc.calling_convention &&
-			x_proc.c_vararg == y_proc.c_vararg &&
-			x_proc.variadic == y_proc.variadic &&
-			x_proc.diverging == y_proc.diverging &&
-			x_proc.optional_ok == y_proc.optional_ok &&
+			are_proc_properties_identical(x, y) &&
 			are_types_identical_internal(x_proc.params, y_proc.params, check_tuple_names) &&
 			are_types_identical_internal(x_proc.results, y_proc.results, check_tuple_names) \
 		)
 
 	case .Map:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_map := x.variant.(Type_Map)
-		y_map := y.variant.(Type_Map)
+		x_map, x_map_ok := x.variant.(Type_Map)
+		if !x_map_ok { return false }
+		y_map, y_map_ok := y.variant.(Type_Map)
+		if !y_map_ok { return false }
 		return are_types_identical(x_map.key, y_map.key) && are_types_identical(x_map.value, y_map.value)
 
 	case .Simd_Vector:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_sv := x.variant.(Type_Simd_Vector)
-		y_sv := y.variant.(Type_Simd_Vector)
+		x_sv, x_sv_ok := x.variant.(Type_Simd_Vector)
+		if !x_sv_ok { return false }
+		y_sv, y_sv_ok := y.variant.(Type_Simd_Vector)
+		if !y_sv_ok { return false }
 		if x_sv.count == y_sv.count {
 			return are_types_identical(x_sv.elem, y_sv.elem)
 		}
 
 	case .Bit_Field:
 		// C++ Reference: types.cpp are_types_identical_internal
-		x_bf := x.variant.(Type_Bit_Field)
-		y_bf := y.variant.(Type_Bit_Field)
+		x_bf, x_bf_ok := x.variant.(Type_Bit_Field)
+		if !x_bf_ok { return false }
+		y_bf, y_bf_ok := y.variant.(Type_Bit_Field)
+		if !y_bf_ok { return false }
 
 		if are_types_identical(x_bf.backing_type, y_bf.backing_type) && len(x_bf.fields) == len(y_bf.fields) {
 			// Check all field properties match
@@ -565,6 +753,15 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 	if is_type_untyped(src) {
 		if is_type_any(dst) {
 			// NOTE: Anything can cast to 'Any'
+			// C++ Reference: check_expr.cpp:729 -- add_type_info_type(c, s), which the port had
+			// only in the LATER general `any` arm (:874 below) and in the typeid arm. It is not
+			// redundant with those: this arm returns before either is reached, and
+			// add_type_info_type runs default_type BEFORE its untyped guard, so an untyped
+			// constant scored against an `any` parameter registers its DEFAULT type (int, f64,
+			// string, bool) rather than being skipped.
+			if c != nil {
+				add_type_info_type(c, s)
+			}
 			return MAXIMUM_TYPE_DISTANCE
 		}
 		// #1113. C++ Reference: check_expr.cpp check_distance_between_types:
@@ -768,7 +965,10 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 			if score >= 0 {
 				return score + 2
 			}
-		} else if is_type_untyped(src) {
+		} else if is_type_untyped(src) || is_type_struct(type_deref(src)) { // allow for subtyping of structs
+			// C++ check_expr.cpp:905 -- the struct term lets a struct that SUBTYPES one of the
+			// variants (via `using` embedding), by value or through a pointer, score against every
+			// variant and pick the best. Dropping it made the port over-reject; see wit_uni204.
 			// Multiple variants, untyped - pick best match
 			prev_lowest_score: i64 = -1
 			lowest_score: i64 = -1
@@ -807,10 +1007,40 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 				if src_proc.is_polymorphic && !src_proc.is_poly_specialized {
 					poly_data: Poly_Proc_Data
 					if check_polymorphic_procedure_assignment(c, operand, dst, operand.expr, &poly_data) {
+						// C++ Reference: check_expr.cpp:934-937 -- on success the reference
+						// RECORDS the instantiation before scoring it:
+						//     Entity *e = poly_proc_data.gen_entity;
+						//     add_type_and_value(c, operand->expr, Addressing_Value, e->type, {});
+						//     add_entity_use(c, operand->expr, e);
+						// The port returned 4 and recorded neither, so the expression kept the
+						// POLYMORPHIC type on its TAV entry instead of the specialized one, and
+						// the generated entity was never marked used.
+						if e := poly_data.gen_entity; e != nil {
+							add_type_and_value(c, operand.expr, .Value, e.type, Exact_Value{})
+							add_entity_use(c, operand.expr, e)
+						}
 						return 4
 					}
 				}
 			}
+		}
+
+		// C++ Reference: check_expr.cpp:940-942 -- the THIRD arm of `if (is_type_proc(dst))`,
+		// which the port did not have at all, along with check_proc_params_assignable and its
+		// helper check_is_assignable_to_using_offset_zero_subtype. Without it the port
+		// OVER-REJECTS a proc value whose pointer parameter is a struct embedding the
+		// destination's parameter type at offset 0:
+		//
+		//	Base    :: struct { x: int }
+		//	Derived :: struct { using base: Base, y: int }
+		//	handler :: proc(d: ^Derived) {}
+		//	f: proc(b: ^Base) = handler        // oracle accepts, port rejected
+		//
+		// Witnessed both ways before writing this: wit_bk217/k_proc_param_subtype_rev (the
+		// reverse direction) and .../k_proc_param_unrelated (an unrelated struct) are rejected by
+		// BOTH front ends, so the rule admits exactly the offset-zero subtype direction.
+		if is_type_proc(src) && are_proc_properties_identical(dst, src) && check_proc_params_assignable(c, dst, src) {
+			return 4
 		}
 	}
 

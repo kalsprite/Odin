@@ -380,7 +380,11 @@ current_thread_index :: proc() -> int {
 // C++ Reference: thread_pool.cpp:40-55, main.cpp:16-20
 //
 // Creates worker_count threads plus main thread (total = worker_count + 1)
-// Each thread gets its own work-stealing deque and arena allocators
+// Each thread gets its own work-stealing deque. It does NOT get an arena: this line used to say
+// "and arena allocators", which was true of NEITHER side -- Thread_Data holds a deque, a thread
+// handle and an index and nothing else, and `arena` appears nowhere in src/thread_pool.cpp
+// either. An invented capability in a comment is worse than silence, because it reads as a
+// design decision someone else already verified.
 // Sets up futexes for task availability and completion signaling
 thread_pool_init :: proc(worker_count: int, allocator := context.allocator) -> ^Thread_Pool {
 	pool := new(Thread_Pool, allocator)
@@ -503,8 +507,58 @@ worker_thread_proc :: proc(t: ^thread.Thread) {
 		}
 
 		// No work available - sleep until woken
-		sync.atomic_store_explicit(&pool.tasks_available, sync.Futex(SOMEONE_WAITING), .Release)
-		if !intrinsics.atomic_load(&pool.running) do break
+		//
+		// SEQ_CST, NOT RELEASE. This store and the `running` load below it are the two halves of a
+		// DEKKER pair against thread_pool_destroy (:530 stores running=false, :566 stores
+		// NOBODY_WAITING). C++ thread_pool.cpp:254 spells it `tasks_available.store(Someone_Waiting)`
+		// with no order argument, i.e. seq_cst, and :255's bare `!pool->running` is likewise seq_cst.
+		// A RELEASE store does not order Store->Load: on x86 it is a plain mov, and so is a seq_cst
+		// load, so the CPU may let this store retire AFTER the running load. That reopens the very
+		// lost wakeup the store of NOBODY_WAITING at :566 was added to close:
+		//
+		//	worker: store SOMEONE_WAITING           <- buffered, not yet visible
+		//	worker: load running -> true
+		//	main:   store running = false (:530)
+		//	main:   store NOBODY_WAITING + broadcast (:566-567)
+		//	worker: the buffered SOMEONE_WAITING lands, re-dirtying the word
+		//	worker: futex_wait(&tasks_available, SOMEONE_WAITING) -> the compare SUCCEEDS, sleeps
+		//	main:   thread.join blocks forever
+		//
+		// The seq_cst store puts a StoreLoad barrier between the two, so a worker that observes
+		// running==true has already published SOMEONE_WAITING, and main's later NOBODY_WAITING store
+		// is guaranteed to overwrite it rather than be overwritten by it.
+		sync.atomic_store_explicit(&pool.tasks_available, sync.Futex(SOMEONE_WAITING), .Seq_Cst)
+		if !intrinsics.atomic_load(&pool.running) {
+			// DELIBERATE DIVERGENCE FROM C++ -- the reference has a lost-wakeup deadlock here and
+			// this is the fix. C++ thread_pool.cpp:253-256 breaks out WITHOUT clearing the word,
+			// so an exiting worker strands `tasks_available` at SOMEONE_WAITING behind itself;
+			// a different worker already past its own `running` check then sleeps on that dirty
+			// word after thread_pool_destroy has committed to a blocking join and will never
+			// broadcast again. Reproduced in the reference at ~0.1% of concurrent runs, with
+			// backtraces: main in thread_join_and_destroy, every worker in
+			// futex_wait(&tasks_available, val=1), zero checker frames. Filed upstream as
+			// COMPILER_ISSUES/UPSTREAM-UNFILED-thread-pool-destroy-deadlocks-when-an-exiting-
+			// worker-republishes-Someone_Waiting.md. Kept as a divergence under Jon's ruling that a
+			// reference quirk is the contract EXCEPT when it is a crash -- a silent permanent hang
+			// after correct output is worse than a crash.
+			//
+			// THE CLEAR AND THE BROADCAST MUST STAY TOGETHER AND IN THIS ORDER. The broadcast is
+			// the load-bearing half, NOT the store. It looks removable -- "nobody can be waiting,
+			// we only just cleared the word" -- and removing it puts the deadlock straight back,
+			// because the whole point is the worker that is ALREADY asleep on the value this store
+			// just overwrote. futex_wait compares against the word at the moment it sleeps; a
+			// sleeper that got there first is invisible to this thread and only the broadcast
+			// reaches it.
+			//
+			// The invariant this restores: once `running` is false, no worker can reach the wait
+			// and stay there. A worker reading running==false clears and broadcasts; a worker
+			// reading running==true did so before the destroyer cleared it, so the destroyer's own
+			// store and broadcast are still to come. There is therefore no state in which the word
+			// is SOMEONE_WAITING, a worker is asleep on it, and nobody is left to broadcast.
+			intrinsics.atomic_store(&pool.tasks_available, sync.Futex(NOBODY_WAITING))
+			sync.futex_broadcast(&pool.tasks_available)
+			break
+		}
 		sync.futex_wait(&pool.tasks_available, SOMEONE_WAITING)
 	}
 }
@@ -529,12 +583,50 @@ thread_pool_destroy :: proc(pool: ^Thread_Pool) {
 	// Signal shutdown
 	intrinsics.atomic_store(&pool.running, false)
 
-	// Wake all sleeping workers (they may be waiting on either futex)
-	sync.futex_broadcast(&pool.tasks_available)
+	// Port-only, KEPT DELIBERATELY: C++ does not touch tasks_left here. A spurious broadcast on it
+	// can only cause a re-check in thread_pool_wait, never a sleep, so it cannot deadlock; and by
+	// the time destroy runs, main is the caller and nobody is inside thread_pool_wait anyway.
 	sync.futex_broadcast(&pool.tasks_left)
 
-	// Join all worker threads
+	// SHUTDOWN LOST-WAKEUP. C++ thread_pool.cpp:70-76:
+	//
+	//	for_array_off(i, 1, pool->threads) {
+	//	        Thread *t = &pool->threads[i];
+	//	        pool->tasks_available.store(Nobody_Waiting);   // <-- THE STATEMENT THE PORT LACKED
+	//	        futex_broadcast(&t->pool->tasks_available);
+	//	        thread_join_and_destroy(t);
+	//	}
+	//
+	// The port hoisted the broadcast OUT of this loop, did it once, and never stored
+	// Nobody_Waiting at all. That is a real deadlock, not a theoretical one, because the worker
+	// sets the futex word ITSELF on the way to sleep (worker_thread_proc:506) and nothing else
+	// ever clears it:
+	//
+	//	worker: store SOMEONE_WAITING (:506)
+	//	worker: load running -> still true (:507)          <- window opens
+	//	main:   store running = false (:530)
+	//	main:   futex_broadcast(&tasks_available) (:533)    <- NO-OP, no one is asleep yet
+	//	worker: futex_wait(&tasks_available, SOMEONE_WAITING) (:508)
+	//	        the word still reads SOMEONE_WAITING, so the value-compare SUCCEEDS and the
+	//	        worker sleeps -- after the only broadcast has already been delivered.
+	//	main:   thread.join(worker) blocks forever.
+	//
+	// WHAT THIS STORE DOES AND DOES NOT CLOSE -- read this before trusting it. An earlier version
+	// of this comment claimed "storing Nobody_Waiting first is what closes it". THAT WAS WRONG, and
+	// wrong in the way that stops the next reader looking: it names the wrong mechanism.
+	// Storing NOBODY_WAITING here closes exactly one window -- the SINGLE-worker one, where the
+	// stranded worker's futex_wait finds the word already cleared and returns immediately. The
+	// seq_cst note at the sleep site closes a second, different window: one worker's own store
+	// being reordered past that same worker's own `running` load. Both arguments are per-thread by
+	// construction. NEITHER says anything about a THIRD party, and the actual deadlock is a third
+	// party: a second worker that publishes SOMEONE_WAITING on its way out, after this store, while
+	// the loop below is already blocked in a join and will never broadcast again.
+	// What closes THAT is in worker_thread_proc: an exiting worker clears the word and broadcasts
+	// before it breaks. This store and broadcast are kept because they match C++ and are harmless,
+	// not because they are the fix.
 	for i := 1; i < pool.thread_count; i += 1 {
+		intrinsics.atomic_store(&pool.tasks_available, sync.Futex(NOBODY_WAITING))
+		sync.futex_broadcast(&pool.tasks_available)
 		if pool.threads[i].thread != nil {
 			thread.join(pool.threads[i].thread)
 			thread.destroy(pool.threads[i].thread)
@@ -575,11 +667,20 @@ thread_pool_add_task :: proc(task_proc: Worker_Task_Proc, data: rawptr) -> bool 
 	sync.atomic_add_explicit(&pool.tasks_left, 1, .Release)
 
 	// Wake sleeping workers if any
+	//
+	// FAILURE ORDER IS SEQ_CST, NOT RELAXED. C++ thread_pool.cpp:107 spells this
+	// `compare_exchange_strong(state, Nobody_Waiting)` with NO order arguments, which is seq_cst on
+	// BOTH paths. That is the opposite of the deque CASes at :271 and :316, where C++ :126/:158
+	// pass `memory_order_relaxed` for failure EXPLICITLY -- so the port matching relaxed there and
+	// seq_cst here is the reference's own distinction, not an inconsistency. An RMW always reads the
+	// latest value in the modification order, so this cannot change WHICH branch is taken; what it
+	// changes is that on the no-broadcast path the reference orders the surrounding accesses and the
+	// port did not.
 	_, swapped := sync.atomic_compare_exchange_strong_explicit(
 		&pool.tasks_available,
 		sync.Futex(SOMEONE_WAITING),
 		sync.Futex(NOBODY_WAITING),
-		.Seq_Cst, .Relaxed)
+		.Seq_Cst, .Seq_Cst)
 	if swapped {
 		sync.futex_broadcast(&pool.tasks_available)
 	}

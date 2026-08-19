@@ -19,7 +19,38 @@ import arm64 "core:rexcode/isa/arm64"
 
 MAX_HFA :: 4
 
+// classify stamps the object's SIZE onto the Location and calls classify_aapcs64_body.
+//
+// A wrapper rather than a stamp at each return site, and the count is the
+// argument: this classifier has dozens of them, and `classify_signature`'s own
+// note about stamping centrally says why -- "one line to get wrong instead of a
+// dozen". The wrapper cannot be bypassed by a new return site added later.
+//
+// WHY IT EXISTS. `Direct.size` and `Sret.size` are the FOOTPRINT -- how much
+// stack to reserve, how many bytes to copy, how far the callee may write. They
+// were stamped only by `classify_signature`, so a consumer driving classify and
+// assign itself -- a public, documented path -- read ZERO. Zero is a plausible
+// footprint, not an obviously-absent one, which is the unclaimed-default hazard
+// `Param_Shape` was given an INVALID zero to prevent three files away.
+//
+// The size was never unavailable: it is a PARAMETER of this procedure. Nothing
+// had to be derived, only carried.
 classify :: proc(
+	size, align: u32,
+	fields: []abi.Field,
+	conv: ^abi.Convention,
+	pos: abi.Position,
+	shape: abi.Param_Shape,
+	flags: abi.Param_Flags,
+	buf: []abi.Piece, // caller-owned; size it with abi.pieces_needed
+) -> abi.Location {
+	loc := classify_aapcs64_body(size, align, fields, conv, pos, shape, flags, buf)
+	abi.stamp_size(&loc, size)
+	return loc
+}
+
+@(private)
+classify_aapcs64_body :: proc(
 	size, align: u32,
 	fields: []abi.Field,
 	conv: ^abi.Convention,
@@ -353,6 +384,13 @@ A64_RET_Q := [?]u16{
 }
 
 @(private) AAPCS64_BASE := abi.Convention{
+	// ARGUMENT EXTENSION -- see `Convention.arg_extend_to`.
+	// AAPCS64 on Linux extends NOTHING, not even a bool -- the callee may not
+	// rely on the high bits of a narrow argument. The Darwin row below differs,
+	// which is one of the divergences that row exists for.
+	arg_extend_to        = 0,
+	arg_extend_signed_at = 0,
+	bool_arg_normalised  = false,
 	id = .AAPCS64,
 	// A vector under one eightbyte is INTEGER here -- EXCEPT as a bare result.
 	// Measured: `void a(v4i8 x, int t)` leaves `t` in w1, so the vector took
@@ -438,6 +476,13 @@ darwin       :: proc "contextless" () -> abi.Convention { return abi.compose(DAR
 darwin_odin  :: proc "contextless" () -> abi.Convention { return abi.compose(DARWIN_BASE,  abi.lang_odin()) }
 
 @(private) DARWIN_BASE := abi.Convention{
+	// ARGUMENT EXTENSION -- see `Convention.arg_extend_to`.
+	// Apple diverges from AAPCS64 here and extends like x86-64. Measured beside
+	// the Linux row in one compile: `signed char` is `i8 signext` on
+	// aarch64-apple-darwin and a bare `i8` on aarch64-linux-gnu.
+	arg_extend_to        = 4,
+	arg_extend_signed_at = 0,
+	bool_arg_normalised  = true,
 	id = .DARWIN_ARM64,
 	// A vector under one eightbyte is INTEGER here -- EXCEPT as a bare result.
 	// Measured: `void a(v4i8 x, int t)` leaves `t` in w1, so the vector took

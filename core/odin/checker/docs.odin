@@ -94,6 +94,43 @@ cmp_entities_for_printing :: proc(a: ^Entity, b: ^Entity) -> slice.Ordering {
 	return .Equal
 }
 
+// cmp_entities_for_printing_by_order_in_src is the comparator `odin doc -in-source-order` uses.
+// C++ Reference: docs.cpp:58-86, selected at docs.cpp:275. THE PORT DID NOT HAVE IT: docs.cpp has
+// two comparators and print_doc_package picks between them, and the port had only the first, so
+// the in-source-order mode silently produced kind-grouped alphabetical output instead.
+//
+// The package-name prologue is IDENTICAL to cmp_entities_for_printing's (C++ duplicates it rather
+// than factoring it out); only the tail differs -- order_in_src, then token offset as the
+// tie-break, instead of kind-ordering then name.
+cmp_entities_for_printing_by_order_in_src :: proc(a: ^Entity, b: ^Entity) -> slice.Ordering {
+	assert(a != nil) // C++ line 59
+	assert(b != nil) // C++ line 60
+
+	// C++ lines 64-75: compare by package name first
+	if a.pkg != b.pkg {
+		if a.pkg == nil {
+			return .Less // C++ line 66
+		}
+		if b.pkg == nil {
+			return .Greater // C++ line 69
+		}
+		cmp_pkg := strings.compare(a.pkg.name, b.pkg.name)
+		if cmp_pkg < 0 do return .Less
+		if cmp_pkg > 0 do return .Greater
+	}
+
+	// C++ lines 77-83: u64_cmp(x->order_in_src, y->order_in_src)
+	if a.order_in_src != b.order_in_src {
+		return a.order_in_src < b.order_in_src ? .Less : .Greater
+	}
+
+	// C++ line 84: i32_cmp(x->token.pos.offset, y->token.pos.offset)
+	if a.token.pos.offset != b.token.pos.offset {
+		return a.token.pos.offset < b.token.pos.offset ? .Less : .Greater
+	}
+	return .Equal
+}
+
 // C++ Reference: docs.cpp:58-64
 cmp_ast_package_by_name :: proc(a: ^ast.Package, b: ^ast.Package) -> slice.Ordering {
 	assert(a != nil) // C++ line 59
@@ -281,9 +318,16 @@ append_comment_group_string :: proc(indent: i32, buf: ^strings.Builder, g: ^ast.
 // ======================================================================================
 
 // C++ Reference: docs.cpp print_doc_comment_group_string
-print_doc_expr :: proc(expr: ^ast.Node, writer: ^strings.Builder, short_form := false) {
-	// C++ Reference: docs.cpp print_doc_comment_group_string
-	s := short_form ? expr_to_string_shorthand(expr) : expr_to_string(expr)
+print_doc_expr :: proc(expr: ^ast.Node, writer: ^strings.Builder) {
+	// C++ Reference: docs.cpp:215-224 -- the shorthand choice is made from the GLOBAL flag inside
+	// this function, not passed in:
+	//     if (build_context.cmd_doc_flags & CmdDocFlag_Short) s = expr_to_string_shorthand(expr);
+	//     else                                                s = expr_to_string(expr);
+	// The port took it as `short_form := false` instead, and both call sites (and the only two
+	// there are) pass nothing -- so `odin doc -short` rendered full expressions, and the shorthand
+	// path was unreachable. The parameter is removed rather than defaulted, because a default
+	// cannot read a global and leaving it would preserve the same dead branch.
+	s := .Short in build_context.cmd_doc_flags ? expr_to_string_shorthand(expr) : expr_to_string(expr)
 	defer delete(s)
 	strings.write_string(writer, s)
 }
@@ -294,7 +338,13 @@ print_doc_expr :: proc(expr: ^ast.Node, writer: ^strings.Builder, short_form := 
 // ======================================================================================
 
 // C++ Reference: docs.cpp:195-307
-print_doc_package :: proc(info: ^Checker_Info, pkg: ^ast.Package, writer: ^strings.Builder, show_docs := true) {
+// `show_docs` is NOT a parameter. C++ Reference: docs.cpp:280 --
+//     bool show_docs = (build_context.cmd_doc_flags & CmdDocFlag_Short) == 0;
+// computed inside this function from the global flag. The port declared it as `show_docs := true`
+// and generate_documentation (its only caller) passes nothing, so `odin doc -short` still printed
+// every doc comment. Same defect and same fix as print_doc_expr above.
+print_doc_package :: proc(info: ^Checker_Info, pkg: ^ast.Package, writer: ^strings.Builder) {
+	show_docs := .Short not_in build_context.cmd_doc_flags
 	// C++ line 196-198: Null check
 	if pkg == nil {
 		return
@@ -347,14 +397,32 @@ print_doc_package :: proc(info: ^Checker_Info, pkg: ^ast.Package, writer: ^strin
 			append(&entities, e)
 		}
 
-		// C++ line 240: Sort entities for display
-		slice.sort_by_cmp(entities[:], cmp_entities_for_printing)
+		// C++ Reference: docs.cpp:274-278 -- the comparator is CHOSEN by the flag, and the same
+		// flag selects the grouping in the loop below (per-file vs per-entity-kind). The port
+		// hard-coded the alphabetical comparator and the kind grouping, so `-in-source-order` was
+		// accepted and then ignored.
+		in_src_order := .In_Source_Order in build_context.cmd_doc_flags
+		if in_src_order {
+			slice.sort_by_cmp(entities[:], cmp_entities_for_printing_by_order_in_src)
+		} else {
+			slice.sort_by_cmp(entities[:], cmp_entities_for_printing)
+		}
 
-		// C++ lines 244-291: Print entities grouped by kind
+		// C++ lines 282-301: print entities grouped by FILE in source order, by KIND otherwise.
+		curr_file: ^ast.File = nil
 		curr_entity_kind := Entity_Kind.Invalid
 		for e in entities {
-			// C++ lines 246-252: Print kind header when changing
-			if curr_entity_kind != e.kind {
+			if in_src_order {
+				// C++ docs.cpp:285-293 -- a `file: <basename>` header whenever the file changes.
+				if curr_file != e.file {
+					if curr_file != nil {
+						print_doc_line_string(0, "", writer)
+					}
+					curr_file = e.file
+					print_doc_line_string(1, fmt.tprintf("file: %s", filename_from_path(curr_file.fullpath)), writer)
+				}
+			} else if curr_entity_kind != e.kind {
+				// C++ docs.cpp:295-300 -- print the kind header when the kind changes.
 				if curr_entity_kind != .Invalid {
 					print_doc_line_string(0, "", writer)
 				}

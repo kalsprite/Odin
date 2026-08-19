@@ -158,6 +158,10 @@ init_core_type_info :: proc(c: ^Checker) {
 	c.t_type_info_matrix = find_core_type(c, "Type_Info_Matrix")
 	c.t_type_info_soa_pointer = find_core_type(c, "Type_Info_Soa_Pointer")
 	c.t_type_info_bit_field = find_core_type(c, "Type_Info_Bit_Field")
+	// C++ Reference: checker.cpp:3546 -- the LAST of the 61 find_core_type calls, and the one the
+	// port did not have. Without it Type_Info_Fixed_Capacity_Dynamic_Array is never looked up and
+	// the global stays nil.
+	c.t_type_info_fixed_capacity_dynamic_array = find_core_type(c, "Type_Info_Fixed_Capacity_Dynamic_Array")
 
 	// LEDGER #577 tail. C++ closes init_core_type_info with exactly this block
 	// (checker.cpp init_core_type_info); the port declared all 27 globals, RESET them, and never assigned
@@ -196,6 +200,8 @@ init_core_type_info :: proc(c: ^Checker) {
 	c.t_type_info_matrix_ptr = alloc_type_pointer(c.t_type_info_matrix)
 	c.t_type_info_soa_pointer_ptr = alloc_type_pointer(c.t_type_info_soa_pointer)
 	c.t_type_info_bit_field_ptr = alloc_type_pointer(c.t_type_info_bit_field)
+	// C++ Reference: checker.cpp:3575.
+	c.t_type_info_fixed_capacity_dynamic_array_ptr = alloc_type_pointer(c.t_type_info_fixed_capacity_dynamic_array)
 
 	// NOT ported, and the absence is CONSISTENT rather than half-done: C++ also resolves
 	// Type_Info_Fixed_Capacity_Dynamic_Array here (checker.cpp init_core_type_info) and its pointer. The
@@ -802,6 +808,24 @@ add_min_dep_type_info :: proc(c: ^Checker, t: ^Type) {
 		hash = hash,
 	}
 
+	// t243n -- KNOWN BOUNDED DIVERGENCE, keyed on the hash ALONE where the reference keys on the
+	// PAIR. C++'s TypeSet is open-addressed and its lookup requires BOTH halves to match
+	// (name_canonicalization.cpp:52-72):
+	//     if (hash == pair.hash && are_types_identical_unique_tuples(key, pair.type)) return hash_index;
+	//     else if (key == nullptr) return -1;
+	// so two DISTINCT types that hash equal occupy two separate slots and both get registered. This
+	// map can hold only one entry per hash, so on a collision the second type is treated as already
+	// present and its type_info is never registered -- a MISSING entry, which emits no diagnostic.
+	// The hash is the 64-bit SipHash of the canonical type string (type_hash_canonical_type), so the
+	// exposure is ~2^-64 per pair; at ~10^4 distinct types in a large program that is ~5e-12. Left as
+	// a hash-keyed map deliberately: closing it needs a (hash, type) key or an overflow chain, and
+	// that is real structural work against a probability this small. Recorded so it is a KNOWN gap
+	// rather than an unexamined assumption -- and so that anyone who ever sees a type_info entry go
+	// missing without a diagnostic checks here first.
+	// NOTE the reference's own probe loop calls are_types_identical_unique_tuples(key, ptr) BEFORE
+	// its `key == nullptr` test, which is safe only because that function's LEADING nil guard
+	// returns false for (nullptr, non-nullptr); it is unrelated to the missing POST-alias-unwrap
+	// recheck filed separately in COMPILER_ISSUES.
 	sync.rw_mutex_lock(&c.info.min_dep_type_info_set_mutex)
 	if _, exists := c.info.min_dep_type_info_set[hash]; exists {
 		sync.rw_mutex_unlock(&c.info.min_dep_type_info_set_mutex)
@@ -864,10 +888,18 @@ add_min_dep_type_info :: proc(c: ^Checker, t: ^Type) {
 		}
 
 	case .Bit_Set:
-		// Register element and underlying types (C++ checker.cpp add_min_dep_type_info)
+		// Register element and integer backing types (C++ checker.cpp add_min_dep_type_info)
 		bs := bt.variant.(Type_Bit_Set)
 		add_min_dep_type_info(c, bs.elem)
-		add_min_dep_type_info(c, bs.underlying)
+		// C++ Reference: checker.cpp add_min_dep_type_info -- `add_min_dep_type_info(c,
+		// bit_set_to_int(bt))`, NOT the raw `underlying` field. For the ordinary `bit_set[E]` with
+		// no explicit backing, `underlying` is nil, add_min_dep_type_info returns immediately on
+		// nil, and the integer the bit_set is actually stored as was never registered at all --
+		// so the port's min-dep roster was a strict subset of C++'s for every bit_set in the
+		// language. Same family as LEDGER #709 (the Fixed_Capacity_Dynamic_Array arm below) and,
+		// like it, invisible to every text-comparing gate: the roster is checker output consumed
+		// by a backend and no diagnostic reads it.
+		add_min_dep_type_info(c, bit_set_to_int(bt))
 
 	case .Pointer:
 		// Register pointer element type (C++ checker.cpp add_min_dep_type_info)
@@ -929,10 +961,11 @@ add_min_dep_type_info :: proc(c: ^Checker, t: ^Type) {
 		// same reasoning #637 was landed on: invisibility to text-comparing gates is not evidence
 		// the registration is optional.
 		//
-		// C++'s arm has NO `break;` and falls through into `case Type_Enum:`, running
+		// C++'s arm USED TO have no `break;` and fell through into `case Type_Enum:`, running
 		// `add_min_dep_type_info(c, bt->Enum.base_type)` on a non-active union member -- an
-		// upstream defect filed as LEDGER #710. That is DELIBERATELY NOT reproduced: this arm
-		// terminates normally.
+		// upstream defect filed as LEDGER #710. It was deliberately not reproduced here; this arm
+		// has always terminated normally. FIXED UPSTREAM 2026-08-17 (checker.cpp:2685 gained the
+		// `break;`), so the two now agree and this is no longer a knowing deviation.
 		fcda := bt.variant.(Type_Fixed_Capacity_Dynamic_Array)
 		add_min_dep_type_info(c, fcda.elem)
 		add_min_dep_type_info(c, alloc_type_pointer(fcda.elem))

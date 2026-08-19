@@ -746,6 +746,33 @@ check_builtin_attributes :: proc(ctx: ^Checker_Context, e: ^Entity, attributes: 
 	// PACKAGE SCOPE so it resolves everywhere without an import. Nothing in this port did that, so
 	// every @(builtin) proc group in base:runtime - append, resize, reserve, delete, make, clear and
 	// the rest - was undeclared in every consuming package.
+	//
+	// C++ Reference: checker.cpp:4738-4776. TWO GATES precede the walk, and the port had NEITHER.
+	//     switch (e->kind) {
+	//     case Entity_ProcGroup: case Entity_Procedure: case Entity_TypeName: case Entity_Constant:
+	//     	break;
+	//     default:
+	//     	return;
+	//     }
+	//     if (!((ctx->scope->flags&ScopeFlag_File) && ctx->scope->file->pkg->kind == Package_Runtime)) {
+	//     	return;
+	//     }
+	// @(builtin) is only meaningful inside base:runtime; anywhere else the attribute is rejected as
+	// an unknown attribute name by the ordinary dispatcher and this procedure must stay silent.
+	// Without the gate the port emitted "'builtin' cannot have a field value" for `@(builtin=1)` in
+	// a user package, where the reference emits only "Unknown attribute element name 'builtin'"
+	// (witness wit_ba209/a_builtin_val), and it registered arbitrary user entities -- including
+	// variables, which the kind switch above excludes -- into the builtin package scope.
+	#partial switch e.kind {
+	case .Proc_Group, .Procedure, .Type_Name, .Constant:
+		// Okay
+	case:
+		return
+	}
+	if !(.File in ctx.scope.flags && ctx.scope.file != nil && ctx.scope.file.pkg != nil && ctx.scope.file.pkg.kind == .Runtime) {
+		return
+	}
+
 	for attr in attributes {
 		for elem in attr.elems {
 			attr_name := ""
@@ -993,7 +1020,18 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 	}
 
 	// C++ line 4489-4493: Initialize visibility and attribute flags
-	entity_visibility_kind := Entity_Visibility_Kind.Public
+	//
+	// C++ Reference: checker.cpp:4835
+	//     EntityVisiblityKind entity_visibility_kind = c->foreign_context.visibility_kind;
+	// The reference SEEDS this from the enclosing foreign block; it does not merge the block's
+	// visibility in afterwards. The port used to start at Public and then take a max at the two
+	// entity-creation sites below, which differs in two observable ways:
+	//   1. a nested @(private) inside a @(private) foreign block never reached the
+	//      `entity_visibility_kind >= kind` arm, so "Previous declaration of 'private'" was never
+	//      reported (witnesses wit_ba209/a_fgn_priv, a_fgn_priv_file);
+	//   2. the merge was gated on `curr_library != nil`, so a bare `foreign { ... }` block -- which
+	//      has no library ident -- propagated no visibility at all.
+	entity_visibility_kind := ctx.foreign_context.visibility_kind
 	is_priv := false
 	is_test := false
 	is_init := false
@@ -1002,7 +1040,11 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 	// C++ line 4495-4559: Process attributes
 	// Parse attributes for visibility and test/init/fini flags
 	for attr in vd.attributes {
-		for elem in attr.elems {
+		// C++ Reference: checker.cpp:4857 iterates by INDEX because the `private` arm REMOVES the
+		// element it just consumed (see the removal below); a range loop over a slice copies the
+		// slice header and would not see the shrink.
+		for j := 0; j < len(attr.elems); j += 1 {
+			elem := attr.elems[j]
 			name: string
 			value: ^ast.Expr = nil
 
@@ -1024,19 +1066,28 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 				success := false
 
 				if value != nil {
-					// Check for string literal specifying "file" or "package"
-					operand := Operand{}
-					check_expr(ctx, &operand, value)
-
-					if operand.mode == .Constant {
-						if v_str, ok3 := operand.value.(string); ok3 {
-							if v_str == "file" {
-								kind = .Private_To_File
-								success = true
-							} else if v_str == "package" {
-								kind = .Private_To_Package
-								success = true
-							}
+					// C++ Reference: checker.cpp:4864-4877
+					//     if (value->kind == Ast_BasicLit && value->BasicLit.token.kind == Token_String) {
+					//         String v = {};
+					//         if (value->tav.value.kind == ExactValue_String) v = value->tav.value.value_string;
+					// The test is SYNTACTIC: the parameter must be a STRING BASIC LITERAL, whose exact
+					// value the parser has already computed. The reference never evaluates the
+					// expression here, and the port must not either -- collection runs before the
+					// file's own declarations are in scope, so `@(private=PV)` with `PV :: "file"`
+					// reported "Undeclared name: PV" where the reference reports the malformed
+					// -parameter error below. It also ACCEPTED a constant that happened to hold
+					// "file"/"package", which the reference rejects. Witness wit_ba209/a_priv_const.
+					if bl, bl_ok := value.derived.(^ast.Basic_Lit); bl_ok && bl.tok.kind == .String {
+						v: string
+						if s, s_ok := parse_exact_value_from_token(bl.tok).(string); s_ok {
+							v = s
+						}
+						if v == "file" {
+							kind = .Private_To_File
+							success = true
+						} else if v == "package" {
+							kind = .Private_To_Package
+							success = true
 						}
 					}
 				} else {
@@ -1065,6 +1116,20 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 				} else {
 					entity_visibility_kind = kind
 				}
+
+				// C++ Reference: checker.cpp:4895-4896
+				//     slice_unordered_remove(elems, j);
+				//     j -= 1;
+				// The reference CONSUMES the `private` element here, so the generic attribute
+				// dispatcher never sees it. The port kept it, and check_decl_attributes' own
+				// duplicate detection then reported the SAME "Previous declaration of 'private'"
+				// a second time: `@(private, private)` counted 2 errors against the reference's 1,
+				// and `@(private, private, private)` counted 4 against 2. The repeat was invisible
+				// to a text sweep because it is byte-identical to the first and deduplicated on
+				// print -- only the error COUNT moved. Witness wit_ba209/a_priv_dup.
+				attr.elems[j] = attr.elems[len(attr.elems) - 1]
+				attr.elems = attr.elems[:len(attr.elems) - 1]
+				j -= 1
 			} else if name == "test" {
 				// C++ line 4547
 				is_test = true
@@ -1102,6 +1167,19 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 			// C++ line 4584-4586: File marked @(private) or @(private="package")
 			entity_visibility_kind = .Private_To_Package
 		}
+	}
+
+	// C++ Reference: checker.cpp:4922-4924
+	//     if (entity_visibility_kind != EntityVisiblity_Public && !(c->scope->flags&ScopeFlag_File)) {
+	//         error(decl, "Attribute 'private' is not allowed on a non file scope entity");
+	//     }
+	// This is the reference's ONLY site for this message, and it runs during collection for every
+	// value declaration -- local constants, types, procedures and variables alike. The port had no
+	// counterpart and emitted the message from check_decl_attributes instead, which only worked
+	// because the `private` element was still in the attribute list. Now that the element is
+	// consumed above (as the reference consumes it), the message has to come from here.
+	if entity_visibility_kind != .Public && .File not_in ctx.scope.flags {
+		error_node(decl, "Attribute 'private' is not allowed on a non file scope entity")
 	}
 
 	// C++ line 4581-4635: Handle mutable declarations (variables)
@@ -1167,13 +1245,9 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 			// C++ line 4611-4619: Handle foreign variables
 			fl := ctx.foreign_context.curr_library
 			if fl != nil {
-				// Merge foreign block visibility with entity visibility (use most restrictive)
-				// C++ Reference: checker.cpp - foreign block visibility applies to all entities within
-				if ctx.foreign_context.visibility_kind != .Public {
-					if entity_visibility_kind == .Public || ctx.foreign_context.visibility_kind > entity_visibility_kind {
-						entity_visibility_kind = ctx.foreign_context.visibility_kind
-					}
-				}
+				// NOTE: the foreign block's visibility is NOT merged here. It SEEDS
+				// `entity_visibility_kind` at the top of this procedure, exactly as
+				// checker.cpp:4835 does -- see the comment there.
 
 				// C++ line 4614: e->Variable.is_foreign = true
 				if var_ent, ok5 := &e.variant.(Entity_Variable); ok5 {
@@ -1191,6 +1265,12 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 
 			// C++ line 4606-4609: Error on 'using' at file scope
 			if vd.is_using {
+				// t205: C++ checker.cpp:4953 CLEARS the AST flag before reporting --
+				//     vd->is_using = false; // NOTE(bill): This error will be only caught once
+				// The port kept it set, so this loop over `vd.names` reported once PER NAME:
+				// `using a, b, c: int` gave 3 diagnostics where the reference gives 1.
+				// Witness wit_using205/u1, control u2 (single name, already matched).
+				vd.is_using = false
 				error(name, "'using' is not allowed at the file scope")
 			}
 
@@ -1328,13 +1408,9 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 
 			e.identifier = name
 
-			// Merge foreign block visibility with entity visibility (use most restrictive)
-			// C++ Reference: checker.cpp - foreign block visibility applies to all entities within
-			if fl != nil && ctx.foreign_context.visibility_kind != .Public {
-				if entity_visibility_kind == .Public || ctx.foreign_context.visibility_kind > entity_visibility_kind {
-					entity_visibility_kind = ctx.foreign_context.visibility_kind
-				}
-			}
+			// NOTE: the foreign block's visibility is NOT merged here. It SEEDS
+			// `entity_visibility_kind` at the top of this procedure, exactly as
+			// checker.cpp:4835 does -- see the comment there.
 
 			// C++ line 4723-4726: Apply visibility and file flags
 			if entity_visibility_kind != .Public {
@@ -1426,7 +1502,12 @@ check_add_foreign_import_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 		//     port:   File name cannot be used as a library name as it is not a valid identifier
 		// The name is '_' here because path_to_entity_name yields a blank identifier for a path
 		// that cannot produce one -- which is exactly the case this branch catches. Typo kept.
-		error(decl, "File name, '%s', cannot be as a library name as it is not a valid identifier", library_name)
+		// t203: report on the TOKEN, not the decl node. C++ passes `fl->token` -- the `foreign`
+		// keyword, which is why the reference's caret is a bare `^` at column 1. error(decl, ...)
+		// resolves to error_node, which supplies the node's END, so the port drew a range across
+		// the whole declaration (`^~~~~~...~~~~^`). Message and position were already identical;
+		// only the caret differed. Same defect as the six branch-statement sites in check_stmt.
+		error(fl.foreign_tok, "File name, '%s', cannot be as a library name as it is not a valid identifier", library_name)
 		return
 	}
 
@@ -1453,10 +1534,17 @@ check_add_foreign_import_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 		}
 	}
 
+	// C++ checker.cpp:5864 passes `fl->library_name` -- the library name's OWN token, not the
+	// declaration's position -- after asserting it has a real line (checker.cpp:5852,
+	// GB_ASSERT(fl->library_name.pos.line != 0)) and overwriting its text (`.string =
+	// library_name`). The port was synthesising a token at fl.pos, which is the `foreign` keyword,
+	// so every diagnostic naming this entity pointed at the start of the declaration instead of at
+	// the name. ast.odin:729 declares `name: ^Ident` as possibly nil, which is the one thing C++'s
+	// by-value Token cannot be, hence the fallback rather than a bare deref.
 	token := tokenizer.Token {
 		kind = .Ident,
 		text = library_name,
-		pos  = fl.pos,
+		pos  = fl.name != nil ? fl.name.pos : fl.pos,
 	}
 	e := alloc_entity_library_name(parent_scope, token, t_invalid, fullpaths[:], library_name)
 

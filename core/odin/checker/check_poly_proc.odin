@@ -461,10 +461,34 @@ find_or_generate_polymorphic_procedure :: proc(old_ctx: ^Checker_Context, base_e
 
 	// Create procedure info for deferred checking
 	// C++ lines 627-635
-	// NOTE: C++ lines 614-621 have a bug where they try to walk scope chain to find file,
-	// but the logic is incorrect (checks s->file == nullptr in while condition but then
-	// assigns s->file inside loop, so file is always nullptr). We use entity.file instead,
-	// which was set from base_entity.file at line 428.
+	// DELIBERATE DEVIATION, AND IT IS MEASURED -- do not "fix" this back to the reference.
+	// C++ Reference: check_expr.cpp find_or_generate_polymorphic_procedure --
+	//
+	//	AstFile *file = nullptr;
+	//	{
+	//		Scope *s = entity->scope;
+	//		while (s != nullptr && s->file == nullptr) { file = s->file; s = s->parent; }
+	//	}
+	//	proc_info->file = file;
+	//
+	// That loop can only ever assign nullptr: the body runs only while `s->file` IS nullptr, and
+	// the iteration that would have found a real file exits the loop first. So C++ passes
+	// nullptr here, while its own CACHE-HIT path a hundred lines earlier passes other->file --
+	// the reference is internally inconsistent, not merely terse.
+	//
+	// The port used to assert this was a C++ bug and substitute entity.file. That claim was
+	// right but unevidenced, so it was TESTED at t220: setting this to nil and re-sweeping gave
+	//     modelsweep tst_p55  state_packages=12 state_entities=72 unpairable=27
+	//     modelsweep tst_p54  state_packages=0  state_entities=0  unpairable=0   (control)
+	// with entries like `core/slice/sort_private.odin:91:2.merge (procedure) instr: ref=true
+	// port=None`. Corpus, parity, jsoncheck and threadcheck were ALL green in both runs -- only
+	// the model sweep could see it.
+	//
+	// The conclusion is the general rule, not a local excuse: the contract is the reference's
+	// OBSERVABLE BEHAVIOUR, not its literal source. C++ recovers the file downstream and its
+	// model comes out right; the port's consume path reads proc_info.file, so copying the
+	// literal nullptr makes the port's model diverge from the reference it is imitating.
+	// entity.file is how the port reaches the same observable state.
 	proc_info := new(Proc_Info)
 	proc_info.file = entity.file
 	proc_info.token = token

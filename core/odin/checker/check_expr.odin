@@ -4139,8 +4139,20 @@ check_representable_as_constant :: proc(ctx: ^Checker_Context, in_value: Exact_V
 
 		#partial switch v in in_value {
 		case bool:
-			// Booleans cannot convert to integers in constants
-			return false
+			// A BOOLEAN CONVERTS: false -> 0, true -> 1.
+			// The port asserted the opposite ("Booleans cannot convert to integers in constants")
+			// and returned false. That is an INVENTED RULE -- the reference routes this arm
+			// through exact_value_to_integer, whose FIRST case is exactly this:
+			//     case ExactValue_Bool: { i64 i = 0; if (v.value_bool) { i = 1; } return exact_value_i64(i); }
+			// (src/exact_value.cpp). The port's own exact_value_to_integer ports that case
+			// correctly; only this arm, which does the conversion inline, disagreed with it.
+			// Effect was a broad OVER-REJECTION of every constant bool-to-integer conversion --
+			// `int(true)`, `i16(true)`, `u32be(true)` -- all of which the reference accepts and
+			// folds to 1. Over-rejection emits a diagnostic where the reference emits none, so
+			// no value-comparing instrument could have found it; it came in as a tip from a
+			// session running a conversion matrix over the reference.
+			value_i64 = 1 if v else 0
+			is_signed = true
 		case big.Int:
 			// Store the BigInt value for range checking
 			bigint_value = v
@@ -9388,6 +9400,13 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 	o.mode = .Invalid
 	o.type = t_invalid
 	o.value = nil
+	// t204: C++ does NOT assign o->expr here. check_expr_base_internal assigns it exactly once,
+	// at the TAIL (`kind = Expr_Expr; o->expr = node; return kind;`), which only the arms that
+	// `break` reach. An arm that `return`s early therefore leaves o->expr at whatever the CALLER
+	// had. The port initialising it up front is a real behavioural divergence for those arms.
+	// `incoming_expr` preserves it so an early-returning arm can restore C++'s value instead of
+	// assuming it was nil. See the ^ast.Helper_Type arm.
+	incoming_expr := o.expr
 	o.expr = node
 
 	if node == nil {
@@ -10072,6 +10091,20 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 			o.mode = .Type
 			o.type = ht_type
 		}
+		// t204: REPRODUCING A REFERENCE DEFECT, deliberately. C++'s arm returns early and so
+		// never runs the tail's `o->expr = node`; the operand escapes with a NULL expr, and
+		// check_decl.cpp:60's `error(operand->expr, ...)` then renders with no position at all:
+		//     f :: proc() { y: int = #type int; _ = y }
+		//     oracle: "Error: Cannot assign a type 'int' to variable 'y'"   (no file/line/col)
+		//     same line without `#type`: "main.odin(2:24) Error: ..." with the source echo.
+		// Isolated with probes wit_ht204/{ht1,ht2,ht3}; witness wit24/helper_in_expr.
+		//
+		// Filed upstream as UPSTREAM-UNFILED-helper-type-operand-loses-expr-so-diagnostics-
+		// lose-their-position.md. It is NOT a crash, so by the standing ruling the reference's
+		// behaviour is the contract and the port must match it rather than be quietly better.
+		// Restoring `incoming_expr` rather than hardcoding nil reproduces C++ exactly: C++ leaves
+		// the caller's value, which is nil only because these callers pass a fresh Operand.
+		o.expr = incoming_expr
 		return .Stmt
 
 	case ^ast.Bad_Expr:
@@ -13584,7 +13617,16 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 		if !is_ident {
 			expr_str := expr_to_string(fv.field)
 			defer delete(expr_str)
-			error_node(fv.field, "Invalid parameter name '%s' in procedure call", expr_str)
+			// t204: WAS `fv.field`. C++ check_expr.cpp:6776,6786,6796 anchors ALL THREE
+			// diagnostics in this loop on `arg` -- the whole FieldValue (`a = 2`) -- not on the
+			// field identifier (`a`). Same pos either way (ast_token_pos recurses a Field_Value
+			// into its field), so ONLY THE SQUIGGLE EXTENT differed: oracle `^~~~^`, port `^`.
+			//
+			// The corpus showed this on ONE of the three (Duplicate parameter, via wit/posnamed
+			// and wit_1094/*). The other two are the identical mistake with no witness -- found
+			// only by reading the whole C++ loop instead of the single cited line. Fixing just
+			// the witnessed one would have left two live extent defects behind.
+			error_node(fv, "Invalid parameter name '%s' in procedure call", expr_str)
 			data.error = true
 			continue
 		}
@@ -13592,20 +13634,20 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 		name := ident.name
 		param_index := lookup_procedure_parameter(pt, name)
 		if param_index < 0 {
-			error_node(fv.field, "No parameter named '%s' for this procedure type", name)
+			error_node(fv, "No parameter named '%s' for this procedure type", name)
 			data.error = true
 			continue
 		}
 
 		if visited[param_index] {
-			error_node(fv.field, "Duplicate parameter '%s' in procedure call", name)
+			error_node(fv, "Duplicate parameter '%s' in procedure call", name)
 			data.error = true
 			continue
 		}
 
 		visited[param_index] = true
 		named_filled[param_index] = true
-		named_nodes[param_index] = fv.field
+		named_nodes[param_index] = fv
 
 		// Check the named argument value
 		param_type := param_types[param_index]
@@ -14439,7 +14481,20 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 					if arg_op.mode != .Type &&
 					   is_type_integer(param_type) &&
 					   (is_type_integer(arg_op.type) || is_type_enum(arg_op.type)) {
-						ok = check_is_castable_to(ctx, arg_op, param_type)
+						// A CONSTANT has to FIT the parameter; castability is not enough.
+						// `#any_int x: u8` called with 300 or -1 is a range error, not a cast.
+						// C++ Reference: check_expr.cpp check_call_arguments_internal --
+						//     if (o->mode == Addressing_Constant) {
+						//         // constants have to fit the parameter
+						//         ok = check_representable_as_constant(c, o->value, param_type, &o->value);
+						//     } else {
+						//         ok = check_is_castable_to(c, o, param_type);
+						//     }
+						if arg_op.mode == .Constant {
+							ok = check_representable_as_constant(ctx, arg_op.value, param_type, &arg_op.value)
+						} else {
+							ok = check_is_castable_to(ctx, arg_op, param_type)
+						}
 					}
 				}
 			}
