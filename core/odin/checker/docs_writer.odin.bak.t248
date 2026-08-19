@@ -1643,32 +1643,9 @@ doc_write_entity :: proc(w: ^Doc_Writer, e: ^Entity) -> Doc_Entity_Index {
 	}
 
 	// Position
-	//
-	// C++ Reference: docs_writer.cpp:262-282 odin_doc_token_pos_cast -- ALL FOUR fields come from
-	// the SAME TokenPos, and the file index is resolved from THAT POSITION's own file
-	// (`global_files[pos.file_id]`, then looked up in `w->file_cache`). C++ never reads `e->file`
-	// here; docs.cpp's `e->file` uses are a different concern (grouping for the text printer).
-	//
-	// #1204. The port used `w.file_cache[e.file]` while taking line/column/offset from
-	// `e.token.pos`, so the two could name different files. They do exactly that for a
-	// polymorphic record specialization: add_polymorphic_record_entity (check_type.odin) stamps
-	// `e.file = ctx.file`, and `ctx.file` is whichever file forced the specialization -- for
-	// `Static_Handle_Map($N, $T, $Handle_Type)` that is general.odin, the file holding the proc
-	// group `add :: proc{static_add}`, not static_handle_map.odin where the struct is declared.
-	// C++ stamps `e->file` the same way; it simply does not use it for the doc position, which is
-	// why the reference is INSENSITIVE to which file forces the specialization and the port was
-	// not. The symptom was line:col preserved with the filename wrong -- the exact fingerprint of
-	// a position whose file came from a different source than its line and column.
-	//
-	// The port's tokenizer.Pos carries no file_id (only ast.Node does, and it is unassigned), so
-	// the equivalent of `global_files[pos.file_id]` is lookup_source_file on the position's path.
-	// C++'s `pos.file_id != 0` guard corresponds to lookup_source_file returning nil, and its
-	// "file not in file_cache" fallback to index 0 is the existing `found` test, kept intact.
 	pos: Doc_Position
-	if src_file := lookup_source_file(e.token.pos.file); src_file != nil {
-		if file_index, found := w.file_cache[src_file]; found {
-			pos.file = file_index
-		}
+	if file_index, found := w.file_cache[e.file]; found {
+		pos.file = file_index
 	}
 	pos.line = u32(e.token.pos.line)
 	pos.column = u32(e.token.pos.column)

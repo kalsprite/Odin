@@ -1843,13 +1843,7 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 		// C++ lines 374-383: Allocate entity storage
 		entities := make([dynamic]^Entity, 0, param_count, context.temp_allocator)
 
-		// C++ Reference: check_type.cpp:413 `i32 field_group_index = -1;` -- the counter is
-		// PRE-incremented at the top of the loop body (check_type.cpp:419), so the FIRST field
-		// group must come out as 0. Seeding it at 0 here made every polymorphic parameter's
-		// field_group_index exactly one too large, visible in .odin-doc as `fgi=1` where the
-		// reference writes `fgi=0` (#1205). The port's three other field_group_index loops
-		// (check_type.odin:1465, :5571, :6520) all seed -1; this site was the lone outlier.
-		field_group_index := -1
+		field_group_index := 0
 
 		// C++ lines 386-532: Iterate through field groups
 		for field in polymorphic_params.list {

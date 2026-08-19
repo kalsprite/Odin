@@ -21,9 +21,7 @@ export ODIN_ROOT="${ODIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pw
 # not just the default rendering -- that is the whole point.
 #
 # ONE NORMALISATION, AND IT IS NAMED RATHER THAN HIDDEN. The oracle appends a body marker to every
-# procedure literal -- ` /* 33!77 */`, FILE_ID!OFFSET of the proc literal (NOT line!offset, as
-# this comment said until tick 248; measured against $S/phase2/witdoc_ctxfile247) -- which the
-# port does not emit.
+# procedure literal -- ` /* 33!77 */`, line!offset of the body -- which the port does not emit.
 # That is the STANDING, SEPARATELY-TRACKED d_proclit_str divergence (wit_b3rest/d_proclit_str), not
 # a doc defect, and leaving it in would make every package fail this gate for an unrelated reason.
 # It is stripped from the ORACLE side only, by a pattern that cannot match anything else. If
@@ -83,38 +81,6 @@ for p in "$@"; do
     if died "$rc_ref" || died "$rc_port"; then
       echo "DOC-DIED   $p [$label] ref_rc=$rc_ref port_rc=$rc_port"
       n_died=$((n_died+1)); continue
-    fi
-
-    # REF-FAIL: THE ORACLE REJECTED THE PACKAGE, SO THERE IS NO DOCUMENTATION TO COMPARE.
-    #
-    # Added tick 248. `died` only catches timeout (124) and signals (>=128). A package the oracle
-    # merely REJECTS exits 1, which fell straight through to the diff below -- so `ref.raw` held
-    # the oracle's ERROR MESSAGE and `port.txt` held the port's, and the gate diffed one
-    # diagnostic against another and called the result a documentation divergence. On the 287-
-    # package sweep that is 16 packages x 2 unexempted combos = 32 bogus TEXT-DIFF cells, all from
-    # packages that cannot be documented on Linux at all (10x rexcode/isa/*/tools, sys/darwin,
-    # sys/freebsd, core/path, odin/format, odin/printer, dynlib/example). Enough noise to bury a
-    # real finding.
-    #
-    # docbin.sh never had this hole because `odin doc -doc-format` leaves an ARTIFACT and its
-    # absence is checkable (REF-NODOC). Plain `odin doc` writes to stdout, so exit status is the
-    # only signal and it has to be read deliberately.
-    #
-    # NO VERDICT IS COMPARED HERE, AND THAT IS DELIBERATE. My first cut of this block reported
-    # `rc_port == 0` as "ORACLE REJECTS, PORT ACCEPTS" and counted it a DIFF. That is a FALSE
-    # ALARM GENERATOR: triage_doctext DOES NOT GATE ON CHECKER ERRORS. Measured on core/path --
-    # the oracle rejects with a compile-time #panic (rc=1), and the port tool prints the full
-    # documentation with NO diagnostic and exits 0. (The port's CHECKER does reject core/path;
-    # tst_r14 was measured doing exactly that. It is the doc harness that ignores it.) So
-    # `rc_port` carries no verdict information at this site and must not be read as one -- it
-    # would have fired on all 16 undocumentable packages x 2 combos on every future run.
-    #
-    # Verdict parity for these packages belongs to the CHECK instruments, and it is already
-    # covered: tick 248 measured all 16 directly, oracle=reject / port=reject, 16/16 SAME.
-    if [ "$rc_ref" -ne 0 ]; then
-      echo "REF-FAIL   $p [$label] ref_rc=$rc_ref port_rc=$rc_port (oracle emits no docs; verdict is corpus_scan2's job)"
-      n_died=$((n_died+1))
-      continue
     fi
     if grep -q '^### ' "$TMP/port.txt"; then
       echo "PORT-FAIL  $p [$label] $(grep -m1 '^### ' "$TMP/port.txt")"

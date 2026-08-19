@@ -1650,27 +1650,8 @@ check_struct_fields :: proc(ctx: ^Checker_Context, node: ^ast.Struct_Type, st: ^
 				// The port had no such parameter, so a raw tag on a CRLF file kept its CRs --
 				// measured as `line1\r\nline2` against the reference's `line1\nline2`, and
 				// visible only once schema v4 put tags into the model dump (#899/#902).
-				//
-				// t247: THE `ok` FLAG IS NO LONGER DISCARDED. The reasoning above -- that the
-				// guard is unreachable because the tokenizer validates string literals first --
-				// was REFUTED BY MEASUREMENT. It is correct only for the candidate it names:
-				// `"\q"` is a TOKENIZER error, and a tokenizer error stops the compile before
-				// semantic analysis runs, so it genuinely never reaches here. But the tokenizer
-				// does NOT range-check an octal or `\U` escape -- scan_escape accepts the digits
-				// and never looks at the value -- while unquote_char does. So `"\400"` and
-				// `"\U00110000"` tokenize CLEANLY, reach this line, and the reference reports
-				// them. MEASURED on `x: int "\400"`:
-				//     oracle  Error: Invalid string literal
-				//     port    (clean)
-				// Witness: wit_tag247/{struct_octal,struct_uover}.
-				unquoted_tag, tag_ok := unquote_string(tag, len(tag) != 0 && tag[0] == '`')
-				if !tag_ok {
-					// C++ clears the tag and still appends it, because the array is positional.
-					error_token(f.tag, "Invalid string literal")
-					tag = ""
-				} else {
-					tag = unquoted_tag
-				}
+				unquoted_tag, _ := unquote_string(tag, len(tag) != 0 && tag[0] == '`')
+				tag = unquoted_tag
 			}
 			append(&st.tags, tag)
 
@@ -1843,13 +1824,7 @@ check_record_polymorphic_params :: proc(ctx: ^Checker_Context, polymorphic_param
 		// C++ lines 374-383: Allocate entity storage
 		entities := make([dynamic]^Entity, 0, param_count, context.temp_allocator)
 
-		// C++ Reference: check_type.cpp:413 `i32 field_group_index = -1;` -- the counter is
-		// PRE-incremented at the top of the loop body (check_type.cpp:419), so the FIRST field
-		// group must come out as 0. Seeding it at 0 here made every polymorphic parameter's
-		// field_group_index exactly one too large, visible in .odin-doc as `fgi=1` where the
-		// reference writes `fgi=0` (#1205). The port's three other field_group_index loops
-		// (check_type.odin:1465, :5571, :6520) all seed -1; this site was the lone outlier.
-		field_group_index := -1
+		field_group_index := 0
 
 		// C++ lines 386-532: Iterate through field groups
 		for field in polymorphic_params.list {
@@ -4338,20 +4313,12 @@ check_bit_field_type_expr :: proc(ctx: ^Checker_Context, bft: ^ast.Bit_Field_Typ
 		// entry is appended for EVERY field, tagged or not, because the array is POSITIONAL and a
 		// consumer reads tags[i] for fields[i]. The `ok` flag is discarded for the same reason as
 		// the struct arm: the tokenizer validates string literals before the checker sees them, so
-		// C++'s error was thought unreachable from a well-formed token (#899); t247 REFUTED
-		// that and it is now reproduced.
+		// C++'s error looks unreachable from a well-formed token and is not reproduced on
+		// speculation (#899).
 		bf_tag := ast_field.tag.text
 		if len(bf_tag) != 0 {
-			// t247: the `ok` flag is no longer discarded here either; see the struct arm for
-			// the measurement that refuted the "unreachable" reasoning.
-			// Witness: wit_tag247/bitfield_octal.
-			unquoted_bf_tag, bf_tag_ok := unquote_string(bf_tag, bf_tag[0] == '`')
-			if !bf_tag_ok {
-				error_token(ast_field.tag, "Invalid string literal")
-				bf_tag = ""
-			} else {
-				bf_tag = unquoted_bf_tag
-			}
+			unquoted_bf_tag, _ := unquote_string(bf_tag, bf_tag[0] == '`')
+			bf_tag = unquoted_bf_tag
 		}
 		append(&bf.tags, bf_tag)
 

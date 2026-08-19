@@ -3547,14 +3547,6 @@ check_builtin_abs :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^ast.C
 	}
 
 	assert(!is_type_complex_or_quaternion(operand.type))
-
-	// A constant result must still fit its type: abs(i8(-128)) is 128, which i8 cannot hold.
-	// C++ Reference: check_builtin.cpp:4614-4617
-	if operand.mode == .Constant {
-		operand.expr = call
-		check_is_expressible(ctx, operand, operand.type)
-	}
-
 	return true
 }
 
@@ -6699,13 +6691,6 @@ check_builtin_type_hasher_proc :: proc(ctx: ^Checker_Context, operand: ^Operand,
 		// #996: the ", got %s" clause was dropped here too, the sibling of the type_equal_proc
 		// omission above. The two together are the 13 `mapfn` cells.
 		error_node(call.args[0], "Expected a valid type for map keys for 'type_hasher_proc', got %s", type_to_string(bt))
-		return false
-	}
-
-	// C++ Reference: check_builtin.cpp:8376-8379, after the key-type check and before the
-	// dependency registration.
-	if ctx.info.build_context != nil && ctx.info.build_context.bedrock {
-		error_node(call, "'type_hasher_proc' is not available when using '-bedrock'")
 		return false
 	}
 
@@ -10670,10 +10655,7 @@ check_builtin_c_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 		}
 		e := entity_of_node(ctx.info, args.expr)
 		if e == nil || .C_Var_Arg not_in e.flags {
-			// Reported on the SECOND argument. C++ named `list.expr` here until f861febc1
-			// corrected it to `args.expr` (check_builtin.cpp:775); the port had copied the
-			// pre-fix position.
-			error_node(args.expr, "'%s' expected a `#c_vararg` parameter", builtin_name)
+			error_node(call.args[0], "'%s' expected a `#c_vararg` parameter", builtin_name)
 		}
 
 		operand.mode = .No_Value
@@ -10708,10 +10690,7 @@ check_builtin_c_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call
 
 		type := check_type(ctx, call.args[1])
 		if type == nil || type == t_invalid {
-			// f861febc1 shortened this: the reference's trailing "to intrinsics.%.*s" had two
-			// verbs and one argument (filed upstream), and it was repaired by DELETING the
-			// clause, not by supplying the argument. check_builtin.cpp:860.
-			error_node(call.args[1], "'%s' expected a type as the second parameter", builtin_name)
+			error_node(call.args[1], "'%s' expected a type as the second parameter to intrinsics.%s", builtin_name, builtin_name)
 			return false
 		}
 

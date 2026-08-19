@@ -3817,19 +3817,6 @@ check_assignment_variable :: proc(ctx: ^Checker_Context, lhs, rhs: ^Operand, con
 			rhs.mode = .Invalid
 		}
 
-		// The sibling arm, added upstream in f861febc1 (check_stmt.cpp:446-458): "a builtin is
-		// not a value". Same shape as the Proc_Group arm above. MEASURED before porting:
-		// `_ = len` -> oracle 1 diagnostic, port 0. The control `_ = g` already matched.
-		// The same upstream hunk also gives the Proc_Group arm an explicit `return nullptr;`,
-		// which is COSMETIC -- without it that arm fell into `case Addressing_Invalid: return
-		// nullptr;` and returned the same value. Verified by measurement, so it is not ported.
-		if rhs.mode == .Builtin {
-			expr_str := expr_to_string(rhs.expr)
-			defer delete(expr_str)
-			error(rhs.expr, "Cannot assign built-in procedure '%s' in %s", expr_str, blank_context_name)
-			rhs.mode = .Invalid
-		}
-
 		if rhs.mode == .Invalid {
 			return nil
 		}

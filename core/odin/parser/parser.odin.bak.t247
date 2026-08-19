@@ -4188,9 +4188,7 @@ check_basic_literal_value :: proc(p: ^Parser, tok: tokenizer.Token) {
 		}
 
 	case .Rune:
-		// C++ Reference: parser.cpp:876-880 -- the reference runs the WHOLE literal through
-		// unquote_string, not just its escapes.
-		if !unquote_string_is_valid(tok.text) {
+		if !escapes_are_valid(tok.text) {
 			error(p, tok.pos, "Invalid rune literal")
 		}
 
@@ -4219,166 +4217,12 @@ check_basic_literal_value :: proc(p: ^Parser, tok: tokenizer.Token) {
 					error(p, pos, "Invalid multi-line string literal")
 				}
 			}
-		} else if !unquote_string_is_valid(tok.text) {
+		} else if !escapes_are_valid(tok.text) {
 			error(p, tok.pos, "Invalid string literal")
 		}
 	}
 }
 
-// unquote_char_step mirrors ONE step of src/string.cpp's unquote_char (string.cpp:1024-1128):
-// it validates the character or escape at the head of `s` and returns the remaining tail.
-// The parser needs a yes/no verdict rather than the decoded value, so the rune is dropped --
-// but every `return false` in the reference has a counterpart below, in the same order.
-//
-// Two properties are deliberate, and wit_unq247 guards them (LEDGER #370):
-//   - There is NO SURROGATE CHECK. `"\ud800"` is accepted.
-//   - `\x` is EXEMPT from the range test: the reference breaks out of the switch before it,
-//     so `"\xFF"` is fine regardless of the byte value.
-unquote_char_step :: proc(s: string, quote: byte) -> (tail: string, ok: bool) {
-	MAX_RUNE :: 0x0010ffff
-
-	if s[0] == quote && (quote == '\'' || quote == '"') {
-		return "", false
-	}
-	if s[0] >= 0x80 {
-		_, size := utf8.decode_rune_in_string(s)
-		return s[size:], true
-	}
-	if s[0] != '\\' {
-		return s[1:], true
-	}
-	if len(s) <= 1 {
-		return "", false
-	}
-
-	c := s[1]
-	rest := s[2:]
-	switch c {
-	case 'a', 'b', 'e', 'f', 'n', 'r', 't', 'v', '\\', '\'', '"':
-		return rest, true
-
-	case '0' ..= '7':
-		// The leading digit plus exactly two more, capped at one byte.
-		if len(rest) < 2 {
-			return "", false
-		}
-		r := int(c - '0')
-		for i in 0 ..< 2 {
-			d := rest[i]
-			if d < '0' || d > '7' {
-				return "", false
-			}
-			r = r << 3 | int(d - '0')
-		}
-		if r > 0xff {
-			return "", false
-		}
-		return rest[2:], true
-
-	case 'x', 'u', 'U':
-		count := 2
-		switch c {
-		case 'u':
-			count = 4
-		case 'U':
-			count = 8
-		}
-		if len(rest) < count {
-			return "", false
-		}
-		r := 0
-		for i in 0 ..< count {
-			d := -1
-			switch ch := rest[i]; ch {
-			case '0' ..= '9':
-				d = int(ch - '0')
-			case 'a' ..= 'f':
-				d = int(ch - 'a') + 10
-			case 'A' ..= 'F':
-				d = int(ch - 'A') + 10
-			}
-			if d < 0 {
-				return "", false
-			}
-			r = r << 4 | d
-		}
-		if c == 'x' {
-			return rest[count:], true
-		}
-		if r > MAX_RUNE {
-			return "", false
-		}
-		return rest[count:], true
-	}
-
-	return "", false
-}
-
-// unquote_string_is_valid answers the question src/string.cpp's unquote_string (string.cpp:1152)
-// answers for the parser: can this literal token be unquoted at all? Every `return 0` in the
-// reference is reproduced below, in order. The reference distinguishes a borrowed result (1)
-// from an allocated one (2), but the parser only tests the result against zero, so this returns
-// a bool.
-//
-// The reference's fourth argument is `has_carriage_return`, which selects between two ways of
-// producing the raw-string BODY. It cannot change the verdict, so it has no counterpart here.
-//
-// C++ Reference: parser.cpp:877 (rune) and parser.cpp:910 (string).
-unquote_string_is_valid :: proc(text: string) -> bool {
-	n := len(text)
-	if n < 2 {
-		return false
-	}
-	quote := text[0]
-	if quote != text[n - 1] {
-		return false
-	}
-	s := text[1:n - 1]
-
-	if quote == '`' {
-		// A raw string has no escapes; it only has to not contain its own delimiter.
-		return !strings.contains_rune(s, '`')
-	}
-	if quote != '"' && quote != '\'' {
-		return false
-	}
-	if strings.contains_rune(s, '\n') {
-		return false
-	}
-
-	// Fast path: nothing to unquote, so the reference hands back the body untouched.
-	if !strings.contains_rune(s, '\\') && !strings.contains_rune(s, rune(quote)) {
-		if quote == '"' {
-			return true
-		}
-		// A rune literal must be exactly one rune. The reference also guards a decode
-		// sentinel of -1, which Odin's decoder never produces -- it reports RUNE_ERROR --
-		// so only the length test survives the translation.
-		_, size := utf8.decode_rune_in_string(s)
-		if size == len(s) {
-			return true
-		}
-	}
-
-	for len(s) > 0 {
-		tail, ok := unquote_char_step(s, quote)
-		if !ok {
-			return false
-		}
-		s = tail
-		if quote == '\'' && len(s) != 0 {
-			// A rune literal holds exactly one character.
-			return false
-		}
-	}
-	return true
-}
-
-// SUPERSEDED by unquote_string_is_valid, which is what the parser now uses. Kept because this
-// package is public tooling API and the procedure is exported. It was too weak to be the
-// parser's predicate: it checks only the RANGE of a `\u`/`\U` escape, so an unknown escape, a
-// malformed hex run, or an unterminated literal all slipped past it and the port emitted the
-// tokenizer's diagnostic without the reference's accompanying "Invalid string literal".
 // escapes_are_valid is the part of unquote_char (src/string.cpp:1024-1128) that the TOKENIZER
 // does not already cover.
 //

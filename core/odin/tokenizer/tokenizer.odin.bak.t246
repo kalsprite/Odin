@@ -375,32 +375,6 @@ scan_identifier :: proc(t: ^Tokenizer) -> string {
 scan_string :: proc(t: ^Tokenizer) -> string {
 	offset := t.offset-1
 
-	// Python-style triple-quoted string literal `"""..."""`, escape-processed.
-	// C++ Reference: src/tokenizer.cpp:796-819. The opening quote is already consumed, so
-	// `t.ch` is the second quote and peek_byte(t) the third.
-	if t.ch == '"' && peek_byte(t) == '"' {
-		advance_rune(t) // consume the second opening `"`
-		advance_rune(t) // consume the third opening `"`
-		for {
-			ch := t.ch
-			if ch < 0 {
-				error(t, t.offset, "Triple-quote multi-line string literal not terminated")
-				break
-			}
-			advance_rune(t)
-			// A closing `"""` is three consecutive quotes: `ch` plus the next two runes.
-			if ch == '"' && t.ch == '"' && peek_byte(t) == '"' {
-				advance_rune(t) // consume the second closing `"`
-				advance_rune(t) // consume the third closing `"`
-				break
-			}
-			if ch == '\\' {
-				scan_escape(t)
-			}
-		}
-		return string(t.src[offset : t.offset])
-	}
-
 	for {
 		ch := t.ch
 		if ch == '\n' || ch < 0 {
@@ -424,27 +398,6 @@ scan_string :: proc(t: ^Tokenizer) -> string {
 
 scan_raw_string :: proc(t: ^Tokenizer) -> string {
 	offset := t.offset-1
-
-	// Triple-backtick multi-line string literal, RAW -- no escape processing.
-	// C++ Reference: src/tokenizer.cpp:837-855.
-	if t.ch == '`' && peek_byte(t) == '`' {
-		advance_rune(t) // consume the second opening backtick
-		advance_rune(t) // consume the third opening backtick
-		for {
-			ch := t.ch
-			if ch < 0 {
-				error(t, t.offset, "Triple-quote multi-line string literal not terminated")
-				break
-			}
-			advance_rune(t)
-			if ch == '`' && t.ch == '`' && peek_byte(t) == '`' {
-				advance_rune(t) // consume the second closing backtick
-				advance_rune(t) // consume the third closing backtick
-				break
-			}
-		}
-		return string(t.src[offset : t.offset])
-	}
 
 	for {
 		ch := t.ch

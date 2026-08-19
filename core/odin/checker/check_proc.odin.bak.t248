@@ -2061,26 +2061,7 @@ check_proc_body :: proc(ctx_: ^Checker_Context, token: tokenizer.Token, decl: ^D
 		// C++ Reference: check_decl.cpp check_proc_body
 		return false
 	}
-	// PORT ADDITION -- C++'s check_proc_body HAS NO STORE HERE. Corrected at tick 248; the comment
-	// this replaces read "seq-cst store, matching C++'s plain `= true` on a std::atomic", which
-	// cited check_expr.cpp:7397. That store is real but lives in a DIFFERENT function on a
-	// DIFFERENT path: the committed (non-return_on_failure) branch of the polymorphic CALL site.
-	// check_decl.cpp check_proc_body (the counterpart of THIS procedure) reads the flag at
-	// check_decl.cpp:2369 and never writes it. A citation to a store in another function is not
-	// authority for a store here.
-	//
-	// CONSEQUENCE, as far as it can be reasoned: this line runs ONLY on success (a failing clause
-	// returns above), and a successful evaluation prints nothing whatever print_err is. It can
-	// therefore only matter if the SAME decl is evaluated again later and fails that time -- in
-	// which case the port suppresses a render C++ would emit at the caller, because the call
-	// site's compare-exchange (check_expr.odin, #890) would find the flag already claimed.
-	// For one instantiation the bindings are the same in both places, so that combination looks
-	// unreachable -- but "looks unreachable" is exactly the reasoning that was wrong about the
-	// field-tag guard at tick 247, so it is NOT being removed on inspection.
-	//
-	// EXPERIMENT TO RUN: delete this line, rebuild to a new binary, and re-run corpus_scan2 plus
-	// the wit_where* families. If no cell moves, the store is inert and should go for
-	// faithfulness. If a cell moves, this comment gets the witness it currently lacks.
+	// LEDGER #886: seq-cst store, matching C++'s plain `= true` on a std::atomic.
 	sync.atomic_store(&decl.where_clauses_evaluated, true)
 
 	// Open procedure body scope

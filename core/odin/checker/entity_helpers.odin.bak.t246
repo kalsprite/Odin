@@ -848,11 +848,6 @@ try_to_add_package_dependency :: proc(ctx: ^Checker_Context, package_name: strin
 // (STRANDED above a different procedure until #734 -- another procedure was inserted between
 //  this doc comment and the definition it documents.)
 add_map_get_dependencies :: proc(ctx: ^Checker_Context) {
-	if ctx.info.build_context != nil && ctx.info.build_context.bedrock {
-		// the map runtime is declared '#+build !bedrock'
-		return
-	}
-
 	// No decl guard: C++ has none here (check_expr.cpp add_map_get_dependencies), and add_package_dependency
 	// already handles a nil decl.
 	if build_context.dynamic_map_calls {
@@ -870,11 +865,6 @@ add_map_get_dependencies :: proc(ctx: ^Checker_Context) {
 // The port had it folded in, which is why a roster audit keyed on NAMES could not see the defect:
 // the name was present, just registered from the wrong function and unconditionally.
 add_map_set_dependencies :: proc(ctx: ^Checker_Context) {
-	if ctx.info.build_context != nil && ctx.info.build_context.bedrock {
-		// the map runtime is declared '#+build !bedrock'
-		return
-	}
-
 	init_core_source_code_location(ctx.checker)
 
 	// C++ ALSO builds t_map_set_proc here (check_expr.cpp add_map_set_dependencies). DELIBERATELY NOT PORTED:
@@ -897,11 +887,6 @@ add_map_set_dependencies :: proc(ctx: ^Checker_Context) {
 // add_map_reserve_dependencies is C++'s THIRD map helper, which the port never had.
 // C++ Reference: check_expr.cpp add_map_reserve_dependencies. Unconditional -- no dynamic_map_calls branch.
 add_map_reserve_dependencies :: proc(ctx: ^Checker_Context) {
-	if ctx.info.build_context != nil && ctx.info.build_context.bedrock {
-		// the map runtime is declared '#+build !bedrock'
-		return
-	}
-
 	init_core_source_code_location(ctx.checker)
 	add_package_dependency(ctx, "runtime", "__dynamic_map_reserve")
 }
@@ -917,11 +902,6 @@ add_map_reserve_dependencies :: proc(ctx: ^Checker_Context) {
 // default_hasher, default_hasher_string, default_hasher_cstring, default_hasher_f64,
 // default_hasher_complex128 and default_hasher_quaternion256.
 add_map_key_type_dependencies :: proc(ctx: ^Checker_Context, key_type: ^Type) {
-	if ctx.info.build_context != nil && ctx.info.build_context.bedrock {
-		// the map runtime is declared '#+build !bedrock'
-		return
-	}
-
 	key := core_type(key_type)
 	if key == nil {
 		return

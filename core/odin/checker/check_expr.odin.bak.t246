@@ -855,18 +855,6 @@ parse_exact_value_from_token :: proc(tok: tokenizer.Token) -> Exact_Value {
 	s := text
 	#partial switch tok.kind {
 	case .String:
-		// C++ parser.cpp:880-884 dispatches a triple-quoted literal to unquote_string_triple
-		// BEFORE the ordinary unquote_string path. The `>= 6` guard is the reference's.
-		if len(text) >= 6 &&
-		   ((text[0] == '"' && text[1] == '"' && text[2] == '"') ||
-		    (text[0] == '`' && text[1] == '`' && text[2] == '`')) {
-			unquoted, _, _, ok := unquote_string_triple(text, strings.contains(text, "\r"))
-			if !ok {
-				return nil
-			}
-			s = unquoted
-			break
-		}
 		// C++ parser.cpp: `unquote_string(ast_allocator(f), &s, 0, s.text[0] == '`')` -- the
 		// STRING arm passes the raw-string flag, so a raw literal's CRs are stripped (#903).
 		unquoted, ok := unquote_string(text, len(text) != 0 && text[0] == '`')
@@ -1065,183 +1053,6 @@ strip_carriage_return :: proc(s: string) -> string {
 // literal kept CRs the reference removes. MEASURED on a struct tag spanning a CRLF line:
 //     ref  tags=line1\nline2      port tags=line1\r\nline2
 // found only after schema v4 put tags in the model dump (LEDGER #899/#902/#903).
-// Triple_String_Error mirrors C++'s TripleStringErrorKind (string.cpp). The parser turns each
-// of these into a distinct syntax error, so they are not interchangeable.
-// C++ Reference: string.cpp TripleStringErrorKind.
-Triple_String_Error :: enum {
-	None = 0,
-	Invalid_Literal,         // malformed delimiters (should not occur for a real token)
-	Content_On_Opening_Line, // text after the opening delimiter on its own line
-	Closing_Not_On_Own_Line, // closing delimiter is not alone on its line
-	Under_Indented,          // a content line is indented less than the closing delimiter
-	Indentation_Mismatch,    // a line's indentation whitespace differs from the closing delimiter
-	Invalid_Escape,          // bad escape sequence (only reachable for `"""` strings)
-}
-
-// unquote_string_triple_content escape-processes the already-delimiter-stripped body of a
-// triple-quoted string.
-// C++ Reference: string.cpp unquote_string_triple_content.
-unquote_string_triple_content :: proc(s: string, has_carriage_return: bool) -> (string, bool) {
-	body := s
-	if !strings.contains(body, "\\") {
-		if has_carriage_return {
-			return strip_carriage_return(body), true
-		}
-		return body, true
-	}
-	if has_carriage_return {
-		body = strip_carriage_return(body)
-	}
-
-	buf := make([dynamic]byte, 0, 3*len(body)/2 + 1)
-	for len(body) > 0 {
-		// NOTE: quote==0 makes unquote_char treat `"` as an ordinary byte (it only rejects a
-		// bare quote when quote is '"' or '\''), while `\\` escapes -- including `\"` -- are
-		// still handled.
-		r, multiple_bytes, tail, ok := unquote_char(body, 0)
-		if !ok {
-			delete(buf)
-			return s, false
-		}
-		body = tail
-		if r < 0x80 || !multiple_bytes {
-			append(&buf, byte(r))
-		} else {
-			encoded, n := utf8.encode_rune(r)
-			append(&buf, ..encoded[:n])
-		}
-	}
-	return string(buf[:]), true
-}
-
-// unquote_string_triple computes the value of a `"""..."""` or ```` ```...``` ```` literal.
-// `err_offset` is a byte offset into the TOKEN TEXT pointing at the offending character, or -1
-// when no precise location is available; both err fields are meaningful only when ok is false.
-// C++ Reference: string.cpp unquote_string_triple.
-unquote_string_triple :: proc(s: string, has_carriage_return := false) -> (out: string, err: Triple_String_Error, err_offset: int, ok: bool) {
-	n := len(s)
-	if n < 6 {
-		return s, .Invalid_Literal, 0, false
-	}
-	quote := s[0]
-	if quote != '"' && quote != '`' {
-		return s, .Invalid_Literal, 0, false
-	}
-	if !(s[0] == quote && s[1] == quote && s[2] == quote) ||
-	   !(s[n-1] == quote && s[n-2] == quote && s[n-3] == quote) {
-		return s, .Invalid_Literal, 0, false
-	}
-
-	raw := quote == '`'
-	body := s[3 : n-3] // body begins at token offset 3
-
-	// Single-line form: no indentation handling.
-	if !strings.contains(body, "\n") {
-		if raw {
-			if has_carriage_return {
-				return strip_carriage_return(body), .None, -1, true
-			}
-			return body, .None, -1, true
-		}
-		content, cok := unquote_string_triple_content(body, has_carriage_return)
-		if !cok {
-			return s, .Invalid_Escape, -1, false
-		}
-		return content, .None, -1, true
-	}
-
-	// The opening delimiter's line must be whitespace only.
-	first_nl := 0
-	for body[first_nl] != '\n' {
-		first_nl += 1
-	}
-	for i in 0 ..< first_nl {
-		c := body[i]
-		if c != ' ' && c != '\t' && c != '\r' {
-			return s, .Content_On_Opening_Line, 3 + i, false
-		}
-	}
-
-	// The closing delimiter's line: whitespace after the final newline is the indent prefix.
-	last_nl := len(body) - 1
-	for body[last_nl] != '\n' {
-		last_nl -= 1
-	}
-	indent := body[last_nl + 1:]
-	for i in 0 ..< len(indent) {
-		c := indent[i]
-		if c != ' ' && c != '\t' {
-			return s, .Closing_Not_On_Own_Line, 3 + (last_nl + 1) + i, false
-		}
-	}
-
-	content := body[first_nl + 1 : last_nl]
-	content_base := 3 + (first_nl + 1) // token offset of the content start
-
-	buf := make([dynamic]byte, 0, len(content) + 1)
-	li := 0
-	for {
-		le := li
-		for le < len(content) && content[le] != '\n' {
-			le += 1
-		}
-		line_len := le - li
-		if line_len > 0 && content[li + line_len - 1] == '\r' {
-			line_len -= 1 // normalize CRLF line endings
-		}
-
-		blank := true
-		for k in 0 ..< line_len {
-			c := content[li + k]
-			if c != ' ' && c != '\t' {
-				blank = false
-				break
-			}
-		}
-		// A whitespace-only line contributes an empty line.
-		if !blank {
-			ws := 0
-			for ws < line_len && (content[li + ws] == ' ' || content[li + ws] == '\t') {
-				ws += 1
-			}
-			ws_end_off := content_base + li + ws
-
-			for k in 0 ..< len(indent) {
-				if k >= line_len || content[li + k] != indent[k] {
-					lc: u8 = 0
-					if k < line_len {
-						lc = content[li + k]
-					}
-					delete(buf)
-					if k < line_len && (lc == ' ' || lc == '\t') {
-						return s, .Indentation_Mismatch, ws_end_off, false
-					}
-					return s, .Under_Indented, ws_end_off, false
-				}
-			}
-			for k in len(indent) ..< line_len {
-				append(&buf, content[li + k])
-			}
-		}
-
-		if le >= len(content) {
-			break
-		}
-		append(&buf, '\n')
-		li = le + 1
-	}
-
-	deindented := string(buf[:])
-	if raw {
-		return deindented, .None, -1, true
-	}
-	content_out, cok := unquote_string_triple_content(deindented, false)
-	if !cok {
-		return s, .Invalid_Escape, -1, false
-	}
-	return content_out, .None, -1, true
-}
-
 unquote_string :: proc(s: string, has_carriage_return := false) -> (string, bool) {
 	n := len(s)
 	if n < 2 {
@@ -10551,8 +10362,7 @@ check_assignment :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 
 	// Special error for builtin procedures
 	if operand.mode == .Builtin {
-		// C++ Reference: check_expr.cpp:1262-1267 names the EXPRESSION; the port omitted it.
-		error(operand.expr, "Cannot assign built-in procedure '%s' to %s%s", expr_to_string(operand.expr), article, context_name)
+		error(operand.expr, "Cannot assign built-in procedure to %s%s", article, context_name)
 		return false
 	}
 

@@ -26,11 +26,8 @@ export ODIN_ROOT="${ODIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pw
 # and real content differences become one line each.
 #
 # ONE NORMALISATION, AND IT IS NAMED RATHER THAN HIDDEN -- the same one doctext.sh makes. The
-# oracle appends a body marker to every procedure literal, ` /* 33!7776 */` -- that is
-# FILE_ID!OFFSET of the proc literal, NOT line!offset as this comment said until tick 248.
-# MEASURED: in $S/phase2/witdoc_ctxfile247 the marker reads `34!204`; the procedure is on LINE 7
-# and byte 204 is exactly the offset of its `proc` keyword. Both halves were checked, because the
-# offset alone would not have distinguished the two readings. The port does not emit the marker. That is the STANDING, SEPARATELY-TRACKED d_proclit_str
+# oracle appends a body marker to every procedure literal, ` /* 33!7776 */` (line!offset of the
+# body), which the port does not emit. That is the STANDING, SEPARATELY-TRACKED d_proclit_str
 # divergence (wit_b3rest/d_proclit_str), not a doc-writer defect, and leaving it in would fail
 # every package for an unrelated reason. It is stripped from the ORACLE side only, by a pattern
 # that cannot match anything else. If d_proclit_str is ever fixed, this becomes a no-op, not a lie.
