@@ -755,7 +755,13 @@ string_canonical_entity_name :: proc(e: ^Entity, allocator := context.allocator)
 write_canonical_parent_prefix :: proc(w: ^Type_Writer, e: ^Entity) {
 	assert(e != nil, "write_canonical_parent_prefix: entity is nil")
 
-	if e.kind == .Procedure || e.kind == .Type_Name {
+	// C++ Reference: src/name_canonicalization.cpp:576-577 --
+	//     if (e->kind == Entity_Procedure || e->kind == Entity_AsmTemplate ||
+	//         e->kind == Entity_TypeName  || e->kind == Entity_Variable)
+	// TWO kinds were missing from the port's guard, and BOTH fall through to the `panic` at the
+	// bottom of this procedure rather than to a diagnostic: `.Asm_Template` (#1242) and
+	// `.Variable`, which has no connection to asm and predates it.
+	if e.kind == .Procedure || e.kind == .Asm_Template || e.kind == .Type_Name || e.kind == .Variable {
 		// C++ Reference: line 421-424
 		if e.kind == .Procedure {
 			proc_ent := e.variant.(Entity_Procedure)
@@ -1013,7 +1019,10 @@ write_canonical_entity_name :: proc(w: ^Type_Writer, e: ^Entity) {
 		// For debug symbols only (C++ line 576-578)
 		fallthrough
 
-	case .Procedure, .Variable:
+	// C++ Reference: src/name_canonicalization.cpp:743-745 -- Procedure, AsmTemplate and
+	// Variable share one arm, with Constant falling into it. `.Asm_Template` added by #1242;
+	// the port's `case:` below is a panic, not a diagnostic.
+	case .Procedure, .Asm_Template, .Variable:
 		type_writer_append(w, raw_data(e.token.text), len(e.token.text))
 		if is_type_polymorphic(e.type) {
 			type_writer_appendc(w, CANONICAL_TYPE_SEPARATOR)
@@ -1531,9 +1540,13 @@ entity_symbol_name :: proc(e: ^Entity, allocator := context.allocator) -> string
 	// Case 4: the canonical name IS the symbol.
 	//
 	// GUARDED, and this is the second deliberate divergence. write_canonical_entity_name handles
-	// exactly four entity kinds -- TypeName, Constant, Procedure, Variable -- and PANICS on
-	// anything else (C++: `default: GB_PANIC("TODO(bill): entity kind %d")`,
+	// exactly FIVE entity kinds -- TypeName, Constant, Procedure, AsmTemplate, Variable -- and
+	// PANICS on anything else (C++: `default: GB_PANIC("TODO(bill): entity kind %d")`,
 	// name_canonicalization.cpp). The port is faithful there and panics too.
+	//
+	// It said FOUR until #1242: upstream added Entity_AsmTemplate to that arm
+	// (name_canonicalization.cpp:744) and both the count in this comment and the filter below
+	// were stale. An asm template does get a linker symbol in the reference.
 	//
 	// That is safe in C++ because lb_get_entity_name is only ever reached from the backend, on
 	// entities it is about to EMIT, and it never emits a builtin. It is NOT safe for an exported
@@ -1547,7 +1560,7 @@ entity_symbol_name :: proc(e: ^Entity, allocator := context.allocator) -> string
 	// "" as "this entity has no symbol", which is the truth: builtins, imports, libraries and
 	// labels are compile-time only and are never emitted by any backend.
 	#partial switch _ in e.variant {
-	case Entity_Type_Name, Entity_Constant, Entity_Procedure, Entity_Variable:
+	case Entity_Type_Name, Entity_Constant, Entity_Procedure, Entity_Asm_Template, Entity_Variable:
 		return string_canonical_entity_name(e, allocator)
 	}
 	return ""

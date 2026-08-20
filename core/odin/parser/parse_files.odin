@@ -70,9 +70,35 @@ parse_package :: proc(pkg: ^ast.Package, p: ^Parser = nil) -> bool {
 		files[i] = file
 		i += 1
 	}
-	slice.sort(files)
+	// LEDGER #1208. This was `slice.sort(files)`, and `files` is a []^ast.File -- so it sorted
+	// by POINTER ADDRESS. `pkg.files` is a map[string]^File with no inherent order, so the
+	// allocator's return addresses were the only thing deciding the order the package's files
+	// were parsed in. It happened to agree with the order collect_package created them in,
+	// which is why it never showed: nothing in the observable output depended on it, and a
+	// latent nondeterminism that never fires looks exactly like correct code.
+	//
+	// Sorting by fullpath is not a behaviour change -- collect_package fills the map from
+	// filepath.glob, and os.glob sorts by name (core/os/path.odin:963), so within a single
+	// package directory path order and name order are the same order that was already coming
+	// out. What changes is that it is now guaranteed rather than inherited from the allocator.
+	//
+	// It also makes runtime_session.odin:106 honest: that site already sorts by fullpath and
+	// its comment claims to be building "the same shape check_package_from_path builds". That
+	// claim was true only by accident until now.
+	slice.sort_by(files, proc(a, b: ^ast.File) -> bool { return a.fullpath < b.fullpath })
 
 	for file in files {
+		// #1264: the reference's expect_token calls exit_with_errors() when an expectation
+		// fails at EOF, so the process is gone and no LATER file of the package is parsed at
+		// all. The port cannot exit its host, so it stops here instead -- see
+		// Parser.aborted_at_eof (parser.odin). Checked at the top of the loop rather than
+		// after parse_file so that the file that latched still finishes unwinding, which is
+		// what the reference does too: the exit happens inside the diagnostic, not at a
+		// package boundary.
+		if p.aborted_at_eof {
+			ok = false
+			break
+		}
 		// LEDGER #307: the package-name block below is reachable ONLY when parse_file
 		// succeeded.
 		//

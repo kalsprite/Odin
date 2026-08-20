@@ -74,6 +74,24 @@ Expr_To_String_Handler :: #type proc(expr: ^ast.Node, allocator: runtime.Allocat
 // err_line / err_block pair added in #307.
 Error_Range_Handler :: #type proc(pos, end: tokenizer.Pos, fmt: string, args: ..any)
 
+// Plain_Error_Handler reports a diagnostic with the CHECKER's "Error: " prefix rather than the
+// parser's "Syntax Error: ".
+//
+// C++ Reference: src/parser.cpp calls TWO different families. `syntax_error(...)` (src/error.cpp)
+// renders "Syntax Error: "; plain `error(...)` -- error(Token) at src/error.cpp:751, error(Ast *)
+// at src/parser.cpp:567 -- renders "Error: ". C++ is one translation unit set, so parser.cpp can
+// reach both. The port's parser could reach only the first, so every site the reference reports
+// as a plain Error came out labelled "Syntax Error".
+//
+// MEASURED on 1a808b4a4, the two sites are src/parser.cpp:2506 (segment override) and :2701
+// (asm spec value). Witness cells a_membadseg and a_specval_bad: same position, same text, same
+// exit status, wrong prefix -- and, at :2506, a one-column caret where the oracle underlines the
+// whole node.
+//
+// Same shape and same reasoning as err_range (#322): a separate injected channel rather than a
+// widened Error_Handler, because Error_Handler is the tokenizer's type and is shared.
+Plain_Error_Handler :: #type proc(pos, end: tokenizer.Pos, fmt: string, args: ..any)
+
 Flag :: enum u32 {
 	Optional_Semicolons,
 }
@@ -102,7 +120,14 @@ Parser :: struct {
 	err_block_begin: Error_Block_Handler,
 	err_block_end:   Error_Block_Handler,
 	err_range:       Error_Range_Handler, // LEDGER #322
+	err_plain:       Plain_Error_Handler, // the "Error: " channel; see Plain_Error_Handler
 	expr_str:        Expr_To_String_Handler, // LEDGER #390
+
+	// Target architecture, supplied by the driver the same way the handlers above are.
+	// C++ reads build_context.metrics.arch as a global; this package is standalone, so the
+	// zero value .Unknown means "no target configured" and suppresses target-specific
+	// diagnostics rather than failing them. Currently read only by parse_asm_template.
+	target_arch: runtime.Odin_Arch_Type,
 
 	prev_tok: tokenizer.Token,
 	curr_tok: tokenizer.Token,
@@ -151,6 +176,34 @@ Parser :: struct {
 	fix_prev_pos: tokenizer.Pos,
 
 	peeking: bool,
+
+	// C++ Reference: src/parser.cpp:1726-1728 -- the tail of expect_token:
+	//
+	//     if (prev.kind == Token_EOF) {
+	//         exit_with_errors();
+	//     }
+	//
+	// and exit_with_errors (src/error.cpp) is `print_all_errors(); gb_exit(1);`. When an
+	// expectation fails with the file already exhausted, the reference PRINTS WHAT IT HAS AND
+	// KILLS THE PROCESS. Nothing further is parsed, nothing further is reported, and the
+	// checker never runs.
+	//
+	// That exit is observable, and #1264 is what it costs to omit it. For `f :: proc() { if }`
+	// the reference accumulates exactly FOUR diagnostics; the port carried on unwinding and
+	// accumulated NINE (three further "Expected '}', got 'EOF'" expectations plus next_token0's
+	// "Token is EOF"). Both arms then sort with gb_sort, whose insertion-sort arm is used at or
+	// below 8 elements and whose quicksort arm above it is UNSTABLE -- so the reference's four
+	// keep emission order and print "Expected an operand" at (3:0), while the port's nine were
+	// reordered and printed "Expected '}', got 'EOF'" at the same position. print_all_errors
+	// merges neighbours at identical positions keeping the FIRST, so the extra five diagnostics
+	// changed which of them survived. The visible defect was one line of text; the cause was a
+	// missing process exit five diagnostics earlier.
+	//
+	// A LIBRARY cannot exit its host's process -- the same constraint error_limit_reached
+	// already documents below, and the same answer: latch, stop the statement loops, and emit
+	// nothing further. The counters stop moving too, because in the reference they no longer
+	// exist by this point.
+	aborted_at_eof: bool,
 }
 
 MAX_FIX_COUNT :: 10
@@ -181,6 +234,9 @@ default_error_handler :: proc(pos: tokenizer.Pos, msg: string, args: ..any) {
 }
 
 warn :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: ..any) {
+	if p.aborted_at_eof {
+		return
+	}
 	if p.warn != nil {
 		p.warn(pos, msg, ..args)
 	}
@@ -188,6 +244,9 @@ warn :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: ..any) {
 }
 
 error :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: ..any) {
+	if p.aborted_at_eof {
+		return
+	}
 	if p.err != nil {
 		p.err(pos, msg, ..args)
 	}
@@ -214,6 +273,12 @@ error :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: ..any) {
 // globally is the one deliberate difference: this package cannot see the checker's collector, and
 // during parsing the two agree.
 error_limit_reached :: proc(p: ^Parser) -> bool {
+	// #1264: an expect_token failure at EOF is the reference's OTHER way out of the statement
+	// loops, and it is far more abrupt -- exit_with_errors() rather than a cap being passed.
+	// Sharing this predicate is what makes the two loops notice it; see Parser.aborted_at_eof.
+	if p.aborted_at_eof {
+		return true
+	}
 	max_count := p.max_error_count
 	if max_count <= 0 {
 		max_count = DEFAULT_MAX_ERROR_COLLECTOR_COUNT
@@ -237,6 +302,9 @@ error_limit_reached :: proc(p: ^Parser) -> bool {
 // package-name error went through the counting `error`. On base/builtin that was oracle 15 vs
 // port 1. LEDGER #388.
 error_no_file_count :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: ..any) {
+	if p.aborted_at_eof {
+		return
+	}
 	if p.err != nil {
 		p.err(pos, msg, ..args)
 	}
@@ -250,7 +318,7 @@ error_no_file_count :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: .
 // the new handler still gets the diagnostic, just with the old single-column caret. Silently
 // dropping it would be far worse than a narrow caret.
 error_node :: proc(p: ^Parser, node: ^ast.Node, msg: string, args: ..any) {
-	if node == nil {
+	if node == nil || p.aborted_at_eof {
 		return
 	}
 	if p.err_range != nil {
@@ -259,6 +327,48 @@ error_node :: proc(p: ^Parser, node: ^ast.Node, msg: string, args: ..any) {
 		p.err(node.pos, msg, ..args)
 	}
 	p.file.syntax_error_count += 1
+	p.error_count += 1
+}
+
+
+// plain_error_node is C++'s `error(Ast *node, ...)` (src/parser.cpp:567): the CHECKER's error
+// routine, so "Error: " rather than "Syntax Error: ", spanning the node.
+//
+// It DOES bump the file's error count -- src/parser.cpp:579-582 does
+// `f->error_count += 1` after error_va, guarded on node->file_id != 0. That is the one thing
+// separating it from plain_error_token below, which cannot reach a file at all.
+//
+// FALLS BACK to the syntax-error channel when err_plain is unset, for the same reason
+// error_node does: a host that has not wired the new handler should still see the diagnostic.
+plain_error_node :: proc(p: ^Parser, node: ^ast.Node, msg: string, args: ..any) {
+	if node == nil || p.aborted_at_eof {
+		return
+	}
+	if p.err_plain != nil {
+		p.err_plain(node.pos, node.end, msg, ..args)
+	} else if p.err_range != nil {
+		p.err_range(node.pos, node.end, msg, ..args)
+	} else if p.err != nil {
+		p.err(node.pos, msg, ..args)
+	}
+	p.file.syntax_error_count += 1
+	p.error_count += 1
+}
+
+// plain_error_token is C++'s `error(Token const &token, ...)` (src/error.cpp:751), which passes
+// an EMPTY end position -- hence a single-column caret, not a span -- and, taking no AstFile,
+// cannot touch f->error_count. Same distinction error_no_file_count already documents for the
+// syntax-error family, and it is load-bearing for the same reason: parse_package gates its
+// declaration loop on the file's error count.
+plain_error_token :: proc(p: ^Parser, pos: tokenizer.Pos, msg: string, args: ..any) {
+	if p.aborted_at_eof {
+		return
+	}
+	if p.err_plain != nil {
+		p.err_plain(pos, {}, msg, ..args)
+	} else if p.err != nil {
+		p.err(pos, msg, ..args)
+	}
 	p.error_count += 1
 }
 
@@ -278,7 +388,7 @@ error_node :: proc(p: ^Parser, node: ^ast.Node, msg: string, args: ..any) {
 // trailing newline, unlike the one at parser.cpp:4384. Whether that renders as its own line is the
 // error collector's business, and the port's driver mirrors the reference's.
 require_parenthesised_tag_expr :: proc(p: ^Parser, tag: tokenizer.Token, expr: ^ast.Expr, warn_name, suggest_name: string) {
-	if expr == nil {
+	if expr == nil || p.aborted_at_eof {
 		return
 	}
 	if _, is_paren := expr.derived.(^ast.Paren_Expr); is_paren {
@@ -1097,6 +1207,13 @@ expect_token :: proc(p: ^Parser, kind: tokenizer.Token_Kind) -> tokenizer.Token 
 		}
 		if p.err_block_end != nil {
 			p.err_block_end()
+		}
+
+		// C++ Reference: src/parser.cpp:1726-1728 -- AFTER the error block is closed, so the
+		// failing expectation itself is reported and only then does the reference stop. See
+		// Parser.aborted_at_eof for why the port latches instead of exiting.
+		if prev.kind == .EOF {
+			p.aborted_at_eof = true
 		}
 	}
 	advance_token(p)
@@ -1960,6 +2077,14 @@ parse_for_stmt :: proc(p: ^Parser) -> ^ast.Stmt {
 
 		if p.curr_tok.kind == .In {
 			in_tok := expect_token(p, .In)
+			// C++ Reference: src/parser.cpp:5329-5331 -- the diagnostic is emitted immediately
+			// after consuming the `in`, before the range expression is parsed:
+			//     Token in_token = expect_token(f, Token_in);
+			//     syntax_error(in_token, "Prefer 'for _ in' over 'for in'");
+			// The port had the SWITCH counterpart (parser.odin:2205, "Prefer 'switch _ in' over
+			// 'switch in'") and not this one -- the sibling was ported, the outlier was the bug.
+			// LEDGER #1251.
+			error(p, in_tok.pos, "Prefer 'for _ in' over 'for in'")
 			rhs: ^ast.Expr
 
 			prev_allow_range := p.allow_range
@@ -3516,7 +3641,16 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 		if p.curr_tok.kind != .Eq {
 			type = parse_var_type(p, allowed_flags)
 			tt := ast.unparen_expr(type)
-			if is_signature && !any_polymorphic_names {
+			// C++ Reference: src/parser.cpp:4931-4938 -- the nil case is C++'s FIRST branch and
+			// the typeid check is its `else if`:
+			//     if (tt == nullptr) {
+			//         syntax_error(f->prev_token, "Invalid type expression in field list");
+			//     } else if (is_signature && !any_polymorphic_names && tt->kind == Ast_TypeidType && ...)
+			// The port had only the second arm, and reached `tt.derived` unguarded -- a nil
+			// dereference waiting for any field whose type parses to nothing. LEDGER #1251.
+			if tt == nil {
+				error(p, p.prev_tok.pos, "Invalid type expression in field list")
+			} else if is_signature && !any_polymorphic_names {
 				if ti, ok := tt.derived.(^ast.Typeid_Type); ok && ti.specialization != nil {
 					error_node(p, type, "Specialization of typeid is not allowed without polymorphic names")
 				}
@@ -3640,6 +3774,15 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 			append(&fields, field)
 		}
 	} else {
+		// C++ Reference: src/parser.cpp:4908-4915 -- this guard sits immediately before
+		// convert_to_ident_list, and the port had only the "Empty field declaration" half:
+		//     if (f->prev_token.kind == Token_Comma) {
+		//         syntax_error(f->prev_token, "Trailing comma before a colon is not allowed");
+		//     }
+		// LEDGER #1251. Measured on `proc(a, : int)`: oracle reports at the comma, port silent.
+		if p.prev_tok.kind == .Comma {
+			error(p, p.prev_tok.pos, "Trailing comma before a colon is not allowed")
+		}
 		names := convert_to_ident_list(p, list[:], true, allow_poly_names)
 		if len(names) == 0 {
 			error(p, p.curr_tok.pos, "Empty field declaration")
@@ -3688,7 +3831,43 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 		}
 	}
 
-	field_list = ast.new(ast.Field_List, start_tok.pos, p.curr_tok.pos)
+	// C++ Reference: src/parser_pos.cpp:369-373 -- ast_end_token's FieldList arm:
+	//
+	//	case Ast_FieldList:
+	//		if (node->FieldList.list.count > 0) {
+	//			return ast_end_token(node->FieldList.list[node->FieldList.list.count-1]);
+	//		}
+	//		return node->FieldList.token;
+	//
+	// and ast_token (src/parser_pos.cpp:114-115) returns that SAME token, so for an EMPTY list
+	// `token_pos_end` puts the node's end exactly one column past its own start.
+	//
+	// LEDGER #1252. The port stored `p.curr_tok.pos` -- the START of the FOLLOW token, which is
+	// not part of the node at all and has not been consumed. For an empty list that token IS
+	// start_tok, so end == pos, and error_node (:274-286) then hands `p.err_range` a span whose
+	// end does not exceed its start. The checker's squiggle computation (error.odin:895-921,
+	// which matches src/error.cpp:449-481 byte for byte) falls through BOTH same-line branches
+	// and draws ZERO carets. Measured on `S :: struct() { a: int }`:
+	//
+	//	oracle	main.odin(2:13) Syntax Error: Expected at least 1 polymorphic parameter
+	//		S :: struct() { a: int }
+	//		            ^
+	//	port	the same two lines, and a caret line holding no caret
+	//
+	// The renderer was never wrong; it was handed an end that did not follow its start.
+	//
+	// The non-empty arm is currently unobservable -- the only two diagnostics anchored on a
+	// Field_List node are the "Expected at least 1 polymorphic parameter/parametric" pair, and
+	// both fire only when the list came back empty. It is written out anyway, because `end` is
+	// a property of a PUBLIC AST (#868) and the reference's rule is what it ought to mean.
+	field_list_end := end_pos(start_tok)
+	if len(fields) > 0 {
+		if last := fields[len(fields) - 1]; last != nil {
+			field_list_end = last.end
+		}
+	}
+
+	field_list = ast.new(ast.Field_List, start_tok.pos, field_list_end)
 	field_list.list = fields[:]
 	return
 }
@@ -4056,6 +4235,7 @@ check_basic_literal_value :: proc(p: ^Parser, tok: tokenizer.Token) {
 
 		is_negative := false
 		i := 0
+		digit_count := 0
 		broke_on_exponent := false
 		for ; i < len(text); i += 1 {
 			r := text[i]
@@ -4078,7 +4258,17 @@ check_basic_literal_value :: proc(p: ^Parser, tok: tokenizer.Token) {
 				}
 				broke_on_exponent = true
 				break
+			} else {
+				digit_count += 1
 			}
+		}
+		// LEDGER #1207. `0x_` and friends consume no digits, so C++ now sets success = false
+		// and RETURNS here (big_int.cpp:245, PR #7370, landed in 1a808b4a4). The return is
+		// placed BEFORE the exponent branch, so this test must precede the early `return true`
+		// below -- otherwise a digit-free literal that never reached an exponent, which is
+		// exactly the `0x_` case, would be accepted on the way past.
+		if digit_count == 0 {
+			return false
 		}
 		if !broke_on_exponent || i >= len(text) {
 			return true
@@ -5031,6 +5221,18 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		type.tags = tags
 
 		if p.allow_type && p.expr_level < 0 {
+			// C++ Reference: src/parser.cpp:3016-3022 -- TWO guards here, not one:
+			//     if (tags != 0) {
+			//         syntax_error(token, "A procedure type cannot have suffix tags");
+			//     }
+			//     if (where_token.kind != Token_Invalid) {
+			//         syntax_error(where_token, "'where' clauses are not allowed on procedure types");
+			//     }
+			// The port had only the second. LEDGER #1251. Measured on `x: proc() #no_bounds_check`,
+			// where the oracle reports at the `proc` keyword and the port was silent.
+			if tags != {} {
+				error(p, tok.pos, "A procedure type cannot have suffix tags")
+			}
 			if where_token.kind != .Invalid {
 				error(p, where_token.pos, "'where' clauses are not allowed on procedure types")
 			}
@@ -5345,7 +5547,14 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 			param_count: int
 			poly_params, param_count = parse_field_list(p, .Close_Paren, ast.Field_Flags_Record_Poly_Params)
 			if param_count == 0 {
-				error_node(p, poly_params, "Expected at least 1 polymorphic parameter")
+				// C++ Reference: src/parser.cpp:3398 --
+				//     syntax_error(polymorphic_params, "Expected at least 1 polymorphic parametric");
+				// "parametric" is a typo in the reference. The struct arm 145 lines earlier
+				// (src/parser.cpp:3253) spells the same diagnostic "parameter", and the port had
+				// both sites reading "parameter". Reproduced verbatim here because a reference
+				// quirk is the contract, and recorded in the upstream typo aggregate rather than
+				// corrected on this side. LEDGER #1253.
+				error_node(p, poly_params, "Expected at least 1 polymorphic parametric")
 				poly_params = nil
 			}
 			expect_token_after(p, .Close_Paren, "parameter list")
@@ -5484,10 +5693,48 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 
 		prev_allow_range := p.allow_range
 		p.allow_range = true
-		elem = parse_expr(p, false)
+		// C++ Reference: src/parser.cpp:3501 -- `parse_expr(f, true)`. The port passed `false`.
+		elem = parse_expr(p, true)
 		p.allow_range = prev_allow_range
 
-		if allow_token(p, .Semicolon) {
+		// C++ Reference: src/parser.cpp:3503-3516 -- three things the port had none of.
+		// LEDGER #1251.
+		//
+		//     if (elem == nullptr) {
+		//         syntax_error(token, "Expected a type or range, got nothing");
+		//     }
+		//     if (f->curr_token.kind == Token_Semicolon && f->curr_token.string == ";") {
+		//         expect_token(f, Token_Semicolon);
+		//         underlying = parse_type(f);
+		//     } else if (allow_token(f, Token_Comma) || allow_token(f, Token_Semicolon)) {
+		//         String p = token_to_string(f->prev_token);
+		//         syntax_error(token_end_of_line(f, f->prev_token), "Expected a semicolon, got a %.*s", LIT(p));
+		//         underlying = parse_type(f);
+		//     }
+		//
+		// The `string == ";"` test is the load-bearing part: an AUTOMATICALLY INSERTED semicolon
+		// carries the text "\n", not ";", so a newline before the ']' takes the second branch and
+		// is diagnosed. The port's bare `allow_token(p, .Semicolon)` could not tell the two
+		// apart and silently accepted the newline form. Measured, `bit_set[E<newline>]`:
+		//     oracle  Expected a semicolon, got a newline   (plus the cascade that follows)
+		//     port    (that line absent)
+		// and `bit_set[E, u32]`:
+		//     oracle  Expected a semicolon, got a ,         -- and the underlying type is parsed
+		//     port    Expected ']', got ','  +  Expected ';', got identifier
+		// and `bit_set[]`:
+		//     oracle  Expected a type or range, got nothing
+		//     port    (silent here; the CHECKER then said "Expected an enum type for a bit_set"
+		//             with NO position at all, because there was no node to hang one on)
+		if elem == nil {
+			error(p, tok.pos, "Expected a type or range, got nothing")
+		}
+
+		if p.curr_tok.kind == .Semicolon && p.curr_tok.text == ";" {
+			expect_token(p, .Semicolon)
+			underlying = parse_type(p)
+		} else if allow_token(p, .Comma) || allow_token(p, .Semicolon) {
+			g := tokenizer.token_to_string(p.prev_tok)
+			error(p, end_of_line_pos(p, p.prev_tok), "Expected a semicolon, got a %s", g)
 			underlying = parse_type(p)
 		}
 
@@ -5600,104 +5847,458 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		return bf
 
 	case .Asm:
-		tok := expect_token(p, .Asm)
+		// C++ Reference: src/parser.cpp:3541-3553 -- `case Token_asm:` PEEKS for `{` and
+		// parses an asm TEMPLATE GROUP, `g :: asm { a, b }`, before falling through to a
+		// single template. The port had only the template arm, so every asm group was a
+		// syntax error ("Expected '(', got '{'") -- even though ast.Asm_Group, the
+		// is_asm_group arm in check_collect.odin:1404 and check_asm_group_decl were all
+		// already present and waiting for a producer. LEDGER #1242.
+		//
+		// The shape is the proc-group site at parse_operand's `case .Proc` above, with two
+		// deliberate differences, both matching the reference: the `{` is PEEKED rather than
+		// tested after consuming the keyword (C++ `case Token_asm` has not consumed `asm`
+		// at that point), and the closing brace is taken with a plain expect_token rather
+		// than expect_closing_brace_of_field_list -- src/parser.cpp:3550 and :2986 agree on
+		// expect_token for both groups.
+		if peek_token_kind(p, .Open_Brace) {
+			tok  := expect_token(p, .Asm)
+			open := expect_token(p, .Open_Brace)
 
-		param_types: [dynamic]^ast.Expr
-		return_type: ^ast.Expr
-		if allow_token(p, .Open_Paren) {
-			for p.curr_tok.kind != .Close_Paren && p.curr_tok.kind != .EOF {
-				t := parse_type(p)
-				append(&param_types, t)
-				if p.curr_tok.kind != .Comma ||
-				   p.curr_tok.kind == .EOF {
-					break
+			args: [dynamic]^ast.Expr
+
+			for p.curr_tok.kind != .Close_Brace &&
+			    p.curr_tok.kind != .EOF {
+				elem := parse_expr(p, false)
+
+				if p.curr_tok.kind == .Where {
+					tok_where := expect_token(p, .Where)
+					cond := parse_expr(p, false)
+
+					be := ast.new(ast.Binary_Expr, elem.pos, end_pos(p.prev_tok))
+					be.left  = elem
+					be.op    = tok_where
+					be.right = cond
+					elem = be
 				}
-				advance_token(p)
-			}
-			expect_token(p, .Close_Paren)
+				append(&args, elem)
 
-			if allow_token(p, .Arrow_Right) {
-				return_type = parse_type(p)
+				allow_field_separator(p) or_break
 			}
+
+			close := expect_token(p, .Close_Brace)
+
+			if len(args) == 0 {
+				// C++ Reference: src/parser.cpp:3549 -- the message says "procedure group"
+				// even for an asm group, and carries the same "a least" typo as the
+				// proc-group site. Reproduced verbatim; upstream's prose is the spec here
+				// (LEDGER #347, #171, #185).
+				error(p, tok.pos, "Expected a least 1 argument in a procedure group")
+			}
+
+			ag := ast.new(ast.Asm_Group, tok.pos, end_pos(close))
+			ag.tok   = tok
+			ag.open  = open
+			ag.close = close
+			ag.args  = args[:]
+			return ag
 		}
 
-		has_side_effects := false
-		is_align_stack := false
-		dialect := ast.Inline_Asm_Dialect.Default
-		for allow_token(p, .Hash) {
-			if p.curr_tok.kind == .Ident {
-				name := advance_token(p)
-				// LEDGER #319. Two divergences from parser.cpp:3115-3147, both fixed here.
-				//
-				// ANCHOR: C++ reports at `token` -- the DIRECTIVE's own identifier. Every one of
-				// these five reported at `tok.pos`, the `asm` keyword, so on
-				// `asm(...) -> i32 #side_effects #side_effects {...}` the port pointed at column 7
-				// where C++ points at column 43, the second directive. Same shape as #179, where a
-				// wrong anchor accounted for 88/88 of the vet-mode divergences.
-				//
-				// MISSING DEFAULT: the `case:` arm below did not exist, so `#bogus` on an inline
-				// asm expression was accepted in silence -- a real under-rejection. Probe n7_asmbad.
-				switch name.text {
-				case "side_effects":
-					if has_side_effects {
-						error(p, name.pos, "Duplicate directive on inline asm expression: '#side_effects'")
-					}
-					has_side_effects = true
-				case "align_stack":
-					if is_align_stack {
-						error(p, name.pos, "Duplicate directive on inline asm expression: '#align_stack'")
-					}
-					is_align_stack = true
-				case "att":
-					if dialect == .ATT {
-						error(p, name.pos, "Duplicate directive on inline asm expression: '#att'")
-					} else if dialect != .Default {
-						error(p, name.pos, "Conflicting asm dialects")
-					} else {
-						dialect = .ATT
-					}
-				case "intel":
-					if dialect == .Intel {
-						error(p, name.pos, "Duplicate directive on inline asm expression: '#intel'")
-					} else if dialect != .Default {
-						error(p, name.pos, "Conflicting asm dialects")
-					} else {
-						dialect = .Intel
-					}
-				case:
-					error(p, name.pos, "Invalid directive on inline asm expression: '#%s'", name.text)
-				}
-
-			} else {
-				error(p, p.curr_tok.pos, "Expected an identifier after hash")
-			}
-		}
-
-		skip_possible_newline_for_literal(p)
-		open := expect_token(p, .Open_Brace)
-		asm_string := parse_expr(p, false)
-		expect_token(p, .Comma)
-		constraints_string := parse_expr(p, false)
-		allow_token(p, .Comma)
-		close := expect_closing_brace_of_field_list(p)
-
-		e := ast.new(ast.Inline_Asm_Expr, tok.pos, end_pos(close))
-		e.tok                = tok
-		e.param_types        = param_types[:]
-		e.return_type        = return_type
-		e.constraints_string = constraints_string
-		e.has_side_effects   = has_side_effects
-		e.is_align_stack     = is_align_stack
-		e.dialect            = dialect
-		e.open               = open.pos
-		e.asm_string         = asm_string
-		e.close              = close.pos
-
-		return e
+		// C++ Reference: src/parser.cpp:3554 parse_operand -> parse_asm_template. The old
+		// body here parsed the DELETED string-pair form and is replaced wholesale; see
+		// parse_asm_template below. Inline_Asm_Expr itself is retained in core/odin/ast
+		// pending #868, but nothing constructs it any more.
+		return parse_asm_template(p)
 
 	}
 
 	return nil
+}
+
+// ============================================================================
+// Structured inline assembly
+// ============================================================================
+//
+// C++ Reference: src/parser.cpp:2450-2793. Upstream replaced the old string-pair form
+// (`asm(T) -> U { "insn", "constraints" }`) with a real assembly grammar and deleted
+// Ast_InlineAsmExpr. The old `case .Asm` in parse_operand implemented that dead form and
+// silently ACCEPTED input the reference now rejects with three syntax errors -- witness
+// $S/phase2/wit_merge246/asm_cast_launder.
+
+// C++ Reference: src/parser.cpp:2450-2463. `%name` or `%name.flag`.
+parse_asm_register :: proc(p: ^Parser) -> ^ast.Expr {
+	tok  := expect_token(p, .Mod)
+	name := expect_token(p, .Ident)
+	reg := ast.new(ast.Asm_Register, tok.pos, end_pos(name))
+	reg.tok  = tok
+	reg.name = name
+	if allow_token(p, .Period) {
+		// C++ passes the whole phrase "register name and period for the flag" as the
+		// expect_token_after context, so the diagnostic reads
+		//     Expected 'identifier' after register name and period for the flag, got ...
+		flag := expect_token_after(p, .Ident, "register name and period for the flag")
+		if flag.kind == .Ident {
+			reg.flag = flag
+			reg.end  = end_pos(flag)
+		}
+	}
+	return reg
+}
+
+// C++ Reference: src/parser.cpp:2464-2560.
+//
+// `allow_memory_operand` is false for everything nested inside a memory operand, which is
+// what stops `[[...]]` from parsing -- C++ falls out of the switch and reports "Invalid asm
+// operand" for a '[' in that position.
+parse_asm_operand :: proc(p: ^Parser, allow_memory_operand: bool) -> ^ast.Expr {
+	#partial switch p.curr_tok.kind {
+	case .Period:
+		tok  := expect_token(p, .Period)
+		name := parse_ident(p)
+		ld := ast.new(ast.Asm_Label_Decl, tok.pos, name.end)
+		ld.tok  = tok
+		ld.name = name
+		return ld
+
+	case .Ident:
+		return parse_ident(p)
+
+	case .Mod:
+		return parse_asm_register(p)
+
+	case .Integer, .Float, .Rune:
+		tok := advance_token(p)
+		bl := ast.new(ast.Basic_Lit, tok.pos, end_pos(tok))
+		bl.tok = tok
+		return bl
+
+	case .Open_Paren:
+		return parse_expr(p, false)
+
+	case .Open_Bracket:
+		if allow_memory_operand {
+			open := expect_token(p, .Open_Bracket)
+
+			segment_override: ^ast.Expr
+			index: ^ast.Expr
+			scale: ^ast.Expr
+			disp:  ^ast.Expr
+			type:  ^ast.Expr
+
+			index_op: tokenizer.Token
+			scale_op: tokenizer.Token
+			disp_op:  tokenizer.Token
+
+			base := parse_asm_operand(p, false)
+
+			if allow_token(p, .Colon) {
+				// [segment: ...]
+				segment_override = base
+				if segment_override != nil {
+					if _, is_reg := segment_override.derived.(^ast.Asm_Register); !is_reg {
+						// C++ Reference: src/parser.cpp:2506 -- `error(segment_override, ...)`,
+						// the Ast* overload: plain "Error: ", spanning the node.
+						plain_error_node(p, segment_override, "Expected an asm register as the segment override")
+					}
+				}
+				base = parse_asm_operand(p, false)
+			}
+
+			// [base]
+			// [base + index]
+			// [base - index]
+			// [base + index + disp]
+			// [base + index*scale]  // *, <<, >>
+			// [base + index*scale + disp]
+			if allow_token(p, .Add) || allow_token(p, .Sub) {
+				index_op = p.prev_tok
+				index = parse_asm_operand(p, false)
+				if allow_token(p, .Mul) || allow_token(p, .Shl) || allow_token(p, .Shr) {
+					scale_op = p.prev_tok
+					scale = parse_asm_operand(p, false)
+				}
+				if allow_token(p, .Add) || allow_token(p, .Sub) {
+					disp_op = p.prev_tok
+					disp = parse_asm_operand(p, false)
+				}
+			}
+
+			close := expect_token(p, .Close_Bracket)
+
+			// [...]:type
+			if allow_token(p, .Colon) {
+				type = parse_type(p)
+			}
+
+			mem := ast.new(ast.Asm_Memory_Operand, open.pos, end_pos(p.prev_tok))
+			mem.open             = open
+			mem.segment_override = segment_override
+			mem.base             = base
+			mem.index_op         = index_op
+			mem.index            = index
+			mem.scale_op         = scale_op
+			mem.scale            = scale
+			mem.disp_op          = disp_op
+			mem.disp             = disp
+			mem.close            = close
+			mem.type             = type
+			return mem
+		}
+	}
+
+	error(p, p.curr_tok.pos, "Invalid asm operand, found '%s'", p.curr_tok.text)
+	advance_token(p)
+	return nil
+}
+
+// C++ Reference: src/parser.cpp:2564-2584. Operands run to a ';' or to the first token that
+// is not followed by a ','; the ';' itself is optional.
+parse_asm_operands :: proc(p: ^Parser) -> []^ast.Expr {
+	operands: [dynamic]^ast.Expr
+	for p.curr_tok.kind != .Semicolon && p.curr_tok.kind != .EOF {
+		operand := parse_asm_operand(p, true)
+		if operand != nil {
+			append(&operands, operand)
+		}
+		if !allow_token(p, .Comma) {
+			break
+		}
+	}
+	allow_token(p, .Semicolon)
+	return operands[:]
+}
+
+// C++ Reference: src/parser.cpp:2586-2630.
+parse_asm_instruction :: proc(p: ^Parser) -> ^ast.Expr {
+	// C++ Reference: src/parser.cpp:2586-2588 --
+	//     if (allow_token(f, Token_Semicolon)) {
+	//         return nullptr;
+	//     }
+	// An EMPTY instruction. This is not cosmetic: a label declaration does not consume a
+	// terminator (the Token_Period arm below returns straight after its Token_Colon), so
+	// `.loop: ; jmp .loop;` reaches this procedure with the body loop sitting on `;`.
+	// Without the guard the port emitted "Expected an asm instruction, got ';'" and the
+	// reference accepted the same source.
+	if allow_token(p, .Semicolon) {
+		return nil
+	}
+	// C++ writes this as a `default:` that breaks out for non-keywords and otherwise FALLS
+	// THROUGH into the Token_Ident arm, so a keyword is accepted as a mnemonic (`and`, `or`,
+	// `not` and friends are real instructions). Odin has no implicit fallthrough in a
+	// #partial switch, so the two are folded into one condition.
+	if p.curr_tok.kind == .Ident || tokenizer.is_keyword(p.curr_tok.kind) {
+		name := parse_ident(p)
+		operands := parse_asm_operands(p)
+		inst := ast.new(ast.Asm_Instruction, name.pos, end_pos(p.prev_tok))
+		inst.name     = name
+		inst.operands = operands
+		// C++ initialises this to -1 at parse time; semantic analysis fills it in.
+		inst.valid_form_index = -1
+		return inst
+	}
+
+	#partial switch p.curr_tok.kind {
+	case .Period:
+		tok  := expect_token(p, .Period)
+		name := parse_ident(p)
+		expect_token(p, .Colon)
+		ld := ast.new(ast.Asm_Label_Decl, tok.pos, end_pos(p.prev_tok))
+		ld.tok  = tok
+		ld.name = name
+		return ld
+
+	case .Hash:
+		tok  := expect_token(p, .Hash)
+		name := expect_token(p, .Ident)
+		operands := parse_asm_operands(p)
+		dir := ast.new(ast.Asm_Directive, tok.pos, end_pos(p.prev_tok))
+		dir.tok      = tok
+		dir.name     = name
+		dir.operands = operands
+		return dir
+	}
+
+	error(p, p.curr_tok.pos, "Expected an asm instruction, got '%s'", p.curr_tok.text)
+	advance_token(p)
+	return nil
+}
+
+// C++ Reference: src/parser.cpp:2635-2659. The signature is a Proc_Type with the .Inline_Asm
+// calling convention -- the reference builds it with ast_proc_type directly rather than
+// going through parse_proc_type, because there is no calling-convention string to read.
+parse_asm_signature :: proc(p: ^Parser, asm_token: tokenizer.Token) -> ^ast.Expr {
+	expect_token(p, .Open_Paren)
+	p.expr_level += 1
+	params, _ := parse_field_list(p, .Close_Paren, ast.Field_Flags_Signature_Params)
+	if file_allow_newline(p) {
+		skip_possible_newline(p)
+	}
+	p.expr_level -= 1
+	expect_token_after(p, .Close_Paren, "asm template parameter list")
+	results, diverging := parse_results(p)
+
+	is_generic := is_field_list_generic(params, true)
+	if !is_generic && results != nil {
+		is_generic = is_field_list_generic(results, false)
+	}
+
+	pt := ast.new(ast.Proc_Type, asm_token.pos, end_pos(p.prev_tok))
+	pt.tok                = asm_token
+	pt.calling_convention = ast.Proc_Calling_Convention_Extra.Inline_Asm
+	pt.params             = params
+	pt.results            = results
+	pt.diverging          = diverging
+	pt.generic            = is_generic
+	return pt
+}
+
+// C++ Reference: src/parser.cpp:2661-2793.
+parse_asm_template :: proc(p: ^Parser) -> ^ast.Expr {
+	tok := expect_token(p, .Asm)
+
+	signature := parse_asm_signature(p, tok)
+
+	specs:    []^ast.Expr
+	clobbers: []^ast.Expr
+
+	if file_allow_newline(p) {
+		skip_possible_newline(p)
+	}
+
+	if p.curr_tok.kind == .Open_Bracket {
+		specs_buf:    [dynamic]^ast.Expr
+		clobbers_buf: [dynamic]^ast.Expr
+
+		expect_token(p, .Open_Bracket)
+		for p.curr_tok.kind != .Close_Bracket && p.curr_tok.kind != .EOF {
+			spec: ^ast.Expr
+			if p.curr_tok.kind == .Ident {
+				name := parse_ident(p)
+				tied_name: ^ast.Expr
+				type:      ^ast.Expr
+				value:     ^ast.Expr
+				if allow_token(p, .Arrow_Right) {
+					tied_name = parse_ident(p)
+				}
+				if allow_token(p, .Colon) {
+					type = parse_type(p)
+				}
+				if allow_token(p, .Eq) {
+					#partial switch p.curr_tok.kind {
+					case .Ident:
+						value = parse_ident(p)
+					case .Mod:
+						value = parse_asm_register(p)
+					case:
+						// C++ Reference: src/parser.cpp:2701 -- `error(f->curr_token, ...)`,
+						// the Token overload: plain "Error: ", single-column caret, and it
+						// does NOT bump the file's error count.
+						plain_error_token(p, p.curr_tok.pos, "Expected a register or scratch parameter")
+						// C++ parses and DISCARDS an expression here to resynchronise
+						// (`Ast *dummy = parse_expr(f, true); gb_unused(dummy);`).
+						_ = parse_expr(p, true)
+					}
+				}
+
+				// C++ reports both of these at f->curr_token, NOT at the spec -- so the
+				// caret sits on whatever follows the specification, which is usually the
+				// ',' or the ']'.
+				if tied_name != nil {
+					if type != nil {
+						error(p, p.curr_tok.pos, "An asm specification for tied values cannot declare a type")
+					}
+				} else if type == nil && value == nil {
+					error(p, p.curr_tok.pos, "An asm specification must specify at least either a type or a value if the value is not tied")
+				}
+
+				sp := ast.new(ast.Asm_Spec, name.pos, end_pos(p.prev_tok))
+				sp.name      = name
+				sp.tied_name = tied_name
+				sp.type      = type
+				sp.value     = value
+				spec = sp
+			} else if p.curr_tok.kind == .Hash {
+				hash := expect_token(p, .Hash)
+				name := expect_token(p, .Ident)
+
+				switch name.text {
+				case "volatile", "align_stack":
+					cl := ast.new(ast.Asm_Clobber, hash.pos, end_pos(name))
+					cl.tok  = hash
+					cl.name = name
+					append(&clobbers_buf, cast(^ast.Expr)cl)
+				case "clobber":
+					value := parse_asm_operand(p, false)
+					cl := ast.new(ast.Asm_Clobber, hash.pos, end_pos(p.prev_tok))
+					cl.tok   = hash
+					cl.name  = name
+					cl.value = value
+					append(&clobbers_buf, cast(^ast.Expr)cl)
+				case:
+					// The reference's text really does list #side_effects, which is not one
+					// of the three names it accepts here (`volatile` is). Reproduced as-is.
+					error(p, name.pos, "Expected #clobber, #side_effects, or #align_stack, got '%s'", name.text)
+				}
+			} else {
+				// "am asm specification" is the reference's typo (src/parser.cpp:2742) and
+				// is reproduced deliberately -- agreeing is the job.
+				error(p, p.curr_tok.pos, "Expected am asm specification which begins with a identifier, got '%s'", p.curr_tok.text)
+				advance_token(p)
+			}
+
+			if spec != nil {
+				append(&specs_buf, spec)
+			}
+			if !allow_token(p, .Comma) {
+				break
+			}
+		}
+		expect_token(p, .Close_Bracket)
+		if file_allow_newline(p) {
+			skip_possible_newline(p)
+		}
+
+		specs    = specs_buf[:]
+		clobbers = clobbers_buf[:]
+	}
+
+	instructions: []^ast.Expr
+
+	if !allow_token(p, .Open_Brace) {
+		error(p, p.curr_tok.pos, "Expected a body for an asm template")
+		advance_token(p)
+	} else {
+		instructions_buf: [dynamic]^ast.Expr
+		for p.curr_tok.kind != .Close_Brace && p.curr_tok.kind != .EOF {
+			instruction := parse_asm_instruction(p)
+			if instruction != nil {
+				append(&instructions_buf, instruction)
+			}
+		}
+		expect_token(p, .Close_Brace)
+		instructions = instructions_buf[:]
+	}
+
+	// C++ Reference: src/parser.cpp:2782-2784 --
+	//     if (build_context.metrics.arch != TargetArch_amd64) {
+	//         syntax_error(token, "asm templates are currently only supported on -target:amd64");
+	//     }
+	// The reference reads a global build context; this package is standalone and has none,
+	// so the driver supplies the architecture. `.Unknown` -- the zero value, and what every
+	// pre-existing consumer of this package gets -- SUPPRESSES the check rather than
+	// failing it, the same disposition as a nil `expr_str`: a parser with no target
+	// configured must not invent a target-specific rejection.
+	if p.target_arch != .Unknown && p.target_arch != .amd64 {
+		error(p, tok.pos, "asm templates are currently only supported on -target:amd64")
+	}
+
+	at := ast.new(ast.Asm_Template, tok.pos, end_pos(p.prev_tok))
+	at.tok          = tok
+	at.signature    = signature
+	at.specs        = specs
+	at.clobbers     = clobbers
+	at.instructions = instructions
+	at.end_token    = p.prev_tok
+	return at
 }
 
 is_literal_type :: proc(expr: ^ast.Expr) -> bool {
@@ -5909,9 +6510,11 @@ parse_call_expr :: proc(p: ^Parser, operand: ^ast.Expr) -> ^ast.Expr {
 		p.curr_tok.kind != .EOF {
 
 		if p.curr_tok.kind == .Comma {
-			error(p, p.curr_tok.pos, "expected an expression not ,")
+			// C++ Reference: src/parser.cpp:3600 -- capital E. #1255.
+			error(p, p.curr_tok.pos, "Expected an expression not ,")
 		} else if p.curr_tok.kind == .Eq {
-			error(p, p.curr_tok.pos, "expected an expression not =")
+			// C++ Reference: src/parser.cpp:3602 -- capital E. #1255.
+			error(p, p.curr_tok.pos, "Expected an expression not =")
 		}
 
 		prefix_ellipsis := false
@@ -5925,7 +6528,8 @@ parse_call_expr :: proc(p: ^Parser, operand: ^ast.Expr) -> ^ast.Expr {
 			eq := expect_token(p, .Eq)
 
 			if prefix_ellipsis {
-				error(p, ellipsis.pos, "'..' must be applied to value rather than a field name")
+				// C++ Reference: src/parser.cpp:3616 -- "the field name", not "a field name". #1255.
+				error(p, ellipsis.pos, "'..' must be applied to value rather than the field name")
 			}
 
 			value := parse_value(p)
@@ -5936,10 +6540,60 @@ parse_call_expr :: proc(p: ^Parser, operand: ^ast.Expr) -> ^ast.Expr {
 
 			arg = fv
 		} else if seen_ellipsis {
-			error(p, arg.pos, "Positional arguments are not allowed after '..'")
+			// C++ Reference: src/parser.cpp:3623 -- syntax_error(arg, ...), the NODE overload at
+			// src/parser.cpp:648-663, not the token one. Two things follow that the port had
+			// wrong. #1267.
+			//
+			//   a. It draws a SPAN over the offending argument, because the node overload passes
+			//      ast_end_pos(node) alongside the token. The port called error(p, arg.pos, ...)
+			//      and drew a single caret. MEASURED on `g(..xs, zz+zz)`:
+			//          oracle  ^~~~^        port  ^
+			//
+			//   b. `arg` CAN BE NIL. parse_atom_expr returns nullptr with NO diagnostic when
+			//      f->allow_type is set (src/parser.cpp:3663-3665), and the argument loop appends
+			//      whatever parse_expr returned without checking -- so `Foo(.., ..)` in a type
+			//      position puts a nil into the argument list. The node overload tolerates that
+			//      by emitting at a ZERO token and zero end position; the port read `arg.pos` and
+			//      SEGFAULTED. Oracle rc=1, port rc=139, so this crash was the port's alone.
+			//
+			// The nil arm goes through error_no_file_count because C++ bumps f->error_count only
+			// for a non-nil node with a real file_id (src/parser.cpp:659-662), while
+			// syntax_error_va bumps the global collector either way -- the distinction #388
+			// already carved out for exactly this reason.
+			if arg != nil {
+				error_node(p, arg, "Positional arguments are not allowed after '..'")
+			} else {
+				error_no_file_count(p, {}, "Positional arguments are not allowed after '..'")
+			}
 		}
 
-		append(&args, arg)
+		// DO NOT APPEND A NIL ARGUMENT. #1267.
+		//
+		// C++ Reference: src/parser.cpp:3626 does `array_add(&args, arg)` unconditionally, and
+		// `arg` is nil whenever parse_atom_expr took its allow_type early return
+		// (src/parser.cpp:3663-3665: `if (f->allow_type) return nullptr;` -- no diagnostic, no
+		// Bad_Expr, just nullptr). So `Foo(..)` written in a TYPE position leaves a null pointer
+		// sitting in the argument list, and the checker walks straight into it: MEASURED, the
+		// reference segfaults on all of
+		//     v: Foo(..)      v: Foo(T = int, ..)     v: Foo(.., T = int)
+		//     v: S(..)        v: int(..)              f :: proc() -> Foo(..)
+		// in check_call_parameter_mixture (src/check_expr.cpp:8674, `args[0]->kind`) and, once
+		// past that, in the argument-unpacking and call paths behind it. Filed upstream.
+		//
+		// A reference QUIRK is the contract; a reference CRASH is not (Jon's ruling on `using`).
+		// There is therefore no reference behaviour to copy here -- only a choice about what an
+		// argument list containing nothing should mean. Dropping the entry is the choice that
+		// costs nothing: the reference emitted no diagnostic for it, so the node carried no
+		// information, and a nil element inside ^ast.Call_Expr.args is a trap for every consumer
+		// of this PUBLIC package, not just for the checker. The `..` itself is still recorded, in
+		// ce.ellipsis, so nothing about the written syntax is lost.
+		//
+		// The nil-tolerance added to check_call_parameter_mixture (check_proc_group.odin) is kept
+		// as well: it documents the upstream crash at the site where the reference dies, and it
+		// holds even if some other caller constructs an argument list by hand.
+		if arg != nil {
+			append(&args, arg)
+		}
 
 		if ellipsis.pos.line != 0 {
 			seen_ellipsis = true
@@ -6015,6 +6669,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 			loop = false
 
 		case .Open_Paren:
+			parse_check_or_return(p, operand, "call expression")
 			operand = parse_call_expr(p, operand)
 
 		case .Open_Bracket:
@@ -6100,6 +6755,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 					if indices[0] == nil || indices[1] == nil {
 						error(p, p.curr_tok.pos, "Matrix index expressions require both row and column indices")
 					}
+					parse_check_or_return(p, operand, "matrix index expression")
 					se := ast.new(ast.Matrix_Index_Expr, operand.pos, end_pos(close))
 					se.expr = operand
 					se.open = open.pos
@@ -6109,6 +6765,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 
 					operand = se
 				} else {
+					parse_check_or_return(p, operand, "slice expression")
 					se := ast.new(ast.Slice_Expr, operand.pos, end_pos(close))
 					se.expr = operand
 					se.open = open.pos
@@ -6120,6 +6777,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 					operand = se
 				}
 			} else {
+				parse_check_or_return(p, operand, "index expression")
 				ie := ast.new(ast.Index_Expr, operand.pos, end_pos(close))
 				ie.expr = operand
 				ie.open = open.pos
@@ -6134,6 +6792,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 			tok := expect_token(p, .Period)
 			#partial switch p.curr_tok.kind {
 			case .Ident:
+				parse_check_or_return(p, operand, "selector expression")
 				field := parse_ident(p)
 
 				sel := ast.new(ast.Selector_Expr, operand.pos, field)
@@ -6144,6 +6803,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 				operand = sel
 
 			case .Open_Paren:
+				parse_check_or_return(p, operand, "type assertion")
 				open := expect_token(p, .Open_Paren)
 				type := parse_type(p)
 				close := expect_token(p, .Close_Paren)
@@ -6157,6 +6817,7 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 				operand = ta
 
 			case .Question:
+				parse_check_or_return(p, operand, ".? based type assertion")
 				question := expect_token(p, .Question)
 				type := ast.new(ast.Unary_Expr, question.pos, end_pos(question))
 				type.op = question
@@ -6169,28 +6830,65 @@ parse_atom_expr :: proc(p: ^Parser, value: ^ast.Expr, lhs: bool) -> (operand: ^a
 				operand = ta
 
 			case:
+				// C++ Reference: src/parser.cpp:3702-3707 --
+				//     default:
+				//         syntax_error(f->curr_token, "Expected a selector");
+				//         advance_token(f);
+				//         operand = ast_bad_expr(f, ast_token(operand), f->curr_token);
+				//         // operand = ast_selector_expr(f, f->curr_token, operand, nullptr);
+				//         break;
+				//
+				// LEDGER #1250. The port transcribed the COMMENTED-OUT line and dropped the
+				// `advance_token`. #628's "C++ dead code is still C++" is about code that is
+				// compiled and unreachable; a commented-out line is not code, and the live
+				// statement is the contract.
+				//
+				// The missing advance is the visible half. Leaving the offending token in place
+				// means the atom loop exits and the BINARY loop reads it next: for `s.in` the
+				// token is `in`, a binary operator, so it is consumed as one and the search for
+				// its right operand hits `}` --
+				//     oracle  Expected a selector                       (one diagnostic)
+				//     port    Expected a selector
+				//             Expected an operand                      <-- invented
+				//             Expected '}', got 'EOF'                  <-- invented
+				// Measured on `s.in`, `s.context`, and `s.notin` (the last only once #1249 made
+				// `notin` a keyword at all).
 				error(p, p.curr_tok.pos, "Expected a selector")
-				operand = empty_selector_expr(tok, operand)
+				advance_token(p)
+				be := ast.new(ast.Bad_Expr, operand.pos, end_pos(p.curr_tok))
+				operand = be
 			}
 
 		case .Arrow_Right:
+			// C++ Reference: src/parser.cpp:3710-3715 -- there is NO switch here:
+			//     case Token_ArrowRight: {
+			//         parse_check_or_return(operand, "-> based call expression");
+			//         Token token = advance_token(f);
+			//         operand = ast_selector_expr(f, token, operand, parse_ident(f));
+			//     } break;
+			//
+			// LEDGER #1250. The port invented a `#partial switch` with an "Expected a selector"
+			// default, which is the wrong diagnostic AND the wrong recovery. C++ calls
+			// parse_ident unconditionally, and parse_ident on a non-Ident token routes through
+			// expect_token -- which reports "Expected 'identifier', got '%s'", appends
+			// "Note: '%s' is a keyword" when applicable, and ADVANCES. Measured:
+			//     s->in    oracle  Expected 'identifier', got 'in'  + Note: 'in' is a keyword
+			//              port    Expected a selector              + two cascade errors
+			//     s->1     oracle  Expected 'identifier', got 'integer'
+			//              port    Expected a selector              + one cascade error
+			parse_check_or_return(p, operand, "-> based call expression")
 			tok := expect_token(p, .Arrow_Right)
-			#partial switch p.curr_tok.kind {
-			case .Ident:
-				field := parse_ident(p)
+			field := parse_ident(p)
 
-				sel := ast.new(ast.Selector_Expr, operand.pos, field)
-				sel.expr  = operand
-				sel.op = tok
-				sel.field = field
+			sel := ast.new(ast.Selector_Expr, operand.pos, field)
+			sel.expr  = operand
+			sel.op = tok
+			sel.field = field
 
-				operand = sel
-			case:
-				error(p, p.curr_tok.pos, "Expected a selector")
-				operand = empty_selector_expr(tok, operand)
-			}
+			operand = sel
 
 		case .Pointer:
+			parse_check_or_return(p, operand, "dereference")
 			op := expect_token(p, .Pointer)
 			deref := ast.new(ast.Deref_Expr, operand.pos, end_pos(op))
 			deref.expr = operand
@@ -6333,6 +7031,55 @@ parse_unary_expr :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 	return parse_atom_expr(p, parse_operand(p, lhs), lhs)
 }
 
+// parse_check_or_return is C++'s parse_check_or_return (src/parser.cpp:3649-3660):
+//
+//     gb_internal void parse_check_or_return(Ast *operand, char const *msg) {
+//         if (operand == nullptr) { return; }
+//         switch (operand->kind) {
+//         case Ast_OrReturnExpr:
+//             syntax_error_with_verbose(operand, "'or_return' use within %s is not wrapped in parentheses (...)", msg);
+//             break;
+//         case Ast_OrBranchExpr:
+//             syntax_error_with_verbose(operand, "'%.*s' use within %s is not wrapped in parentheses (...)", msg, LIT(operand->OrBranchExpr.token.string));
+//             break;
+//         }
+//     }
+//
+// LEDGER #1250. The port had NO equivalent, so all NINE postfix contexts accepted a bare
+// `or_return` / `or_break` / `or_continue` operand silently where the reference diagnoses it.
+//
+// DO NOT CONFUSE THIS WITH check_or_expr_needs_parens BELOW. They are different C++ functions
+// with different messages, and the port already had the other one:
+//     ast_unary_expr / ast_binary_expr (parser.cpp:703-740)
+//         "'%s' within a binary expression not wrapped in parentheses (...)"
+//     parse_check_or_return (parser.cpp:3649)
+//         "'%s' use within %s is not wrapped in parentheses (...)"
+// Note "use within" and "is not wrapped" in this one; the other has neither.
+//
+// ARGUMENT ORDER, DELIBERATELY NOT COPIED. The C++ Ast_OrBranchExpr arm passes `msg` FIRST and
+// `LIT(...)` second against a format whose verbs are `%.*s` then `%s`, so `msg` -- a pointer --
+// is consumed as the precision and the string's `len` is consumed as the pointer. The reference
+// SEGFAULTS in gb__print_string on every one of the four postfix forms reachable with an
+// or_break/or_continue operand (`.a`, `.(T)`, `.?`, `->a`, `(...)`), 6/6 runs, verified with a
+// backtrace. `or_return` in the same position prints fine because that arm has a single verb.
+//
+// Filed upstream as
+// UPSTREAM-UNFILED-or-break-inside-a-selector-segfaults-on-a-swapped-format-argument.md.
+// The port emits the arguments in the ORDER THE FORMAT ASKS FOR: a reference quirk is the
+// contract, but a reference crash is not (Jon's ruling). So on those four forms the port prints
+// the diagnostic the reference was trying to print when it died.
+parse_check_or_return :: proc(p: ^Parser, operand: ^ast.Expr, msg: string) {
+	if operand == nil || p.err_verbose == nil || p.aborted_at_eof {
+		return
+	}
+	#partial switch e in operand.derived_expr {
+	case ^ast.Or_Return_Expr:
+		p.err_verbose(operand.pos, operand.end, "'or_return' use within %s is not wrapped in parentheses (...)", msg)
+	case ^ast.Or_Branch_Expr:
+		p.err_verbose(operand.pos, operand.end, "'%s' use within %s is not wrapped in parentheses (...)", e.token.text, msg)
+	}
+}
+
 // check_or_expr_needs_parens reports C++'s "not wrapped in parentheses" diagnostic for an
 // `or_return` / `or_break` / `or_continue` expression used directly as an operand.
 //
@@ -6341,7 +7088,7 @@ parse_unary_expr :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 // factored here and called at the build sites. C++ routes them through syntax_error_with_verbose
 // (prefix-less when piped), hence p.err_verbose rather than p.err.
 check_or_expr_needs_parens :: proc(p: ^Parser, expr: ^ast.Expr, context_name: string) {
-	if expr == nil || p.err_verbose == nil {
+	if expr == nil || p.err_verbose == nil || p.aborted_at_eof {
 		return
 	}
 	#partial switch e in expr.derived_expr {
@@ -6454,30 +7201,81 @@ parse_binary_expr :: proc(p: ^Parser, lhs: bool, prec_in: int) -> ^ast.Expr {
 				te.y    = y
 
 				expr = te
-			case .Or_Else:
-				x := expr
-				y := parse_expr(p, lhs)
-				oe := ast.new(ast.Or_Else_Expr, expr.pos, end_pos(p.prev_tok))
-				oe.x     = x
-				oe.token = op
-				oe.y     = y
-
-				expr = oe
-
 			case:
-				right := parse_binary_expr(p, false, prec+1)
+				// C++ Reference: src/parser.cpp:4009-4021 --
+				//
+				//	} else {
+				//		Ast *right = parse_binary_expr(f, false, op_prec+1);
+				//		if (right == nullptr) {
+				//			syntax_error(op, "Expected expression on the right-hand side of the binary operator '%.*s'", LIT(op.string));
+				//		}
+				//		if (op.kind == Token_or_else) {
+				//			// NOTE(bill): easier to handle its logic different with its own AST kind
+				//			expr = ast_or_else_expr(f, expr, op, right);
+				//		} else {
+				//			expr = ast_binary_expr(f, op, expr, right);
+				//		}
+				//	}
+				//
+				// LEDGER #1254. `or_else` IS NOT A CASE OF ITS OWN IN THE REFERENCE. The port
+				// gave it one, and that arm parsed its right operand with
+				//     y := parse_expr(p, lhs)          == parse_binary_expr(p, lhs, 1)
+				// where the reference parses it at `op_prec+1`. token_precedence answers 1 for
+				// Token_or_else (src/parser.cpp:3915-3919), so the reference's rhs is parsed at
+				// prec 2 and a SECOND `or_else` -- precedence 1, below the floor -- terminates
+				// it. `or_else` is therefore LEFT-associative in the reference and was
+				// RIGHT-associative in the port. (The arm also passed `lhs` where the reference
+				// passes false.)
+				//
+				// This is a parse-SHAPE divergence, not a message one. Measured on
+				// `a := m[1] or_else 2 or_else 3`:
+				//     oracle  main.odin(4:7)  ... got int              ^~~~~~~~~~~~~^
+				//     port    main.odin(4:20) ... got untyped integer  ^
+				// -- the oracle reports the OUTER or_else, whose x is `m[1] or_else 2`; the port
+				// reported the INNER one it had built instead. Different tree, different
+				// operand, different position, different caret span.
+				right := parse_binary_expr(p, false, prec + 1)
 				if right == nil {
-					error(p, op.pos, "expected expression on the right-hand side of the binary operator")
+					error(p, op.pos, "Expected expression on the right-hand side of the binary operator '%s'", op.text)
 				}
-				be := ast.new(ast.Binary_Expr, expr.pos, end_pos(p.prev_tok))
-				// C++ ast_binary_expr checks BOTH operands (parser.cpp:688-705).
-				check_or_expr_needs_parens(p, expr, "a binary")
-				check_or_expr_needs_parens(p, right, "a binary")
-				be.left  = expr
-				be.op    = op
-				be.right = right
 
-				expr = be
+				if op.kind == .Or_Else {
+					// NOTE(bill): easier to handle its logic different with its own AST kind
+					oe := ast.new(ast.Or_Else_Expr, expr.pos, end_pos(p.prev_tok))
+					oe.x     = expr
+					oe.token = op
+					oe.y     = right
+
+					expr = oe
+				} else {
+					// C++ Reference: src/parser.cpp:713-745, ast_binary_expr. The nil operand
+					// substitutions were absent from the port. They are reachable in the
+					// reference only through a null returned by parse_binary_expr, which is the
+					// same condition the rhs diagnostic above tests -- so the rhs arm fires
+					// after that diagnostic, and the lhs arm is defensive on both sides.
+					lhs_expr := expr
+					rhs_expr := right
+					if lhs_expr == nil {
+						error(p, op.pos, "No lhs expression for binary expression '%s'", op.text)
+						lhs_expr = ast.new(ast.Bad_Expr, op.pos, end_pos(op))
+					}
+					if rhs_expr == nil {
+						error(p, op.pos, "No rhs expression for binary expression '%s'", op.text)
+						rhs_expr = ast.new(ast.Bad_Expr, op.pos, end_pos(op))
+					}
+
+					// C++ ast_binary_expr checks BOTH operands (parser.cpp:725-741), and does so
+					// AFTER the nil substitutions above, not before.
+					check_or_expr_needs_parens(p, lhs_expr, "a binary")
+					check_or_expr_needs_parens(p, rhs_expr, "a binary")
+
+					be := ast.new(ast.Binary_Expr, lhs_expr.pos, end_pos(p.prev_tok))
+					be.left  = lhs_expr
+					be.op    = op
+					be.right = rhs_expr
+
+					expr = be
+				}
 			}
 		}
 	}
@@ -6593,6 +7391,15 @@ parse_simple_stmt :: proc(p: ^Parser, flags: Stmt_Allow_Flags) -> ^ast.Stmt {
 				stmt := parse_stmt(p)
 
 				if stmt != nil {
+					// C++ Reference: src/parser.cpp:4308-4320 -- the _SET_LABEL macro expands to
+					// six cases, and the switch has a DEFAULT:
+					//     default:
+					//         syntax_error(token, "Labels can only be applied to a loop or switch statement");
+					//         break;
+					// The port used `#partial switch`, which silently accepts every other kind,
+					// so a label attached to something unlabelable was dropped without a word.
+					// `token` is the COLON (it is what the enclosing switch dispatched on), which
+					// is `op` here. LEDGER #1265.
 					#partial switch n in stmt.derived_stmt {
 					case ^ast.Block_Stmt:       n.label = label
 					case ^ast.If_Stmt:          n.label = label
@@ -6600,21 +7407,56 @@ parse_simple_stmt :: proc(p: ^Parser, flags: Stmt_Allow_Flags) -> ^ast.Stmt {
 					case ^ast.Switch_Stmt:      n.label = label
 					case ^ast.Type_Switch_Stmt: n.label = label
 					case ^ast.Range_Stmt:	    n.label = label
+					case:
+						error(p, op.pos, "Labels can only be applied to a loop or switch statement")
 					}
 
+					// C++ Reference: src/parser.cpp:4322-4345. THREE separate defects here, all
+					// of them in the two arms below. LEDGER #1265.
+					//
+					// 1. THE ARGUMENT. C++ passes `LIT(ast_token(name).string)` -- the LABEL's
+					//    identifier -- so the suggestion reads `use 'lbl: #partial switch'`. The
+					//    port passed `partial_token.text`, and partial_token is the result of
+					//    expect_token(p, .Hash), so its text is literally "#". The port printed
+					//    `use '#: #reverse for'`, which suggests nothing.
+					// 2. THE REVERSE MESSAGE. C++ does not reuse the partial wording at all:
+					//        syntax_error(token, "#reverse can only be applied to a 'for in' statement");
+					//    The port invented a mirror of the #partial text.
+					// 3. THE REVERSE POSITION. C++ reports the two #reverse diagnostics at
+					//    `token` -- the COLON, which is `op` here -- not at the `#`. Measured:
+					//    oracle 2:18, port 2:20 on `f :: proc() { lbl: #reverse for { ... } }`.
+					//    The #partial arm keeps partial_token, which is what C++ uses for THAT one.
+					// Plus a MISSING diagnostic: C++ reports "#reverse already applied to a
+					// 'for in' statement" when the range statement is already reversed.
+					//
+					// C++ writes these as `if (is_partial) ... else if (is_reverse)`; the two
+					// cannot both be set (the scanner above picks one), so the `else` is not
+					// observable, but it is kept for shape.
 					if is_partial {
+						// C++ uses ast_token(name).string, which works for any node; the label
+						// reaching here is an identifier in every form the parser accepts one, and
+						// an unchecked assertion here would turn a diagnostic into a panic.
+						label_name := ""
+						if label != nil {
+							if id, is_ident := label.derived.(^ast.Ident); is_ident {
+								label_name = id.name
+							}
+						}
 						#partial switch n in stmt.derived_stmt {
 						case ^ast.Switch_Stmt:      n.partial = true
 						case ^ast.Type_Switch_Stmt: n.partial = true
 						case:
-							error(p, partial_token.pos, "Incorrect use of directive, use '%s: #partial switch'", partial_token.text)
+							error(p, partial_token.pos, "Incorrect use of directive, use '%s: #partial switch'", label_name)
 						}
-					}
-					if is_reverse {
+					} else if is_reverse {
 						#partial switch n in stmt.derived_stmt {
-						case ^ast.Range_Stmt: n.reverse = true
+						case ^ast.Range_Stmt:
+							if n.reverse {
+								error(p, op.pos, "#reverse already applied to a 'for in' statement")
+							}
+							n.reverse = true
 						case:
-							error(p, partial_token.pos, "incorrect use of directive, use '%s: #reverse for'", partial_token.text)
+							error(p, op.pos, "#reverse can only be applied to a 'for in' statement")
 						}
 					}
 				}
@@ -6626,7 +7468,12 @@ parse_simple_stmt :: proc(p: ^Parser, flags: Stmt_Allow_Flags) -> ^ast.Stmt {
 	}
 
 	if len(lhs) > 1 {
-		error(p, op.pos, "expected 1 expression, got %d", len(lhs))
+		// C++ Reference: src/parser.cpp:4355-4356 --
+		//     syntax_error(token, "Expected 1 expression");
+		// Capital E, and no count. The port lower-cased it and appended an invented
+		// ", got %d". `token` there is the same token `op` is here (the one the enclosing
+		// switch dispatched on), so only the text changes. LEDGER #1261.
+		error(p, op.pos, "Expected 1 expression")
 		return ast.new(ast.Bad_Stmt, start_tok.pos, end_pos(p.curr_tok))
 	}
 

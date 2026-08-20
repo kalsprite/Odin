@@ -649,6 +649,48 @@ init_default_library_collections :: proc() {
 }
 
 // C++: build_settings.cpp:1029-1036
+// get_fullpath_relative joins `base_dir` and `path` and resolves the result to an absolute path.
+//
+// C++ Reference: src/build_settings.cpp:1487-1511 --
+//     gb_internal String get_fullpath_relative(gbAllocator a, String base_dir, String path, bool *ok_) {
+//         ... base_dir + "/" + path ...
+//         // IMPORTANT NOTE(bill): Remove trailing path separators
+//         // this is required to make sure there is a conventional notation for the path
+//         for (/**/; i > 0; i--) { u8 c = str[i-1]; if (c != '/' && c != '\\') break; }
+//         String res = make_string(str, i);
+//         res = string_trim_whitespace(res);
+//         return path_to_fullpath(a, res, ok_);
+//     }
+//
+// The separator is joined UNCONDITIONALLY -- C++ does a bare gb_memmove of "/" between the two --
+// so a base_dir that already ends in one produces a doubled separator, which the trailing-separator
+// strip does NOT remove because it only trims the END of the whole string. filepath.join would
+// quietly normalise that away, so this builds the string by hand instead: the doubled separator is
+// visible to realpath and therefore to the resolved answer, and matching the reference matters more
+// than tidiness here.
+//
+// ON FAILURE. src/build_settings.cpp:1439-1481 (the POSIX path_to_fullpath) calls realpath, and
+// realpath REQUIRES THE PATH TO EXIST. When it does not, the reference sets ok = false and returns
+// the input string unchanged -- its own comment says it opted for "just return a copy of the
+// original path" because "further checks and processes will use the path and cause errors (which we
+// want)". This reproduces that exactly, including returning the *trimmed joined* string rather than
+// the caller's `path`.
+get_fullpath_relative :: proc(base_dir: string, path: string, allocator := context.allocator) -> (result: string, ok: bool) {
+	joined := strings.concatenate({base_dir, "/", path}, context.temp_allocator)
+
+	n := len(joined)
+	for n > 0 && (joined[n-1] == '/' || joined[n-1] == '\\') {
+		n -= 1
+	}
+	trimmed := strings.trim_space(joined[:n])
+
+	abs, abs_err := os.get_absolute_path(trimmed, allocator)
+	if abs_err != nil {
+		return strings.clone(trimmed, allocator), false
+	}
+	return abs, true
+}
+
 find_library_collection_path :: proc(name: string) -> (path: string, found: bool) {
 	for &lc in library_collections {
 		if lc.name == name {
@@ -1134,7 +1176,16 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 
 	// C++: build_settings.cpp:1714-1715
 	bc.ODIN_VENDOR = "odin"
-	bc.ODIN_VERSION = "" // Set by compiler, not checker
+	// LEDGER #1211. This was `""` with the note "Set by compiler, not checker", which described
+	// C++'s mechanism correctly and then stopped one step short: ODIN_VERSION is a UNIVERSE
+	// CONSTANT that user code reads, so leaving it empty makes the port answer a question
+	// differently from the reference rather than declining to answer it.
+	//
+	// C++ takes it from a -D define fixed when the COMPILER was built (build_settings.cpp:152-156,
+	// ODIN_VERSION_RAW). The port's exact analogue is the constant of the toolchain that built the
+	// PORT -- which is what `ODIN_VERSION` resolves to here, in this file, at the port's own
+	// compile time. Built from this checkout the two agree, which is precisely the intent.
+	bc.ODIN_VERSION = ODIN_VERSION
 
 	// C++: build_settings.cpp:1718-1720
 	if bc.max_error_count <= 0 {

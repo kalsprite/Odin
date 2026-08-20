@@ -4083,6 +4083,43 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		// so the "Called within" continuation stays attached to the panic error. Without it the
 		// buffered `error` and the immediate `error_line` come out in the wrong order and the
 		// continuation prints BEFORE the diagnostic it belongs to.
+		// LEDGER #1212 -- PORT CRASH, not a divergence in wording.
+		//
+		// C++ checks args[0] into `operand` in check_builtin_procedure's SHARED PROLOGUE
+		// (src/check_builtin.cpp:2883-2889 -- the `default:` arm that BuiltinProc_DIRECTIVE
+		// falls through to for every directive except `defined` and `config`). That runs
+		// BEFORE check_builtin_procedure_directive is entered, and therefore before this
+		// arm's ERROR_BLOCK(). The arm itself never calls check_expr; it only READS
+		// operand->type / operand->mode.
+		//
+		// This port dispatches directives from check_call_expr instead (check_expr.odin,
+		// "Step 0"), which bypasses that prologue entirely, so each arm checks its own
+		// argument. The panic arm was doing that INSIDE the error block -- and an error
+		// raised inside a block is pushed and deliberately NOT popped, because
+		// try_pop_error_value is a no-op while tls_in_block is set. So any diagnostic
+		// emitted while checking the argument left a staged error value, and the arm's own
+		// error() then pushed over it:
+		//
+		//     error.odin(251:2) runtime assertion: Nested error push detected
+		//         - did you forget to pop a previous error?
+		//
+		// Minimal reproducer, rc=132 against the oracle's two clean diagnostics:
+		//
+		//     #panic("a" + ("b" if true else "c"))
+		//
+		// (the concatenation reports "String concatenation is only allowed with constant
+		// strings" from check_binary_op, then the guard below reports "is not a constant
+		// string"). C++ carries the IDENTICAL assert in push_error_value
+		// (src/error.cpp:32) and escapes it only by virtue of this ordering.
+		//
+		// The `len(args) > 0` guard mirrors C++'s prologue, which is itself gated on
+		// `ce->args.count > 0` -- so `#panic()` checks nothing and falls straight to the
+		// arity error below, exactly as it does upstream.
+		msg_op: Operand
+		if len(call_expr.args) > 0 {
+			check_expr(ctx, &msg_op, call_expr.args[0])
+		}
+
 		begin_error_block()
 		defer end_error_block()
 		// C++ Reference: check_builtin.cpp, the `name == "panic"` arm. C++ requires EXACTLY one
@@ -4099,9 +4136,6 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			error(call_expr, "'#panic' expects 1 argument, got %d", len(call_expr.args))
 			return false
 		}
-
-		msg_op: Operand
-		check_expr(ctx, &msg_op, call_expr.args[0])
 
 		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive. This check was absent entirely, so a
 		// non-constant or non-string argument fell through to a bare "Compile time panic"
@@ -4356,11 +4390,51 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 			if file == nil {
 				return false
 			}
-			joined, join_err := filepath.join({filepath.dir(file.fullpath), original_string})
-			if join_err != nil {
+			// LEDGER #1246, and see the long note in cache_load_file_directive. C++
+			// (src/check_builtin.cpp:2296-2302) resolves this arm through the SAME
+			// determine_path_from_string, so it validates the path and then
+			// string_trim_whitespace's the JOINED result. `#load_directory(" ")` therefore
+			// resolves to the base directory, exists, and succeeds; the port reported
+			// "path does not exist" on the untrimmed `<dir>/ `.
+			// #1247, the sibling of the #load arm. C++ Reference: src/check_builtin.cpp:2298-2302:
+			//     String base_dir = dir_from_path(get_file_path_string(call->file_id));
+			//     BlockingMutex *ignore_mutex = nullptr;
+			//     bool ok = determine_path_from_string(ignore_mutex, call, base_dir, original_string, &path);
+			//     gb_unused(ok);
+			//
+			// base_dir is built with its trailing separator kept, exactly as the #load arm does and
+			// for the same reason: get_fullpath_relative joins an unconditional '/', so the
+			// reference genuinely produces `dir//path` and prints it in its diagnostics.
+			//
+			// THE DISCARDED `ok` IS AN UPSTREAM CRASH, AND IT IS NOT REPRODUCED. `String path;` at
+			// src/check_builtin.cpp:2294 is uninitialised, and determine_path_from_string writes
+			// through the out-parameter only on the paths that succeed. So when it fails, the
+			// reference emits its diagnostic and then reads an indeterminate `path`. MEASURED on
+			// dev-2026-08:1a808b4a4: `#load_directory(":foo")` and `#load_directory("bogus:x")`
+			// both SEGFAULT (rc=139, core dumped, 2/2), and the diagnostic that was already queued
+			// never reaches the terminal because the process dies before print_all_errors runs --
+			// which is why the oracle's output for those two inputs is EMPTY rather than an error.
+			// Filed upstream. Per the standing ruling a reference quirk is the contract EXCEPT when
+			// it is a crash, so the port reports and returns instead. Those cells are deliberate
+			// TEXT-DIFFs, in the same class as wit_ell267.
+			base_dir := filepath.dir(file.fullpath)
+			if len(base_dir) > 0 && base_dir[len(base_dir)-1] != '/' && base_dir[len(base_dir)-1] != '\\' {
+				base_dir = strings.concatenate({base_dir, "/"}, context.temp_allocator)
+			}
+			resolved, path_ok := determine_path_from_string(
+				ctx.info,
+				nil,
+				call,
+				base_dir,
+				original_string,
+				false,
+				ctx.checker.allocator,
+			)
+			if !path_ok {
+				call.state_flags += {.Directive_Was_False}
 				return false
 			}
-			path = joined
+			path = resolved
 		}
 
 		// C++ maps ReadDirectoryError to six messages, all prefixed with the BARE
@@ -4450,7 +4524,93 @@ cache_load_file_directive :: proc(
 		if len(base_dir) > 0 && base_dir[len(base_dir)-1] != '/' && base_dir[len(base_dir)-1] != '\\' {
 			base_dir = strings.concatenate({base_dir, "/"}, context.temp_allocator)
 		}
-		path = strings.concatenate({base_dir, "/", original_path}, context.temp_allocator)
+
+		// C++ Reference: src/check_builtin.cpp:2038-2046 routes the relative case through
+		// `determine_path_from_string` (src/parser.cpp:6514), which the port had skipped
+		// entirely -- it concatenated and went straight to the read. Two behaviours were lost.
+		//
+		// (a) THE PATH IS VALIDATED. src/parser.cpp:6584-6588:
+		//         } else if (!is_import_path_valid(file_str)) {
+		//             do_error(node, "Invalid import path: '%.*s'", LIT(file_str));
+		//             return false;
+		//     and `do_error` here is `syntax_error`, not `error`, because
+		//     cache_load_file_directive calls determine_path_from_string with the default
+		//     `use_check_errors=false`. So the reference's diagnostic for `#load("")` is
+		//         Syntax Error: Invalid import path: ''
+		//     anchored at the CALL (caret spans the whole `#load("")`), where the port printed
+		//         Error: Failed to `#load` file: <dir>/; invalid file or cannot be found
+		//     anchored at the directive ident (caret one column). Wrong message, wrong
+		//     severity word, wrong caret.
+		//
+		//     MEASURED, and it is the reason this returns WITHOUT also reporting the
+		//     not-found error: `odin check` on `D :: #load("")` emits EXACTLY ONE
+		//     diagnostic, the syntax error. src/check_builtin.cpp:2044 does have an
+		//     `if (err_on_not_found) error(ce->proc, "Failed to ...")` on this path and
+		//     err_on_not_found is `true` at the only `#load` dispatch
+		//     (src/check_builtin.cpp:2524) -- yet the second line does not appear, 1/1 in
+		//     four separate spellings (const decl, in-proc, `#exists`, two-argument `#load`).
+		//     OPEN QUESTION recorded rather than papered over: the port reproduces the
+		//     OBSERVED single diagnostic, which is the contract, and the mechanism upstream
+		//     is not yet explained.
+		//
+		// (b) THE JOINED PATH IS WHITESPACE-TRIMMED. src/parser.cpp:6647:
+		//         String fullpath = string_trim_whitespace(get_fullpath_relative(..., base_dir, file_str, nullptr));
+		//     Note WHERE the trim is: on the RESULT of the join, not on the argument. So
+		//     `#load_directory(" ")` resolves to the base directory itself -- `<dir>// ` with
+		//     the trailing space trimmed off -- which exists, so the reference SUCCEEDS and the
+		//     only diagnostic is the constant-declaration one. The port produced `<dir>// `
+		//     untrimmed and reported "path does not exist".
+		//
+		// LEDGER #1246.
+		// #1247. This was `load_directive_path_is_valid` -- a hand-rolled stand-in that validated
+		// the path and then joined it against the file's own directory, with no collection lookup
+		// at all. So `#load("core:odin/checker/checker.odin")`, which the reference ACCEPTS, came
+		// out as
+		//     Error: Failed to `#load` file: //core:odin/checker/checker.odin; invalid file or cannot be found
+		// and `#load("bogus:x.txt")` and `#load("system:c")` produced that same message where the
+		// reference reports "Unknown library collection: 'bogus'" and "The library collection
+		// 'system' is restrict for 'foreign import'". The real determine_path_from_string exists
+		// now (#1269), so the stand-in is gone and this is the reference's own call:
+		//     bool ok = determine_path_from_string(ignore_mutex, call, base_dir, original_string, &path);
+		//     if (!ok) {
+		//         if (err_on_not_found) { error(ce->proc, "Failed to `#%.*s` file: %.*s; invalid file or cannot be found", ...); }
+		//         call->state_flags |= StateFlag_DirectiveWasFalse;
+		//         return false;
+		//     }
+		//
+		// NOTE the node: `call`, a CallExpr -- NOT an import decl. That is load-bearing inside
+		// determine_path_from_string, where `is_import_decl_path` gates the absolute-path rejection
+		// (so `#load("/etc/passwd")` is not an "Invalid import path") and inverts the Windows
+		// drive-letter branch. And `use_check_errors` is left at its default false, so these come
+		// out as "Syntax Error:" with the caret spanning the whole call.
+		//
+		// THE SECOND DIAGNOSTIC. C++ does emit the "Failed to `#load` file" error here as well, and
+		// err_on_not_found is true at the only `#load` dispatch -- yet the oracle prints only ONE
+		// line. The earlier note below called that an OPEN QUESTION; it is now answered. Both
+		// diagnostics anchor at the same position (syntax_error at the call, error at ce->proc, the
+		// `#load` directive itself, which IS the call's first token), and print_all_errors merges
+		// neighbouring errors at identical positions keeping the first. So it is emitted and then
+		// merged away. It is emitted here too rather than skipped, because the merge is the
+		// mechanism and reproducing the mechanism is what keeps the two in step if either side
+		// of it moves.
+		resolved, path_ok := determine_path_from_string(
+			ctx.info,
+			nil,
+			call,
+			base_dir,
+			original_path,
+			false,
+			ctx.checker.allocator,
+		)
+		if !path_ok {
+			if err_on_not_found {
+				pn, bn := load_directive_proc_and_name(call)
+				error_node(pn, "Failed to `#%s` file: %s; invalid file or cannot be found", bn, original_path)
+			}
+			call.state_flags += {.Directive_Was_False}
+			return nil, false
+		}
+		path = resolved
 	}
 
 	// Lock the cache mutex
@@ -4504,15 +4664,60 @@ cache_load_file_directive :: proc(
 				cache.data = data
 				cache.file_error = .None
 			} else {
-				cache.exists = false
-				// C++ Reference: src/gb/gb.h:5159-5162. On POSIX, gb__posix_file_open returns
-				// gbFileError_Invalid for EVERY open failure -- the errno is discarded
-				// ("TODO(bill): More file errors"). Only the Windows branch distinguishes
-				// NotExists/Permission. The port's os.exists heuristic was a refinement the
-				// reference compiler does not have on this platform, and it made every
-				// missing-file message read "file cannot be found" where C++ says
-				// "invalid file or cannot be found".
-				cache.file_error = .Invalid
+				// LEDGER #1246. C++ does not use a read-the-whole-file helper here; it does
+				// gb_file_open / gb_file_size / gb_file_read_at by hand
+				// (src/check_builtin.cpp:2097-2116) and **discards gb_file_read_at's result**:
+				//
+				//     file_error = gb_file_open(&f, c_str);
+				//     if (file_error == gbFileError_None) {
+				//         exists = true;
+				//         isize file_size = cast(isize)gb_file_size(&f);
+				//         if (file_size > 0) {
+				//             u8 *ptr = permanent_alloc_array<u8>(file_size+1);
+				//             gb_file_read_at(&f, ptr, file_size, 0);   // <-- return ignored
+				//             ...
+				//
+				// Only the OPEN decides success. On POSIX `open(O_RDONLY)` succeeds for a
+				// DIRECTORY, so `#load(".")` is ACCEPTED by the reference -- st_size bytes of
+				// whatever the allocator handed back, since the read fails with EISDIR and
+				// nobody looks. os.read_entire_file fails on a directory, so the port rejected
+				// it: an accept/reject FLIP and an OVER-REJECT (cell c_load_dot).
+				//
+				// So: retry through open, and let the open alone decide.
+				//
+				// SCOPE NOTE: the reference's VALUE for this case is uninitialised heap of
+				// length st_size, and st_size for a directory is filesystem-dependent. Exact
+				// parity on the bytes is not a well-posed goal -- the same call is not even
+				// stable across two runs of the reference. What is well-posed, and what this
+				// matches, is the accept/reject verdict and the absence of a diagnostic. Any
+				// program that observes the contents is observing indeterminate data upstream.
+				fd, open_err := os.open(path)
+				if open_err == nil {
+					defer os.close(fd)
+					n := 0
+					if size, size_err := os.file_size(fd); size_err == nil && size > 0 {
+						n = int(size)
+					}
+					// Retained for the checker's lifetime, so not the temp allocator.
+					buf := make([]u8, n, context.allocator)
+					if n > 0 {
+						// The result is deliberately unused, exactly as upstream.
+						_, _ = os.read_at(fd, buf, 0)
+					}
+					cache.exists = true
+					cache.data = buf
+					cache.file_error = .None
+				} else {
+					cache.exists = false
+					// C++ Reference: src/gb/gb.h:5159-5162. On POSIX, gb__posix_file_open returns
+					// gbFileError_Invalid for EVERY open failure -- the errno is discarded
+					// ("TODO(bill): More file errors"). Only the Windows branch distinguishes
+					// NotExists/Permission. The port's os.exists heuristic was a refinement the
+					// reference compiler does not have on this platform, and it made every
+					// missing-file message read "file cannot be found" where C++ says
+					// "invalid file or cannot be found".
+					cache.file_error = .Invalid
+				}
 			}
 		}
 	}

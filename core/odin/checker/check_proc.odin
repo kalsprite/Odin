@@ -1328,8 +1328,50 @@ ast_file_vet_deprecated :: proc(file: ^ast.File) -> bool {
 // because nested procedures (lambdas) can reference entities that the parent
 // procedure must also depend on for proper dependency analysis.
 //
-// The function skips propagation if the parent scope is a File, Package, or Global
-// scope, as those are not procedure scopes.
+// IT DOES NOT SKIP FILE/PKG/GLOBAL PARENTS, DESPITE WHAT THE REFERENCE'S OWN COMMENT SAYS.
+// LEDGER #1210. src/check_decl.cpp:2222-2225 reads:
+//
+//     if (decl && decl->parent) {
+//         Scope *ps = decl->parent->scope;
+//         if (ps->flags & (ScopeFlag_File & ScopeFlag_Pkg & ScopeFlag_Global)) {
+//             return;
+//
+// The three flags are joined with `&`, not `|`. They are distinct single bits --
+// ScopeFlag_Pkg = 1<<1, ScopeFlag_Global = 1<<3, ScopeFlag_File = 1<<4 (src/checker.hpp:531-534)
+// -- so `16 & 2 & 8` is 0, `ps->flags & 0` is 0, and the early return is UNREACHABLE. The
+// reference propagates unconditionally, for every parent scope kind.
+//
+// The port used to spell the guard `||`, which is what the reference's comment describes and
+// what a reader would assume the code does. That made it fire for exactly the case the guard
+// was written to think about: a proc literal nested inside a TOP-LEVEL procedure, whose parent
+// decl was created at collect time with the FILE scope. So every such literal's dependencies
+// were dropped instead of propagated -- silently, because a dependency that is never recorded
+// emits no diagnostic.
+//
+// Ported as the reference BEHAVES, not as it reads: this is the "a reference quirk is the
+// contract" rule, and the quirk here is not a crash. Filed upstream separately, because the
+// reference's intent and its code disagree and only they can say which one they meant.
+//
+// MEASURED INERT IN THE PORT TODAY, AND THE REASON MATTERS. Instrumenting this function to
+// print `decl.parent.scope.flags` on every call, over $S/phase2/wit_nestdep250c, produced
+// {Proc} or {Proc, Context_Defined} on ALL ~300 calls and File/Pkg/Global on none. So the old
+// `||` guard never fired and removing it moved nothing: the mindep dumps before and after are
+// BYTE-IDENTICAL (in_set=205 both), with unref_global/unref_proc at in=0 confirming the
+// instrument discriminates reachability rather than marking everything live.
+//
+// It is unreachable because of a SECOND divergence, not because the case cannot arise.
+// `decl.parent` is non-nil only for a decl minted while ctx.decl was non-nil, and the port
+// leaves ctx.decl NIL at file scope -- C++ puts the package's Decl_Info there
+// (checker.cpp:1702, fed by checker.cpp:7693), the port has no writer for
+// info.package_decl_infos at all. So the port's file-scope decls have parent == nil and leave
+// at the check above, while C++'s have the package decl as parent, whose scope carries
+// ScopeFlag_Pkg.
+//
+// THAT IS WHY THIS EDIT HAD TO COME FIRST. If the package Decl_Info is ever wired up, every
+// top-level decl acquires a Pkg-scoped parent, the `||` guard would start firing, and the port
+// would begin diverging from a reference that propagates unconditionally. Removing it now makes
+// that future change safe instead of silently wrong. See the disposition note on
+// info.package_decl_infos for why the parent itself is a write-only sink.
 add_deps_from_child_to_parent :: proc(decl: ^Decl_Info) {
 	// Early validation
 	// C++ Reference: check_decl.cpp:1973
@@ -1337,13 +1379,8 @@ add_deps_from_child_to_parent :: proc(decl: ^Decl_Info) {
 		return
 	}
 
-	parent_scope := decl.parent.scope
-
-	// Skip if parent is file/pkg/global scope
-	// C++ Reference: check_decl.cpp:1975-1976
-	if parent_scope != nil && (.File in parent_scope.flags || .Pkg in parent_scope.flags || .Global in parent_scope.flags) {
-		return
-	}
+	// No scope test here -- see the header comment. src/check_decl.cpp:2223's guard is dead code,
+	// so the reference falls straight through to the two copy loops below for every parent.
 
 	// Copy entity dependencies
 	// C++ Reference: check_decl.cpp:1980-1988
@@ -2300,8 +2337,28 @@ type_target_max_align :: proc() -> int {
 }
 
 type_align_of :: proc(t: ^Type) -> int {
+	// C++ Reference: src/types.cpp:4339 type_align_of -- the public entry point creates the
+	// TypePath, calls the internal, and frees it. See the Type_Path block in types.odin for
+	// why this level of guard exists at all when Checker_Type_Path already does; in short,
+	// polymorphic instantiation reaches the size/alignment walk without ever tripping the
+	// declaration-cycle detector, and before #1260 that was a SIGSEGV rather than a
+	// diagnostic.
+	path: Type_Path
+	defer delete(path.path)
+	return type_align_of_internal(t, &path)
+}
+
+// C++ Reference: src/types.cpp:4370 type_align_of_internal.
+type_align_of_internal :: proc(t: ^Type, path: ^Type_Path) -> int {
 	if t == nil {
 		return 1
+	}
+	// C++ Reference: src/types.cpp:4371-4374 -- `if (t->failure) return FAILURE_ALIGNMENT;`.
+	// Unlike the nil case above this returns 0, not 1: a type already known to be part of an
+	// illegal cycle has no alignment, and every caller checks path.failure before using the
+	// value rather than dividing by it.
+	if .Failure in t.flags {
+		return FAILURE_ALIGNMENT
 	}
 
 	bt := base_type(t)
@@ -2384,11 +2441,31 @@ type_align_of :: proc(t: ^Type) -> int {
 
 	case .Array:
 		arr := bt.variant.(Type_Array)
-		return type_align_of(arr.elem)
+		// C++ Reference: src/types.cpp:4402-4411 -- the element is PUSHED before its alignment
+		// is asked for, so `A :: struct { x: [1]B }` with B leading back to A closes the cycle
+		// here rather than recursing.
+		pushed := type_path_push(path, arr.elem)
+		if path.failure {
+			return FAILURE_ALIGNMENT
+		}
+		align := type_align_of_internal(arr.elem, path)
+		if pushed {
+			type_path_pop(path)
+		}
+		return align
 
 	case .Enumerated_Array:
 		earr := bt.variant.(Type_Enumerated_Array)
-		return type_align_of(earr.elem)
+		// C++ Reference: src/types.cpp:4413-4422 -- same shape as the plain array above.
+		pushed := type_path_push(path, earr.elem)
+		if path.failure {
+			return FAILURE_ALIGNMENT
+		}
+		align := type_align_of_internal(earr.elem, path)
+		if pushed {
+			type_path_pop(path)
+		}
+		return align
 
 	// C++ Reference: types.cpp type_align_of_internal -- Slice and DynamicArray return
 	// build_context.int_size, Map returns build_context.ptr_size. They are NOT all "pointer
@@ -2411,7 +2488,7 @@ type_align_of :: proc(t: ^Type) -> int {
 	// and the exact sibling of #113 (type_align_of ignored struct alignment directives).
 	case .Bit_Field:
 		bf := bt.variant.(Type_Bit_Field)
-		return type_align_of(bf.backing_type)
+		return type_align_of_internal(bf.backing_type, path)
 
 	case .Struct:
 		struc := bt.variant.(Type_Struct)
@@ -2429,7 +2506,18 @@ type_align_of :: proc(t: ^Type) -> int {
 		max_align := 1
 		for field in struc.fields {
 			// entity_type, not `.type`: the base field is not always populated.
-			field_align := type_align_of(entity_type(field))
+			// C++ Reference: src/types.cpp:4498-4508 -- each field type is pushed for the
+			// duration of its own alignment query and popped after. Sequential fields of the
+			// same named type are therefore NOT a cycle; only nesting is.
+			field_type := entity_type(field)
+			pushed := type_path_push(path, field_type)
+			if path.failure {
+				return FAILURE_ALIGNMENT
+			}
+			field_align := type_align_of_internal(field_type, path)
+			if pushed {
+				type_path_pop(path)
+			}
 			if field_align > max_align {
 				max_align = field_align
 			}
@@ -2478,7 +2566,16 @@ type_align_of :: proc(t: ^Type) -> int {
 		// Union alignment is the max alignment of its variants
 		max_align := 1
 		for variant in un.variants {
-			variant_align := type_align_of(variant)
+			// C++ Reference: src/types.cpp:4471-4481 -- same push/pop discipline as the struct
+			// field walk above.
+			pushed := type_path_push(path, variant)
+			if path.failure {
+				return FAILURE_ALIGNMENT
+			}
+			variant_align := type_align_of_internal(variant, path)
+			if pushed {
+				type_path_pop(path)
+			}
 			if variant_align > max_align {
 				max_align = variant_align
 			}
@@ -2487,7 +2584,7 @@ type_align_of :: proc(t: ^Type) -> int {
 
 	case .Enum:
 		enum_type := bt.variant.(Type_Enum)
-		return type_align_of(enum_type.base_type)
+		return type_align_of_internal(enum_type.base_type, path)
 
 	case .Bit_Set:
 		// C++ Reference: types.cpp type_align_of_internal. The `underlying` branch was ported; the BIT-COUNT
@@ -2501,7 +2598,7 @@ type_align_of :: proc(t: ^Type) -> int {
 		// constant that happens to be right for the common 64-bit case.
 		bs := bt.variant.(Type_Bit_Set)
 		if bs.underlying != nil {
-			return type_align_of(bs.underlying)
+			return type_align_of_internal(bs.underlying, path)
 		}
 		bits := bs.upper - bs.lower + 1
 		switch {
@@ -2521,7 +2618,7 @@ type_align_of :: proc(t: ^Type) -> int {
 	case .Simd_Vector:
 		sv := bt.variant.(Type_Simd_Vector)
 		// SIMD vectors have alignment equal to their total size
-		elem_size := type_size_of(sv.elem)
+		elem_size := type_size_of_internal(sv.elem, path)
 		total_size := int(sv.count) * elem_size
 		// Round up to power of 2
 		// #1115 (B2-h h6). C++ Reference: types.cpp type_align_of_internal, case Type_SimdVector:
@@ -2547,7 +2644,16 @@ type_align_of :: proc(t: ^Type) -> int {
 		// underneath it. Worth noting as a general hazard of layout defects: they compose, and
 		// fixing one can be what makes the next one measurable.
 		fcda := bt.variant.(Type_Fixed_Capacity_Dynamic_Array)
-		return max(int(build_context.int_size), type_align_of(fcda.elem))
+		// C++ Reference: src/types.cpp:4429-4438 -- the element is pushed here too.
+		pushed := type_path_push(path, fcda.elem)
+		if path.failure {
+			return FAILURE_ALIGNMENT
+		}
+		elem_align := type_align_of_internal(fcda.elem, path)
+		if pushed {
+			type_path_pop(path)
+		}
+		return max(int(build_context.int_size), elem_align)
 
 	case .Matrix:
 		mat := bt.variant.(Type_Matrix)

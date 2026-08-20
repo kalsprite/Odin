@@ -13,6 +13,7 @@ C++ Reference: checker.cpp:5130-5926
 import "base:runtime"
 import "core:mem"
 import "core:odin/ast"
+import "core:odin/parser"
 import "core:odin/tokenizer"
 import "core:slice"
 import "core:strings"
@@ -234,7 +235,38 @@ check_add_import_decl :: proc(ctx: ^Checker_Context, import_decl: ^ast.Import_De
 		}
 
 		collection_name, file_str := split_import_collection(import_path)
-		if collection_name != "" && collection_name != "system" {
+		if collection_name != "" {
+			// C++ Reference: src/parser.cpp:6613-6625 --
+			//
+			//	if (collection_name == "system") {
+			//		if (node->kind != Ast_ForeignImportDecl) {
+			//			do_error(node, "The library collection 'system' is restrict for 'foreign import'");
+			//			return false;
+			//		} else {
+			//			*path = file_str;
+			//			return true;
+			//		}
+			//	} else if (!find_library_collection_path(collection_name, &base_dir)) {
+			//		do_error(node, "Unknown library collection: '%.*s'", LIT(collection_name));
+			//		return false;
+			//	}
+			//
+			// LEDGER #1257. The port merely SKIPPED the `system` collection here -- the
+			// condition read `collection_name != "" && collection_name != "system"` -- so
+			// `import "system:foo"` fell through to package resolution and came out as the
+			// port's own "Error: Unable to find package: system:foo". This site is
+			// check_add_import_decl, i.e. an ordinary `import`, never a `foreign import`
+			// (which is check_add_foreign_import_decl), so the ForeignImportDecl arm above is
+			// unconditionally the OTHER branch here. "restrict" is the reference's wording,
+			// reproduced verbatim; it is in the upstream typo aggregate.
+			if collection_name == "system" {
+				syntax_error_va(
+					ast_token_pos(import_decl),
+					node_end_pos(import_decl),
+					"The library collection 'system' is restrict for 'foreign import'",
+				)
+				return
+			}
 			if _, found := find_library_collection_path(collection_name); !found {
 				syntax_error_va(
 					ast_token_pos(import_decl),
@@ -862,6 +894,238 @@ check_export_entities_in_pkg :: proc(c: ^Checker, pkg: ^ast.Package) {
 }
 
 // Helper functions
+
+// determine_path_from_string is the reference's single entry point for turning the string inside an
+// `import`, a `foreign import`, a `#load` or a `#load_directory` into a path, and for reporting
+// every way that string can be wrong.
+//
+// C++ Reference: src/parser.cpp:6514-6660, ported in full.
+//
+// WHY IT IS BEING ADDED NOW (#1269). The port never had it. Four separate sites each grew their own
+// partial re-implementation -- check_import_export.odin (import decls), package_resolver.odin
+// (collection resolution), check_builtin.odin (#load) and an inline block in check_decl.odin
+// (foreign import) -- and they disagree with the reference in different places and with each other.
+// The foreign-import one was the worst: it carried three INVENTED messages ("Foreign library path
+// cannot be empty", "Failed to resolve foreign library path '%s'", "Unknown library collection:
+// '%s'" at the wrong node) and was missing five diagnostics entirely. Measured on the oracle, seven
+// of twelve probe inputs diverged (probe_fimp269):
+//     ""              port "Foreign library path cannot be empty" @ the path expr
+//                     oracle "Invalid import path: ''"            @ the whole decl
+//     ":foo"          oracle "Expected a collection name"                       port SILENT
+//     "/tmp/lib.a"    oracle "Invalid import path: '/tmp/lib.a'"                port SILENT
+//     "a*b.a"         oracle "Invalid import path: 'a*b.a'"                     port SILENT
+//     "builtin"       oracle "The package 'builtin' must be imported with ..."  port SILENT
+//     "core:runtime"  oracle deprecation WARNING                                port SILENT
+//     "bogus:foo"     right message, wrong anchor (the path expr, not the decl)
+//
+// THIS COMMIT WIRES ONE CALLER: the foreign-import drain in check_decl.odin. The import-decl path
+// in this same file already reproduces the same sequence inline and already matches the oracle on
+// every corpus cell, so folding it in is a second, separately-swept change rather than a freebie --
+// it reports through syntax_error_va with an explicit span, and proving that error_node's span is
+// identical for every node kind it can see is the work, not the edit.
+//
+// ANCHORING. Every diagnostic here is `do_error(node, ...)` -- the whole DECLARATION, not the
+// offending path expression. That is visible in the oracle's caret (`^~~~...~^` from column 1) and
+// is the single biggest behavioural difference from the block this replaces. The one exception is
+// the deprecation WARNING, which C++ raises through `do_warning(ast_token(node), ...)`, a bare token
+// with no end -- so its caret is a lone `^`. Both shapes are reproduced.
+//
+// `file_mutex` is kept in the signature, and kept nil-able, because the reference tests it twice for
+// two different reasons: `file_mutex == nullptr` means "the semantics stage" and enables the Windows
+// drive-letter handling, and a non-nil one guards the mutation of the node at the end. Dropping it
+// would have meant inventing a different way to say the same two things.
+determine_path_from_string :: proc(
+	info:             ^Checker_Info,
+	file_mutex:       ^sync.Mutex,
+	node:             ^ast.Node,
+	base_dir:         string,
+	original_string:  string,
+	use_check_errors: bool = false,
+	allocator := context.allocator,
+) -> (path: string, ok: bool) {
+	base_dir := base_dir
+	collection_name := ""
+
+	// C++ takes the two diagnostic functions as pointers and swaps them once at the top:
+	//     do_error = &syntax_error; do_warning = &syntax_warning;
+	//     if (use_check_errors) { do_error = &error; do_warning = &warning; }
+	// Odin has no comparable overload set to point at, so the branch moves to the call.
+	do_error :: proc(use_check_errors: bool, node: ^ast.Node, format: string, args: ..any) {
+		if use_check_errors {
+			error_node(node, format, ..args)
+		} else {
+			syntax_error_node(node, format, ..args)
+		}
+	}
+	do_warning :: proc(use_check_errors: bool, token: tokenizer.Token, format: string, args: ..any) {
+		if use_check_errors {
+			warning_token(token, format, ..args)
+		} else {
+			syntax_warning_token(token, format, ..args)
+		}
+	}
+
+	_, is_import_decl := node.derived.(^ast.Import_Decl)
+	foreign_decl, is_foreign_import_decl := node.derived.(^ast.Foreign_Import_Decl)
+	is_import_decl_path := is_import_decl || is_foreign_import_decl
+
+	// C++ scans for the FIRST colon by hand rather than using a helper, and the distinction between
+	// "no colon" (-1) and "colon at 0" (an empty collection name) is load-bearing below.
+	colon_pos := -1
+	for j in 0 ..< len(original_string) {
+		if original_string[j] == ':' {
+			colon_pos = j
+			break
+		}
+	}
+
+	has_windows_drive := false
+	when ODIN_OS == .Windows {
+		// C++ Reference: src/parser.cpp:6540-6558, inside `#if defined(GB_SYSTEM_WINDOWS)` and
+		// guarded on `file_mutex == nullptr` -- i.e. only when called from the semantics stage.
+		//
+		// NOT REPRODUCED: the second half of that block walks `original_string` and rewrites every
+		// '\\' to '/' IN PLACE, mutating the token's own backing store. Odin strings are immutable
+		// and the token text is shared, so the port cannot do it and should not want to -- it is a
+		// write through a `String const &`. It is recorded here rather than silently dropped
+		// because it means a Windows path spelled with backslashes reaches the checks below
+		// unrewritten in the port; if that ever needs to matter, the fix is to normalise a COPY,
+		// which changes what is stored on the node and so needs its own witness.
+		if file_mutex == nil {
+			if !is_import_decl_path &&
+			   colon_pos == 1 &&
+			   len(original_string) > 2 &&
+			   ((original_string[0] >= 'a' && original_string[0] <= 'z') ||
+			    (original_string[0] >= 'A' && original_string[0] <= 'Z')) &&
+			   (original_string[2] == '/' || original_string[2] == '\\') {
+				colon_pos = -1
+				has_windows_drive = true
+			}
+		}
+	}
+
+	file_str := ""
+	if colon_pos == 0 {
+		do_error(use_check_errors, node, "Expected a collection name")
+		return "", false
+	}
+
+	if len(original_string) > 0 && colon_pos > 0 {
+		collection_name = original_string[:colon_pos]
+		file_str = original_string[colon_pos + 1:]
+	} else {
+		file_str = original_string
+	}
+
+	if is_import_decl_path && parser.is_import_path_absolute(file_str) {
+		do_error(use_check_errors, node, "Invalid import path: '%s'", file_str)
+		return "", false
+	}
+
+	if has_windows_drive {
+		// C++ substring(file_str, 3, file_str.len) -- skip "X:/" -- reached only when the drive
+		// letter was detected, which guarantees the length.
+		sub_file_path := file_str[3:]
+		if !parser.is_import_path_valid(sub_file_path) {
+			do_error(use_check_errors, node, "Invalid import path: '%s'", file_str)
+			return "", false
+		}
+	} else if !parser.is_import_path_valid(file_str) {
+		// An EMPTY path lands here: is_import_path_valid returns false for len 0 (C++ falls out of
+		// its `len > 0` block to `return false`). That is why `foreign import lib { "" }` reports
+		// "Invalid import path: ''" and not an emptiness message of its own -- there is no such
+		// message anywhere in src/.
+		do_error(use_check_errors, node, "Invalid import path: '%s'", file_str)
+		return "", false
+	}
+
+	if len(collection_name) > 0 {
+		// NOTE(bill): `base:runtime` == `core:runtime`
+		if collection_name == "core" {
+			replace_with_base := false
+			if strings.has_prefix(file_str, "runtime") {
+				replace_with_base = true
+			} else if strings.has_prefix(file_str, "intrinsics") {
+				replace_with_base = true
+			}
+			// C++ Reference: src/parser.cpp:6596 is written `} if (string_starts_with(file_str,
+			// str_lit("builtin")))` -- a bare `if` closing the previous `else if` chain, not an
+			// `else if`. It is a slip, and it is inert (all three arms set the same flag), so it is
+			// reproduced as written rather than tidied: parity is the contract, and a future
+			// upstream change to any arm's body would make the difference observable.
+			if strings.has_prefix(file_str, "builtin") {
+				replace_with_base = true
+			}
+
+			if replace_with_base {
+				collection_name = "base"
+			}
+			if replace_with_base {
+				// The message says "core:" literally even though collection_name has just been
+				// rewritten to "base" -- it is quoting what the user wrote.
+				if ast_file_vet_deprecated(get_file_from_node(info, node)) {
+					do_error(use_check_errors, node,
+						"import \"core:%s\" has been deprecated in favour of \"base:%s\"",
+						file_str, file_str)
+				} else {
+					do_warning(use_check_errors, ast_token(node),
+						"import \"core:%s\" has been deprecated in favour of \"base:%s\"",
+						file_str, file_str)
+				}
+			}
+		}
+
+		if collection_name == "system" {
+			if !is_foreign_import_decl {
+				// "restrict" is the reference's wording, reproduced verbatim; it is in the upstream
+				// typo aggregate.
+				do_error(use_check_errors, node, "The library collection 'system' is restrict for 'foreign import'")
+				return "", false
+			}
+			// A system library is NAMED, not located: what follows the colon goes to the linker
+			// as-is ("system:c" -> -lc), so there is nothing on disk to resolve and base_dir is
+			// never consulted.
+			return file_str, true
+		} else {
+			collection_path, found := find_library_collection_path(collection_name)
+			if !found {
+				// NOTE(bill): It's a naughty name
+				do_error(use_check_errors, node, "Unknown library collection: '%s'", collection_name)
+				return "", false
+			}
+			base_dir = collection_path
+		}
+	}
+
+	if is_package_name_reserved(file_str) {
+		// C++ writes `*path = file_str` BEFORE branching, so the path is set on the failing arm
+		// too. The caller ignores it when ok is false; it is returned anyway so the two agree.
+		if collection_name == "core" || collection_name == "base" {
+			return file_str, true
+		}
+		do_error(use_check_errors, node,
+			"The package '%s' must be imported with the 'base' library collection: 'base:%s'",
+			file_str, file_str)
+		return file_str, false
+	}
+
+	if file_mutex != nil {
+		sync.lock(file_mutex)
+	}
+	defer if file_mutex != nil {
+		sync.unlock(file_mutex)
+	}
+
+	if is_foreign_import_decl {
+		foreign_decl.collection_name = collection_name
+	}
+
+	if has_windows_drive {
+		return file_str, true
+	}
+	fullpath, _ := get_fullpath_relative(base_dir, file_str, allocator)
+	return strings.trim_space(fullpath), true
+}
 
 // is_package_name_reserved checks if a package name is a reserved system package
 is_package_name_reserved :: proc(name: string) -> bool {

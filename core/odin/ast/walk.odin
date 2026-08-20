@@ -172,6 +172,37 @@ walk :: proc(v: ^Visitor, node: ^Node) {
 		walk(v, n.constraints_string)
 		walk(v, n.asm_string)
 
+	case ^Asm_Group:
+		walk_expr_list(v, n.args)
+	case ^Asm_Template:
+		walk(v, n.signature)
+		walk_expr_list(v, n.specs)
+		walk_expr_list(v, n.clobbers)
+		walk_expr_list(v, n.instructions)
+	case ^Asm_Register:
+		// tokens only
+	case ^Asm_Spec:
+		walk(v, n.name)
+		walk(v, n.tied_name)
+		walk(v, n.type)
+		walk(v, n.value)
+	case ^Asm_Clobber:
+		walk(v, n.value)
+	case ^Asm_Label_Decl:
+		walk(v, n.name)
+	case ^Asm_Instruction:
+		walk(v, n.name)
+		walk_expr_list(v, n.operands)
+	case ^Asm_Memory_Operand:
+		walk(v, n.segment_override)
+		walk(v, n.base)
+		walk(v, n.index)
+		walk(v, n.scale)
+		walk(v, n.disp)
+		walk(v, n.type)
+	case ^Asm_Directive:
+		walk_expr_list(v, n.operands)
+
 
 	case ^Bad_Stmt:
 	case ^Empty_Stmt:

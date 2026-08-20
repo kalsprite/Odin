@@ -285,6 +285,20 @@ alloc_entity_proc_group :: proc(scope: ^Scope, token: tokenizer.Token, type: ^Ty
 	return entity
 }
 
+// alloc_entity_asm_template creates an asm template entity
+// C++ Reference: src/entity.cpp:561-566 alloc_entity_asm_template. C++ asserts the node is
+// an Ast_AsmTemplate; the port asserts the same, because the node is read back as one by
+// every consumer.
+alloc_entity_asm_template :: proc(scope: ^Scope, token: tokenizer.Token, type: ^Type, node: ^ast.Node, allocator := context.allocator) -> ^Entity {
+	_, is_asm_template := node.derived.(^ast.Asm_Template)
+	assert(is_asm_template, "alloc_entity_asm_template requires an ^ast.Asm_Template node")
+	entity := alloc_entity(.Asm_Template, scope, token, type, allocator)
+	entity.variant = Entity_Asm_Template{
+		node = node,
+	}
+	return entity
+}
+
 // alloc_entity_import_name creates an import name entity
 alloc_entity_import_name :: proc(scope: ^Scope, token: tokenizer.Token, type: ^Type, path: string, name: string, import_scope: ^Scope, allocator := context.allocator) -> ^Entity {
 	entity := alloc_entity(.Import_Name, scope, token, type, allocator)
@@ -378,8 +392,17 @@ entity_type :: proc(e: ^Entity) -> ^Type {
 		return nil
 	}
 
+	// `Entity_Asm_Template` added by #1242. Unlike the kinds deliberately left out of the gate
+	// above, an asm template DOES carry a type -- check_asm.odin:2076 assigns the proc type built
+	// by alloc_type_proc, mirroring src/check_asm.cpp:1674. Omitting it made entity_type() return
+	// nil for a fully resolved template, so check_asm_group_decl's overload loop took its
+	// `entity_type(q) == nil` continue on every pair and NEITHER collision diagnostic could ever
+	// fire -- the port accepted two identical asm templates in one group silently.
+	//
+	// Entity_Nil is still absent here even though get_entity_type (check_expr.odin:346) includes
+	// it; that is the unrelated widening the note above defers, and is not touched by this change.
 	#partial switch _ in e.variant {
-	case Entity_Constant, Entity_Variable, Entity_Type_Name, Entity_Procedure:
+	case Entity_Constant, Entity_Variable, Entity_Type_Name, Entity_Procedure, Entity_Asm_Template:
 		return e.type
 	}
 

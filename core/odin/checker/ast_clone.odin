@@ -414,6 +414,101 @@ clone_ast_node :: proc(node: ^ast.Node, file: ^ast.File = nil) -> ^ast.Node {
 		n.constraints_string = cast(^ast.Expr)clone_ast_node(n.constraints_string, file)
 		return n
 
+	// C++ Reference: src/parser.cpp clone_ast -- AsmGroup.args is the only asm node the
+	// reference clones explicitly (src/parser.cpp:240-241); the rest are covered by the
+	// generic child walk. This port clones every child field by hand, so each is listed.
+	case ^ast.Asm_Group:
+		n := new(ast.Asm_Group)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		n.args = clone_ast_array_helper(n.args)
+		return n
+
+	case ^ast.Asm_Template:
+		n := new(ast.Asm_Template)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		n.signature    = cast(^ast.Expr)clone_ast_node(n.signature, file)
+		n.specs        = clone_ast_array_helper(n.specs)
+		n.clobbers     = clone_ast_array_helper(n.clobbers)
+		n.instructions = clone_ast_array_helper(n.instructions)
+		return n
+
+	case ^ast.Asm_Register:
+		n := new(ast.Asm_Register)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		return n
+
+	case ^ast.Asm_Spec:
+		n := new(ast.Asm_Spec)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		n.name      = cast(^ast.Expr)clone_ast_node(n.name, file)
+		n.tied_name = cast(^ast.Expr)clone_ast_node(n.tied_name, file)
+		n.type      = cast(^ast.Expr)clone_ast_node(n.type, file)
+		n.value     = cast(^ast.Expr)clone_ast_node(n.value, file)
+		return n
+
+	case ^ast.Asm_Clobber:
+		n := new(ast.Asm_Clobber)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		n.value = cast(^ast.Expr)clone_ast_node(n.value, file)
+		return n
+
+	case ^ast.Asm_Label_Decl:
+		n := new(ast.Asm_Label_Decl)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		n.name = cast(^ast.Expr)clone_ast_node(n.name, file)
+		return n
+
+	case ^ast.Asm_Instruction:
+		n := new(ast.Asm_Instruction)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		n.name     = cast(^ast.Expr)clone_ast_node(n.name, file)
+		n.operands = clone_ast_array_helper(n.operands)
+		return n
+
+	case ^ast.Asm_Memory_Operand:
+		n := new(ast.Asm_Memory_Operand)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		n.segment_override = cast(^ast.Expr)clone_ast_node(n.segment_override, file)
+		n.base             = cast(^ast.Expr)clone_ast_node(n.base, file)
+		n.index            = cast(^ast.Expr)clone_ast_node(n.index, file)
+		n.scale            = cast(^ast.Expr)clone_ast_node(n.scale, file)
+		n.disp             = cast(^ast.Expr)clone_ast_node(n.disp, file)
+		n.type             = cast(^ast.Expr)clone_ast_node(n.type, file)
+		return n
+
+	case ^ast.Asm_Directive:
+		n := new(ast.Asm_Directive)
+		n^ = variant^
+		n.node.expr_base.tav = {}
+		n.node.expr_base.derived = n
+		n.node.derived_expr = n
+		n.operands = clone_ast_array_helper(n.operands)
+		return n
+
 	case ^ast.Bad_Stmt:
 		n := new(ast.Bad_Stmt)
 		n^ = variant^

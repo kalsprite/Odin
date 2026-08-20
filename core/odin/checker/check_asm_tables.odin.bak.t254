@@ -1,0 +1,313 @@
+package checker
+
+import "core:reflect"
+import "core:sync"
+import x86 "core:rexcode/isa/x86"
+
+// C++ Reference: src/asm_tables.cpp + src/asm_tables_amd64.cpp.
+//
+// src/asm_tables_amd64.cpp is a GENERATED file, 2119 lines, whose header says so:
+//
+//     // GENERATED FILE - DO NOT EDIT
+//     // Produces a C++ equivalent of the encoding table from core:rexcode written in Odin
+//
+// Its source of truth is core/rexcode/isa/x86, which is already Odin in this repository. C++
+// needs a generated copy only because C++ cannot import an Odin package. The port can, so this
+// file DERIVES the same tables from `core:rexcode/isa/x86` instead of carrying a second copy.
+// That is not a shortcut: a hand-copied 2000-line table is a table that will silently drift.
+//
+// VERIFIED, not assumed: the 211 dense register entries produced below were diffed against
+// `Asm_amd64::register_strings` and `Asm_amd64::register_codes` in the generated C++.
+// All 211 NAMES match exactly, in order. 209 of 211 CODES match; the two that do not are
+// DR6 and DR7, and the generated C++ is the correct one -- see the note on Debug registers
+// below and COMPILER_ISSUES/UPSTREAM-UNFILED-rexcode-x86-DREG-enum-numbers-DR6-DR7-as-4-and-5.md
+
+// The dense register table, index 0 being the invalid/empty entry, exactly as the reference's
+// `enum Register : u16 { REG_INVALID, ... REG_COUNT }` is laid out.
+ASM_REG_COUNT :: 211
+
+asm_register_names: [ASM_REG_COUNT]string
+asm_register_codes: [ASM_REG_COUNT]x86.Register
+
+// Names are lowercased into this fixed buffer rather than allocated. init_asm_tables can be
+// reached from any thread under any context.allocator (the reference calls it once from main,
+// which the port has no equivalent of), and a table that outlives every allocator in the
+// process must not depend on which one happened to be installed at first use.
+@(private="file") asm_register_name_buf:  [2048]u8
+@(private="file") asm_register_name_used: int
+@(private="file") asm_tables_once:        sync.Once
+
+// C++ Reference: src/asm_tables.cpp:66-68 -- `void init_asm_tables() { g_asm_amd64.init(); }`,
+// called once from src/main.cpp:4324. The port is a library with no main, so the table is
+// built on first use behind a sync.Once instead. It is read-only afterwards, which is what
+// makes it safe to share across the checker's worker threads.
+init_asm_tables :: proc() {
+	sync.once_do(&asm_tables_once, init_asm_tables_impl)
+}
+
+@(private="file")
+asm_intern_lower :: proc(s: string) -> string {
+	start := asm_register_name_used
+	for i in 0 ..< len(s) {
+		c := s[i]
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		asm_register_name_buf[asm_register_name_used] = c
+		asm_register_name_used += 1
+	}
+	return string(asm_register_name_buf[start:asm_register_name_used])
+}
+
+@(private="file") asm_reg_next: int
+
+@(private="file")
+asm_add_reg_group :: proc($T: typeid, class: u16) {
+	values := reflect.enum_field_values(T)
+	for name, i in reflect.enum_field_names(T) {
+		asm_register_names[asm_reg_next] = asm_intern_lower(name)
+		asm_register_codes[asm_reg_next] = x86.Register(class | u16(values[i]))
+		asm_reg_next += 1
+	}
+}
+
+@(private="file")
+asm_add_reg :: proc(name: string, code: x86.Register) {
+	asm_register_names[asm_reg_next] = asm_intern_lower(name)
+	asm_register_codes[asm_reg_next] = code
+	asm_reg_next += 1
+}
+
+@(private="file")
+init_asm_tables_impl :: proc() {
+	// Slot 0 is REG_INVALID and its name is the empty string, matching
+	// `register_strings[0] == str_lit("")`.
+	asm_reg_next = 1
+
+	// The class order below IS the reference's Register enum order. It is not arbitrary: the
+	// generated table walks the classes in exactly this sequence, and the port's table has to
+	// agree index-for-index for `register_codes[r]`-style indexing to mean the same thing.
+	asm_add_reg_group(x86.GPR64, x86.REG_GPR64)
+	asm_add_reg_group(x86.GPR32, x86.REG_GPR32)
+	asm_add_reg_group(x86.GPR16, x86.REG_GPR16)
+	asm_add_reg_group(x86.GPR8,  x86.REG_GPR8)
+	asm_add_reg_group(x86.GPR8H, x86.REG_GPR8H)
+	asm_add_reg_group(x86.XMM,   x86.REG_XMM)
+	asm_add_reg_group(x86.YMM,   x86.REG_YMM)
+	asm_add_reg_group(x86.ZMM,   x86.REG_ZMM)
+	asm_add_reg_group(x86.KREG,  x86.REG_K)
+	asm_add_reg_group(x86.SREG,  x86.REG_SEG)
+	asm_add_reg_group(x86.CREG,  x86.REG_CR)
+
+	// Debug registers are NOT taken from x86.DREG. That enum is written
+	// `DREG :: enum u8 { DR0, DR1, DR2, DR3, DR6, DR7 }` with no explicit values, so DR6 and
+	// DR7 are numbered 4 and 5 -- disagreeing with the x86.DR6/x86.DR7 CONSTANTS beside it
+	// (REG_DR|6 and REG_DR|7), with the hardware, and with the generated C++ table, which
+	// carries its own explicit numbering at tablegen/cpp-compiler/cpp-gen.odin:1289.
+	// The constants are the correct source. Filed as
+	// UPSTREAM-UNFILED-rexcode-x86-DREG-enum-numbers-DR6-DR7-as-4-and-5.md; this stays correct
+	// either way, since it reads the constants rather than the enum.
+	asm_add_reg("DR0", x86.DR0)
+	asm_add_reg("DR1", x86.DR1)
+	asm_add_reg("DR2", x86.DR2)
+	asm_add_reg("DR3", x86.DR3)
+	asm_add_reg("DR6", x86.DR6)
+	asm_add_reg("DR7", x86.DR7)
+
+	asm_add_reg_group(x86.BND, x86.REG_BND)
+	asm_add_reg_group(x86.MM,  x86.REG_MM)
+	asm_add_reg_group(x86.ST,  x86.REG_ST)
+
+	asm_add_reg("RIP", x86.RIP)
+
+	assert(asm_reg_next == ASM_REG_COUNT, "asm register table size disagrees with the reference's REG_COUNT")
+
+	init_asm_name_tables()
+}
+
+// asm_register_lookup resolves a register name to its dense table index, or 0 for "not found".
+//
+// C++ Reference: src/asm_tables_amd64.cpp:474-479, `Register register_lookup(String const &)`,
+// which reads a StringMap built over the same 211 names. A linear scan over the dense table is
+// used here instead: it is called once per asm operand, and it makes the "did you mean"
+// candidate order a property of the table rather than of a hash function.
+asm_register_lookup :: proc(name: string) -> int {
+	init_asm_tables()
+	for i in 1 ..< ASM_REG_COUNT {
+		if asm_register_names[i] == name {
+			return i
+		}
+	}
+	return 0
+}
+
+// C++ Reference: src/asm_tables_amd64.cpp:242-274 -- `flag_bit_from_name`.
+//
+// Returns the EFLAGS bit position for a `%flags.<name>` accessor, or -1 if the name is not a
+// flag. `width_` receives the field width in bits: 2 for iopl (bits 12-13), 1 for every other
+// entry. The bit numbers are the architectural EFLAGS layout.
+asm_flag_bit_from_name :: proc(name: string, width_: ^i32 = nil) -> i32 {
+	Entry :: struct {
+		name: string,
+		bit:  i32,
+	}
+	@(static, rodata) table := []Entry{
+		{"c",    0},  // Carry
+		{"p",    2},  // Parity
+		{"a",    4},  // Auxiliary Carry
+		{"z",    6},  // Zero
+		{"s",    7},  // Sign
+		{"t",    8},  // Trap
+		{"i",    9},  // Interrupt Enable
+		{"d",   10},  // Direction
+		{"o",   11},  // Overflow
+		{"iopl",12},  // I/O Privilege Level (2-bit field: bits 12-13, low bit)
+		{"nt",  14},  // Nested Task
+		{"r",   16},  // Resume
+		{"vm",  17},  // Virtual-8086 Mode
+		{"ac",  18},  // Alignment Check / Access Control
+		{"vi",  19},  // Virtual Interrupt Flag
+		{"vip", 20},  // Virtual Interrupt Pending
+		{"id",  21},  // Identification
+	}
+
+	for t in table {
+		if name == t.name {
+			if width_ != nil {
+				width_^ = 2 if t.name == "iopl" else 1
+			}
+			return t.bit
+		}
+	}
+	return -1
+}
+
+// C++ Reference: src/asm_tables_amd64.cpp:96-99 -- `enum Prefix : u8`, and its
+// `prefix_strings` at :773-775, which are just the lowercased member names.
+//
+// This one enum genuinely has to be RE-DECLARED rather than derived. The generator's Prefix
+// enum lives in the TOOL -- core/rexcode/isa/x86/tablegen/cpp-compiler/cpp-gen.odin:899 -- not
+// in the `core:rexcode/isa/x86` package, so there is nothing to import. It is 13 entries and it
+// is architectural, so a copy is acceptable where a copy of the 1239-entry mnemonic table or
+// the 211-entry register table would not be.
+Asm_Prefix :: enum u8 {
+	Invalid,
+	ES,
+	CS,
+	SS,
+	DS,
+	REX,
+	EVEX,
+	FS,
+	GS,
+	VEX,
+	LOCK,
+	REPNE,
+	REP,
+}
+
+// VERIFIED, not assumed: `x86.Mnemonic`'s member names were diffed against the generated
+// `enum Mnemonic : u16 { M_... }` in src/asm_tables_amd64.cpp. All 1239 match, in order, and
+// the values are dense 0..1238 -- so `mnemonic_strings[m]` is exactly
+// `to_lower(enum_field_names(x86.Mnemonic)[m])` and no copy of the table is needed.
+ASM_MNEMONIC_COUNT :: 1239
+
+asm_mnemonic_names: [ASM_MNEMONIC_COUNT]string
+asm_prefix_names:   [len(Asm_Prefix)]string
+
+// ~9 KB of lowercased mnemonic text plus the prefixes. Sized with headroom and asserted
+// against at fill time, for the same reason the register buffer is: this table outlives every
+// allocator in the process and must not depend on which one was installed at first use.
+@(private="file") asm_name_buf:  [16384]u8
+@(private="file") asm_name_used: int
+
+// asm_mnemonic_string returns the lowercase spelling of a mnemonic, i.e. the reference's
+// `mnemonic_strings[m]`. Index 0 (.INVALID) is the empty string, as it is there.
+asm_mnemonic_string :: proc(m: x86.Mnemonic) -> string {
+	init_asm_tables()
+	i := int(m)
+	if i < 0 || i >= ASM_MNEMONIC_COUNT {
+		return ""
+	}
+	return asm_mnemonic_names[i]
+}
+
+// asm_prefix_string returns the lowercase spelling of a prefix -- `prefix_strings[p]`.
+asm_prefix_string :: proc(p: Asm_Prefix) -> string {
+	init_asm_tables()
+	return asm_prefix_names[int(p)]
+}
+
+// asm_prefix_lookup resolves a lowercase prefix name, or .Invalid.
+//
+// C++ Reference: src/asm_tables_amd64.cpp:470-473. The reference's map is built skipping index
+// 0 (src/asm_tables_amd64.cpp:455-458), so the empty string is not a key -- which is why the
+// loop below starts after .Invalid rather than relying on "" never being passed in.
+asm_prefix_lookup :: proc(name: string) -> Asm_Prefix {
+	init_asm_tables()
+	for p in Asm_Prefix {
+		if p == .Invalid {
+			continue
+		}
+		if asm_prefix_names[int(p)] == name {
+			return p
+		}
+	}
+	return .Invalid
+}
+
+// asm_mnemonic_lookup resolves a lowercase mnemonic, or .INVALID.
+//
+// C++ Reference: src/asm_tables_amd64.cpp:466-469, a StringMap over `mnemonic_strings` built
+// skipping M_INVALID. A linear scan is used instead: it needs no allocator (see the note on
+// init_asm_tables), and a mnemonic is looked up once per instruction in a hand-written asm
+// body, which is not a hot path.
+asm_mnemonic_lookup :: proc(name: string) -> x86.Mnemonic {
+	init_asm_tables()
+	for i in 1 ..< ASM_MNEMONIC_COUNT {
+		if asm_mnemonic_names[i] == name {
+			return x86.Mnemonic(i)
+		}
+	}
+	return .INVALID
+}
+
+@(private="file")
+asm_intern_lower_name :: proc(s: string) -> string {
+	start := asm_name_used
+	for i in 0 ..< len(s) {
+		c := s[i]
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		asm_name_buf[asm_name_used] = c
+		asm_name_used += 1
+	}
+	return string(asm_name_buf[start:asm_name_used])
+}
+
+@(private="file")
+init_asm_name_tables :: proc() {
+	values := reflect.enum_field_values(x86.Mnemonic)
+	names  := reflect.enum_field_names(x86.Mnemonic)
+	assert(len(names) == ASM_MNEMONIC_COUNT, "x86.Mnemonic size disagrees with the reference's MNEMONIC_COUNT")
+	for n, i in names {
+		assert(int(values[i]) == i, "x86.Mnemonic is not densely numbered; the port's table indexes by value")
+		// Slot 0 is INVALID, whose reference string is "".
+		if i == 0 {
+			asm_mnemonic_names[0] = ""
+			continue
+		}
+		asm_mnemonic_names[i] = asm_intern_lower_name(n)
+	}
+
+	asm_prefix_names[int(Asm_Prefix.Invalid)] = ""
+	for p in Asm_Prefix {
+		if p == .Invalid {
+			continue
+		}
+		pn, ok := reflect.enum_name_from_value(p)
+		assert(ok, "Asm_Prefix member has no name")
+		asm_prefix_names[int(p)] = asm_intern_lower_name(pn)
+	}
+}

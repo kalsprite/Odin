@@ -228,29 +228,48 @@ check_type_internal :: proc(ctx: ^Checker_Context, e: ^ast.Node, type: ^^Type, n
 		}
 
 	case ^ast.Call_Expr:
-		// Call expression - can be type_of() or other type-returning builtins
-		// C++ Reference: check_type.cpp handles this through check_expr_or_type
+		// C++ Reference: src/check_type.cpp:3993-4001 -- this is the ENTIRE arm:
+		//
+		//     case_ast_node(ce, CallExpr, e);
+		//         Operand o = {};
+		//         check_expr_or_type(ctx, &o, e);
+		//         if (o.mode == Addressing_Type) {
+		//             *type = o.type;
+		//             set_base_type(named_type, *type);
+		//             return true;
+		//         }
+		//     case_end;
+		//
+		// It emits NOTHING on any other mode; it falls out of the switch so that
+		// check_type_expr's own "'%s' is not a type" (check_type.cpp:4066) is the single
+		// diagnostic. The port had THREE defects here, all from the same misreading. LEDGER #1262.
+		//
+		// 1. check_expr_base INSTEAD OF check_expr_or_type. check_expr_or_type is
+		//    check_expr_base + check_not_tuple + error_operand_no_value (check_expr.cpp:12929),
+		//    and the port already has all three procedures -- this arm just did not call the
+		//    wrapper. Both tails were therefore lost:
+		//        `lbl: g()` where g returns nothing
+		//            oracle  'g()' call does not return a value and cannot be used as a value
+		//            port    'g()' used as a type
+		//        `x: h2()` where h2 returns two values
+		//            oracle  2-valued expression found where single value expected
+		//            port    'h2()' is not a type
+		// 2. TWO INVENTED DIAGNOSTICS. The .No_Value and default arms have no counterpart in the
+		//    reference. The default arm's text is identical to what check_type_expr emits at the
+		//    SAME position moments later, so the port was emitting it twice -- invisible, because
+		//    print_all_errors merges neighbouring errors at identical positions. `x: h()` with h
+		//    returning an int shows one message on both arms and raw_diags 2 against the
+		//    oracle's 1. That cell is the control for this change: it must still match.
+		// 3. THE .Type BRANCH OMITTED set_base_type(named_type, *type). Not witnessed by any cell
+		//    I could build (a `T :: type_of(v)` alias and its use both already matched), and
+		//    restored anyway because it is a plain read of the reference, not a guess.
 		o: Operand
-		check_expr_base(ctx, &o, e, nil)
-
-		#partial switch o.mode {
-		case .Invalid:
-			// Error already reported
-
-		case .Type:
+		check_expr_or_type(ctx, &o, e)
+		if o.mode == .Type {
 			assert(o.type != nil)
 			type^ = o.type
+			set_base_type(named_type, type^)
 			return true
-
-		case .No_Value:
-			err_str := expr_to_string(o.expr)
-			defer delete(err_str)
-			error_node(o.expr, "'%s' used as a type", err_str)
-
-		case:
-			err_str := expr_to_string(o.expr)
-			defer delete(err_str)
-			error_node(o.expr, "'%s' is not a type", err_str)
 		}
 
 	case:
@@ -4883,6 +4902,12 @@ check_procedure_type :: proc(ctx: ^Checker_Context, proc_type: ^Type, proc_type_
 		}
 
 	case ast.Proc_Calling_Convention_Extra:
+		// C++ Reference: src/parser.cpp:2640 -- an asm template's signature carries
+		// ProcCC_InlineAsm, which the parser assigns programmatically and which has no
+		// source spelling to route through string_to_calling_convention.
+		if v == .Inline_Asm {
+			cc = .Inline_Asm
+		}
 		// Foreign block default - use foreign context's default
 		if v == .Foreign_Block_Default {
 			// C++ Reference: check_type.cpp check_procedure_type (`if (c->foreign_context.default_cc > 0)`,

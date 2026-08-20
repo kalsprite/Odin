@@ -529,18 +529,22 @@ worker_thread_proc :: proc(t: ^thread.Thread) {
 		// is guaranteed to overwrite it rather than be overwritten by it.
 		sync.atomic_store_explicit(&pool.tasks_available, sync.Futex(SOMEONE_WAITING), .Seq_Cst)
 		if !intrinsics.atomic_load(&pool.running) {
-			// DELIBERATE DIVERGENCE FROM C++ -- the reference has a lost-wakeup deadlock here and
-			// this is the fix. C++ thread_pool.cpp:253-256 breaks out WITHOUT clearing the word,
-			// so an exiting worker strands `tasks_available` at SOMEONE_WAITING behind itself;
-			// a different worker already past its own `running` check then sleeps on that dirty
-			// word after thread_pool_destroy has committed to a blocking join and will never
+			// THIS IS NO LONGER A DIVERGENCE -- THE REFERENCE HAS ADOPTED IT. Landed upstream as
+			// PR #7388 (commit 239ced873, in tree at 1a808b4a4); src/thread_pool.cpp:252-260 now
+			// reads exactly as this block does: store Nobody_Waiting, broadcast, then break.
+			// Verified by reading both sides at tick 249, not inferred from the PR title.
+			//
+			// The history, kept because it is the argument for why the code is shaped this way.
+			// C++ thread_pool.cpp used to break out WITHOUT clearing the word, so an exiting
+			// worker stranded `tasks_available` at SOMEONE_WAITING behind itself; a different
+			// worker already past its own `running` check then slept on that dirty word after
+			// thread_pool_destroy had committed to a blocking join, and nothing would ever
 			// broadcast again. Reproduced in the reference at ~0.1% of concurrent runs, with
 			// backtraces: main in thread_join_and_destroy, every worker in
-			// futex_wait(&tasks_available, val=1), zero checker frames. Filed upstream as
-			// COMPILER_ISSUES/UPSTREAM-UNFILED-thread-pool-destroy-deadlocks-when-an-exiting-
-			// worker-republishes-Someone_Waiting.md. Kept as a divergence under Jon's ruling that a
-			// reference quirk is the contract EXCEPT when it is a crash -- a silent permanent hang
-			// after correct output is worse than a crash.
+			// futex_wait(&tasks_available, val=1), zero checker frames. This port carried the fix
+			// FIRST, as a deliberate divergence under Jon's ruling that a reference quirk is the
+			// contract EXCEPT when it is a crash -- a silent permanent hang after correct output
+			// is worse than a crash. The filing is now in COMPILER_ISSUES/done/.
 			//
 			// THE CLEAR AND THE BROADCAST MUST STAY TOGETHER AND IN THIS ORDER. The broadcast is
 			// the load-bearing half, NOT the store. It looks removable -- "nobody can be waiting,

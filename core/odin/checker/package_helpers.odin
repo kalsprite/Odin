@@ -84,9 +84,30 @@ init_package_exported_entity_queue :: proc(info: ^Checker_Info, pkg: ^ast.Packag
 }
 
 // enqueue_exported_entity adds an exported entity to a package's queue
-// C++ Reference: parser.hpp:209 - queue.mpmc_enqueue(&pkg->exported_entity_queue, entity)
+// C++ Reference: parser.hpp:210 - queue.mpmc_enqueue(&pkg->exported_entity_queue, entity)
 // Used during multi-threaded entity collection to track exported symbols
-// The queue will be auto-initialized if needed (MPMC queue auto-grows)
+//
+// THE QUEUE IS NEVER EXPLICITLY INITIALISED, AND THAT IS SAFE -- MEASURED, NOT ASSUMED.
+// init_package_exported_entity_queue below has ZERO callers, and the one place that would call it
+// (check_collect.odin:361, the analogue of C++'s `mpmc_init(&pkg->exported_entity_queue,
+// total_pkg_decl_count)` at checker.cpp:6096) carries it only as a comment. So every enqueue here
+// lands on a ZERO-VALUE MPMC_Queue.
+//
+// The old note above said "auto-initialized if needed", which was a guess. What actually happens:
+// capacity is 0, so `len(q.q) >= q.capacity` is true on EVERY enqueue and _mpmc_internal_grow runs
+// each time -- but with old_cap 0 it computes new_cap 0, `reserve(&q.q, 0)` is a no-op, and the
+// `cap(q.q) < new_cap` failure test cannot trip because cap is never negative. It returns true, and
+// push_back on the underlying dynamic Queue does the real growing. capacity therefore stays 0
+// forever and the grow branch is a per-enqueue no-op.
+//
+// PROBED DIRECTLY ($S/phase2/mpmcprobe): 1000 enqueues onto a zero-value MPMC_Queue(Item) gave
+// capacity=0 count=1000 failed=0, then 1000 dequeues in FIFO order with 0 missing and 0
+// out-of-order. Nothing is dropped or reordered.
+//
+// So C++'s mpmc_init call is a PREALLOCATION HINT with no semantic content, and not reproducing it
+// costs a per-enqueue no-op call, not correctness. Recorded here to close the standing question
+// rather than leave it to be rediscovered; if this is ever wired up it is a performance change and
+// should be justified as one.
 enqueue_exported_entity :: proc(info: ^Checker_Info, pkg: ^ast.Package, identifier: ^ast.Node, entity: ^Entity) {
 	if pkg == nil {
 		return

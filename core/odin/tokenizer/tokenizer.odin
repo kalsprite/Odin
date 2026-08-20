@@ -77,6 +77,44 @@ keyword_hash :: proc(text: string) -> u32 #no_bounds_check {
 	return h
 }
 
+// C++ Reference: src/tokenizer.cpp:182-191 -- a SECOND table, registered into the same keyword
+// hash table immediately after the real keywords:
+//
+//     static struct {
+//         String s;
+//         TokenKind kind;
+//     } const legacy_keywords[] = {
+//         {str_lit("notin"), Token_not_in},
+//     };
+//
+//     for (i32 i = 0; i < gb_count_of(legacy_keywords); i++) {
+//         add_keyword_hash_entry(legacy_keywords[i].s, legacy_keywords[i].kind);
+//     }
+//
+// LEDGER #1249. The port had no legacy keyword at all, so `notin` lexed as an ordinary
+// IDENTIFIER and the two tokenizers disagreed about the shape of the token stream -- not about a
+// message. `.A notin s` is a syntax error on both, but for opposite reasons and at different
+// positions:
+//     oracle  Syntax Error: Did you mean 'not_in'?          at the start of `notin`
+//     port    Syntax Error: Expected '{', got 'identifier'  plus two cascade errors
+// and `notin :: 3` at file scope is a two-diagnostic error on the reference and SILENTLY ACCEPTED
+// by the port, because an identifier named `notin` is a perfectly good declaration name.
+//
+// This is a migration aid rather than a quirk: `notin` was the old spelling, it still lexes as
+// `not_in` so that old source keeps its MEANING, and the diagnostic tells the author to update the
+// spelling. Reproducing it is required for token-stream parity, and `core:odin/tokenizer` is a
+// public package whose consumers should see the same token kinds the compiler does.
+@(private)
+Legacy_Keyword :: struct {
+	name: string,
+	kind: Token_Kind,
+}
+
+@(private)
+legacy_keywords := [?]Legacy_Keyword{
+	{"notin", .Not_In},
+}
+
 keyword_lut_init :: proc(lut: ^Keyword_LUT) -> bool {
 	if lut == nil {
 		return false
@@ -96,6 +134,21 @@ keyword_lut_init :: proc(lut: ^Keyword_LUT) -> bool {
 		entry.hash = hash
 		entry.kind = kind
 		entry.name = name
+	}
+
+	// The legacy entries go into the SAME table, after the real keywords and before the size
+	// assertions -- C++ orders it this way too, so a legacy spelling longer than any real keyword
+	// would trip the `< 16` bound rather than slip past it.
+	for lk in legacy_keywords {
+		max_keyword_size = max(max_keyword_size, len(lk.name))
+
+		hash := keyword_hash(lk.name)
+
+		entry := &lut[hash & KEYWORD_LUT_MASK]
+		assert(entry.kind == .Invalid, lk.name)
+		entry.hash = hash
+		entry.kind = lk.kind
+		entry.name = lk.name
 	}
 
 	assert(max_keyword_size >  1)
@@ -348,14 +401,33 @@ scan_comment :: proc(t: ^Tokenizer) -> string {
 scan_file_tag :: proc(t: ^Tokenizer) -> string {
 	offset := t.offset - 1
 
-	for t.ch != '\n' && t.ch != utf8.RUNE_EOF {
-		if t.ch == '/' {
-			next := peek_byte(t, 0)
-
-			if next == '/' || next == '*' {
-				break
-			}
-		}
+	// C++ Reference: src/tokenizer.cpp:993-1006 --
+	//
+	//     // Skip until end of line or until we hit what is probably a comment.
+	//     // The parsing of tags happens in `parse_file`.
+	//     while (t->curr_rune != GB_RUNE_EOF) {
+	//         if (t->curr_rune == '\n') break;
+	//         if (t->curr_rune == '/')  break;
+	//         advance_to_next_rune(t);
+	//     }
+	//
+	// The reference stops at ANY '/', not only at one that opens a comment. The port looked
+	// ahead for '/' or '*' first, which reads like a refinement of the reference's own
+	// "what is PROBABLY a comment" and is not: it changes what the tokenizer hands the parser,
+	// and the parser's pre-package loop (parser.cpp:7232-7246) treats whatever is left over as
+	// an INVALID TOKEN. #1263.
+	//
+	// `#+build linux/x` therefore diverges completely rather than cosmetically:
+	//   reference  (1:14) Expected only comments or lines starting with '#+' before the package
+	//                     declaration              -- '/x' is leftover, caret on the '/'
+	//   port       (1:1)  Invalid build tag platform: /
+	// and the reference never even reaches parse_file_tag, because the leftover-token check at
+	// parser.cpp:7266-7269 returns before the collected tags are parsed at :7288.
+	//
+	// No file tag anywhere in core/, vendor/ or examples/ contains a '/', so this only ever
+	// changes malformed tags. The comment forms are unaffected: '//' and '/*' both stop at the
+	// same '/' under either rule.
+	for t.ch != '\n' && t.ch != utf8.RUNE_EOF && t.ch != '/' {
 		advance_rune(t)
 	}
 
@@ -757,12 +829,35 @@ scan :: proc(t: ^Tokenizer) -> Token {
 				entry := &global_keyword_lut[keyword_hash(lit) & KEYWORD_LUT_MASK]
 				if entry.kind != .Invalid && entry.name == lit {
 					kind = entry.kind
+					// C++ Reference: src/tokenizer.cpp:715-717 --
+					//     if (token->kind == Token_not_in && entry->text.len == 5) {
+					//         syntax_error(*token, "Did you mean 'not_in'?");
+					//     }
+					// The test is on the ENTRY's text, not the token's kind alone: both `not_in`
+					// (6) and `notin` (5) resolve to the same kind, and only the short spelling is
+					// the legacy one. LEDGER #1249.
+					if kind == .Not_In && len(entry.name) == 5 {
+						error(t, offset, "Did you mean 'not_in'?")
+					}
 					break check_keyword
 				}
 			} else {
 				for i in Token_Kind.B_Keyword_Begin ..= Token_Kind.B_Keyword_End {
 					if lit == tokens[i] {
 						kind = Token_Kind(i)
+						break check_keyword
+					}
+				}
+				// The LUT-less fallback has to know about the legacy spellings too, or the
+				// tokenizer would report a different token stream depending on whether the
+				// global table happened to be initialised. C++ has one path and cannot diverge
+				// this way; the port has two, so both carry the table.
+				for lk in legacy_keywords {
+					if lit == lk.name {
+						kind = lk.kind
+						if kind == .Not_In && len(lk.name) == 5 {
+							error(t, offset, "Did you mean 'not_in'?")
+						}
 						break check_keyword
 					}
 				}

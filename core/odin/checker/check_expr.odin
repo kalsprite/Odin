@@ -343,7 +343,13 @@ get_entity_type :: proc(entity: ^Entity) -> ^Type {
 	// (check_expr.cpp:1982-1984). Omitting .Nil left the new Entity_Nil with a NIL operand type,
 	// which broke every use of `nil` -- caught immediately by the 11-cell nil control battery
 	// (7 of 11 flipped from accept to reject).
-	case .Constant, .Variable, .Type_Name, .Procedure, .Nil:
+	// `.Asm_Template` added by #1242. Same failure shape as `.Nil` above and the same cause:
+	// the reference does not filter by kind here at all, so every entity kind carrying a type
+	// gets one, and an asm template does carry a proc type (built at check_asm.cpp:1667).
+	// Without it check_ident hit `if entity_type == nil { return nil }` and returned NIL for a
+	// perfectly resolvable asm template -- which made check_asm_group_decl report
+	// "Expected a valid entity name in asm template group" for every member of every asm group.
+	case .Constant, .Variable, .Type_Name, .Procedure, .Nil, .Asm_Template:
 		return entity.type
 
 	case .Builtin:
@@ -803,6 +809,15 @@ check_ident :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, named_t
 	case .Invalid:
 		o.type = t_invalid
 		o.mode = .Invalid
+
+	case .Asm_Template:
+		// C++ Reference: src/check_expr.cpp:2088-2090 --
+		//     case Entity_AsmTemplate:
+		//         o->mode = Addressing_Value;
+		//         break;
+		// The type was already set from `o.type = entity_type` above, exactly as C++ sets
+		// `o->type = e->type` before its kind switch. #1242.
+		o.mode = .Value
 
 	case .Proc_Group:
 		// Should have been handled above
@@ -3195,6 +3210,17 @@ check_unary_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, ty
 						}
 						if .Switch_Value in e.flags {
 							error_line("\tSuggestion: Did you want to pass the value to the switch statement by pointer to get addressable semantics?\n")
+							// C++ Reference: src/check_expr.cpp:2993-2998 -- the Switch_Value arm emits
+							// TWO error_line calls, not one:
+							//
+							//     error_line("\tSuggestion: Did you want to pass the value to the switch statement by pointer to get addressable semantics?\n");
+							//     error_line("\t            Prefer doing 'switch &%.*s in ...'\n", LIT(e->token.string));
+							//
+							// The port had only the first. The `for`-range arm directly above it, which
+							// has the same shape, was complete -- including its map variant -- which is
+							// what makes the omission legible as a transcription slip rather than a
+							// decision. LEDGER #1245, found by the whole-file message audit.
+							error_line("\t            Prefer doing 'switch &%s in ...'\n", e.token.text)
 						}
 					}
 				}
@@ -5937,18 +5963,86 @@ error_operand_no_value :: proc(o: ^Operand) {
 }
 
 // check_multi_expr_with_type_hint checks a multi-valued expression with type hint
-// Reference: check_expr.cpp:11814-11827
+//
+// C++ Reference: src/check_expr.cpp:12891-12907 --
+//
+//     gb_internal void check_multi_expr_with_type_hint(CheckerContext *c, Operand *o, Ast *e, Type *type_hint) {
+//         check_expr_base(c, o, e, type_hint);
+//         switch (o->mode) {
+//         default:
+//             return; // NOTE(bill): Valid
+//         case Addressing_NoValue:
+//             error_operand_no_value(o);
+//             break;
+//         case Addressing_Type:
+//             if (type_hint != nullptr && is_type_typeid(type_hint)) {
+//                 add_type_info_type(c, o->type);
+//                 return;
+//             }
+//             error_operand_not_expression(o);
+//             break;
+//         }
+//         o->mode = Addressing_Invalid;
+//     }
+//
+// LEDGER #1248. The port dropped the `Addressing_Type && is_type_typeid(type_hint)` exemption, so
+// a bare TYPE used as a `typeid` element was rejected with "'%s' is not an expression but a type"
+// wherever it arrived through THIS entry point.
+//
+// WHERE THIS SHOWS. Five call sites, one-to-one with C++'s five; two are reachable with a typeid
+// hint from ordinary source:
+//     check_compound_lit.odin:806   (C++ 10892)  struct literal, POSITIONAL element
+//     check_compound_lit.odin:1092  (C++ 11135)  array/slice/simd/matrix literal, POSITIONAL element
+//     check_expr.odin:9190/9279/9390 (C++ 10181/10254/10337)  the or_return / or_else / or_break family
+// so `a := []typeid{int}`, `[2]typeid = {int, f32}` and `S{int}` for `S :: struct{t: typeid}` were
+// all over-rejected, while the reference accepts every one of them silently.
+//
+// WHY THE FIX IS HERE AND NOT IN check_compound_lit.odin. C++ does not special-case typeid in its
+// array/slice arm at all -- :11135 is a bare call, and the port's :1092 is the same bare call. The
+// first diagnosis was "the slice/array arm is missing the typeid branch the MAP arm has", which is
+// wrong twice over: the map arm's `check_expr_or_type` split is a genuine C++ special case
+// (:11581-11586), and duplicating it here would have masked the callee-level gap for the other
+// four call sites.
+//
+// THE TELL. The sibling `check_expr_with_type_hint` (above) already had the exemption, and the
+// INDEXED element path (check_compound_lit.odin:1013/1051) routes through that sibling -- so
+// `[2]typeid{0 = int, 1 = f32}` was ACCEPTED while `[2]typeid{int, f32}` was REJECTED. Same literal
+// type, same element type, opposite verdict decided only by whether the element carried an index.
+// Two procedures differing only in tuple handling disagreed about typeid; the outlier was the bug.
+//
+// SCOPE. `check_assignment` (:10494) already carries C++'s own `Addressing_Type && typeid` branch
+// (LEDGER #696), so an operand that SURVIVES this procedure is handled correctly downstream --
+// which is why `t: typeid = int` and a `typeid` procedure parameter already agreed with the
+// reference. Only this gate was missing.
+//
+// NOT A TRUNCATION. The reference does not stop checking elements once a bare type appears; it
+// simply does not consider one an error under a typeid hint. Measured: `[]typeid{int, 3}` yields
+// exactly ONE reference diagnostic, `Cannot convert '3' to 'typeid' from 'untyped integer'`, and
+// `[dynamic]typeid{int}` yields exactly the dynamic-literals error. A fix that skipped element
+// checking instead would pass the simple cells and silently lose both of those.
 check_multi_expr_with_type_hint :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, type_hint: ^Type) {
 	check_expr_base(ctx, o, node, type_hint)
 	#partial switch o.mode {
 	case .No_Value:
 		error_operand_no_value(o)
 	case .Type:
+		if type_hint != nil && is_type_typeid(type_hint) {
+			// The operand stays a TYPE. check_assignment's typeid branch turns it into the
+			// constant typeid value; all this site owes is the type-info registration and a
+			// return that leaves o.mode alone.
+			add_type_info_type(ctx, o.type)
+			return
+		}
 		error_operand_not_expression(o)
 	case:
 		// Valid - all other modes allowed
 		return
 	}
+	// C++ ends with `o->mode = Addressing_Invalid;`. It is a no-op in both languages, because
+	// error_operand_no_value and error_operand_not_expression each already set .Invalid on the
+	// mode that reaches them -- but it is what the reference writes, and the structure is worth
+	// keeping identical so the next reader does not have to re-derive that it is redundant.
+	o.mode = .Invalid
 }
 
 // get_constant_field_value extracts a field value from a constant compound literal
@@ -6397,8 +6491,13 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 		add_entity_use(ctx, op_expr, e)
 		expr_entity = e
 
-		// Check if this is a procedure/proc group (error case)
-		if e != nil && (e.kind == .Procedure || e.kind == .Proc_Group) {
+		// Check if this is a procedure/proc group/asm template (error case)
+		//
+		// C++ Reference: src/check_expr.cpp:5985 --
+		//     e->kind == Entity_Procedure || e->kind == Entity_ProcGroup || e->kind == Entity_AsmTemplate
+		// `.Asm_Template` added by #1242; without it `tmpl.field` fell through to the
+		// import-name arm below instead of reporting "'field' is not declared by 'tmpl'".
+		if e != nil && (e.kind == .Procedure || e.kind == .Proc_Group || e.kind == .Asm_Template) {
 			if selector_ident, ok2 := selector.derived.(^ast.Ident); ok2 {
 				error(node, "'%s' is not declared by '%s'", selector_ident.name, e.token.text)
 			}
@@ -6864,8 +6963,34 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 	}
 
 	if expr_entity != nil && is_type_polymorphic(expr_entity.type) {
-		error(op_expr, "Cannot access field from non-specialized polymorphic type")
+		// C++ Reference: src/check_expr.cpp:6283-6295 --
+		//
+		//     gbString op_str   = expr_to_string(op_expr);
+		//     gbString type_str = type_to_string_shorthand(operand->type);
+		//     gbString sel_str  = expr_to_string(selector);
+		//     error(op_expr, "Cannot access field '%s' from non-specialized polymorphic type '%s'",
+		//           sel_str, op_str);
+		//     ...
+		//     operand->mode = Addressing_Invalid;
+		//     operand->expr = node;
+		//
+		// The port emitted the message with NO format arguments at all, so every one of these
+		// read "Cannot access field from non-specialized polymorphic type" -- naming neither the
+		// field nor the type. #1266, witness wit_polysel266 (7 divergent cells).
+		//
+		// REPRODUCE THE REFERENCE QUIRK EXACTLY: the second '%s' is described as a "type" but is
+		// fed `op_str`, the EXPRESSION text, not `type_str`. type_str is computed and freed
+		// without ever being used -- the same dead local as in the non-constant-field arm a few
+		// lines above, which the port already renders correctly. For `Foo.T` both spellings
+		// happen to print "Foo"; they part company as soon as op_expr is not a bare identifier.
+		//
+		// `operand.expr = node` was also missing. C++ poisons the operand on every failure path
+		// out of this function, and a caller that reads operand->expr after an Invalid mode would
+		// otherwise see the stale sub-expression.
+		error(op_expr, "Cannot access field '%s' from non-specialized polymorphic type '%s'",
+		      expr_to_string(selector), expr_to_string(op_expr))
 		operand.mode = .Invalid
+		operand.expr = node
 		return nil
 	}
 
@@ -6944,6 +7069,14 @@ check_selector :: proc(ctx: ^Checker_Context, operand: ^Operand, node: ^ast.Node
 
 	case .Procedure:
 		// Procedure accessed through import (e.g., runtime.some_proc)
+		operand.mode = .Value
+
+	case .Asm_Template:
+		// C++ Reference: src/check_expr.cpp:6358-6360, under the reference's own comment
+		// "These cases should never be hit but are here for sanity reasons". It IS hit:
+		// check_asm_group_decl routes a `pkg.tmpl` member through check_selector
+		// (src/check_decl.cpp:2026). Without this arm the port took the `case:` below and
+		// reported "Unexpected entity kind in selector expression". #1242.
 		operand.mode = .Value
 
 	case:
@@ -10027,6 +10160,15 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 		o.mode = .Invalid
 		return .Stmt
 
+	case ^ast.Asm_Group:
+		// C++ Reference: src/check_expr.cpp:12561-12564 -- the sibling arm to Proc_Group
+		// directly above, including the "a asm" article the reference writes. #1242: without
+		// it, an asm group in expression position (`(asm { a })(1)`) fell through to the
+		// default and was silently ACCEPTED.
+		error(node, "Illegal use of a asm group")
+		o.mode = .Invalid
+		return .Stmt
+
 	case ^ast.Proc_Lit:
 		// Procedure literal (inline procedure)
 		// C++ Reference: check_expr.cpp check_expr_base_internal
@@ -10296,6 +10438,32 @@ check_expr_base_internal :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.
 		o.expr = incoming_expr
 		return .Stmt
 
+	case ^ast.Asm_Template:
+		// C++ Reference: src/check_expr.cpp:12472-12478 --
+		//     case_ast_node(at, AsmTemplate, node);
+		//         error(node, "'asm' templates must either be defined as a declaration or within a procedure call directly");
+		//         o->mode = Addressing_NoValue;
+		//         o->type = nullptr;
+		//         o->expr = node;
+		//         return kind;
+		//
+		// #1242: the port had no arm, so an asm template in an expression position that is
+		// neither a declaration value nor a direct callee was SILENTLY ACCEPTED --
+		// `A :: [asm(){nop;}]int` checked clean where the reference rejects it.
+		//
+		// Note this arm does NOT fire for the two legal placements: a declaration value reaches
+		// check_asm_template_from_entity through check_entity_decl's .Asm_Template arm
+		// (check_decl.odin), and a direct callee is intercepted in check_call_expr before the
+		// callee is checked as an ordinary expression (check_expr.odin, the block ported from
+		// src/check_expr.cpp:8899-8917).
+		//
+		// `kind` is Expr_Stmt on this path, same as the Helper_Type and Bad_Expr arms.
+		error(node, "'asm' templates must either be defined as a declaration or within a procedure call directly")
+		o.mode = .No_Value
+		o.type = nil
+		o.expr = node
+		return .Stmt
+
 	case ^ast.Bad_Expr:
 		// Error node - already reported by parser
 		return .Stmt
@@ -10466,6 +10634,35 @@ check_assignment :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: 
 	// Step 3: If no target type, assignment is vacuously valid (for type inference)
 	if target_type == nil {
 		return true
+	}
+
+	// Step 3b: a bit_field field's width lives on its ENTITY, not on its type, so a constant
+	// that already carries a type never reaches the width test on its own -- `w.n = 200` was
+	// refused while `w.n = u8(200)` was accepted and silently stored 0.
+	//
+	// C++ Reference: check_expr.cpp:1196-1202 (added by PR #7385, landed in 1a808b4a4):
+	//
+	//     // a bit_field field's width is on its entity, not its type
+	//     if (c->bit_field_bit_size != 0 && operand->mode == Addressing_Constant && is_type_typed(operand->type)) {
+	//         check_is_expressible(c, operand, type);
+	//         if (operand->mode == Addressing_Invalid) {
+	//             return;
+	//         }
+	//     }
+	//
+	// LEDGER #1206. This is a gap UPSTREAM CREATED, not one the port introduced: until that
+	// commit the reference accepted `u8(200)` here too. The plumbing this needs was already
+	// in place on the port side -- ctx.bit_field_bit_size is set by the assignment statement
+	// (check_stmt.odin:4076) and by the selector, and check_is_expressible already narrows its
+	// bound by it (check_expr.odin:5165) -- so only the call site was missing.
+	//
+	// The `is_type_typed` guard is what keeps this from double-reporting: an UNTYPED constant
+	// has already been range-checked by convert_to_typed in Step 2 above.
+	if ctx.bit_field_bit_size != 0 && operand.mode == .Constant && is_type_typed(operand.type) {
+		check_is_expressible(ctx, operand, target_type)
+		if operand.mode == .Invalid {
+			return false
+		}
 	}
 
 	// Step 4: Handle procedure groups - resolve to specific procedure matching target type
@@ -12343,12 +12540,41 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 		return .Expr
 	}
 
+	// C++ Reference: src/check_expr.cpp:8899-8917 -- an ANONYMOUS asm template written
+	// directly in call position, `asm(...) -> ... { ... }(args)`. It never went through
+	// collect_entities, so there is no entity and no DeclInfo to check it from; both are
+	// manufactured here and handed to check_asm_template_from_entity, exactly as C++ does.
+	// The template's node keeps a pointer to the entity it minted (`anonymous_entity`), which
+	// is how the backend finds it later.
+	//
+	// This has to happen BEFORE check_expr_or_type below: an Asm_Template node has no
+	// expression meaning of its own, so evaluating it as a callee would report on it rather
+	// than check it.
+	if call.expr != nil {
+		if at, is_asm := ast.unparen_expr(call.expr).derived.(^ast.Asm_Template); is_asm {
+			d := make_decl_info(ctx.scope, ctx.decl)
+			e := alloc_entity_asm_template(d.scope, at.tok, nil, at)
+			d.init_expr = at
+			at.anonymous_entity = e
+
+			check_asm_template_from_entity(ctx, e, d)
+
+			o.mode  = .Value
+			o.type  = e.type
+			o.value = nil
+			o.expr  = call.expr
+			add_type_and_value(ctx, call.expr, o.mode, o.type, o.value)
+		}
+	}
+
 	// Step 1: Check the callee expression (the thing being called)
 	// Reference: check_expr.cpp lookup_polymorphic_record_parameter
 	// Allow arrow operator (->) inside call expressions
 	prev_allow_arrow := ctx.allow_arrow_right_selector_expr
 	ctx.allow_arrow_right_selector_expr = true
-	check_expr_or_type(ctx, o, call.expr)
+	if _, is_asm := ast.unparen_expr(call.expr).derived.(^ast.Asm_Template); !is_asm {
+		check_expr_or_type(ctx, o, call.expr)
+	}
 	ctx.allow_arrow_right_selector_expr = prev_allow_arrow
 
 	// Step 2: Handle invalid operands early
@@ -12520,6 +12746,33 @@ check_call_expr :: proc(ctx: ^Checker_Context, o: ^Operand, node: ^ast.Node, typ
 					if !hinted {
 						check_expr_or_type(ctx, &operand_list[i], fv.value, nil)
 					}
+				}
+
+				// C++ Reference: src/check_expr.cpp:8335-8338, the tail of the
+				// is_call_expr_field_value branch of check_polymorphic_record_type:
+				//
+				//     bool vari_expand = (ce->ellipsis.pos.line != 0);
+				//     if (vari_expand) {
+				//         error(ce->ellipsis, "Invalid use of '..' in a polymorphic type call'");
+				//     }
+				//
+				// The stray trailing apostrophe is the reference's, and is reproduced verbatim.
+				//
+				// This diagnostic looked like dead code when it was first audited: reaching it
+				// needs args[0] to be a `field = value` AND ce->ellipsis to be set, and the parser
+				// rejects `..name = value` outright (src/parser.cpp:3616), which appears to close
+				// the only door. It does not -- is_call_expr_field_value tests ONLY args[0]
+				// (src/check_expr.cpp:7156-7163), so `Foo(T = int, ..)` and `Foo(T = int, ..x)`
+				// both qualify. What actually kept it unreachable is that the reference CRASHES
+				// before it gets here: the nil argument the parser leaves behind for a bare `..`
+				// is dereferenced in check_call_parameter_mixture, which runs first. #1267 removes
+				// the crash from the port, so this becomes live for the first time.
+				//
+				// MEASURED: with the nil dropped and this check absent, the port ACCEPTED
+				// `v: Foo(T = int, ..)` in silence (rc=0) -- it discarded the '..' without a word.
+				// This is the diagnostic the reference was trying to emit when it died.
+				if call.ellipsis.pos.line != 0 {
+					error_token(call.ellipsis, "Invalid use of '..' in a polymorphic type call'")
 				}
 			} else {
 				// Positional parameters, so a multi-valued expression spreads
@@ -13955,6 +14208,122 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			}
 		}
 
+
+		// THE VARIADIC SLOT'S OPERAND. C++ Reference: src/check_expr.cpp:6837-6880.
+		//
+		//     if (variadic) {
+		//         if (visited[pt->variadic_index] && positional_operand_count < positional_operands.count) {
+		//             error(call, "Variadic parameters already handled with a named argument '%.*s' in procedure call", ...);
+		//         } else if (!visited[pt->variadic_index]) {
+		//             visited[pt->variadic_index] = true;
+		//             Operand *variadic_operand = &ordered_operands[pt->variadic_index];
+		//             if (vari_expand) {
+		//                 if (variadic_operands.count == 0) { error(call, "'..' in the wrong position"); }
+		//                 else {
+		//                     *variadic_operand = variadic_operands[0];
+		//                     variadic_operand->type = default_type(variadic_operand->type);
+		//                 }
+		//             } else {
+		//                 Operand o = {};
+		//                 o.mode = Addressing_Value;
+		//                 o.expr = ast_ident(f, make_token_ident("nil"));
+		//                 o.expr->Ident.token.pos = ast_token(call).pos;
+		//                 if (variadic_operands.count != 0) {
+		//                     o.expr->Ident.token.pos = ast_token(variadic_operands[0].expr).pos;
+		//                     o.type = pt->params->Tuple.variables[pt->variadic_index]->type;
+		//                 } else {
+		//                     o.type = t_untyped_nil;
+		//                 }
+		//                 *variadic_operand = o;
+		//             }
+		//         }
+		//     }
+		//
+		// THREE branches, and the port had NONE of them -- it left whatever the ordinary
+		// positional fill had put in the variadic slot, which is the first variadic ARGUMENT.
+		// All three matter and each has its own witness:
+		//
+		//  * `..s` expansion -- the operand is the expanded SLICE, retyped with default_type.
+		//    This is the branch that lets `f :: proc(args: ..$T)` called as `f(..s)` infer
+		//    T = int and be ACCEPTED. Getting it wrong makes a legal call an error
+		//    (cell d_expand_ok).
+		//  * a NAMED variadic argument (`f(args = 1)`) -- the slot is already visited, so the
+		//    whole block is SKIPPED and the named operand stays. That is why the reference
+		//    still reports a per-argument diagnostic for it (cell l_named_var), where the
+		//    positional spellings report none.
+		//  * otherwise -- a synthetic `nil` identifier. Its type is the variadic PARAMETER's own
+		//    type when arguments reached the slot, and untyped nil when none did.
+		//
+		// C++ calls the third branch "an awful hack" in its own comment, and it is, but it is
+		// load-bearing: what the INSTANTIATION sees in the variadic slot is never a variadic
+		// argument's type. The port passed the first variadic argument straight through, so
+		//     f :: proc(args: ..$T) {}   ...   f(1)
+		// tried to determine '[]$T' from 'untyped integer' and reported at the argument. The
+		// reference reports nothing there; it reports the ambiguous-variadic error at the CALL.
+		// With an EMPTY slot the port passed a ZEROED operand -- mode .Invalid, type nil, expr
+		// nil -- so determine_type_from_polymorphic fell back to the PARAMETER DECLARATION for
+		// its position and printed 'invalid type' where the reference prints 'untyped nil' at
+		// the call.
+		//
+		// THE CARET WIDTH IS THE PROOF, and is why this was diagnosed from output rather than
+		// guessed: the reference draws `^~^` -- THREE columns -- under `f()`, under `f(1)` and
+		// under `f(1, 2)` alike. Three is len("nil"). The diagnostic is anchored to the
+		// synthetic identifier, not to the call node, which is four and seven columns wide.
+		//
+		// LEDGER #1244. Found by the whole-file message audit, not by the corpus: every cell
+		// here is rc=1 on BOTH arms, so a status corpus cannot see any of it.
+		if pt.variadic && variadic_index >= 0 && variadic_index < poly_param_count && pt.params != nil {
+			if params_tuple, is_tuple := pt.params.variant.(Type_Tuple);
+			   is_tuple && variadic_index < len(params_tuple.variables) {
+				// C++'s `visited[pt->variadic_index]` -- set by the NAMED-argument pass only.
+				// When a named argument already filled the slot C++ skips this block entirely.
+				already_named := variadic_index < len(visited) && visited[variadic_index]
+
+				// C++'s `variadic_operands.count != 0`. Positional arguments at or past the
+				// variadic index are exactly C++'s variadic_operands.
+				has_variadic_args := len(positional_operands) > variadic_index
+
+				if !already_named {
+					if vari_expand {
+						// `..s`: the expanded slice IS the operand. Nothing synthetic.
+						if has_variadic_args {
+							vo := positional_operands[variadic_index]
+							vo.type = default_type(vo.type)
+							poly_operands[variadic_index] = vo
+							poly_visited[variadic_index] = true
+						}
+						// variadic_operands.count == 0 is C++'s "'..' in the wrong position",
+						// which the port already reports upstream (LEDGER #1011).
+					} else {
+						pos := call.pos
+						if call.expr != nil {
+							pos = call.expr.pos
+						}
+						vo: Operand
+						vo.mode = .Value
+						vo.type = t_untyped_nil
+						if has_variadic_args {
+							first := positional_operands[variadic_index].expr
+							if first != nil {
+								pos = first.pos
+							}
+							vo.type = entity_type(params_tuple.variables[variadic_index])
+						}
+						// The synthetic identifier's text is "nil": three columns wide.
+						end := pos
+						end.column += 3
+						end.offset += 3
+						nil_ident := ast.new(ast.Ident, pos, end)
+						nil_ident.name = "nil"
+						vo.expr = nil_ident
+
+						poly_operands[variadic_index] = vo
+						poly_visited[variadic_index] = true
+					}
+				}
+			}
+		}
+
 		// Do NOT instantiate when a required argument was never supplied.
 		//
 		// C++ Reference: check_expr.cpp check_call_arguments_internal --
@@ -14215,6 +14584,53 @@ check_call_arguments_basic :: proc(ctx: ^Checker_Context, callee: ^Operand, call
 			data.error = true
 			data.result_type = pt.results
 			return data
+		}
+	}
+
+	// THE AMBIGUOUS-POLYMORPHIC-VARIADIC GATE. C++ Reference: src/check_expr.cpp:7074-7086.
+	//
+	//     if (variadic) {
+	//         Entity *var_entity = pt->params->Tuple.variables[pt->variadic_index];
+	//         Type *slice = var_entity->type;
+	//         GB_ASSERT(is_type_slice(slice));
+	//         Type *elem = base_type(slice)->Slice.elem;
+	//         Type *t = elem;
+	//         if (is_type_polymorphic(t)) {
+	//             if (show_error) {
+	//                 error(call, "Ambiguous call to a polymorphic variadic procedure with no variadic input %s", type_to_string(final_proc_type));
+	//             }
+	//             err = CallArgumentError_AmbiguousPolymorphicVariadic;
+	//         }
+	//         for_array(operand_index, variadic_operands) { ... }
+	//     }
+	//
+	// The message reads as though it were about an EMPTY variadic slot, and it is not: the gate
+	// fires whenever the variadic element type is still polymorphic after instantiation, which is
+	// precisely when the type parameter is bound ONLY by the variadic slot. Variadic arguments do
+	// not participate in inference, so `f :: proc(args: ..$T)` can never determine T no matter how
+	// many arguments are passed -- `f(1)` and `f(1, 2)` are both ambiguous. When T is also bound
+	// by an ordinary parameter (`f :: proc(a: $T, args: ..T)`) instantiation succeeds and the elem
+	// type is concrete by the time we get here, so the gate correctly stays silent.
+	//
+	// POSITION: `error(call, ...)` -- the whole call node, unlike the synthetic-nil diagnostic
+	// above, whose caret is three columns wide. Measured on the reference: `f(1)` draws `^~~^`,
+	// `fg(1, 2)` draws `^~~~~~~^`.
+	//
+	// PLACEMENT: before the positional loop, because C++'s gate precedes its variadic-operands
+	// loop and `f(args = 1)` shows the ordering -- the reference prints this line first and the
+	// per-argument diagnostic second. LEDGER #1244.
+	if pt.variadic && variadic_index >= 0 && pt.params != nil {
+		if params_tuple, is_tuple := pt.params.variant.(Type_Tuple);
+		   is_tuple && variadic_index < len(params_tuple.variables) {
+			var_entity := params_tuple.variables[variadic_index]
+			slice_type := base_type(entity_type(var_entity))
+			if slice_type != nil {
+				if st, st_ok := slice_type.variant.(Type_Slice); st_ok && is_type_polymorphic(st.elem) {
+					ts := type_to_string(proc_type)
+					error_node(call, "Ambiguous call to a polymorphic variadic procedure with no variadic input %s", ts)
+					data.error = true
+				}
+			}
 		}
 	}
 

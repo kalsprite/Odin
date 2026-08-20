@@ -1,0 +1,1033 @@
+package checker
+
+import "core:odin/ast"
+import x86 "core:rexcode/isa/x86"
+import "core:math/big"
+import "core:odin/tokenizer"
+
+// C++ Reference: src/check_asm.cpp, src/asm_tables.cpp.
+//
+// This file is the port of the reference's inline-asm semantic analysis. The reference splits
+// it across two translation units -- asm_tables.cpp holds the operand/register-class
+// vocabulary and #includes the GENERATED asm_tables_amd64.cpp, and check_asm.cpp holds the
+// analysis -- and is #included from check_decl.cpp:2119 rather than compiled separately.
+//
+// SCOPE NOTE (do not re-derive): asm_tables_amd64.cpp is generated. Its source of truth is
+// core/rexcode/isa/x86 (package rexcode_x86), which is already Odin in this repository, so the
+// port imports it where the reference embeds a generated table. That is why this file is much
+// shorter than the two it replaces.
+
+// C++ Reference: src/asm_tables.cpp:37-45 -- `enum AsmOperandKind : u8`.
+//
+// Asm_Reg_Class is NOT here: it lives in core/odin/ast (semantic_types.odin) because
+// Asm_Template_Entity_Decl.reg_class needs it and that struct hangs off an Entity. The
+// reference makes the same split for the same reason (src/entity.cpp:186).
+Asm_Operand_Kind :: enum u8 {
+	Invalid,
+	Register,
+	Memory,
+	Register_Or_Memory,
+	Immediate,
+	Label,
+}
+
+// C++ Reference: src/asm_tables.cpp:10-25. Two tables, not one with an article prepended:
+// "a"/"an" is baked in because the reference has no article-selection helper.
+asm_reg_class_strings := [ast.Asm_Reg_Class]string {
+	.Unknown = "unknown",
+	.Integer = "integer",
+	.Float   = "float",
+	.Vector  = "vector",
+	.Mask    = "mask",
+}
+
+asm_reg_class_strings_with_article := [ast.Asm_Reg_Class]string {
+	.Unknown = "an unknown",
+	.Integer = "an integer",
+	.Float   = "a float",
+	.Vector  = "a vector",
+	.Mask    = "a mask",
+}
+
+// C++ Reference: src/asm_tables.cpp:47-64. The Invalid slot is the empty string in both
+// tables, deliberately -- it is never formatted into a diagnostic.
+asm_operand_kind_strings := [Asm_Operand_Kind]string {
+	.Invalid            = "",
+	.Register           = "register",
+	.Memory             = "memory",
+	.Register_Or_Memory = "register or memory",
+	.Immediate          = "immediate",
+	.Label              = "label",
+}
+
+asm_operand_kind_expected_strings := [Asm_Operand_Kind]string {
+	.Invalid            = "",
+	.Register           = "a register",
+	.Memory             = "a memory",
+	.Register_Or_Memory = "a register or memory",
+	.Immediate          = "an immediate",
+	.Label              = "a label",
+}
+
+// check_asm_operand_bit_width returns the bit width the operand's Odin type occupies in a
+// register or immediate slot. Integers/floats/bools/pointers give their size; #simd gives the
+// total vector width. 0 if unknown, -1 if untyped.
+//
+// C++ Reference: src/check_asm.cpp:1-18
+check_asm_operand_bit_width :: proc(type: ^Type) -> i32 {
+	if type == nil || type == t_invalid {
+		return 0
+	}
+	if is_type_untyped(type) {
+		return -1
+	}
+	if is_type_boolean(type) {
+		return 1
+	}
+	sz := type_size_of(base_type(type))
+	if sz <= 0 {
+		return 0
+	}
+	return i32(sz * 8)
+}
+
+// C++ Reference: src/check_asm.cpp:20-37
+is_valid_asm_parameter_type :: proc(type: ^Type) -> bool {
+	if is_type_integer(type) {
+		return true
+	}
+	if is_type_float(type) {
+		return true
+	}
+	if is_type_boolean(type) {
+		return true
+	}
+	if is_type_pointer(type) || is_type_multi_pointer(type) {
+		return true
+	}
+	if is_type_simd_vector(type) {
+		return true
+	}
+	return false
+}
+
+// C++ Reference: src/check_asm.cpp:39-56.
+//
+// NOTE the ordering: booleans are tested AFTER integers and floats, and map to Integer. A
+// b8/b16/b32/b64 is not is_type_integer, so the earlier test does not swallow it.
+check_asm_reg_class_from_type :: proc(type: ^Type) -> ast.Asm_Reg_Class {
+	if is_type_integer(type) {
+		return .Integer
+	}
+	if is_type_float(type) {
+		return .Float
+	}
+	if is_type_boolean(type) {
+		return .Integer
+	}
+	if is_type_pointer(type) || is_type_multi_pointer(type) {
+		return .Integer
+	}
+	if is_type_simd_vector(type) {
+		return .Vector
+	}
+	return .Unknown
+}
+
+// asm_template_entity_decl_default builds the operand declaration an asm template parameter
+// gets before any [spec] has been applied to it.
+//
+// C++ Reference: src/entity.cpp:378-391. It lives in entity.cpp there only because that is
+// where the struct is; it calls check_asm_reg_class_from_type, which is forward-declared at
+// src/entity.cpp:364 and defined in check_asm.cpp. Keeping it beside its one dependency is
+// the same code with one fewer forward declaration.
+//
+// The five -1 initialisers are load-bearing: 0 is a valid total_index/param_index, so an
+// unset field must be distinguishable from index zero.
+asm_template_entity_decl_default :: proc(entity: ^Entity) -> ast.Asm_Template_Entity_Decl {
+	ed := ast.Asm_Template_Entity_Decl{}
+	ed.kind = .Register
+	if is_type_internally_pointer_like(entity_type(entity)) {
+		ed.kind = .Memory
+	}
+	ed.reg_class    = check_asm_reg_class_from_type(entity_type(entity))
+	ed.entity       = entity
+	ed.total_index  = -1
+	ed.param_index  = -1
+	ed.result_index = -1
+	ed.tie          = -1
+	ed.view_of      = -1
+	ed.view_bits    =  0
+
+	return ed
+}
+
+// check_asm_pin_type_compat reports when a parameter's declared type cannot live in the
+// physical register it was pinned to.
+//
+// C++ Reference: src/check_asm.cpp:88-116.
+//
+// Note the two silent returns at the top: an unknown register class, a zero-width register,
+// or an absent/invalid declared type all mean "nothing can be concluded", and the reference
+// deliberately says nothing rather than guessing. Likewise got_w < 0 (an untyped constant)
+// skips the width test -- only got_w > 0 is a real measurement.
+check_asm_pin_type_compat :: proc(
+	reg_class: ast.Asm_Reg_Class,
+	reg_w: i32,
+	decl_type: ^Type,
+	at: ^ast.Node,
+	pin_name: string,
+	param_name: string,
+) {
+	if reg_class == .Unknown ||
+	   reg_w == 0 ||
+	   decl_type == nil || decl_type == t_invalid {
+		return
+	}
+	got_class := check_asm_reg_class_from_type(decl_type)
+	got_w     := check_asm_operand_bit_width(decl_type)
+
+	class_ok: bool
+	#partial switch reg_class {
+	case .Integer: class_ok = got_class == .Integer
+	case .Vector:  class_ok = got_class == .Vector || got_class == .Float
+	case .Mask:    class_ok = got_class == .Mask
+	case:          class_ok = true
+	}
+	if !class_ok {
+		error(at, "Parameter '%s' is pinned to %%%s, but its type is in the wrong register class for that register",
+		      param_name, pin_name)
+		return
+	}
+	// got_w < 0 == untyped constant: skip. Otherwise the value must fit the register.
+	if got_w > 0 && got_w > reg_w {
+		error(at, "Parameter '%s' (%d-bit) is wider than its pinned register %%%s (%d-bit)",
+		      param_name, int(got_w), pin_name, int(reg_w))
+	}
+}
+
+// check_asm_template_signature_params resolves one side (params or results) of an asm
+// template's signature into a tuple, and appends one Asm_Template_Entity_Decl per name.
+//
+// C++ Reference: src/check_asm.cpp:374-467.
+//
+// Differences from the reference that are shape, not behaviour:
+//   * C++ allocates the empty tuple up front and returns it on a nil field list; the port's
+//     alloc_type_tuple takes the variables slice, so the variables are gathered first.
+//   * C++ `ast_node_expect(name, Ast_Ident)` is inlined -- see syntax_error_node in
+//     error.odin, added for exactly this call.
+//
+// NOTE the `continue` on an invalid parameter type: it skips the whole FIELD, so
+// `asm(a, b: struct{})` declares neither a nor b and reports once. That is the reference's
+// control flow and it is why param_index is only bumped inside the names loop.
+check_asm_template_signature_params :: proc(
+	ctx: ^Checker_Context,
+	scope: ^Scope,
+	_params: ^ast.Node,
+	input_parameters: bool,
+	asm_template_entity_decls: ^[dynamic]ast.Asm_Template_Entity_Decl,
+) -> ^Type {
+	if _params == nil {
+		return alloc_type_tuple(nil)
+	}
+	field_list := _params.derived.(^ast.Field_List)
+
+	variables := make([dynamic]^Entity, 0, len(field_list.list), ctx.checker.allocator)
+
+	param_index: i32 = 0
+	for field in field_list.list {
+		// C++ Reference: src/check_asm.cpp:387-390 -- polymorphic types are DISALLOWED while
+		// the parameter's type is resolved. `$T` in an asm signature is not a type parameter;
+		// `$x` on a NAME is handled below and means "immediate", not "polymorphic type".
+		prev := ctx.allow_polymorphic_types
+		ctx.allow_polymorphic_types = false
+		type := check_type(ctx, field.type)
+		ctx.allow_polymorphic_types = prev
+
+		if !is_valid_asm_parameter_type(type) {
+			s := type_to_string(type)
+			error(field.type, "Invalid type for an asm template. It must be an integer, float, boolean, pointer, multi-pointer, or #simd vector, got '%s'", s)
+			continue
+		}
+
+		for name_ in field.names {
+			name := name_
+
+			// C++ Reference: src/check_asm.cpp:397-407
+			is_poly_name := false
+			#partial switch pt in name.derived {
+			case ^ast.Poly_Type:
+				assert(pt.specialization == nil)
+				is_poly_name = true
+				name = pt.type
+			}
+
+			ident, is_ident := name.derived.(^ast.Ident)
+			if !is_ident {
+				// C++ Reference: src/parser.cpp:666-672, ast_node_expect.
+				syntax_error(name, "Expected identifier, got %s", ast_kind_string(name))
+				continue
+			}
+
+			if is_blank_ident(ident.name) {
+				error(name, "All parameters must have a name in an asm template")
+				continue
+			}
+			// The port's ^ast.Ident carries only `name`; the reference's Ast_Ident carries a
+			// whole Token. Every other site that needs one synthesises it the same way
+			// (check_type.odin:6296), and pos/text are the only fields any consumer reads.
+			name_token := tokenizer.Token{kind = .Ident, text = ident.name, pos = name.pos}
+
+			// C++ Reference: src/check_asm.cpp:417-426. EntityFlag_Used is set
+			// unconditionally: an asm parameter that no instruction mentions is still part of
+			// the template's ABI, so the unused-parameter machinery must not see it.
+			entity := alloc_entity_param(scope, name_token, type, false, true)
+			entity.flags += {.Used}
+			if is_poly_name {
+				entity.flags += {.Poly_Const}
+				if is_type_internally_pointer_like(type) {
+					error(name, "Parameters with a pointer-like type cannot be used as $ immediates")
+				}
+			}
+
+			found := scope_insert(scope, entity)
+			if found == nil {
+				append(&variables, entity)
+
+				ed := asm_template_entity_decl_default(entity)
+				if is_poly_name {
+					ed.kind = .Immediate
+				}
+				if input_parameters {
+					ed.param_group  = .Input
+					ed.param_index  = param_index
+					param_index += 1
+					ed.result_index = -1
+				} else {
+					ed.param_group  = .Output
+					ed.param_index  = -1
+					ed.result_index = param_index
+					param_index += 1
+				}
+
+				ed.total_index = i32(len(asm_template_entity_decls))
+				append(asm_template_entity_decls, ed)
+			} else {
+				pos := found.token.pos
+				error(name_token,
+				      "Redeclaration of '%s' in this scope\n" +
+				      "\tat %s",
+				      name_token.text, token_pos_to_string(pos))
+				entity = found
+			}
+		}
+	}
+
+	return alloc_type_tuple(variables[:])
+}
+
+// C++ Reference: src/check_asm.cpp:469-479
+check_asm_find_group :: proc(
+	entity: ^Entity,
+	asm_template_entity_decls: []ast.Asm_Template_Entity_Decl,
+	index_: ^i32 = nil,
+) -> ast.Asm_Template_Entity_Decl_Param_Group {
+	for ed, i in asm_template_entity_decls {
+		if ed.entity == entity {
+			if index_ != nil {
+				index_^ = i32(i)
+			}
+			return ed.param_group
+		}
+	}
+	if index_ != nil {
+		index_^ = -1
+	}
+	return .Unknown
+}
+
+// C++ Reference: src/check_asm.cpp:481-488
+check_asm_find_kind :: proc(
+	entity: ^Entity,
+	asm_template_entity_decls: []ast.Asm_Template_Entity_Decl,
+) -> ast.Asm_Template_Entity_Decl_Kind {
+	for ed in asm_template_entity_decls {
+		if ed.entity == entity {
+			return ed.kind
+		}
+	}
+	return .Invalid
+}
+
+// asm_did_you_mean_append mirrors did_you_mean_append (src/common.cpp), which SKIPS empty
+// targets and "_" before scoring. check_asm.cpp builds its suggestion lists inline rather than
+// through check_did_you_mean_type, and -- unlike the check_expr.cpp helpers -- it carries NO
+// build_context.terse_errors guard, so none is added here.
+@(private="file")
+asm_did_you_mean_append :: proc(suggestions: ^[dynamic]Distance_And_Target, key: string, target: string) {
+	if len(target) == 0 || target == "_" {
+		return
+	}
+	append(suggestions, Distance_And_Target{levenshtein_distance(key, target), target})
+}
+
+// check_register resolves a `%reg` (or `%flags.<flag>`) operand and gives it a type.
+//
+// C++ Reference: src/check_asm.cpp:760-843.
+//
+// Returns false when the register could not be resolved; the caller keeps checking either way,
+// which is why the flag path returns `ok` rather than bailing at the first error.
+//
+// DIVERGENCE, DELIBERATE -- `%rip`. The reference reaches
+//     default: GB_PANIC("Unhandled register width size: %d", width_in_bits);
+// for it, because %rip IS in the register table (code 0xFFFE) but its class 0xFF00 is not one
+// of the sixteen the width switch knows, so reg_size returns 0. `mov %rip, %rax` and
+// `mov %rax, [%rip + 8]` both abort the compiler with SIGILL, exit 132, printing nothing but
+// "This is a compiler error". Reproduced on 1a808b4a4 and filed as
+// COMPILER_ISSUES/UPSTREAM-UNFILED-asm-template-referencing-rip-panics-the-compiler.md.
+// Jon's standing ruling is that a reference quirk is the contract EXCEPT when it is a crash,
+// so the port diagnoses it instead, in the shape of the reference's own adjacent arm for the
+// 80-bit x87 registers.
+check_register :: proc(operand: ^Operand, asm_reg: ^ast.Asm_Register) -> bool {
+	init_asm_tables()
+	name := asm_reg.name.text
+
+	// C++ Reference: src/check_asm.cpp:762-784 -- the `%flags.<flag>` accessor form.
+	if asm_reg.flag.kind == .Ident {
+		ok := true
+		width: i32 = 0
+
+		flag := asm_reg.flag.text
+		if name != "flags" {
+			error(asm_reg.name, "Register flags can only be called on %%flags")
+			ok = false
+		} else {
+			bit := asm_flag_bit_from_name(flag, &width)
+			if bit < 0 {
+				error(asm_reg.flag, "Unknown register %%flags name: %s", flag)
+				ok = false
+			}
+		}
+
+		// A single flag bit is a bool; the one multi-bit field (iopl, 2 bits) is a u8.
+		// NOTE that this is assigned even on the error paths, where width stays 0 -- the
+		// operand still needs a type so that checking can continue.
+		operand.type = t_bool
+		if width > 1 {
+			operand.type = t_u8
+		}
+		return ok
+	}
+
+	r := asm_register_lookup(name)
+	if r != 0 {
+		operand.mode = .Value
+
+		// C++ Reference: src/check_asm.cpp:790-795 has an opmask special case here whose body
+		// is entirely commented out ("classify as a mask, not a 64-bit integer" / "see note if
+		// this type does not yet exist"). It is reproduced as a comment rather than as code
+		// because there is nothing to reproduce. Worth recording that its one live line,
+		// `asm_ctx->reg_class(r)`, passes the DENSE INDEX to a function that masks 0xFF00 off a
+		// register CODE -- reg_size(r) right below correctly writes reg_class(register_codes[r])
+		// -- so the value it computes is meaningless. No observable effect, since the block it
+		// guards is empty.
+
+		width_in_bits := u16(0)
+		code := asm_register_codes[r]
+		switch x86.reg_class(code) {
+		case x86.REG_GPR64:                 width_in_bits = 64
+		case x86.REG_GPR32:                 width_in_bits = 32
+		case x86.REG_GPR16:                 width_in_bits = 16
+		case x86.REG_GPR8, x86.REG_GPR8H:   width_in_bits = 8
+		case x86.REG_XMM:                   width_in_bits = 128
+		case x86.REG_YMM:                   width_in_bits = 256
+		case x86.REG_ZMM:                   width_in_bits = 512
+		case x86.REG_K:                     width_in_bits = 64
+		case x86.REG_MM:                    width_in_bits = 64
+		case x86.REG_ST:                    width_in_bits = 80
+		case x86.REG_SEG:                   width_in_bits = 16
+		case x86.REG_CR, x86.REG_DR:        width_in_bits = 64
+		case x86.REG_BND:                   width_in_bits = 128
+		}
+
+		switch width_in_bits {
+		case 8:
+			operand.type = t_u8
+		case 16:
+			operand.type = t_u16
+		case 32:
+			operand.type = t_u32
+		case 64:
+			operand.type = t_u64
+		case 80:
+			error(operand.expr, "80-bit width asm registers are not supported")
+			return false
+		case 128:
+			operand.type = alloc_type_simd_vector(4, t_f32)
+		case 256:
+			operand.type = alloc_type_simd_vector(8, t_f32)
+		case 512:
+			operand.type = alloc_type_simd_vector(16, t_f32)
+		case:
+			// See the DIVERGENCE note above: this is the reference's GB_PANIC arm, and %rip is
+			// the only input that reaches it.
+			error(operand.expr, "Asm registers with no defined width are not supported: %%%s", name)
+			return false
+		}
+
+		return true
+	}
+
+	// C++ Reference: src/check_asm.cpp:830-842
+	begin_error_block()
+	defer end_error_block()
+	error(asm_reg.name, "Unknown register for this target platform: %%%s", name)
+	{
+		suggestions: [dynamic]Distance_And_Target
+		defer delete(suggestions)
+		// The reference iterates its StringMap, i.e. in HASH order; the port walks the dense
+		// table in REGISTER order. Both feed the same unstable sort, so this can only differ
+		// between two candidates that tie on edit distance. Recorded rather than hidden.
+		for i in 1 ..< ASM_REG_COUNT {
+			asm_did_you_mean_append(&suggestions, name, asm_register_names[i])
+		}
+		check_did_you_mean_print(did_you_mean_results(&suggestions))
+	}
+	return false
+}
+
+// C++ Reference: src/check_asm.cpp:844-848
+Check_Mnemonic_Result :: enum {
+	Invalid,
+	Mnemonic,
+	Prefix,
+}
+
+// check_mnemonic_name resolves an instruction's leading identifier to a prefix or a mnemonic.
+//
+// C++ Reference: src/check_asm.cpp:850-884.
+//
+// NOTE the asymmetry in the failure path, which is not a slip: an instruction WITH operands
+// cannot be a prefix (prefixes take none), so its diagnostic says "mnemonic" and its suggestion
+// list omits the prefixes. Only the no-operand form says "mnemonic/prefix" and offers both.
+check_mnemonic_name :: proc(instr: ^ast.Asm_Instruction, mnemonic_: ^u16 = nil) -> Check_Mnemonic_Result {
+	init_asm_tables()
+	ident := instr.name.derived.(^ast.Ident)
+	name := ident.name
+
+	if p := asm_prefix_lookup(name); p != .Invalid {
+		if mnemonic_ != nil {
+			mnemonic_^ = u16(p)
+		}
+		return .Prefix
+	}
+	if m := asm_mnemonic_lookup(name); m != .INVALID {
+		if mnemonic_ != nil {
+			mnemonic_^ = u16(m)
+		}
+		return .Mnemonic
+	}
+
+	begin_error_block()
+	defer end_error_block()
+	if len(instr.operands) == 0 {
+		error(instr.name, "Unknown mnemonic/prefix for this target platform: %s", name)
+	} else {
+		error(instr.name, "Unknown mnemonic for this target platform: %s", name)
+	}
+
+	suggestions: [dynamic]Distance_And_Target
+	defer delete(suggestions)
+	{
+		// C++ Reference: src/check_asm.cpp:871-875 -- every mnemonic string EXCEPT M_INVALID.
+		for i in 1 ..< ASM_MNEMONIC_COUNT {
+			asm_did_you_mean_append(&suggestions, name, asm_mnemonic_string(x86.Mnemonic(i)))
+		}
+	}
+	if len(instr.operands) == 0 {
+		for p in Asm_Prefix {
+			if p == .Invalid {
+				continue
+			}
+			asm_did_you_mean_append(&suggestions, name, asm_prefix_string(p))
+		}
+	}
+	check_did_you_mean_print(did_you_mean_results(&suggestions))
+	return .Invalid
+}
+
+// check_asm_specs resolves the `[...]` specification list of an asm template: scratch operand
+// declarations, register pins, width-views, and input/output ties.
+//
+// C++ Reference: src/check_asm.cpp:491-757.
+//
+// The reference is `template <typename AsmCtx>` and threads an `asm_ctx` through purely to
+// reach check_register. The port targets amd64 only -- parse_asm_template rejects every other
+// target at src/parser.cpp:2782-2784, which the port reproduces -- so the ISA is resolved
+// statically by check_asm_tables.odin and the parameter is not needed.
+//
+// The shape is one loop over the specs with THREE mutually exclusive bodies, selected by which
+// of `tied_name` and `type` is present:
+//   * tied_name != nil            -> an input/output tie: `in -> out`.
+//   * tied_name == nil, type      -> a NEW scratch declaration: `s: u64`, `s: u8 = p0`.
+//   * tied_name == nil, no type   -> a pin on an EXISTING parameter: `p0 = %rax`.
+// `value` is parsed for all three before the split, because all three can carry `= %reg`.
+check_asm_specs :: proc(
+	ctx: ^Checker_Context,
+	scope: ^Scope,
+	specs: []^ast.Expr,
+	asm_template_entity_decls: ^[dynamic]ast.Asm_Template_Entity_Decl,
+) {
+	pin_set := make(map[string]bool, allocator = context.temp_allocator)
+	defer delete(pin_set)
+
+	pin_flag_set := make(map[string]bool, allocator = context.temp_allocator)
+	defer delete(pin_flag_set)
+
+	for spec_ in specs {
+		// C++ Reference: src/check_asm.cpp:500-505 -- the list also holds Asm_Clobber nodes,
+		// which are handled by check_asm_template, not here.
+		spec, is_spec := spec_.derived.(^ast.Asm_Spec)
+		if !is_spec {
+			continue
+		}
+
+		name_ident := spec.name.derived.(^ast.Ident)
+
+		input := scope_lookup_current(scope, name_ident.name)
+		other_scratch: ^Entity = nil
+
+		pin: string
+		pin_flag: string
+		pin_reg_class := ast.Asm_Reg_Class.Unknown
+		pin_reg_w: i32 = 0
+
+		if spec.value != nil {
+			if value_ident, is_ident := spec.value.derived.(^ast.Ident); is_ident {
+				other_scratch = scope_lookup_current(scope, value_ident.name)
+				if other_scratch != nil {
+					group := check_asm_find_group(other_scratch, asm_template_entity_decls[:])
+					// C++ writes `if (!group)`, i.e. the .Unknown member (value 0) is the
+					// falsy one -- "this name resolved, but it is not one of my operands".
+					if group == .Unknown {
+						error(spec.value, "This must be another parameter, got %s", other_scratch.token.text)
+					}
+				} else {
+					error(spec.value, "Undefined parameter declaration '%s'", value_ident.name)
+				}
+			} else {
+				reg, is_reg := spec.value.derived.(^ast.Asm_Register)
+				if !is_reg {
+					s := expr_to_string(spec.value)
+					error(spec.value, "Expected an asm register or scratch parameter, got %s", s)
+					continue
+				}
+
+				pin = reg.name.text
+				if len(pin) != 0 {
+					op := Operand{}
+					op.expr = spec.value
+					if check_register(&op, reg) {
+						if len(reg.flag.text) != 0 {
+							assert(pin == "flags")
+							pin_flag = reg.flag.text
+							if pin_flag in pin_flag_set {
+								error(spec.value, "Pinned register flag %%%s.%s has already been assigned", pin, pin_flag)
+							}
+							pin_flag_set[pin_flag] = true
+						}
+						// NOTE the ordering: `%flags` itself is exempt from the
+						// already-assigned test, because several specs may each pin a
+						// DIFFERENT flag bit of the one flags register.
+						already := pin in pin_set
+						pin_set[pin] = true
+						if already && pin != "flags" {
+							error(spec.value, "Pinned register %%%s has already been assigned", pin)
+						}
+						if len(reg.flag.text) == 0 {
+							pin_reg_class = check_asm_reg_class_from_type(op.type)
+							pin_reg_w     = check_asm_operand_bit_width(op.type)
+						}
+					}
+				}
+			}
+		}
+
+		if spec.tied_name == nil {
+			if spec.type != nil {
+				// ---- a NEW scratch operand declaration ----
+				// C++ Reference: src/check_asm.cpp:558-658
+				type := check_type(ctx, spec.type)
+				if !is_valid_asm_parameter_type(type) {
+					s := type_to_string(type)
+					error(spec.type, "Invalid type for an asm template. It must be an integer, float, boolean, pointer, multi-pointer, or #simd vector, got '%s'", s)
+					continue
+				}
+
+				name_token := tokenizer.Token{kind = .Ident, text = name_ident.name, pos = spec.name.pos}
+
+				entity := alloc_entity_param(scope, name_token, type, false, true)
+				entity.flags += {.Used}
+
+				found := scope_insert(scope, entity)
+				if found == nil {
+					ed := asm_template_entity_decl_default(entity)
+					ed.param_group = .Scratch
+					ed.total_index = i32(len(asm_template_entity_decls))
+					ed.pin         = pin
+					ed.pin_flag    = pin_flag
+					if len(pin) != 0 {
+						check_asm_pin_type_compat(pin_reg_class, pin_reg_w, type, spec.value, pin, name_ident.name)
+					}
+
+					if other_scratch != nil {
+						// Width-view of another operand: `p0b: u8 = p0`.
+						// p0b shares p0's register, viewed at p0b's declared width.
+						assert(spec.value != nil)
+
+						src_index: i32 = -1
+						src_group := check_asm_find_group(other_scratch, asm_template_entity_decls[:], &src_index)
+
+						// 1. The source must already exist and be a register-class operand
+						//    (you cannot take a width-view of an immediate or memory operand).
+						if src_index < 0 {
+							error(spec.value, "'%s' must refer to a previously declared parameter", other_scratch.token.text)
+						} else {
+							src := &asm_template_entity_decls[src_index]
+
+							src_is_reg := src_group == .Input || src_group == .Output || src_group == .Scratch
+							if src.kind == .Immediate || src.kind == .Memory {
+								src_is_reg = false
+							}
+							if !src_is_reg {
+								error(spec.value, "A width-view can only be taken of a register operand, not '%s'", other_scratch.token.text)
+							}
+
+							// 2. The view width must be a legal sub-register width and no wider
+							//    than the source (only narrowing views exist).
+							view_w := check_asm_operand_bit_width(type)                        // this decl's type (u8 -> 8)
+							src_w  := check_asm_operand_bit_width(entity_type(src.entity))
+							view_class := check_asm_reg_class_from_type(type)
+							src_class  := check_asm_reg_class_from_type(entity_type(src.entity))
+
+							if view_class != .Integer || src_class != .Integer {
+								error(spec.type, "Width-views are only supported for integer registers")
+							} else {
+								switch view_w {
+								case 8, 16, 32, 64:
+									if view_w > src_w {
+										error(spec.type, "A width-view (%d-bit) cannot be wider than its source '%s' (%d-bit)",
+										      int(view_w), other_scratch.token.text, int(src_w))
+									}
+								case:
+									error(spec.type, "A width-view must be an 8, 16, 32, or 64-bit integer type, got a %d-bit type", int(view_w))
+								}
+							}
+
+							// 3. A view does not carry its own pin; it inherits the source's register.
+							if len(pin) != 0 {
+								error(spec.value, "A width-view cannot also be pinned to a register; it inherits the source operand's register")
+							}
+
+							ed.kind      = .Register
+							ed.view_of   = src_index
+							ed.view_bits = view_w
+							// A view is not itself an input/output/scratch slot for allocation:
+							// mark it so the lowering passes skip it. Reuse the Scratch group but
+							// with view_of >= 0 as the discriminator (see lowering note).
+						}
+					}
+
+					append(asm_template_entity_decls, ed)
+				} else {
+					pos := found.token.pos
+					error(name_token,
+					      "Redeclaration of '%s' in this scope\n" +
+					      "\tat %s",
+					      name_token.text, token_pos_to_string(pos))
+					continue
+				}
+			} else if input == nil {
+				error(spec.name, "Undefined parameter declaration '%s'", name_ident.name)
+				continue
+			} else {
+				// ---- a pin on an EXISTING parameter ----
+				// C++ Reference: src/check_asm.cpp:663-684
+				index: i32 = -1
+				group := check_asm_find_group(input, asm_template_entity_decls[:], &index)
+				assert(index >= 0)
+				i := &asm_template_entity_decls[index]
+				if len(i.pin) == 0 {
+					i.pin = pin
+					i.pin_flag = pin_flag
+					if len(pin_flag) != 0 && group != .Output {
+						error(spec.value, "Input parameters cannot be pinned to a flag style register")
+					} else if len(pin) != 0 && len(pin_flag) == 0 {
+						check_asm_pin_type_compat(pin_reg_class, pin_reg_w, entity_type(input), spec.value, pin, input.token.text)
+					}
+				} else {
+					error(spec_, "Asm register has already been pinned")
+				}
+
+				if other_scratch != nil {
+					assert(spec.value != nil)
+					error(spec.value, "Another parameter must be assigned/paired with a scratch parameter declaration")
+				}
+			}
+		} else {
+			// ---- an input/output tie ----
+			// C++ Reference: src/check_asm.cpp:685-756
+			tied_ident := spec.tied_name.derived.(^ast.Ident)
+
+			if spec.type != nil {
+				error(spec.type, "Tied register definitions cannot have a defined type since the values are already defined")
+			}
+
+			if input == nil {
+				error(spec.name, "Undefined parameter declaration '%s'", name_ident.name)
+				continue
+			}
+			output := scope_lookup_current(scope, tied_ident.name)
+			if output == nil {
+				// NOTE, not a slip: the reference reports spec->name here, not the tied name,
+				// so an unresolvable OUTPUT is blamed on the input's identifier.
+				error(spec.name, "Undefined parameter declaration '%s'", name_ident.name)
+				continue
+			}
+
+			input_index:  i32 = -1
+			output_index: i32 = -1
+
+			input_group  := check_asm_find_group(input,  asm_template_entity_decls[:], &input_index)
+			output_group := check_asm_find_group(output, asm_template_entity_decls[:], &output_index)
+			if input_group != .Input {
+				error(input.token, "Parameter tied with '%s' must be an input parameter", output.token.text)
+				continue
+			}
+			if output_group != .Output {
+				error(output.token, "Parameter tied with '%s' must be an output parameter", input.token.text)
+				continue
+			}
+
+			assert(input_index >= 0)
+			assert(output_index >= 0)
+
+			i := &asm_template_entity_decls[input_index]
+			o := &asm_template_entity_decls[output_index]
+
+			i.tie = output_index
+			o.tie = input_index
+
+			i.pin = pin
+			o.pin = pin
+			if len(pin) != 0 {
+				check_asm_pin_type_compat(pin_reg_class, pin_reg_w, entity_type(input),  spec.value, pin, input.token.text)
+				check_asm_pin_type_compat(pin_reg_class, pin_reg_w, entity_type(output), spec.value, pin, output.token.text)
+			}
+			// Tied parameters share one physical register, so they must be the same register
+			// family (both integer, or both vector/float). Width may legitimately differ (a
+			// narrow read feeding a wide write), so width is intentionally NOT checked.
+			{
+				ic := check_asm_reg_class_from_type(entity_type(input))
+				oc := check_asm_reg_class_from_type(entity_type(output))
+				i_int := ic == .Integer
+				o_int := oc == .Integer
+				i_vec := ic == .Vector || ic == .Float
+				o_vec := oc == .Vector || oc == .Float
+				if (i_int && o_vec) || (i_vec && o_int) {
+					error(spec.name, "Tied parameters '%s' and '%s' share a register but are in different register classes",
+					      input.token.text, output.token.text)
+				}
+			}
+
+			if other_scratch != nil {
+				assert(spec.value != nil)
+				error(spec.value, "Another parameter must be assigned/paired with a scratch parameter declaration, not a tie")
+			}
+
+			if len(pin_flag) != 0 {
+				error(spec.value, "Input parameters, and thus tied parameters, cannot be pinned to a flag style register")
+			}
+		}
+	}
+}
+
+// C++ Reference: src/check_asm.cpp:58-86.
+//
+// Classifies a CHECKED operand by what it is, for matching against an encoding form's slot.
+// The `expr->tav.mode` test is the reference's, comment and all -- it reads the type-and-value
+// recorded on the node rather than operand->mode, which is why an Ident that resolved to a
+// constant is an immediate even though the operand itself was not marked constant.
+determine_asm_operand_kind :: proc(info: ^Checker_Info, operand: ^Operand) -> Asm_Operand_Kind {
+	if operand.mode == .Constant {
+		return .Immediate
+	}
+	expr := operand.expr
+	if expr == nil {
+		return .Invalid
+	}
+	#partial switch e in expr.derived {
+	case ^ast.Asm_Label_Decl:
+		return .Label
+	case ^ast.Asm_Register:
+		return .Register
+	case ^ast.Asm_Memory_Operand:
+		return .Memory
+	case ^ast.Ident:
+		// TODO(bill): Is this correct?
+		// C++ reads `expr->tav.mode` -- the type-and-value recorded ON THE NODE, not
+		// operand->mode. The port's ast.Node carries the same field (ast.odin:111).
+		if expr.tav.mode == .Constant {
+			return .Immediate
+		}
+		en := entity_of_node(info, expr)
+		if en != nil && en.kind == .Variable && .Poly_Const in en.flags {
+			return .Immediate
+		}
+		return .Register
+	}
+	return .Invalid
+}
+
+// C++ Reference: src/check_asm.cpp:149-156
+Asm_Mismatch :: enum u8 {
+	None,
+	Size,      // register / vector width mismatch
+	Class,     // register class mismatch
+	Imm_Range, // constant immediate does not fit the slot width
+	Imm_Type,  // non-integer constant where an integer immediate is required
+}
+
+// check_asm_immediate_value_fits asks whether a constant immediate fits a slot of `bits`
+// width (0 == unconstrained). It accepts either a signed or an unsigned reading of the bit
+// pattern, which matches how the assembler treats imm fields -- both 200 and -56 fit imm8.
+//
+// C++ Reference: src/check_asm.cpp:160-216.
+//
+// `needed_` is what the diagnostic prints, and it is NOT simply the magnitude width: for a
+// negative value the reference reports the SIGNED width, mp_count_bits(-v-1) + 1.
+check_asm_immediate_value_fits :: proc(ev: Exact_Value, bits: i32, needed_: ^i32 = nil, mismatch_: ^Asm_Mismatch = nil) -> bool {
+	ev := ev
+	bits := bits
+	if _, is_float := ev.(f64); is_float {
+		// Try to convert it if possible to an integer
+		ev = exact_value_to_integer(ev)
+	}
+
+	switch v in ev {
+	case bool:
+		// Encodes as 0 or 1; fits any immediate slot with a non-zero width.
+		if needed_ != nil {
+			needed_^ = 1
+		}
+		return true
+
+	case big.Int:
+		bi := v
+		mag_bits_int, _ := big.count_bits(&bi)
+		mag_bits := i32(mag_bits_int)
+		if needed_ != nil {
+			needed_^ = mag_bits
+		}
+
+		if bits == 0 {
+			// TODO(bill): is this a decent width?!
+			bits = 64 // slot does not pin a width, just set a decent default
+		}
+		if is_zero, _ := big.is_zero(&bi); is_zero {
+			return true
+		}
+		if neg, _ := big.is_neg(&bi); !neg {
+			// Non-negative: fits if the unsigned bit pattern is <= `bits` wide.
+			if mag_bits <= bits {
+				return true
+			}
+		} else {
+			// Negative: fits signed in `bits` iff count_bits(-v - 1) <= bits-1.
+			// (-v-1 ranges 0 .. 2^(bits-1)-1 for the representable negatives.)
+			tmp := &big.Int{}
+			defer big.destroy(tmp)
+			big.neg(tmp, &bi)         // tmp = -v  (positive magnitude)
+			big.sub(tmp, tmp, 1)      // tmp = -v - 1
+			nb_int, _ := big.count_bits(tmp)
+			nb := i32(nb_int)
+			if needed_ != nil {
+				needed_^ = nb + 1 // signed bit-width, for the diagnostic
+			}
+			if nb <= bits - 1 {
+				return true
+			}
+		}
+		if mismatch_ != nil {
+			mismatch_^ = .Imm_Range
+		}
+		return false
+
+	case f64:
+		// TODO(bill): does any architecture support floating-point immediates?
+		// amd64 has no floating-point instruction immediates.
+		if needed_ != nil {
+			needed_^ = 0
+		}
+		if mismatch_ != nil {
+			mismatch_^ = .Imm_Type
+		}
+		return false
+
+	case complex128, string, quaternion256, Exact_Value_Pointer, Exact_Value_Compound,
+	     Exact_Value_Procedure, Exact_Value_Typeid, Exact_Value_String16:
+		// falls through to the shared tail below
+
+	case:
+		// nil -- likewise
+	}
+	if mismatch_ != nil {
+		mismatch_^ = .Imm_Type
+	}
+	return false
+}
+
+// C++ Reference: src/check_asm.cpp:334-340
+Asm_Addr_Role :: enum {
+	Base,
+	Index,
+}
+
+// check_asm_addr_register validates the base or index register of a memory operand.
+//
+// C++ Reference: src/check_asm.cpp:342-372.
+//
+// `width_` is written BEFORE any of the rejections, so the caller's base/index width
+// comparison still has both numbers even when one side was rejected.
+check_asm_addr_register :: proc(operand: ^Operand, role: Asm_Addr_Role, reg_name: string, width_: ^i32 = nil) -> bool {
+	role_name := "base" if role == .Base else "index"
+
+	cls := check_asm_reg_class_from_type(operand.type)
+	w   := check_asm_operand_bit_width(operand.type)
+	if width_ != nil {
+		width_^ = w
+	}
+
+	if cls != .Integer {
+		got := "non-integer"
+		if cls == .Vector {
+			got = "vector"
+		} else if cls == .Mask {
+			got = "mask"
+		}
+		error(operand.expr, "A memory operand's %s must be an integer register, got a %s value", role_name, got)
+		return false
+	}
+	if w != 32 && w != 64 {
+		error(operand.expr, "A memory operand's %s must be a 32-bit or 64-bit register, got a %d-bit register", role_name, int(w))
+		return false
+	}
+	if role == .Index && len(reg_name) != 0 {
+		// rsp/esp cannot be encoded as an index register.
+		if reg_name == "rsp" || reg_name == "esp" {
+			error(operand.expr, "%%%s cannot be used as an index register", reg_name)
+			return false
+		}
+	}
+	return true
+}

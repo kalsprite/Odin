@@ -53,6 +53,11 @@ Entity_Kind :: enum {
 	Package_Name,
 	Import_Name,
 	Library_Name,
+	// C++ Reference: src/entity.cpp:19 ENTITY_KIND(AsmTemplate). PUBLIC API (#868), but
+	// ADDITIVE -- a new variant appended after the existing ones, so no existing ordinal
+	// moves. Note the two kind sets are not identical in either direction: this port also
+	// carries Package_Name, which the reference has no counterpart for.
+	Asm_Template,
 }
 
 // Scope_Flag controls scope behavior
@@ -98,6 +103,12 @@ Type_Kind :: enum {
 // Type_Flag defines type-level flags
 Type_Flag :: enum {
 	In_Process_Of_Checking_Polymorphic,
+	// C++ Reference: src/types.cpp -- `bool failure` on Type, set by
+	// type_path_print_illegal_cycle and read at the head of type_size_of_internal /
+	// type_align_of_internal so that a type already known to be part of an illegal cycle
+	// answers 0 instead of recursing into it a second time. Modelled as a flag rather than
+	// as a new field because Type is public API (#868) and the bit_set already exists.
+	Failure,
 }
 
 Type_Flags :: bit_set[Type_Flag]
@@ -612,6 +623,87 @@ Entity_Procedure :: struct {
 
 Entity_Proc_Group :: struct {
 	procs: [dynamic]^Entity,
+	// C++ Reference: src/entity.cpp:319. An `asm { ... }` group reuses the ProcGroup entity
+	// and distinguishes itself with this flag (src/checker.cpp:5070-5071), rather than
+	// having an entity kind of its own.
+	is_asm_group: bool,
+}
+
+// C++ Reference: src/entity.cpp:561-566 alloc_entity_asm_template. The node is the
+// ^Asm_Template the entity was declared from.
+// C++ Reference: src/asm_tables.cpp:1-8 -- `enum AsmRegClass : u8`.
+//
+// This lives in the PUBLIC ast package (#868) rather than in the checker because
+// Asm_Template_Entity_Decl.reg_class needs it and that struct is reachable from
+// Entity_Asm_Template.decls. The reference makes the same split: AsmRegClass is declared in
+// asm_tables.cpp but consumed by entity.cpp:186 and by the LLVM backend
+// (src/llvm_backend_asm.cpp:163). Its two string tables are diagnostic-only and stay in the
+// checker.
+Asm_Reg_Class :: enum u8 {
+	Unknown,
+	Integer,
+	Float,
+	Vector,
+	Mask,
+}
+
+// C++ Reference: src/entity.cpp:163-170
+Asm_Template_Entity_Decl_Kind :: enum u8 {
+	Invalid,
+	Register,
+	Memory,
+	Immediate,
+}
+
+// C++ Reference: src/entity.cpp:172-179
+Asm_Template_Entity_Decl_Param_Group :: enum u8 {
+	Unknown,
+	Input,
+	Output,
+	Scratch,
+}
+
+// C++ Reference: src/entity.cpp:181-199 -- one resolved operand declaration of an asm
+// template: which entity it names, how it must be materialised, and where it sits in the
+// template's signature.
+Asm_Template_Entity_Decl :: struct {
+	entity:      ^Entity,
+	tied_entity: ^Entity,
+	kind:        Asm_Template_Entity_Decl_Kind,
+	param_group: Asm_Template_Entity_Decl_Param_Group,
+	reg_class:   Asm_Reg_Class,
+
+	pin:      string,
+	pin_flag: string, // e.g. %flags.zf
+
+	total_index: i32,
+
+	param_index:  i32, // index into the Proc signature's params (inputs), else -1
+	result_index: i32, // index into results (outputs), else -1
+	tie:          i32, // InOut: index into operands[] of the tied output; else -1
+
+	view_of:   i32, // total_index of the source operand this is a width-view of, else -1
+	view_bits: i32, // the view width in bits, otherwise 0
+}
+
+// C++ Reference: src/entity.cpp:344-357 -- Entity.AsmTemplate.
+//
+// clobber_registers_set is a StringSet there; a map[string]bool is the port's usual stand-in
+// for one (membership is the only operation used).
+Entity_Asm_Template :: struct {
+	node:           ^Node,
+	is_volatile:    bool,
+	is_align_stack: bool,
+
+	has_observable_side_effect: bool,
+
+	clobber_flags:         bool,
+	clobber_memory:        bool,
+	clobber_registers_set: map[string]bool,
+
+	param_scope: ^Scope,
+	label_scope: ^Scope,
+	decls:       [dynamic]Asm_Template_Entity_Decl,
 }
 
 // Builtin_Proc_Id will be populated with all builtins
@@ -1029,6 +1121,7 @@ Entity_Variant :: union {
 	Entity_Package_Name,
 	Entity_Import_Name,
 	Entity_Library_Name,
+	Entity_Asm_Template,
 }
 
 // ============================================================================

@@ -1318,6 +1318,20 @@ ast_token_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
 		return tokenizer.Pos{}
 	}
 	#partial switch n in node.derived {
+	// C++ Reference: src/parser_pos.cpp:9-32 -- the nine `case Ast_Asm*` arms of ast_token.
+	// Without these the port fell through to node.pos, which for most asm nodes happens to
+	// agree; it is spelled out anyway so that the pair with ast_end_pos below is complete and
+	// so a future parser change to node.pos cannot silently move a diagnostic.
+	case ^ast.Asm_Group:          return n.tok.pos
+	case ^ast.Asm_Template:       return n.tok.pos
+	case ^ast.Asm_Register:       return n.tok.pos
+	case ^ast.Asm_Spec:           return ast_token_pos(n.name)
+	case ^ast.Asm_Clobber:        return n.tok.pos
+	case ^ast.Asm_Label_Decl:     return n.tok.pos
+	case ^ast.Asm_Instruction:    return ast_token_pos(n.name)
+	case ^ast.Asm_Memory_Operand: return n.open.pos
+	case ^ast.Asm_Directive:      return n.tok.pos
+
 	case ^ast.Assign_Stmt:
 		return n.op.pos
 	case ^ast.Deref_Expr:
@@ -1424,6 +1438,51 @@ ast_end_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
 		return tokenizer.Pos{}
 	}
 	#partial switch n in node.derived {
+	// C++ Reference: src/parser_pos.cpp:168-212 -- the nine `case Ast_Asm*` arms of
+	// ast_end_token. These are NOT cosmetic. The port had none of them, so an asm node fell
+	// through to node.end, which the parser sets past the instruction's TERMINATOR.
+	//
+	// MEASURED: `f :: asm() { lock; }` -- the reference underlines `lock` (4 columns) and the
+	// port underlined `lock;` (5). Witness cells b_prefix_bad, b_prefix_end, b_prefix_label,
+	// all three with identical text, identical position and identical exit status, differing
+	// only in the width of the caret. The reference's arm stops at the last OPERAND, or at the
+	// mnemonic when there are none, which is exactly what makes the two disagree.
+	case ^ast.Asm_Group:          return token_end_pos(n.close)
+	case ^ast.Asm_Template:       return token_end_pos(n.end_token)
+	case ^ast.Asm_Register:       return token_end_pos(n.name)
+	case ^ast.Asm_Spec:
+		if n.value != nil {
+			return ast_end_pos(n.value)
+		}
+		if n.type != nil {
+			return ast_end_pos(n.type)
+		}
+		if n.tied_name != nil {
+			return ast_end_pos(n.tied_name)
+		}
+		return ast_end_pos(n.name)
+	case ^ast.Asm_Clobber:
+		if n.value != nil {
+			return ast_end_pos(n.value)
+		}
+		return token_end_pos(n.name)
+	case ^ast.Asm_Label_Decl:     return ast_end_pos(n.name)
+	case ^ast.Asm_Instruction:
+		if len(n.operands) > 0 {
+			return ast_end_pos(n.operands[len(n.operands)-1])
+		}
+		return ast_end_pos(n.name)
+	case ^ast.Asm_Directive:
+		if len(n.operands) > 0 {
+			return ast_end_pos(n.operands[len(n.operands)-1])
+		}
+		return token_end_pos(n.name)
+	case ^ast.Asm_Memory_Operand:
+		if n.type != nil {
+			return ast_end_pos(n.type)
+		}
+		return token_end_pos(n.close)
+
 	// --- leaves: the parser's own end is already token_pos_end of the node's single token.
 	case ^ast.Ident:            return node.end
 	case ^ast.Implicit:         return token_end_pos(n.tok)
@@ -1600,7 +1659,27 @@ ast_end_pos :: proc(node: ^ast.Node) -> tokenizer.Pos {
 		if len(n.list) > 0 {
 			return ast_end_pos(n.list[len(n.list) - 1])
 		}
-		return pos_advance_columns(n.open, 1) // C++ FieldList.token
+		// C++ Reference: src/parser_pos.cpp:369-373 -- ast_end_token's FieldList arm returns
+		// `node->FieldList.token` for an empty list, and ast_token (parser_pos.cpp:114-115)
+		// returns the SAME token. So pos and end describe one token and `token_pos_end` puts
+		// end one column past it, which is what makes the renderer draw a single `^`.
+		//
+		// LEDGER #1252. This arm read `n.open`, and `ast.Field_List.open` is DECLARED AND NEVER
+		// WRITTEN by core/odin/parser -- so it was the zero Pos on every node, `end` came out at
+		// line 0 column 1, and error.odin's squiggle computation (which matches C++'s exactly,
+		// error.cpp:452-481) fell through BOTH branches and emitted zero carets. Measured on
+		// `S :: struct() { a: int }`:
+		//     oracle  Expected at least 1 polymorphic parameter  +  caret line "\t            ^"
+		//     port    the same diagnostic, and a caret line containing no caret
+		// The renderer was never wrong; it was handed an end that preceded its own start.
+		//
+		// NOT `n.open` EVEN ONCE IT IS POPULATED. C++'s FieldList.token is the token the list
+		// STARTED at, which for an empty list is the FOLLOW token -- `)`, `}` or `]` -- not the
+		// opening delimiter. For `struct()` that is the `)` at column 13, and the port already
+		// stores exactly that as the node's own pos (parser.odin:3781 builds the node with
+		// start_tok.pos). Using `open` would name the `(` one column earlier and collapse the
+		// span again. The sibling ^ast.Attribute arm above shows the same fallback shape.
+		return pos_advance_columns(node.pos, 1) // C++ FieldList.token
 
 	case ^ast.Typeid_Type:
 		if n.specialization != nil {
@@ -1711,6 +1790,21 @@ error_line :: proc(format: string, args: ..any) {
 syntax_error :: proc {
 	syntax_error_token,
 	syntax_error_pos,
+	syntax_error_node,
+}
+
+// C++ Reference: src/parser.cpp:517-527 -- `void syntax_error(Ast *node, ...)`, the exact
+// mirror of error_node above: it takes ast_token(node).pos AND ast_end_pos(node), so the
+// caret spans the node rather than collapsing to a single `^`. Added for ast_node_expect
+// (src/parser.cpp:666), whose diagnostic is raised from semantic analysis in check_asm.
+syntax_error_node :: proc(node: ^ast.Node, format: string, args: ..any) {
+	pos: tokenizer.Pos
+	end: tokenizer.Pos
+	if node != nil {
+		pos = ast_token_pos(node)
+		end = ast_end_pos(node)
+	}
+	syntax_error_va(pos, end, format, ..args)
 }
 
 syntax_error_token :: proc(token: tokenizer.Token, format: string, args: ..any) {

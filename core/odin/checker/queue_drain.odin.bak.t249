@@ -1,0 +1,1112 @@
+package checker
+
+/*
+Queue drain functions for transferring entities from MPSC queues to final arrays.
+
+These functions are called after the entity collection phase to move queued
+entities into their final storage locations where they can be processed sequentially.
+
+C++ Reference: The C++ implementation drains queues at various points during checking.
+While C++ may drain inline, we provide explicit drain functions for clarity.
+
+WORKER COORDINATION ARCHITECTURE
+=================================
+
+The C++ checker uses a sophisticated work-stealing thread pool for parallel processing:
+
+1. Thread Pool Structure (thread_pool.cpp:27-34, threading.cpp:61-76):
+   - ThreadPool contains array of Thread structs (one per worker + main thread)
+   - Each Thread has a work-stealing deque (TaskQueue) for local tasks
+   - Global futexes for task availability signaling and completion tracking
+   - Main thread (index 0) participates in work execution
+
+2. Work Stealing Protocol (thread_pool.cpp:101-152):
+   - Workers take tasks from bottom of their own deque (LIFO, cache-friendly)
+   - Idle workers steal from top of other workers' deques (FIFO, breadth-first)
+   - Chase-Lev deque algorithm for lock-free concurrent access
+   - CAS operations prevent race conditions during stealing
+
+3. Task Submission (thread_pool.cpp:154-161):
+   - thread_pool_add_task(proc, data) pushes to current thread's deque
+   - Increments global tasks_left counter
+   - Broadcasts on tasks_available futex to wake sleeping workers
+   - Returns immediately (non-blocking)
+
+4. Barrier Synchronization (thread_pool.cpp:163-184):
+   - thread_pool_wait() blocks until all tasks complete
+   - Main thread helps process tasks while waiting (work participation)
+   - Uses futex_wait on tasks_left for efficient sleep/wake
+   - Critical memory ordering ensures wake happens if tasks added during check
+
+5. Worker Thread Lifecycle (thread_pool.cpp:186-248):
+   - Worker loop: take local tasks → steal remote tasks → sleep
+   - Futex-based sleep when no work available (CPU-efficient)
+   - Broadcast wake when new work arrives or pool shuts down
+   - Graceful shutdown via running flag
+
+6. Queue Draining Integration (checker.cpp:7076-7083):
+   - Drain SOA types inline (complete_soa_type is thread-safe)
+   - Drain entity/definition queues to arrays (lock-free MPSC queues)
+   - thread_pool_wait() ensures all worker tasks complete
+   - Critical for consistency: arrays fully populated before next phase
+
+SYNCHRONIZATION POINTS IN CHECKER
+==================================
+
+The C++ checker calls thread_pool_wait() at these critical junctures:
+
+1. After dependency graph generation (checker.cpp:2999)
+   - Ensures all dependency edges discovered before graph processing
+
+2. After entity collection (checker.cpp:5774, 5814)
+   - Waits for all file/package workers to finish entity discovery
+   - Ensures entity queues complete before draining
+
+3. After procedure body checking (checker.cpp:6315, 6477)
+   - Waits for all procedure validation workers
+   - Ensures deferred checking completes
+
+4. After queue merging (checker.cpp:7082, 7210, 7241, 7403, 7429)
+   - Multiple drain-and-wait cycles throughout checking pipeline
+   - Guarantees arrays synchronized before dependent phases
+
+5. After final validation (checker.cpp:7443)
+   - Final barrier before checker completes
+
+THREAD POOL API (To Be Implemented)
+====================================
+
+The following functions define the thread pool interface. These match the C++
+implementation's signatures and semantics. Implementation will be added in a
+separate thread_pool.odin module.
+
+Thread Pool Management:
+- thread_pool_init(worker_count: int) -> ^Thread_Pool
+- thread_pool_destroy(pool: ^Thread_Pool)
+
+Task Submission:
+- thread_pool_add_task(proc: Worker_Task_Proc, data: rawptr) -> bool
+  C++ Reference: thread_pool.cpp:154-161
+  Submits task to current thread's work queue
+  Returns: true if task added successfully
+
+Synchronization:
+- thread_pool_wait()
+  C++ Reference: thread_pool.cpp:163-184
+  Blocks until all submitted tasks complete
+  Main thread participates in work processing while waiting
+  Uses futex for efficient blocking
+
+Thread Identification:
+- current_thread_index() -> int
+  C++ Reference: thread_pool.cpp:36-38
+  Returns: 0 for main thread, 1..N for workers
+  Used for accessing per-thread data arrays
+
+ARCHITECTURAL NOTE: Declaration Dependency Processing
+================================================================
+
+The C++ implementation does NOT use a dedicated "decl_info_queue" for declaration processing.
+Instead, it uses a dependency graph approach:
+
+1. EntityGraphNode (checker.hpp:313-320) tracks declaration dependencies:
+   - Each entity gets a graph node with pred/succ sets and a dep_count
+   - DeclInfo.deps map (checker.hpp:236) stores entity dependencies
+   - generate_entity_dependency_graph() builds the full dependency graph
+
+2. Dependency-ordered processing (checker.cpp:3018+):
+   - Builds dependency graph from all DeclInfo.deps
+   - Uses topological sort to find processing order
+   - Processes declarations when dep_count reaches zero
+   - NO queue is used - it's a graph traversal algorithm
+
+3. Our Odin implementation:
+   - Entity_Graph_Node (checker.odin:680-687) matches C++ EntityGraphNode
+   - Decl_Info.deps (checker.odin:303) tracks entity dependencies
+   - Processing will use graph-based ordering, not queue-based
+
+The 14 MPSC queues in our system are for:
+  1. definition_queue           (entities to define)
+  2. entity_queue               (entities to check)
+  3. required_global_variable_queue
+  4. required_foreign_imports_through_force_queue
+  5. foreign_imports_to_check_fullpaths
+  6. foreign_decls_to_check
+  7. raddbg_type_views_queue
+  8. intrinsics_entry_point_usage
+  9. objc_class_implementations
+  10. all_procedures_queue
+  11. procs_with_deferred_to_check
+  12. procs_with_objc_context_provider_to_check
+  13. global_untyped_queue
+  14. soa_types_to_complete
+
+None of these are for declaration dependency ordering - that's handled by
+the dependency graph algorithm, not by queuing.
+*/
+
+import "base:intrinsics"
+import "core:container/queue"
+import "core:mem"
+import "core:sync"
+import "core:thread"
+
+// =============================================================================
+// CHASE-LEV WORK-STEALING DEQUE
+// =============================================================================
+//
+// C++ Reference: thread_pool.cpp:49-152
+//
+// The Chase-Lev deque is a lock-free data structure that allows:
+// - The owner thread to push/pop from the bottom (LIFO for cache locality)
+// - Other threads to steal from the top (FIFO for load balancing)
+//
+// Key invariants:
+// - bottom always >= top
+// - size = bottom - top
+// - Empty when bottom == top
+// - Single item when bottom == top + 1
+
+// Task represents a unit of work for the thread pool
+// C++ Reference: thread_pool.cpp:43-47 (Task struct)
+Task :: struct {
+	do_work: Worker_Task_Proc,
+	data:    rawptr,
+}
+
+// Task_Ring_Buffer is a growable circular buffer for tasks
+// C++ Reference: thread_pool.cpp:49-59 (TaskRingBuffer)
+Task_Ring_Buffer :: struct {
+	capacity: int,
+	mask:     int, // capacity - 1, for efficient modulo
+	buffer:   []Task,
+}
+
+// Create a new ring buffer with the given capacity (must be power of 2)
+task_ring_buffer_create :: proc(capacity: int, allocator := context.allocator) -> ^Task_Ring_Buffer {
+	ring := new(Task_Ring_Buffer, allocator)
+	ring.capacity = capacity
+	ring.mask = capacity - 1
+	ring.buffer = make([]Task, capacity, allocator)
+	return ring
+}
+
+// Grow the ring buffer, copying existing tasks
+// C++ Reference: thread_pool.cpp:61-76 (grow_ring_buffer)
+task_ring_buffer_grow :: proc(old: ^Task_Ring_Buffer, bottom, top: int, allocator := context.allocator) -> ^Task_Ring_Buffer {
+	new_capacity := old.capacity * 2
+	new_ring := task_ring_buffer_create(new_capacity, allocator)
+
+	// Copy existing tasks to new buffer
+	for i := top; i < bottom; i += 1 {
+		new_ring.buffer[i & new_ring.mask] = old.buffer[i & old.mask]
+	}
+
+	return new_ring
+}
+
+// Task_Deque is a Chase-Lev work-stealing deque
+// C++ Reference: thread_pool.cpp:78-131
+Task_Deque :: struct {
+	top:    int,               // Steal end (other threads read/CAS)
+	bottom: int,               // Owner end (only owner writes)
+	ring:   ^Task_Ring_Buffer, // Circular buffer of tasks
+}
+
+// Deque grab result
+Grab_Result :: enum {
+	Success,    // Got a task
+	Empty,      // Queue is empty
+	Failed,     // CAS failed (another stealer won)
+}
+
+// Initialize a task deque
+task_deque_init :: proc(deque: ^Task_Deque, initial_capacity := 1024, allocator := context.allocator) {
+	deque.top = 0
+	deque.bottom = 0
+	deque.ring = task_ring_buffer_create(initial_capacity, allocator)
+}
+
+// Push a task onto the bottom of the deque (owner only)
+// C++ Reference: thread_pool.cpp:78-99
+task_deque_push :: proc(deque: ^Task_Deque, task: Task, allocator := context.allocator) {
+	bot := sync.atomic_load_explicit(&deque.bottom, .Relaxed)
+	top := sync.atomic_load_explicit(&deque.top, .Acquire)
+	ring := sync.atomic_load_explicit(&deque.ring, .Relaxed)
+
+	size := bot - top
+	if size > ring.capacity - 1 {
+		// Need to grow the ring buffer
+		ring = task_ring_buffer_grow(ring, bot, top, allocator)
+		// Store with Release to ensure new buffer contents visible to stealers
+		sync.atomic_store_explicit(&deque.ring, ring, .Release)
+	}
+
+	// Store task to buffer slot
+	// Use atomic stores for individual fields to help TSAN understand synchronization
+	slot := &ring.buffer[bot & ring.mask]
+	sync.atomic_store_explicit(cast(^rawptr)&slot.do_work, cast(rawptr)task.do_work, .Relaxed)
+	sync.atomic_store_explicit(&slot.data, task.data, .Relaxed)
+	// Use Release store to ensure task write is visible before bottom increment is seen by stealers
+	sync.atomic_store_explicit(&deque.bottom, bot + 1, .Release)
+}
+
+// Take a task from the bottom of the deque (owner only, LIFO)
+// C++ Reference: thread_pool.cpp:101-131
+task_deque_take :: proc(deque: ^Task_Deque) -> (task: Task, result: Grab_Result) {
+	bot := sync.atomic_load_explicit(&deque.bottom, .Relaxed) - 1
+	ring := sync.atomic_load_explicit(&deque.ring, .Acquire)
+	sync.atomic_store_explicit(&deque.bottom, bot, .Relaxed)
+	sync.atomic_thread_fence(.Seq_Cst) // Synchronize with stealers
+	top := sync.atomic_load_explicit(&deque.top, .Relaxed)
+
+	if top <= bot {
+		// Non-empty queue
+		// Use atomic loads for individual fields to match atomic stores in push and help TSAN
+		slot := &ring.buffer[bot & ring.mask]
+		task.do_work = cast(Worker_Task_Proc)sync.atomic_load_explicit(cast(^rawptr)&slot.do_work, .Relaxed)
+		task.data = sync.atomic_load_explicit(&slot.data, .Relaxed)
+		if top == bot {
+			// Last item - race with stealers
+			_, ok := sync.atomic_compare_exchange_strong_explicit(
+				&deque.top, top, top + 1, .Seq_Cst, .Relaxed)
+			if !ok {
+				// Stealer won
+				sync.atomic_store_explicit(&deque.bottom, bot + 1, .Relaxed)
+				return {}, .Empty
+			}
+
+			// C++ Reference: thread_pool.cpp:132 - `thread->queue.bottom.store(bot + 1, relaxed);`
+			//
+			// The last element has just been claimed by bumping `top` to bot+1, so the deque is
+			// now empty and `bottom` MUST be restored to bot+1 as well - on the CAS-success path
+			// exactly as on the CAS-failure path above. Leaving `bottom` at `bot` leaves the
+			// deque at size -1 (bottom == top-1), which is not a state Chase-Lev can recover
+			// from: the next push writes its task at index `bot` and sets bottom = bot+1 == top,
+			// so both `take` (top <= bot is false) and `steal` (top < bottom is false) report the
+			// deque empty and that task is lost forever - while `tasks_left` was already
+			// incremented for it. Enough of those and `thread_pool_wait` blocks on a counter no
+			// running task will ever decrement, with every worker asleep on `tasks_available`:
+			// a permanent deadlock of the whole checker.
+			sync.atomic_store_explicit(&deque.bottom, bot + 1, .Relaxed)
+		}
+		return task, .Success
+	} else {
+		// Empty queue
+		sync.atomic_store_explicit(&deque.bottom, bot + 1, .Relaxed)
+		return {}, .Empty
+	}
+}
+
+// Steal a task from the top of the deque (other threads, FIFO)
+// C++ Reference: thread_pool.cpp:133-152
+task_deque_steal :: proc(deque: ^Task_Deque) -> (task: Task, result: Grab_Result) {
+	top := sync.atomic_load_explicit(&deque.top, .Acquire)
+	sync.atomic_thread_fence(.Seq_Cst) // Synchronize with owner
+	bot := sync.atomic_load_explicit(&deque.bottom, .Acquire)
+
+	if top < bot {
+		// Non-empty queue
+		// C++ uses memory_order_consume here, but Acquire is safer and portable
+		ring := sync.atomic_load_explicit(&deque.ring, .Acquire)
+		// Use atomic loads for individual fields to match atomic stores in push and help TSAN
+		slot := &ring.buffer[top & ring.mask]
+		task.do_work = cast(Worker_Task_Proc)sync.atomic_load_explicit(cast(^rawptr)&slot.do_work, .Relaxed)
+		task.data = sync.atomic_load_explicit(&slot.data, .Relaxed)
+		_, ok := sync.atomic_compare_exchange_strong_explicit(
+			&deque.top, top, top + 1, .Seq_Cst, .Relaxed)
+		if !ok {
+			// Another stealer won
+			return {}, .Failed
+		}
+		return task, .Success
+	}
+	return {}, .Empty
+}
+
+// =============================================================================
+// THREAD POOL
+// =============================================================================
+
+// Worker_Task_Proc is the signature for worker task functions
+// C++ Reference: threading.cpp:41-42 (WORKER_TASK_PROC macro)
+Worker_Task_Proc :: #type proc(data: rawptr) -> int
+
+// Futex values for task availability signaling
+NOBODY_WAITING  :: 0
+SOMEONE_WAITING :: 1
+
+// Thread_Data holds per-thread state
+// C++ Reference: thread_pool.cpp:27-34 (Thread struct)
+Thread_Data :: struct {
+	deque:        Task_Deque,    // Work-stealing deque for this thread
+	thread:       ^thread.Thread, // Thread handle (nil for main thread)
+	thread_index: int,           // Index in thread array (0 = main)
+}
+
+// Thread_Pool represents the global work-stealing thread pool
+// C++ Reference: thread_pool.cpp:27-34, main.cpp:15
+Thread_Pool :: struct {
+	threads:         []Thread_Data,   // Thread data array (index 0 = main thread)
+	thread_count:    int,             // Total thread count (workers + 1)
+
+	// Synchronization
+	running:         bool,            // False to signal shutdown
+	tasks_left:      sync.Futex,      // Number of pending tasks (atomic, also used as futex for completion)
+	tasks_available: sync.Futex,      // Signaled when work is available (workers sleep on this)
+
+	allocator:       mem.Allocator,   // Allocator for pool resources
+}
+
+// Thread-local storage for current thread index
+// C++ Reference: thread_pool.cpp:36-38
+@(thread_local)
+tls_thread_index: int
+
+// Global thread pool instance (to be initialized at checker startup)
+// C++ Reference: main.cpp:15 (gb_global ThreadPool global_thread_pool)
+global_thread_pool: ^Thread_Pool = nil
+
+// current_thread_index returns the current thread's index
+// C++ Reference: thread_pool.cpp:36-38
+//
+// Returns: 0 for main thread, 1..N for worker threads
+// Used to index into per-thread data arrays
+current_thread_index :: proc() -> int {
+	return tls_thread_index
+}
+
+// thread_pool_init initializes the global thread pool with specified worker count
+// C++ Reference: thread_pool.cpp:40-55, main.cpp:16-20
+//
+// Creates worker_count threads plus main thread (total = worker_count + 1)
+// Each thread gets its own work-stealing deque. It does NOT get an arena: this line used to say
+// "and arena allocators", which was true of NEITHER side -- Thread_Data holds a deque, a thread
+// handle and an index and nothing else, and `arena` appears nowhere in src/thread_pool.cpp
+// either. An invented capability in a comment is worse than silence, because it reads as a
+// design decision someone else already verified.
+// Sets up futexes for task availability and completion signaling
+thread_pool_init :: proc(worker_count: int, allocator := context.allocator) -> ^Thread_Pool {
+	pool := new(Thread_Pool, allocator)
+	pool.allocator = allocator
+	pool.thread_count = worker_count + 1 // Workers + main thread
+	pool.threads = make([]Thread_Data, pool.thread_count, allocator)
+	pool.running = true
+	pool.tasks_left = sync.Futex(0)
+	pool.tasks_available = sync.Futex(NOBODY_WAITING)
+
+	// Initialize main thread (index 0)
+	pool.threads[0].thread_index = 0
+	pool.threads[0].thread = nil
+	task_deque_init(&pool.threads[0].deque, 1024, allocator)
+	tls_thread_index = 0
+
+	// Create and start worker threads
+	for i := 1; i < pool.thread_count; i += 1 {
+		pool.threads[i].thread_index = i
+		task_deque_init(&pool.threads[i].deque, 1024, allocator)
+
+		// Create worker thread
+		t := thread.create(worker_thread_proc)
+		t.data = pool
+		t.user_index = i
+		pool.threads[i].thread = t
+		thread.start(t)
+	}
+
+	return pool
+}
+
+// worker_thread_proc is the main loop for worker threads
+// C++ Reference: thread_pool.cpp:186-248
+worker_thread_proc :: proc(t: ^thread.Thread) {
+	pool := cast(^Thread_Pool)t.data
+	thread_idx := t.user_index
+
+	// Set thread-local index
+	tls_thread_index = thread_idx
+
+	my_deque := &pool.threads[thread_idx].deque
+
+	// C++ Reference: thread_pool.cpp:199-259. The C++ loop body ends with a
+	// `main_loop_continue:` label placed AFTER the sleep, and the steal switch jumps to it
+	// with `goto main_loop_continue`. `main_loop` here is that label: `continue main_loop`
+	// re-tests `running` and re-enters the body at the top, skipping the sleep, which is
+	// exactly what the goto does. See the steal switch below for why that matters.
+	main_loop: for intrinsics.atomic_load(&pool.running) {
+		finished := 0
+
+		// Process own queue (LIFO for cache locality)
+		for {
+			task, result := task_deque_take(my_deque)
+			if result != .Success do break
+
+			task.do_work(task.data)
+			sync.atomic_sub_explicit(&pool.tasks_left, 1, .Release)
+			finished += 1
+		}
+
+		// Signal main thread if we finished work and no tasks remain
+		// C++ Reference: thread_pool.cpp:206-208 - signal tasks_left futex
+		if finished > 0 && sync.atomic_load_explicit(&pool.tasks_left, .Acquire) == 0 {
+			sync.futex_signal(&pool.tasks_left)
+		}
+
+		// Try stealing from other threads
+		if sync.atomic_load_explicit(&pool.tasks_left, .Acquire) > 0 {
+			steal_loop: for victim_offset := 1; victim_offset < pool.thread_count; victim_offset += 1 {
+				if sync.atomic_load_explicit(&pool.tasks_left, .Acquire) == 0 do break
+
+				victim := (thread_idx + victim_offset) % pool.thread_count
+				victim_deque := &pool.threads[victim].deque
+
+				task, result := task_deque_steal(victim_deque)
+
+				// C++ Reference: thread_pool.cpp -- the three-way switch on GrabState:
+				//     case Grab_Empty:   continue;                 // try the next victim
+				//     case Grab_Success: ...work...; /*fallthrough*/
+				//     case Grab_Failed:  goto main_loop_continue;  // restart the OUTER loop
+				//
+				// The port previously did `continue steal_loop` after a Success and treated
+				// Failed like Empty, so a worker kept scanning victims and then fell straight
+				// into the sleep below WITHOUT re-draining its own deque. A stolen task's
+				// do_work can PUSH new tasks onto the stealing worker's own deque (the checker
+				// submits nested tasks), so that worker could park on `tasks_available` while
+				// still holding work.
+				//
+				// That is a permanent deadlock, not a slowdown: the stranded tasks keep
+				// `tasks_left` above zero, and the ONLY futex_signal(&tasks_left) in the pool
+				// is guarded by `tasks_left == 0`, so it can never fire again. Meanwhile
+				// thread_pool_wait is already blocked inside futex_wait(&tasks_left, N) -- a
+				// futex compares its expected value only at ENTRY, so later changes to
+				// tasks_left do not wake it. Workers only wake on `tasks_available`, which only
+				// thread_pool_add_task broadcasts, and nothing is adding tasks.
+				//
+				// MEASURED (LEDGER #299), gdb on a caught hang of core/sys/darwin/Foundation:
+				//   tasks_left = 37 (0x25, so NOT a u32 underflow)
+				//   deque[12]: top=1842 bottom=1879 size=37   <-- the only non-empty deque
+				//   total queued across all deques = 37 == tasks_left
+				//   all 31 workers in worker_thread_proc -> futex_wait, main in
+				//   thread_pool_wait -> futex_wait
+				// i.e. every outstanding task was sitting in one sleeping worker's own deque.
+				switch result {
+				case .Success:
+					task.do_work(task.data)
+					sync.atomic_sub_explicit(&pool.tasks_left, 1, .Release)
+
+					if sync.atomic_load_explicit(&pool.tasks_left, .Acquire) == 0 {
+						sync.futex_signal(&pool.tasks_left)
+					}
+					continue main_loop
+				case .Failed:
+					continue main_loop
+				case .Empty:
+					continue steal_loop
+				}
+			}
+		}
+
+		// No work available - sleep until woken
+		//
+		// SEQ_CST, NOT RELEASE. This store and the `running` load below it are the two halves of a
+		// DEKKER pair against thread_pool_destroy (:530 stores running=false, :566 stores
+		// NOBODY_WAITING). C++ thread_pool.cpp:254 spells it `tasks_available.store(Someone_Waiting)`
+		// with no order argument, i.e. seq_cst, and :255's bare `!pool->running` is likewise seq_cst.
+		// A RELEASE store does not order Store->Load: on x86 it is a plain mov, and so is a seq_cst
+		// load, so the CPU may let this store retire AFTER the running load. That reopens the very
+		// lost wakeup the store of NOBODY_WAITING at :566 was added to close:
+		//
+		//	worker: store SOMEONE_WAITING           <- buffered, not yet visible
+		//	worker: load running -> true
+		//	main:   store running = false (:530)
+		//	main:   store NOBODY_WAITING + broadcast (:566-567)
+		//	worker: the buffered SOMEONE_WAITING lands, re-dirtying the word
+		//	worker: futex_wait(&tasks_available, SOMEONE_WAITING) -> the compare SUCCEEDS, sleeps
+		//	main:   thread.join blocks forever
+		//
+		// The seq_cst store puts a StoreLoad barrier between the two, so a worker that observes
+		// running==true has already published SOMEONE_WAITING, and main's later NOBODY_WAITING store
+		// is guaranteed to overwrite it rather than be overwritten by it.
+		sync.atomic_store_explicit(&pool.tasks_available, sync.Futex(SOMEONE_WAITING), .Seq_Cst)
+		if !intrinsics.atomic_load(&pool.running) {
+			// DELIBERATE DIVERGENCE FROM C++ -- the reference has a lost-wakeup deadlock here and
+			// this is the fix. C++ thread_pool.cpp:253-256 breaks out WITHOUT clearing the word,
+			// so an exiting worker strands `tasks_available` at SOMEONE_WAITING behind itself;
+			// a different worker already past its own `running` check then sleeps on that dirty
+			// word after thread_pool_destroy has committed to a blocking join and will never
+			// broadcast again. Reproduced in the reference at ~0.1% of concurrent runs, with
+			// backtraces: main in thread_join_and_destroy, every worker in
+			// futex_wait(&tasks_available, val=1), zero checker frames. Filed upstream as
+			// COMPILER_ISSUES/UPSTREAM-UNFILED-thread-pool-destroy-deadlocks-when-an-exiting-
+			// worker-republishes-Someone_Waiting.md. Kept as a divergence under Jon's ruling that a
+			// reference quirk is the contract EXCEPT when it is a crash -- a silent permanent hang
+			// after correct output is worse than a crash.
+			//
+			// THE CLEAR AND THE BROADCAST MUST STAY TOGETHER AND IN THIS ORDER. The broadcast is
+			// the load-bearing half, NOT the store. It looks removable -- "nobody can be waiting,
+			// we only just cleared the word" -- and removing it puts the deadlock straight back,
+			// because the whole point is the worker that is ALREADY asleep on the value this store
+			// just overwrote. futex_wait compares against the word at the moment it sleeps; a
+			// sleeper that got there first is invisible to this thread and only the broadcast
+			// reaches it.
+			//
+			// The invariant this restores: once `running` is false, no worker can reach the wait
+			// and stay there. A worker reading running==false clears and broadcasts; a worker
+			// reading running==true did so before the destroyer cleared it, so the destroyer's own
+			// store and broadcast are still to come. There is therefore no state in which the word
+			// is SOMEONE_WAITING, a worker is asleep on it, and nobody is left to broadcast.
+			intrinsics.atomic_store(&pool.tasks_available, sync.Futex(NOBODY_WAITING))
+			sync.futex_broadcast(&pool.tasks_available)
+			break
+		}
+		sync.futex_wait(&pool.tasks_available, SOMEONE_WAITING)
+	}
+}
+
+// task_deque_destroy frees the ring buffer associated with a deque
+task_deque_destroy :: proc(deque: ^Task_Deque, allocator := context.allocator) {
+	if deque.ring != nil {
+		delete(deque.ring.buffer, allocator)
+		free(deque.ring, allocator)
+		deque.ring = nil
+	}
+}
+
+// thread_pool_destroy shuts down thread pool and joins all worker threads
+// C++ Reference: thread_pool.cpp:57-68, main.cpp:3779
+//
+// Sets running flag to false, broadcasts to wake sleeping workers
+// Joins each worker thread and frees resources
+thread_pool_destroy :: proc(pool: ^Thread_Pool) {
+	if pool == nil do return
+
+	// Signal shutdown
+	intrinsics.atomic_store(&pool.running, false)
+
+	// Port-only, KEPT DELIBERATELY: C++ does not touch tasks_left here. A spurious broadcast on it
+	// can only cause a re-check in thread_pool_wait, never a sleep, so it cannot deadlock; and by
+	// the time destroy runs, main is the caller and nobody is inside thread_pool_wait anyway.
+	sync.futex_broadcast(&pool.tasks_left)
+
+	// SHUTDOWN LOST-WAKEUP. C++ thread_pool.cpp:70-76:
+	//
+	//	for_array_off(i, 1, pool->threads) {
+	//	        Thread *t = &pool->threads[i];
+	//	        pool->tasks_available.store(Nobody_Waiting);   // <-- THE STATEMENT THE PORT LACKED
+	//	        futex_broadcast(&t->pool->tasks_available);
+	//	        thread_join_and_destroy(t);
+	//	}
+	//
+	// The port hoisted the broadcast OUT of this loop, did it once, and never stored
+	// Nobody_Waiting at all. That is a real deadlock, not a theoretical one, because the worker
+	// sets the futex word ITSELF on the way to sleep (worker_thread_proc:506) and nothing else
+	// ever clears it:
+	//
+	//	worker: store SOMEONE_WAITING (:506)
+	//	worker: load running -> still true (:507)          <- window opens
+	//	main:   store running = false (:530)
+	//	main:   futex_broadcast(&tasks_available) (:533)    <- NO-OP, no one is asleep yet
+	//	worker: futex_wait(&tasks_available, SOMEONE_WAITING) (:508)
+	//	        the word still reads SOMEONE_WAITING, so the value-compare SUCCEEDS and the
+	//	        worker sleeps -- after the only broadcast has already been delivered.
+	//	main:   thread.join(worker) blocks forever.
+	//
+	// WHAT THIS STORE DOES AND DOES NOT CLOSE -- read this before trusting it. An earlier version
+	// of this comment claimed "storing Nobody_Waiting first is what closes it". THAT WAS WRONG, and
+	// wrong in the way that stops the next reader looking: it names the wrong mechanism.
+	// Storing NOBODY_WAITING here closes exactly one window -- the SINGLE-worker one, where the
+	// stranded worker's futex_wait finds the word already cleared and returns immediately. The
+	// seq_cst note at the sleep site closes a second, different window: one worker's own store
+	// being reordered past that same worker's own `running` load. Both arguments are per-thread by
+	// construction. NEITHER says anything about a THIRD party, and the actual deadlock is a third
+	// party: a second worker that publishes SOMEONE_WAITING on its way out, after this store, while
+	// the loop below is already blocked in a join and will never broadcast again.
+	// What closes THAT is in worker_thread_proc: an exiting worker clears the word and broadcasts
+	// before it breaks. This store and broadcast are kept because they match C++ and are harmless,
+	// not because they are the fix.
+	for i := 1; i < pool.thread_count; i += 1 {
+		intrinsics.atomic_store(&pool.tasks_available, sync.Futex(NOBODY_WAITING))
+		sync.futex_broadcast(&pool.tasks_available)
+		if pool.threads[i].thread != nil {
+			thread.join(pool.threads[i].thread)
+			thread.destroy(pool.threads[i].thread)
+		}
+	}
+
+	// Destroy task deques (free ring buffers)
+	for i := 0; i < pool.thread_count; i += 1 {
+		task_deque_destroy(&pool.threads[i].deque, pool.allocator)
+	}
+
+	// Free resources
+	delete(pool.threads, pool.allocator)
+	free(pool, pool.allocator)
+}
+
+// thread_pool_add_task submits a task to the thread pool for execution
+// C++ Reference: thread_pool.cpp:154-161, main.cpp thread_pool_add_task
+//
+// Pushes task to current thread's work deque (bottom, LIFO)
+// Increments global tasks_left counter
+// Broadcasts to wake idle workers if any are waiting
+//
+// Returns: true if task was added successfully
+thread_pool_add_task :: proc(task_proc: Worker_Task_Proc, data: rawptr) -> bool {
+	pool := global_thread_pool
+	if pool == nil do return false
+
+	// Get current thread's deque
+	thread_idx := current_thread_index()
+	my_deque := &pool.threads[thread_idx].deque
+
+	// Push task to deque
+	task := Task{do_work = task_proc, data = data}
+	task_deque_push(my_deque, task, pool.allocator)
+
+	// Increment task counter
+	sync.atomic_add_explicit(&pool.tasks_left, 1, .Release)
+
+	// Wake sleeping workers if any
+	//
+	// FAILURE ORDER IS SEQ_CST, NOT RELAXED. C++ thread_pool.cpp:107 spells this
+	// `compare_exchange_strong(state, Nobody_Waiting)` with NO order arguments, which is seq_cst on
+	// BOTH paths. That is the opposite of the deque CASes at :271 and :316, where C++ :126/:158
+	// pass `memory_order_relaxed` for failure EXPLICITLY -- so the port matching relaxed there and
+	// seq_cst here is the reference's own distinction, not an inconsistency. An RMW always reads the
+	// latest value in the modification order, so this cannot change WHICH branch is taken; what it
+	// changes is that on the no-broadcast path the reference orders the surrounding accesses and the
+	// port did not.
+	_, swapped := sync.atomic_compare_exchange_strong_explicit(
+		&pool.tasks_available,
+		sync.Futex(SOMEONE_WAITING),
+		sync.Futex(NOBODY_WAITING),
+		.Seq_Cst, .Seq_Cst)
+	if swapped {
+		sync.futex_broadcast(&pool.tasks_available)
+	}
+
+	return true
+}
+
+// thread_pool_wait blocks until all submitted tasks complete
+// C++ Reference: thread_pool.cpp:163-184, main.cpp thread_pool_wait
+//
+// The waiter drains its OWN deque and then sleeps. It does NOT steal -- C++ has no steal
+// pass here, and the port used to (LEDGER #300). That extra pass was masking LEDGER #299:
+// with #299 present a worker could park holding queued work, and main's stealing could
+// still drain it -- unless main had already committed to futex_wait, which is exactly the
+// window the deadlock needed. #299 is now fixed at its source in worker_thread_proc, so
+// there is nothing left for the steal pass to hide and it is removed as a divergence.
+//
+// C++ Reference: thread_pool.cpp:176-197 --
+//     while (pool->tasks_left.load(acquire)) {
+//         while (!thread_pool_queue_take(current_thread, &task)) {
+//             task.do_work(task.data);
+//             pool->tasks_left.fetch_sub(1, release);
+//         }
+//         Footex rem_tasks = pool->tasks_left.load(acquire);
+//         if (rem_tasks == 0) { return; }
+//         futex_wait(&pool->tasks_left, rem_tasks);
+//     }
+//
+// The load/check/wait ORDER is load-bearing and C++ says so in a comment at the site
+// ("This *must* be executed in this order, so the futex wakes immediately if rem_tasks has
+// changed since we checked last, otherwise the program will permanently sleep"): futex_wait
+// compares its expected value at entry, so passing the JUST-LOADED rem_tasks is what makes
+// a concurrent completion return immediately instead of sleeping forever.
+thread_pool_wait :: proc() {
+	pool := global_thread_pool
+	if pool == nil do return
+
+	thread_idx := current_thread_index()
+	my_deque := &pool.threads[thread_idx].deque
+
+	// C++ tests tasks_left as the LOOP CONDITION, so a wait with nothing outstanding
+	// returns without touching the deque at all.
+	for sync.atomic_load_explicit(&pool.tasks_left, .Acquire) != 0 {
+		// Process own queue
+		for {
+			task, result := task_deque_take(my_deque)
+			if result != .Success do break
+
+			task.do_work(task.data)
+			sync.atomic_sub_explicit(&pool.tasks_left, 1, .Release)
+		}
+
+		rem_tasks := sync.atomic_load_explicit(&pool.tasks_left, .Acquire)
+		if rem_tasks == 0 do return
+
+		sync.futex_wait(&pool.tasks_left, u32(rem_tasks))
+	}
+}
+
+
+
+
+
+
+
+
+
+
+// check_intrinsics_entry_point_usage drains intrinsics_entry_point_usage and reports every
+// `intrinsics.__entry_point()` call in a program that has no entry point to run.
+//
+// C++ Reference: checker.cpp:7900-7909
+//
+// This is the normal-path consumer of that queue; without it the queue would still be
+// non-empty when mpsc_destroy asserts on it.
+check_intrinsics_entry_point_usage :: proc(c: ^Checker) {
+	for {
+		node, ok := queue.mpsc_dequeue(&c.info.intrinsics_entry_point_usage)
+		if !ok {
+			break
+		}
+		if c.info.entry_point != nil || node == nil {
+			continue
+		}
+		file := get_file_from_node(&c.info, node)
+		if file != nil && file.pkg != nil && file.pkg.kind == .Runtime {
+			continue
+		}
+		error_node(node, "usage of intrinsics.__entry_point will be a no-op")
+	}
+}
+
+
+
+
+
+
+// drain_and_complete_soa_types processes SOA types immediately during drain
+// C++ Reference: checker.cpp:7077-7079, 4985-4987 - SOA types are completed inline
+// This matches C++ semantics where complete_soa_type is called during dequeue
+// Should be used in check_merge_queues_into_arrays equivalent
+drain_and_complete_soa_types :: proc(c: ^Checker) {
+	// C++ Reference: checker.cpp:7077-7079
+	// for (Type *t = nullptr; queue.mpsc_dequeue(&c->soa_types_to_complete, &t); /**/) {
+	//     complete_soa_type(c, t, false);
+	// }
+
+	for {
+		soa_type, ok := queue.mpsc_dequeue(&c.soa_types_to_complete)
+		if !ok do break
+
+		complete_soa_type(c, soa_type, false)
+	}
+}
+
+
+// discard_abandoned_queue_work empties the queues whose consuming phase was skipped because
+// check_files unwound early on the error cap.
+//
+// This is NOT a substitute for the real drains. Every queue below has a phase that owns it on
+// the normal path (check_foreign_import_fullpaths, check_deferred_procedures, ...), and those
+// phases stay responsible for it. But an unwind returns *between* phases by design - the whole
+// point is to stop doing work once the diagnostics are being thrown away - so whatever the
+// abandoned phases would have consumed is still sitting in their queues, and
+// destroy_checker_info / destroy_checker require every queue to be empty.
+//
+// Dropping the entries is the correct disposal here, not a leak: these queues carry borrowed
+// handles (^Entity, ^Type, ^ast.Node, Untyped_Expr_Info), all of which are owned by the
+// checker's allocator and torn down with it. Unlike the five queues that
+// check_merge_queues_into_arrays moves into Checker_Info arrays, nothing takes ownership of
+// these on the normal path either - the consuming phase reads the entry, acts on it, and lets
+// it go. The only thing lost by discarding is the work itself, which is exactly what unwinding
+// already decided to skip.
+//
+// Call this ONLY on the abort path. On a run that reaches the bottom of check_files these
+// queues must be empty on their own, and the assertions in mpsc_destroy are what proves it.
+discard_abandoned_queue_work :: proc(c: ^Checker) {
+	discard_all :: proc(q: ^queue.MPSC_Queue($T)) {
+		for {
+			if _, ok := queue.mpsc_dequeue(q); !ok {
+				break
+			}
+		}
+	}
+
+	// Consumed on the normal path by the minimum dependency set generation.
+	// C++ Reference: checker.cpp:2980
+	discard_all(&c.info.required_global_variable_queue)
+
+	// Consumed on the normal path by check_foreign_import_fullpaths (Phase 5).
+	// C++ Reference: checker.cpp:5722, 5791
+	discard_all(&c.info.foreign_imports_to_check_fullpaths)
+	discard_all(&c.info.foreign_decls_to_check)
+
+	// Consumed on the normal path by the late validation phases.
+	// C++ Reference: checker.cpp:7903 (intrinsics.__entry_point usage)
+	discard_all(&c.info.intrinsics_entry_point_usage)
+	// C++ Reference: llvm_backend.cpp:1571 - the backend, not the checker, consumes these,
+	// which is why C++ leaves this queue alive at teardown (checker.cpp:1678 is commented
+	// out). We destroy it, so it has to be emptied here.
+	discard_all(&c.info.objc_class_implementations)
+
+	// Consumed on the normal path by Phase 6 post-processing.
+	// C++ Reference: checker.cpp:6869, 7335
+	discard_all(&c.procs_with_deferred_to_check)
+	discard_all(&c.procs_with_objc_context_provider_to_check)
+
+	// Consumed on the normal path when untyped expression values are finalised.
+	// C++ Reference: checker.cpp:7835
+	discard_all(&c.global_untyped_queue)
+
+	// Consumed on the normal path by check_merge_queues_into_arrays (completed inline).
+	// C++ Reference: checker.cpp:7445-7447
+	discard_all(&c.soa_types_to_complete)
+
+	// Consumed on the normal path by the body-checking phase.
+	//
+	// This one was MISSING, and it is the queue that actually strands work: with the error
+	// cap fixed so that limit_reached can latch at all, a package of 40 undeclared names
+	// unwound with 298 items still in it and tripped
+	// "MPSC queue must be empty before destroy". Every other queue in this helper was
+	// already at zero -- measured by printing all ten counts immediately before the
+	// mpsc_destroy block:
+	//
+	//     QDBG definition=0 entity=0 req_glob=0 req_foreign=0 fi_paths=0
+	//          fd_check=0 raddbg=0 entry=0 objc=0 allprocs=298
+	//
+	// LEDGER #381.
+	discard_all(&c.info.all_procedures_queue)
+}
+
+// verify_queues_empty checks that all primary queues are empty after draining
+// C++ Reference: checker.cpp:7444-7445 - assertions that queues are empty
+//
+// This should be called after final draining to ensure no work was missed.
+// Helps catch bugs in queue draining or entity processing logic.
+//
+// The C++ checker only verifies entity_queue and definition_queue because:
+// - These are the primary work queues that MUST be empty after final drain
+// - Other queues (procedures, SOA types) are drained to local arrays in specific
+//   phases and may legitimately have items during intermediate phases
+// - Only entity_queue and definition_queue have the invariant: "must be empty
+//   after final check_merge_queues_into_arrays call"
+verify_queues_empty :: proc(c: ^Checker) {
+	// C++ Reference: checker.cpp:7444-7445
+	// GB_ASSERT(c->info.entity_queue.count.load(std::memory_order_relaxed) == 0);
+	// GB_ASSERT(c->info.definition_queue.count.load(std::memory_order_relaxed) == 0);
+
+	assert(queue.mpsc_is_empty(&c.info.entity_queue), "entity_queue should be empty after final drain")
+	assert(queue.mpsc_is_empty(&c.info.definition_queue), "definition_queue should be empty after final drain")
+
+	// NOTE: C++ does NOT check all_procedures_queue or soa_types_to_complete
+	// These queues are drained to local arrays in specific functions (drain_procedures_queue,
+	// drain_and_complete_soa_types) but may legitimately have items during intermediate phases.
+	// Only entity_queue and definition_queue must be empty after final drain.
+}
+
+// =============================================================================
+// WORKER COORDINATION PROTOCOL DOCUMENTATION
+// =============================================================================
+
+/*
+DETAILED WORKER COORDINATION PROTOCOL (From C++ Implementation)
+================================================================
+
+The C++ checker uses a Chase-Lev work-stealing deque algorithm for lock-free
+parallel task execution. Understanding this protocol is critical for correct
+threading implementation.
+
+1. DEQUE STRUCTURE (thread_pool.cpp:49-59)
+
+   Each thread has a TaskQueue with:
+   - top: atomic<isize>     // Steal end (other threads read/write)
+   - bottom: atomic<isize>  // Owner end (only owner writes)
+   - ring: TaskRingBuffer*  // Circular buffer of tasks
+
+   Invariants:
+   - bottom always >= top
+   - size = bottom - top
+   - Empty when bottom == top
+   - Single item when bottom == top + 1
+
+2. PUSH OPERATION (thread_pool.cpp:78-99)
+
+   Owner thread pushes to bottom (LIFO for cache locality):
+
+   ```cpp
+   bot = queue.bottom.load(relaxed)
+   top = queue.top.load(acquire)      // Check for full
+   if (bot - top > ring.size - 1) {
+       ring = grow_ring(ring, bot, top)  // Allocate larger buffer
+   }
+   ring.buffer[bot % ring.size] = task
+   fence(release)                      // Ensure task visible
+   queue.bottom.store(bot + 1, relaxed)
+
+   tasks_left.fetch_add(1, release)
+   if (tasks_available.CAS(Someone_Waiting, Nobody_Waiting)) {
+       futex_broadcast(tasks_available)  // Wake sleeping workers
+   }
+   ```
+
+   Key points:
+   - Only owner writes to bottom (no atomics needed)
+   - Release fence ensures task write happens before bottom increment
+   - Broadcast only if workers are waiting (CAS optimization)
+
+3. TAKE OPERATION (thread_pool.cpp:101-131)
+
+   Owner thread takes from bottom (LIFO, cache-friendly):
+
+   ```cpp
+   bot = queue.bottom.load(relaxed) - 1
+   queue.bottom.store(bot, relaxed)
+   fence(seq_cst)                      // Synchronize with stealers
+   top = queue.top.load(relaxed)
+
+   if (top <= bot) {
+       task = ring.buffer[bot % ring.size]
+       if (top == bot) {
+           // Last item - race with stealers
+           if (!queue.top.CAS(top, top+1, seq_cst)) {
+               queue.bottom.store(bot + 1, relaxed)
+               return Grab_Empty  // Stealer won
+           }
+       }
+       return Grab_Success
+   } else {
+       // Empty queue
+       queue.bottom.store(bot + 1, relaxed)
+       return Grab_Empty
+   }
+   ```
+
+   Key points:
+   - Decrement bottom first, then check for race
+   - seq_cst fence prevents reordering with stealer's top increment
+   - CAS on last item prevents double-take with stealer
+
+4. STEAL OPERATION (thread_pool.cpp:133-152)
+
+   Other threads steal from top (FIFO, breadth-first):
+
+   ```cpp
+   top = queue.top.load(acquire)
+   fence(seq_cst)                      // Synchronize with owner
+   bot = queue.bottom.load(acquire)
+
+   if (top < bot) {
+       ring = queue.ring.load(consume)
+       task = ring.buffer[top % ring.size]
+       if (!queue.top.CAS(top, top+1, seq_cst)) {
+           return Grab_Failed  // Another stealer won
+       }
+       return Grab_Success
+   }
+   return Grab_Empty
+   ```
+
+   Key points:
+   - Read top before bottom (prevents missing work)
+   - seq_cst fence synchronizes with owner's take
+   - CAS prevents multiple stealers from taking same task
+
+5. WAIT OPERATION (thread_pool.cpp:163-184)
+
+   Main thread waits for completion while helping:
+
+   ```cpp
+   while (tasks_left.load(acquire)) {
+       // Help process own work
+       while (queue_take(current_thread, &task) == Grab_Success) {
+           task.do_work(task.data)
+           tasks_left.fetch_sub(1, release)
+       }
+
+       // Check again with memory barrier
+       rem_tasks = tasks_left.load(acquire)
+       if (rem_tasks == 0) return
+
+       // Sleep until woken or tasks_left changes
+       futex_wait(&tasks_left, rem_tasks)
+   }
+   ```
+
+   Key points:
+   - Main thread participates (not just waiting)
+   - Acquire load ensures all worker writes visible
+   - futex_wait has implicit CAS (only sleeps if value matches)
+
+6. WORKER LOOP (thread_pool.cpp:186-248)
+
+   Worker threads continuously process work:
+
+   ```cpp
+   while (running.load(seq_cst)) {
+       finished = 0
+
+       // Process own queue
+       while (queue_take(self, &task) == Grab_Success) {
+           task.do_work(task.data)
+           tasks_left.fetch_sub(1, release)
+           finished++
+       }
+
+       if (finished > 0 && tasks_left.load(acquire) == 0) {
+           futex_signal(&tasks_left)  // Wake main thread
+       }
+
+       // Try stealing from others
+       if (tasks_left.load(acquire) > 0) {
+           for each thread {
+               if (tasks_left == 0) break
+               if (queue_steal(thread, &task) == Grab_Success) {
+                   task.do_work(task.data)
+                   tasks_left.fetch_sub(1, release)
+                   if (tasks_left == 0) futex_signal(&tasks_left)
+                   goto main_loop_continue
+               }
+           }
+       }
+
+       // No work available - sleep
+       tasks_available.store(Someone_Waiting)
+       if (!running) break
+       futex_wait(&tasks_available, Someone_Waiting)
+
+   main_loop_continue:
+   }
+   ```
+
+   Key points:
+   - LIFO from own queue (cache locality)
+   - FIFO from other queues (breadth-first stealing)
+   - Signal main thread when tasks complete
+   - Round-robin stealing starting from self+1
+
+7. MEMORY ORDERING RATIONALE
+
+   - relaxed: Single-threaded operations (owner writes to bottom)
+   - acquire/release: Synchronize task visibility between threads
+   - seq_cst: Prevent races in CAS operations
+   - fence: Ensure visibility without full barriers on hot path
+
+   Critical pairs:
+   - Push release fence + Steal acquire load (task visibility)
+   - Take seq_cst fence + Steal seq_cst fence (last-item race)
+   - tasks_left release dec + Wait acquire load (completion detection)
+
+8. FUTEX USAGE
+
+   - tasks_available: Binary semaphore for "work is available"
+     * Set to Someone_Waiting when worker sleeps
+     * Broadcast to Nobody_Waiting when work added
+     * Workers wake up and check for work
+
+   - tasks_left: Counter with signaling
+     * Incremented when task added
+     * Decremented when task completes
+     * futex_wait blocks until value changes
+     * futex_signal wakes one waiter (main thread)
+
+This protocol provides:
+- Lock-free task submission (no contention on push)
+- LIFO execution for cache locality (owner takes from bottom)
+- FIFO stealing for load balancing (stealers take from top)
+- Minimal synchronization overhead
+- Scalable to many threads
+*/

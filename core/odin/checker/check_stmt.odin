@@ -217,10 +217,15 @@ check_scope_decls :: proc(ctx: ^Checker_Context, stmts: []^ast.Stmt) {
 		if entity == nil {
 			continue
 		}
-		// Only check constants, type names, and procedures
+		// Only check constants, type names, procedures and asm templates
 		// Variables are checked when their statements are processed
+		//
+		// C++ Reference: src/check_expr.cpp:369-377 -- the filter is
+		// `Entity_Constant, Entity_TypeName, Entity_Procedure, Entity_AsmTemplate`.
+		// `.Asm_Template` added by #1242: a PROCEDURE-LOCAL `a :: asm() { ... }` was never
+		// eagerly resolved here, so it stayed Unresolved until something named it.
 		#partial switch entity.kind {
-		case .Constant, .Type_Name, .Procedure:
+		case .Constant, .Type_Name, .Procedure, .Asm_Template:
 			decl := decl_info_of_entity(entity)
 			if decl != nil {
 				check_entity_decl(ctx, entity, decl, nil)
@@ -1414,14 +1419,37 @@ check_assign_stmt :: proc(ctx: ^Checker_Context, node: ^ast.Stmt) {
 	} else {
 		// Compound assignment: a += 1, a *= 2, etc.
 
+		// C++ Reference: src/check_stmt.cpp:2573-2576 -- `error(op, ...)`, the TOKEN overload.
+		// #1243: the port used error_node(node), which spans the whole assignment statement, so
+		// `a, b += 1, 2` drew `^~~~~~^` where the reference draws a single `^` under the
+		// operator. Same column, same text, different caret. Found by the whole-file message
+		// audit, not by the corpus -- no corpus cell had a multi-valued compound assignment.
 		if len(stmt.lhs) != 1 || len(stmt.rhs) != 1 {
-			error_node(node, "Assignment operator '%s' requires single-valued operands", stmt.op.text)
+			error(stmt.op, "Assignment operator '%s' requires single-valued operands", stmt.op.text)
 			return
 		}
 
 		// Validate operator is a compound assignment operator
-		if stmt.op.kind == .Eq {
-			error_node(node, "Internal error: compound assignment with = operator")
+		//
+		// C++ Reference: src/check_stmt.cpp:2577-2580 --
+		//     if (!gb_is_between(op.kind, Token__AssignOpBegin+1, Token__AssignOpEnd-1)) {
+		//         error(op, "Unknown assignment operator '%.*s'", LIT(op.string));
+		//         return;
+		//     }
+		// #1243: the port tested `stmt.op.kind == .Eq` and reported an INVENTED message,
+		// "Internal error: compound assignment with = operator". Two divergences in one line.
+		// The reference's predicate is a RANGE test over the whole assign-op block, which is
+		// strictly wider: it rejects every token that is not one of the fourteen compound
+		// operators, where the port rejected only `=`. The two enums list the same fourteen
+		// members between their sentinels (src/tokenizer.cpp:40-55 vs
+		// core/odin/tokenizer/token.odin:72-87), and `Eq` is outside the block in BOTH, so the
+		// range test subsumes the old `.Eq` test rather than replacing it.
+		//
+		// This arm is AST-integrity, not user-facing: the `=` case is taken by the multi-valued
+		// branch above, and the parser emits no other token here. Ported for faithfulness, and
+		// because the port's version would have said something the reference never says.
+		if !(.B_Assign_Op_Begin < stmt.op.kind && stmt.op.kind < .B_Assign_Op_End) {
+			error(stmt.op, "Unknown assignment operator '%s'", stmt.op.text)
 			return
 		}
 

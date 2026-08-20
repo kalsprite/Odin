@@ -28,6 +28,11 @@ Proc_Tailing :: enum u32 {
 
 Proc_Calling_Convention_Extra :: enum i32 {
 	Foreign_Block_Default,
+	// C++ Reference: src/parser.cpp:2640 -- parse_asm_signature sets ProcCC_InlineAsm
+	// directly on the Proc_Type it builds. Like Foreign_Block_Default it has no source
+	// spelling, so it cannot travel through the `string` variant of this union;
+	// string_to_calling_convention has no entry for it, in this port or in the reference.
+	Inline_Asm,
 }
 Proc_Calling_Convention :: union {
 	string,
@@ -480,6 +485,132 @@ Inline_Asm_Expr :: struct {
 	constraints_string: ^Expr,
 	asm_string:         ^Expr,
 	close:              tokenizer.Pos,
+}
+
+
+// ----------------------------------------------------------------------------
+// Structured inline assembly
+// ----------------------------------------------------------------------------
+//
+// C++ Reference: src/parser.hpp:454-528 -- nine AST_KINDs. Upstream REPLACED the old
+// string-pair form (`asm(T) -> U { "insn", "constraints" }`, which is what Inline_Asm_Expr
+// above models) with a real assembly grammar, and DELETED Ast_InlineAsmExpr outright. The
+// old node is kept here for now because core/odin/ast is a PUBLIC package and removing it
+// is a breaking change that is Jon's call (#868); adding these is purely additive, so it
+// does not wait on that decision.
+//
+// C++ groups these BEFORE Ast__ExprBegin, alongside Ident, ProcLit and CompoundLit, which
+// means is_ast_expr() (src/parser.hpp:962-963) returns false for all of them. That marker
+// range is a C++ implementation detail used in a handful of places; this port already
+// models Ident as an Expr, so these follow the same taxonomy for consistency.
+
+// Asm_Group is the `asm { ... }` grouping used to declare a set of asm templates under one
+// name. C++ Reference: src/parser.hpp:454-459, built by src/parser.cpp:984-988.
+Asm_Group :: struct {
+	using node: Expr,
+	tok:   tokenizer.Token,
+	open:  tokenizer.Token,
+	close: tokenizer.Token,
+	args:  []^Expr,
+}
+
+// Asm_Template is a single `asm(params) -> results [specs] { instructions }`.
+// C++ Reference: src/parser.hpp:477-485, built by src/parser.cpp:2661-2793.
+Asm_Template :: struct {
+	using node: Expr,
+	tok:          tokenizer.Token,
+	signature:    ^Expr,   // ^Proc_Type, calling convention .Inline_Asm
+	specs:        []^Expr, // ^Asm_Spec
+	clobbers:     []^Expr, // ^Asm_Clobber
+	instructions: []^Expr, // ^Asm_Instruction, ^Asm_Label_Decl or ^Asm_Directive
+	// C++ calls this field `end` (src/parser.hpp:483). Renamed here because Node already
+	// has an `end: tokenizer.Pos`, which `using node: Expr` brings into scope -- the same
+	// clash Inline_Asm_Expr above sidesteps by storing `open`/`close` as Pos rather than
+	// Token. This one keeps the Token because C++ assigns f->prev_token to it wholesale.
+	end_token:    tokenizer.Token,
+
+	// Semantic Analysis Fields
+	// C++ carries `Entity *anonymous_entity` in the node itself; same treatment as
+	// Proc_Lit.decl above, which this package already models.
+	anonymous_entity: ^Entity,
+}
+
+// Asm_Register is `%name` or `%name.flag`.
+// C++ Reference: src/parser.hpp:486-490, built by src/parser.cpp:2450-2463.
+Asm_Register :: struct {
+	using node: Expr,
+	tok:  tokenizer.Token,
+	name: tokenizer.Token,
+	flag: tokenizer.Token,
+}
+
+// Asm_Spec is one entry of the `[...]` specification list: `name -> tied`, `name: type`,
+// `name = %reg`. C++ Reference: src/parser.hpp:491-496, built by src/parser.cpp:2712-2717.
+Asm_Spec :: struct {
+	using node: Expr,
+	name:      ^Expr,
+	tied_name: ^Expr,
+	type:      ^Expr,
+	value:     ^Expr,
+}
+
+// Asm_Clobber is `#volatile`, `#align_stack` or `#clobber <operand>` inside `[...]`.
+// C++ Reference: src/parser.hpp:497-501, built by src/parser.cpp:2719-2740.
+Asm_Clobber :: struct {
+	using node: Expr,
+	tok:   tokenizer.Token,
+	name:  tokenizer.Token,
+	value: ^Expr,
+}
+
+// Asm_Label_Decl is `.name:` as an instruction, or `.name` as an operand.
+// C++ Reference: src/parser.hpp:502-505, built by src/parser.cpp:2606-2613 and 2467-2475.
+Asm_Label_Decl :: struct {
+	using node: Expr,
+	tok:  tokenizer.Token,
+	name: ^Expr,
+}
+
+// Asm_Instruction is `mnemonic operand, operand ;`.
+// C++ Reference: src/parser.hpp:506-511, built by src/parser.cpp:2596-2604.
+//
+// `mnemonic` and `valid_form_index` are resolved by semantic analysis, not the parser;
+// C++ initialises valid_form_index to -1 at parse time (src/parser.cpp:2602).
+Asm_Instruction :: struct {
+	using node: Expr,
+	name:     ^Expr,
+	operands: []^Expr,
+
+	// Semantic Analysis Fields
+	mnemonic:         u16,
+	valid_form_index: i32,
+}
+
+// Asm_Memory_Operand is `[base + index*scale + disp]:type`, optionally with a
+// `[segment: base ...]` override. C++ Reference: src/parser.hpp:512-524, built by
+// src/parser.cpp:2485-2551.
+Asm_Memory_Operand :: struct {
+	using node: Expr,
+	open:             tokenizer.Token,
+	segment_override: ^Expr,
+	base:             ^Expr,
+	index_op:         tokenizer.Token,
+	index:            ^Expr,
+	scale_op:         tokenizer.Token,
+	scale:            ^Expr,
+	disp_op:          tokenizer.Token,
+	disp:             ^Expr,
+	type:             ^Expr,
+	close:            tokenizer.Token,
+}
+
+// Asm_Directive is `#name operand, operand` in instruction position.
+// C++ Reference: src/parser.hpp:525-529, built by src/parser.cpp:2616-2624.
+Asm_Directive :: struct {
+	using node: Expr,
+	tok:      tokenizer.Token,
+	name:     tokenizer.Token,
+	operands: []^Expr,
 }
 
 
@@ -1150,6 +1281,15 @@ Any_Node :: union {
 	^Type_Cast,
 	^Auto_Cast,
 	^Inline_Asm_Expr,
+	^Asm_Group,
+	^Asm_Template,
+	^Asm_Register,
+	^Asm_Spec,
+	^Asm_Clobber,
+	^Asm_Label_Decl,
+	^Asm_Instruction,
+	^Asm_Memory_Operand,
+	^Asm_Directive,
 
 	^Proc_Group,
 
@@ -1238,6 +1378,15 @@ Any_Expr :: union {
 	^Type_Cast,
 	^Auto_Cast,
 	^Inline_Asm_Expr,
+	^Asm_Group,
+	^Asm_Template,
+	^Asm_Register,
+	^Asm_Spec,
+	^Asm_Clobber,
+	^Asm_Label_Decl,
+	^Asm_Instruction,
+	^Asm_Memory_Operand,
+	^Asm_Directive,
 
 	^Proc_Group,
 
@@ -1347,6 +1496,15 @@ node_kind_string :: proc(node: ^Node) -> string {
 	case ^Type_Cast: return "type cast"
 	case ^Auto_Cast: return "auto_cast"
 	case ^Inline_Asm_Expr: return "inline asm expression"
+	case ^Asm_Group:          return "asm group"
+	case ^Asm_Template:       return "asm template"
+	case ^Asm_Register:       return "asm register"
+	case ^Asm_Spec:           return "asm specification"
+	case ^Asm_Clobber:        return "asm clobber"
+	case ^Asm_Label_Decl:     return "asm label declaration"
+	case ^Asm_Instruction:    return "asm instruction"
+	case ^Asm_Memory_Operand: return "asm memory operand"
+	case ^Asm_Directive:      return "asm directive"
 	case ^Matrix_Index_Expr: return "matrix index expression"
 	case ^Bad_Stmt: return "bad statement"
 	case ^Empty_Stmt: return "empty statement"

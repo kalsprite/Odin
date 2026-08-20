@@ -299,8 +299,13 @@ dump_model_entity_line :: proc(sb: ^strings.Builder, e: ^ast.Entity, root: strin
 		dump_model_kv(sb, "builtin", builtin_proc_infos[v.id].name)
 
 	case ast.Entity_Label, ast.Entity_Package_Name, ast.Entity_Import_Name,
-	     ast.Entity_Library_Name, i32:
+	     ast.Entity_Library_Name, ast.Entity_Asm_Template, i32:
 		// No comparable payload beyond the common fields.
+		//
+		// Entity_Asm_Template's sole field is `node: ^Node`, an AST POINTER. Pointers are not
+		// comparable across the two implementations, and the node is invariably the
+		// ^Asm_Template the entity was declared from -- which `e.kind` already reports on the
+		// line above. So there is nothing here the dump does not already carry.
 	}
 
 	dump_model_kv_bool(sb, "poly", is_inst)

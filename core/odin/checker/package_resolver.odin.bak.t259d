@@ -1,0 +1,1971 @@
+package checker
+
+/*
+Package Resolver for the Odin Checker
+
+This module handles recursive package loading and import path resolution.
+It enables the checker to work on real codebases by:
+1. Resolving import paths like "core:fmt" to filesystem paths
+2. Parsing imported packages recursively
+3. Adding packages to the checker's package map
+
+C++ Reference: The C++ compiler handles this in the parser phase before
+checking. Our implementation does it as a pre-check step.
+*/
+
+import "base:runtime"
+
+import "core:fmt"
+import "core:os"
+import "core:path/filepath"
+import "core:strings"
+import "core:sync"
+import "core:odin/ast"
+import "core:odin/parser"
+import "core:odin/tokenizer"
+
+// resolve_import_path converts an import path to a filesystem path
+// Examples:
+//   "core:fmt"     -> ODIN_ROOT/core/fmt
+//   "base:runtime" -> ODIN_ROOT/base/runtime
+//   "vendor:raylib" -> ODIN_ROOT/vendor/raylib
+//   "./relative"   -> current_pkg_dir/relative
+//   "../parent"    -> current_pkg_dir/../parent
+resolve_import_path :: proc(import_path_raw: string, current_pkg_path: string, allocator := context.temp_allocator) -> (fullpath: string, ok: bool) {
+	if len(import_path_raw) == 0 {
+		return "", false
+	}
+
+	// Strip quotes from the import path (parser may include them)
+	import_path := import_path_raw
+	if len(import_path) >= 2 && import_path[0] == '"' && import_path[len(import_path) - 1] == '"' {
+		import_path = import_path[1:len(import_path) - 1]
+	}
+
+	// The len guard above tests the RAW path. `import ""` arrives here as the two-character token
+	// `""`, which survives it and becomes empty only once the quotes come off, so the
+	// `import_path[0]` test further down panicked with "Index 0 is out of range 0..<0".
+	// Witness wit_imppath244/emptystr.
+	//
+	// C++ never reaches resolution for this input at all: determine_path_from_string rejects the
+	// empty file_str with "Invalid import path: ''" (parser.cpp:6220) before any path is built.
+	// Reporting not-ok here lets check_add_import_decl emit exactly that message.
+	if len(import_path) == 0 {
+		return "", false
+	}
+
+	// Check for collection path (contains colon, not Windows drive letter)
+	colon_idx := strings.index_byte(import_path, ':')
+	if colon_idx > 0 {
+		// Check if it's a Windows drive letter (single letter before colon)
+		if colon_idx == 1 && len(import_path) > 2 && (import_path[2] == '/' || import_path[2] == '\\') {
+			// Windows absolute path like "C:/path"
+			return import_path, true
+		}
+
+		// Collection path like "core:fmt" or "base:runtime"
+		collection := import_path[:colon_idx]
+		path_part := import_path[colon_idx + 1:]
+
+		// Get ODIN_ROOT
+		odin_root := build_context.ODIN_ROOT
+		if len(odin_root) == 0 {
+			// Try to get from environment
+			odin_root = os.get_env("ODIN_ROOT", allocator)
+		}
+
+		if len(odin_root) == 0 {
+			return "", false
+		}
+
+		// Build: ODIN_ROOT/collection/path
+		join_err: runtime.Allocator_Error
+		fullpath, join_err = filepath.join({odin_root, collection, path_part}, allocator)
+		if join_err != nil {
+			return "", false
+		}
+		return fullpath, true
+	}
+
+	// Relative or absolute path
+	if import_path[0] == '/' || import_path[0] == '\\' {
+		// Absolute path
+		return import_path, true
+	}
+
+	if strings.has_prefix(import_path, "./") || strings.has_prefix(import_path, "../") {
+		// Relative to current package
+		if len(current_pkg_path) == 0 {
+			return "", false
+		}
+		join_err: runtime.Allocator_Error
+		fullpath, join_err = filepath.join({current_pkg_path, import_path}, allocator)
+		if join_err != nil {
+			return "", false
+		}
+		// Clean the path to resolve ../ and ./
+		//
+		// LEDGER #1256. filepath.abs resolves THROUGH THE FILESYSTEM (realpath), so it fails on
+		// a relative import naming a directory that does not exist -- and that is precisely the
+		// case try_add_import_path_check has to see in order to report
+		// "Path does not exist: %s". Returning not-ok here handed those imports to
+		// check_add_import_decl's "Unable to find package" instead, which is the wrong kind,
+		// the wrong text and the wrong caret span.
+		//
+		// C++ never consults the filesystem while resolving: determine_path_from_string
+		// (src/parser.cpp:6512) concatenates base_dir and the import string and normalises
+		// lexically, and only try_add_import_path afterwards discovers that the directory is
+		// not there. So a failed abs falls back to a lexical clean rather than to failure --
+		// the caller receives the path the reference would have built, and the classifier gets
+		// to name what is wrong with it.
+		//
+		// The abs result is still preferred when it succeeds, so nothing changes for a path
+		// that exists; only the error arm is new.
+		if abs, abs_err := filepath.abs(fullpath, allocator); abs_err == nil {
+			fullpath = abs
+		} else {
+			cleaned, clean_err := filepath.clean(fullpath, allocator)
+			if clean_err != nil {
+				return "", false
+			}
+			fullpath = cleaned
+		}
+		return fullpath, true
+	}
+
+	// Just a name - treat as relative to current package
+	if len(current_pkg_path) > 0 {
+		join_err: runtime.Allocator_Error
+		fullpath, join_err = filepath.join({current_pkg_path, import_path}, allocator)
+		if join_err != nil {
+			return "", false
+		}
+		return fullpath, true
+	}
+
+	return import_path, true
+}
+
+// Package_Load_Result contains the result of loading packages
+Package_Load_Result :: struct {
+	packages:     [dynamic]^ast.Package,
+	parse_errors: int,
+	total_files:  int,
+
+	// root is the package the caller ASKED for -- see the note on Session.root (#588).
+	//
+	// NOT packages[0]: base:runtime is queued ahead of the root (see the seeding comment in
+	// load_package_with_dependencies), so index 0 is the runtime whenever a runtime directory can
+	// be resolved -- which is the normal case, NOT only when ODIN_ROOT is set in the environment.
+	//
+	// Resolved by looking root_fullpath up in `loaded`, which is the one place the normalised
+	// absolute path and the ^ast.Package are both in hand. That also gets the awkward case right:
+	// when the requested path IS base/runtime, the seed wins and the root queue entry is skipped,
+	// so "the package built from the root entry" would be nil while the lookup correctly yields the
+	// runtime package.
+	//
+	// nil if the root path could not be resolved or its package failed to load.
+	root:         ^ast.Package,
+}
+
+// Reserved packages that are synthesized by the compiler rather than parsed from source.
+//
+// `base:runtime` is deliberately NOT in this list. It is an ordinary package whose source is
+// parsed and checked like any other - the only thing special about it is that it is seeded
+// first and carries ast.Package_Kind.Runtime (see seed_runtime_package). The C++ compiler draws
+// the same line: is_package_name_reserved (src/parser.cpp:6112) names only "builtin" and
+// "intrinsics", and determine_path_from_string short-circuits the path resolution only for
+// those two (src/parser.cpp:6236), while runtime is added through the normal
+// try_add_import_path machinery (src/parser.cpp:7070).
+//
+// builtin and intrinsics stay here because they genuinely have no source to parse: C++
+// synthesizes them in init_universal (src/checker.cpp:1113) and stamps
+// pkg->kind = Package_Builtin (src/checker.cpp:1035). They are populated by
+// init_builtin_packages / populate_builtin_package_scope, not by the loader.
+RESERVED_PACKAGES :: []string{
+	"builtin",
+	"intrinsics",
+	"base:builtin",
+	"base:intrinsics",
+}
+
+// RUNTIME_IMPORT_PATH is the import path the loader seeds base:runtime under.
+//
+// It is spelled as a collection path rather than a bare filesystem path so that it resolves
+// through the same resolve_import_path that every `import "base:runtime"` in the tree goes
+// through, and so that it lands in info.packages under exactly the key those imports will look
+// it up by. C++ reaches the same place with get_fullpath_base_collection("runtime")
+// (src/parser.cpp:7067).
+RUNTIME_IMPORT_PATH :: "base:runtime"
+
+// is_reserved_package checks if an import path refers to a reserved/builtin package
+is_reserved_package :: proc(import_path: string) -> bool {
+	for reserved in RESERVED_PACKAGES {
+		if import_path == reserved {
+			return true
+		}
+	}
+	return false
+}
+
+// normalize_deprecated_core_collection rewrites the deprecated `core:` spelling of the three
+// packages that moved to the `base:` collection, and reports whether it did.
+//
+// C++ Reference: parser.cpp:6225-6247, inside determine_path_from_string:
+//
+//	if (collection_name == "core") {
+//	        bool replace_with_base = false;
+//	        if (string_starts_with(file_str, str_lit("runtime")))         { replace_with_base = true; }
+//	        else if (string_starts_with(file_str, str_lit("intrinsics"))) { replace_with_base = true; }
+//	        if (string_starts_with(file_str, str_lit("builtin")))         { replace_with_base = true; }
+//	        if (replace_with_base) { collection_name = str_lit("base"); }
+//	        ...
+//	}
+//
+// C++ does this ONCE, in the parser, and stores the rewritten path on the decl, so every
+// downstream reader already sees `base:`. This port resolves import paths in the CHECKER (see the
+// scope note on parse_setup_file_decls), so the rewrite has to be applied at each of the two
+// points that turn the literal source string into a canonical import path -- the loader's import
+// walk below, and check_add_import_decl.
+//
+// WITHOUT THIS THE PORT DOES NOT MERELY MISS A WARNING, IT OVER-REJECTS. `import "core:runtime"`
+// and `import "core:intrinsics"` -- both still extremely common in real Odin source -- resolved
+// to no package at all and produced "Unable to find package: core:runtime" plus an "Undeclared
+// name" cascade for every use, where the reference resolves them and merely warns. wit_deprec206.
+//
+// PREFIX, NOT EQUALITY. C++ uses string_starts_with, so `core:runtime_foo` is rewritten to
+// `base:runtime_foo` too (and then fails to resolve there, with the base: spelling in the
+// message). That is a reference quirk, and a quirk is the contract -- reproduced deliberately.
+//
+// C++'s third arm is written `} if (...)` rather than `} else if (...)` -- a missing `else`. It is
+// behaviourally inert, because all three arms assign the same constant to the same flag, so this
+// is written as one disjunction rather than replicating the typo.
+normalize_deprecated_core_collection :: proc(
+	import_path: string,
+	allocator := context.allocator,
+) -> (
+	result: string,
+	deprecated: bool,
+) {
+	CORE :: "core:"
+	if !strings.has_prefix(import_path, CORE) {
+		return import_path, false
+	}
+	file_str := import_path[len(CORE):]
+	if !strings.has_prefix(file_str, "runtime") &&
+	   !strings.has_prefix(file_str, "intrinsics") &&
+	   !strings.has_prefix(file_str, "builtin") {
+		return import_path, false
+	}
+	rewritten, err := strings.concatenate({"base:", file_str}, allocator)
+	if err != nil {
+		return import_path, false
+	}
+	return rewritten, true
+}
+
+// current_build_target describes the platform being checked, in the vocabulary
+// core:odin/parser's build-tag matcher speaks.
+//
+// It is derived from build_context.metrics - the target init_build_context was given - and
+// deliberately NOT from the ODIN_OS/ODIN_ARCH constants of the process running the checker.
+// Those constants describe the host, and baking the host in would make it impossible to check
+// a package for any platform other than the one the checker happens to be running on. The C++
+// compiler reads build_context.metrics in exactly the same places (parse_build_tag,
+// is_excluded_target_filename), so this keeps the two in step under cross-checking too.
+current_build_target :: proc() -> parser.Build_Target {
+	return parser.Build_Target{
+		os           = odin_os_from_target_os(build_context.metrics.os),
+		arch         = odin_arch_from_target_arch(build_context.metrics.arch),
+		project_name = build_context.ODIN_BUILD_PROJECT_NAME,
+		bedrock      = build_context.bedrock,
+	}
+}
+
+// odin_os_from_target_os maps the checker's target OS enum onto runtime.Odin_OS_Type.
+//
+// Essence and Haiku have no counterpart: the C++ compiler retired both targets and
+// runtime.Odin_OS_Type never carried them. They map to .Unknown, which no `#+build` tag can
+// name, so when one of them is the target every tagged file is excluded. That is a degenerate
+// answer, but those two are already dead entries in Target_Os_Kind (see the stale-constants
+// parity task) and no Target_Metrics in named_targets selects them.
+@(private = "file")
+odin_os_from_target_os :: proc(os_kind: Target_Os_Kind) -> runtime.Odin_OS_Type {
+	switch os_kind {
+	case .Windows:      return .Windows
+	case .Darwin:       return .Darwin
+	case .Linux:        return .Linux
+	case .Freebsd:      return .FreeBSD
+	case .Openbsd:      return .OpenBSD
+	case .Netbsd:       return .NetBSD
+	case .Wasi:         return .WASI
+	case .Js:           return .JS
+	case .Orca:         return .Orca
+	case .Freestanding: return .Freestanding
+	case .Invalid:
+		return .Unknown
+	}
+	return .Unknown
+}
+
+// odin_arch_from_target_arch maps the checker's target arch enum onto runtime.Odin_Arch_Type.
+@(private = "file")
+odin_arch_from_target_arch :: proc(arch_kind: Target_Arch_Kind) -> runtime.Odin_Arch_Type {
+	switch arch_kind {
+	case .Amd64:     return .amd64
+	case .I386:      return .i386
+	case .Arm32:     return .arm32
+	case .Arm64:     return .arm64
+	case .Wasm32:    return .wasm32
+	case .Wasm64p32: return .wasm64p32
+	case .Riscv64:   return .riscv64
+	case .Invalid:
+		return .Unknown
+	}
+	return .Unknown
+}
+
+// file_header_selects_target reports whether a file's `#+build` tags admit the target.
+//
+// The tags live inside the file, but they must be answered BEFORE the file is parsed. The C++
+// compiler evaluates them in parse_file (src/parser.cpp:6889) immediately after the package
+// clause and returns false on a mismatch, so the declarations of an excluded file are never
+// parsed at all. Filtering a fully parsed file instead would be too late: the body of, say, a
+// windows-only file would already have produced its syntax errors, which is precisely the noise
+// this filter exists to remove.
+//
+// So this re-walks just the file header with the tokenizer - the same loop parse_file uses to
+// gather tags - and stops at the `package` token. Tokenizer errors are swallowed here because
+// the real parse re-reports them for every file that survives the filter; reporting them from
+// the prescan as well would double them up, and reporting them for an excluded file would
+// reintroduce the noise.
+// #215: C++ evaluates the tags INSIDE parse_file, and the loop that bails on a mismatch
+// (src/parser.cpp:6894) sits BELOW the package-clause checks at 6874-6890. So a file the tags
+// exclude has already had its package clause validated, and C++ reports:
+//
+//	Expected only comments or lines starting with '#+' before the package declaration
+//	Invalid package name '_'
+//	Use of reserved package name 'X'
+//
+// and nothing else -- measured with probe tagord, where a body error (`x :: 1 +`) in an
+// excluded file is correctly silent on both sides. The port answered the tags before parsing
+// at all, so it emitted none of the three. Those checks are replayed here, on the excluded
+// path only; files that survive get them from the real parse as before.
+@(private = "file")
+file_header_selects_target :: proc(header: ^ast.File, fullpath: string, src: string, target: parser.Build_Target, kind: ast.Package_Kind) -> bool {
+	t: tokenizer.Tokenizer
+	tokenizer.init(&t, src, fullpath, nil)
+	if t.ch <= 0 {
+		return true
+	}
+
+	stub: ast.File
+	stub.fullpath = fullpath
+	stub.src = src
+	defer delete(stub.tags)
+
+	// Mirrors parser.parse_file: collect the file tags that precede the package declaration,
+	// skipping comments and stepping over anything else (an invalid token before `package` is
+	// the real parse's business to complain about, not ours).
+	invalid_pre_package_token: Maybe(tokenizer.Token)
+	saw_package := false
+	scan_header: for {
+		tok := tokenizer.scan(&t)
+		// Comments and stray tokens fall through the switch and keep the scan going.
+		#partial switch tok.kind {
+		case .Package:
+			saw_package = true
+			break scan_header
+		case .EOF:
+			break scan_header
+		case .File_Tag:
+			append(&stub.tags, tok)
+		case .Comment:
+		// #215: anything else before `package` is what C++ records as first_invalid_token.
+		case:
+			if invalid_pre_package_token == nil {
+				invalid_pre_package_token = tok
+			}
+		}
+	}
+	pkg_name_tok: tokenizer.Token
+	if saw_package {
+		pkg_name_tok = tokenizer.scan(&t)
+	}
+
+	// NOTE: stub.docs is left nil on purpose. parse_file_tags will also honour tags written as
+	// `//+build` doc comments, but the C++ compiler recognises only `#+` file tags, so feeding
+	// it the doc comments would exclude files the compiler would have kept.
+	// #306: the malformed-`#+build` diagnostics, reported HERE and only here.
+	//
+	// This is the one point at which every file of the package is still in hand -- included and
+	// build-EXCLUDED alike -- which is what C++ has: parse_file_tag reports and only then returns
+	// false to exclude (parser.cpp:6772-6820), so a bad tag on a file the target skips still
+	// reports. The port drops excluded files a few lines below, so anything deferred to the
+	// post-parse pass in check_file_tags would never see them (probe bt_subt: `#+build
+	// darwin:bogussub` resolves to Darwin, does not match a linux target, and is dropped).
+	//
+	// parse_file_tags itself stays SILENT and is called twice -- once here for inclusion, once
+	// from check_files for the private/lazy/no-instrumentation flags -- so reporting from inside
+	// it would double every diagnostic.
+	// #308: the ONE ordered tag walk. Here because this is the only place that has both the tag
+	// list and `saw_package`, and because a build-excluded file is still in hand.
+	check_file_tags_for_file(header, stub.tags[:], saw_package, target)
+
+	tags := parser.parse_file_tags(stub, context.allocator)
+	defer {
+		delete(tags.build)
+		delete(tags.build_project_name)
+	}
+
+	// `#+test` EXCLUDES THE FILE unless the command is `odin test`.
+	// C++ Reference: src/parser.cpp:6808-6811 --
+	//     } else if (string_starts_with(lc, str_lit("test"))) {
+	//         if ((build_context.command_kind & Command_test) == 0) { return false; }
+	// and a false return from parse_file_tag makes parse_file return false, i.e. the file never
+	// joins the package.
+	// The port treated this as a no-op, with a comment claiming "the port has no test command, so
+	// there is nothing to gate" -- but the gate is on build_context.command_kind, which the port
+	// HAS (build_settings.odin:204-217, .Test = bit 5), and `odin check` is Command_Check. So a
+	// `#+test` file's declarations stayed VISIBLE here and are invisible in the reference.
+	// WITNESSED (wit_tags/tg_test_excl): a.odin is `#+test` + `X :: 1`, b.odin returns X.
+	//     oracle: "Undeclared name: X"   port: ACCEPTED
+	// The `#+ignore` twin (tg_ignore_excl) already matched on both, which is what proved the
+	// exclusion MECHANISM here was sound and only this tag was missing from it.
+	// parse_file_tags does not carry a `test` field (File_Tags is public parser API), so the tag
+	// is read directly rather than by widening that struct.
+	if .Test not_in build_context.command_kind {
+		for tok in stub.tags {
+			if len(tok.text) < 3 || tok.text[:2] != "#+" {
+				continue
+			}
+			if strings.has_prefix(strings.trim_space(tok.text[2:]), "test") {
+				return false
+			}
+		}
+	}
+
+	if parser.match_build_tags(tags, target) {
+		return true
+	}
+
+	// Excluded. Replay the package-clause diagnostics C++ has already emitted by this point.
+	// C++ Reference: src/parser.cpp:6872-6891 -- the invalid-token check RETURNS, so at most
+	// one of these fires per file.
+	//
+	// #218, a use-after-free this function introduced in progress#195: an Error_Value stores its
+	// Pos BY VALUE, and Pos.file is a string header pointing INTO `fullpath`. The caller frees
+	// `fullpath` the moment this returns false (see collect_package_for_target). Every emitted
+	// diagnostic was therefore left pointing at freed memory, and print_all_errors sorts on
+	// pos.file -- so the order of two diagnostics sharing an offset/line/column depended on what
+	// the allocator had since done with those bytes. Probe rt flipped between two orderings
+	// roughly half the time; the 169-package sweep could not see it because it runs each package
+	// once, and the corpus runs each probe once.
+	//
+	// The diagnostic must own its path. Clone it into the error collector's allocator, which
+	// outlives collection, and only when something is actually going to be reported.
+	owned_pos :: proc(pos: tokenizer.Pos) -> tokenizer.Pos {
+		out := pos
+		out.file = strings.clone(pos.file, global_error_collector.allocator)
+		return out
+	}
+
+	if ippt, ok := invalid_pre_package_token.?; ok {
+		syntax_error_pos(owned_pos(ippt.pos), "Expected only comments or lines starting with '#+' before the package declaration")
+	} else if saw_package && pkg_name_tok.kind == .Ident {
+		switch name := pkg_name_tok.text; {
+		case name == "_":
+			syntax_error_pos(owned_pos(pkg_name_tok.pos), "Invalid package name '_'")
+		case parser.is_package_name_reserved(name), kind != .Runtime && name == "runtime":
+			syntax_error_pos(owned_pos(pkg_name_tok.pos), "Use of reserved package name '%s'", name)
+		}
+	}
+	return false
+}
+
+// owned_file_pos clones a position's file string into the error collector's allocator.
+//
+// Needed wherever the diagnostic outlives the ^ast.File it came from -- which is exactly the
+// abandoned-file case below, since the fullpath is freed as soon as the file is dropped.
+// progress#195 shipped this bug once already (LEDGER #218: a Pos.file slice into a freed
+// buffer made the whole checker flaky ~20% of runs), so a clone is not optional here.
+@(private = "file")
+owned_file_pos :: proc(pos: tokenizer.Pos) -> tokenizer.Pos {
+	out := pos
+	out.file = strings.clone(pos.file, global_error_collector.allocator)
+	return out
+}
+
+// first_invalid_token walks the whole source and reports the position of the first
+// Token_Invalid, matching init_ast_file's loop. It is deliberately SILENT: it decides whether
+// a second, reporting pass is needed, and a clean file must not pay for two sets of
+// diagnostics.
+@(private = "file")
+first_invalid_token :: proc(src: string, path: string) -> (pos: tokenizer.Pos, found: bool) {
+	t: tokenizer.Tokenizer
+	tokenizer.init(&t, src, path, nil)
+	for {
+		tok := tokenizer.scan(&t)
+		if tok.kind == .Invalid {
+			return tok.pos, true
+		}
+		if tok.kind == .EOF {
+			return {}, false
+		}
+	}
+}
+
+// collect_package_for_target reads a package directory into an unparsed ^ast.Package, admitting
+// only the files that belong to the target being checked.
+//
+// This replaces parser.collect_package, which parses every .odin file in the directory
+// regardless of platform. Two independent mechanisms decide what belongs, and BOTH are needed -
+// neither subsumes the other:
+//
+//  1. The filename suffix. core/sys/darwin/mach_darwin.odin carries no tag whatsoever; a
+//     trailing `_<os>`, `_<arch>` or `_<os>_<arch>` component on the file name is the only thing
+//     that marks it darwin-only. Applied here before the file is even read, mirroring
+//     try_add_import_path (src/parser.cpp:5996), which filters the directory listing through
+//     is_excluded_target_filename.
+//
+//  2. The `#+build` tag. core/os/wasm.odin, core/sys/windows/winver.odin and
+//     core/fmt/example.odin are named neutrally and can only be excluded by their tag. Applied
+//     after the source is read (the tag is in the source) but before it is parsed - see
+//     file_header_selects_target.
+//
+// Excluded files never enter pkg.files, so they cannot be counted in total_files and cannot
+// contribute a parse error.
+//
+// `kind` is stamped on the package here, before a single file is parsed, because the parser
+// reads it: parse_file rejects `package runtime` unless file.pkg.kind is .Runtime
+// (core/odin/parser/parser.odin:196, a copy of src/parser.cpp:6887). The C++ compiler has the
+// same ordering constraint and solves it the same way - try_add_import_path takes the kind as
+// an argument and assigns it (src/parser.cpp:5909) before queueing any file for parsing
+// (src/parser.cpp:5999, parser_add_file_to_process).
+// package_base_dir returns the directory that a package's RELATIVE imports resolve against.
+//
+// For an ordinary package that is simply its fullpath. For a SINGLE-FILE package (#915) the
+// fullpath is the FILE -- deliberately, because it is the package's identity and two single-file
+// packages in one directory must not collide in the loader's `loaded` set -- so the containing
+// directory is taken instead.
+//
+// THERE ARE EXACTLY TWO CALLERS and they must agree: the loader's dependency walk and
+// `lookup_imported_package` in check_import_export.odin. They resolve the same import from the same
+// package and disagreeing makes the loader fetch a package the checker then cannot find, which
+// surfaces as "Unable to find package" on an import that is plainly there. That is precisely how
+// this was found (#915), so the rule lives here rather than being open-coded twice.
+package_base_dir :: proc(fullpath: string) -> string {
+	if os.is_dir(fullpath) {
+		return fullpath
+	}
+	return filepath.dir(fullpath)
+}
+
+collect_package_for_target :: proc(path: string, kind: ast.Package_Kind = .Normal) -> (pkg: ^ast.Package, success: bool) {
+	NO_POS :: tokenizer.Pos{}
+
+	// Nothing else in the checker's start-up sets a target, and a zeroed build_context would
+	// make every one of the decisions below come out as "belongs to some other platform".
+	ensure_build_context_initialized()
+
+	target := current_build_target()
+
+	pkg_path, pkg_path_err := os.get_absolute_path(path, context.allocator)
+	if pkg_path_err != nil {
+		return
+	}
+
+	// SINGLE-FILE PACKAGE (#915). When `path` names a .odin FILE rather than a directory, the
+	// package is EXACTLY that one file and its siblings are not read. This is the equivalent of
+	// the reference compiler's `-file`, and it is a property of the PATH, not a flag: a caller
+	// that hands this a file is asking for a one-file package, which is the only thing that path
+	// can mean.
+	//
+	// WHY THE LIBRARY AND NOT THE HARNESS: every entry point funnels through here, so a file path
+	// works from `check_package_from_path`, from `session_check_package` and from the loader's own
+	// dependency walk without any of them learning a new concept. Doing it in the harness would
+	// have meant the harness assembling a file list and bypassing the loader, which
+	// `checker_lifecycle.odin` warns produces a checker with no runtime package at all.
+	//
+	// `pkg.fullpath` stays the FILE path, deliberately: it is the package's identity, and two
+	// single-file packages in one directory must not collide in the loader's `loaded` set. The
+	// consequence is that relative imports need the file's DIRECTORY as their base, which is
+	// handled at the resolve_import_path call site rather than here.
+	matches: []string
+	glob_err: os.Error  // filepath.glob aliases os.glob, so its error type is os.Error
+	single_file := !os.is_dir(pkg_path) && strings.has_suffix(pkg_path, ".odin")
+	if single_file {
+		one := make([]string, 1)
+		one[0] = strings.clone(pkg_path)
+		matches = one
+	} else {
+		path_pattern := fmt.tprintf("%s/*.odin", pkg_path)
+		matches, glob_err = filepath.glob(path_pattern)
+	}
+	defer {
+		for match in matches {
+			delete(match)
+		}
+		delete(matches)
+	}
+
+	if glob_err != nil {
+		return
+	}
+
+	pkg = ast.new(ast.Package, NO_POS, NO_POS)
+	pkg.fullpath = pkg_path
+	pkg.kind = kind
+
+	for match in matches {
+		// (1) Filename suffix - decided from the name alone, so the file is never read.
+		if is_excluded_target_filename(filepath.base(match)) {
+			continue
+		}
+
+		fullpath, fullpath_err := os.get_absolute_path(match, context.allocator)
+		if fullpath_err != nil {
+			return
+		}
+
+		src, src_err := os.read_entire_file(fullpath, context.allocator)
+		if src_err != nil {
+			delete(fullpath)
+			return
+		}
+		if strings.trim_space(string(src)) == "" {
+			delete(fullpath)
+			delete(src)
+			continue
+		}
+
+		// (2) `#+build` tags - decided from the file header, still before the parse.
+		//
+		// #306: publish the source FIRST. file_header_selects_target now reports malformed-tag
+		// diagnostics (parser.report_file_tag_diagnostics), and those render their source line
+		// inline at emit time through the #279 path-keyed registry. Registering afterwards -- or
+		// only for files that survive selection, as the register_source_file call further down
+		// does -- left every one of them showing "( empty line )" instead of the offending tag.
+		//
+		// The registry takes ownership of `fullpath` and `src` from here on, which is why the
+		// !selected path below no longer frees them: a registered entry pointing at freed source
+		// is precisely the use-after-free just fixed in parse_file_tags. Selected files already
+		// worked this way -- their File owns both for the life of the process -- so this makes
+		// excluded files consistent rather than introducing a new class of leak.
+		header := ast.new(ast.File, NO_POS, NO_POS)
+		header.pkg = pkg
+		header.src = string(src)
+		header.fullpath = fullpath
+		register_source_file(header)
+
+		selected := file_header_selects_target(header, fullpath, string(src), target, kind)
+
+		// (3) Tokenize. C++ Reference: init_ast_file (src/parser.cpp:5709-5787) runs the
+		// tokenizer over the WHOLE file into an array before the parser sees a single
+		// token, and process_imported_file (6945-6990) turns its result code into a
+		// diagnostic. Two consequences the port did not have:
+		//
+		//   a. A `#+build`-excluded file is still TOKENIZED. Only the filename-suffix
+		//      filter (1) short-circuits before the file is read; the `#+build` tag lives
+		//      in the token stream, so by the time it is known the tokenizer has already
+		//      run and reported. Verified against the oracle: a `#+build ignore` file
+		//      containing `0hff`, an unterminated "" string or an unterminated `` string
+		//      reports that error, while a PARSE error in the same file (`x := (`) and a
+		//      literal-value error (`1e309`) report nothing. The port reported none of
+		//      them, because it dropped excluded files before tokenizing.
+		//
+		//   b. A Token_Invalid ABANDONS the file:
+		//          if (token->kind == Token_Invalid) {
+		//              err_pos->line = token->pos.line; err_pos->column = token->pos.column;
+		//              return ParseFile_InvalidToken;
+		//          }
+		//      and the caller reports "Failed to parse file: %s; invalid token found in
+		//      file" AT THAT TOKEN. The file is never parsed, so no recovery diagnostics
+		//      follow it -- the port instead carried on and said "Expected an operand".
+		//
+		// The scan below is silent, so a clean included file pays only the extra walk; the
+		// diagnostics are re-emitted only when this pass is the ONLY one that will see the
+		// file (excluded, or abandoned). A file that is parsed normally reports its
+		// tokenizer diagnostics from parse_file as before, exactly once.
+		invalid_pos, has_invalid := first_invalid_token(string(src), fullpath)
+		if has_invalid || !selected {
+			t: tokenizer.Tokenizer
+			tokenizer.init(&t, string(src), fullpath, syntax_error_pos)
+			for {
+				tok := tokenizer.scan(&t)
+				if tok.kind == .EOF || tok.kind == .Invalid {
+					break
+				}
+			}
+		}
+		if has_invalid {
+			// #650: this diagnostic must carry OFFSET 0, not the real offset, or it sorts to the
+			// wrong place. C++ builds its position like this (parser.cpp:6977-6979):
+			//     TokenPos err_pos = {0};
+			//     ParseFileError err = init_ast_file(file, fi.fullpath, &err_pos);
+			//     err_pos.file_id = file->id;
+			// and init_ast_file (parser.cpp:5731) writes ONLY two fields into it:
+			//     err_pos->line = token->pos.line; err_pos->column = token->pos.column;
+			// so `offset` keeps its `{0}` value while line/column are real. `file_id` is patched
+			// afterwards -- which is what shows the omission is accidental rather than intended.
+			//
+			// It matters because print_all_errors sorts with token_pos_cmp (tokenizer.cpp:210),
+			// which compares OFFSET FIRST. An offset of 0 therefore sorts this diagnostic ahead of
+			// every diagnostic that has a real one, regardless of its printed line/column.
+			// MEASURED: a file whose abort sits at column 25 (offset ~34) is emitted by the oracle
+			// BEFORE another file's error at column 6 (offset ~15) -- i.e. NOT in offset order --
+			// while that same file's SECOND error (2:27, real offset) sorts after it. The port
+			// passed a full position here, so it sorted by position and interleaved differently.
+			//
+			// This is bug-compatibility, deliberately: the reference's position is internally
+			// inconsistent (offset disagrees with line/column), but parity is the contract and the
+			// only observable is diagnostic ORDER.
+			abort_pos := owned_file_pos(invalid_pos)
+			abort_pos.offset = 0
+			syntax_error_pos(
+				abort_pos,
+				"Failed to parse file: %s; invalid token found in file",
+				filepath.base(fullpath),
+			)
+			delete(fullpath)
+			delete(src)
+			continue
+		}
+
+		if !selected {
+			// fullpath/src deliberately NOT freed -- the registry entry published above still
+			// points at them so this file's tag diagnostics can render their source line. See
+			// the note at the registration site.
+			continue
+		}
+
+		file := header
+		pkg.files[fullpath] = file
+
+		// LEDGER #279 part 2: publish for source-line rendering NOW, while the file has its
+		// source but before it is parsed. Syntax diagnostics render their source line inline
+		// at emit time (error_va -> show_error_on_line), so anything published later -- for
+		// instance info.files at check_collect.odin:340, which runs during COLLECTION -- is
+		// too late for every parse-stage diagnostic. This is the port's analogue of C++'s
+		// global ast-file table (parser.cpp:57), keyed by path rather than id.
+		register_source_file(file)
+	}
+
+	success = true
+	return
+}
+
+// parse_package_for_target is the target-aware counterpart of
+// parser.parse_package_from_path: it collects the directory through
+// collect_package_for_target and then parses only what survived.
+//
+// The package-name consistency check lives in parser.parse_package and therefore only ever sees
+// the surviving files - which is what silences "different package name" for files such as
+// core/fmt/example.odin, whose `#+build ignore` tag means the C++ compiler never compares its
+// package clause either.
+parse_package_for_target :: proc(path: string, kind: ast.Package_Kind = .Normal, p: ^parser.Parser = nil) -> (pkg: ^ast.Package, ok: bool) {
+	pkg, ok = collect_package_for_target(path, kind)
+	if !ok {
+		return
+	}
+	ok = parser.parse_package(pkg, p)
+
+	// NOTE(#308): the tag walk used to run here, after parse_package. It now runs at COLLECT
+	// time, from collect_package_for_target -- see check_file_tags_for_file. A build-excluded
+	// file never reaches this point, so a walk here could not report its tags at all, and the
+	// two half-walks disagreed on ordering (probe bt_order2).
+	return
+}
+
+// Package_To_Load tracks a package with both its import path and filesystem path
+Package_To_Load :: struct {
+	import_path: string, // The original import path like "core:fmt"
+	fullpath:    string, // The resolved filesystem path
+
+	// kind is what the package will be stamped with before it is parsed. Everything the loader
+	// discovers by following imports is .Normal; only base:runtime is seeded as .Runtime, and
+	// only the loader itself can know that (the import declaration that names it looks exactly
+	// like any other).
+	kind:        ast.Package_Kind,
+}
+
+// load_package_with_dependencies loads a package and all its imported dependencies
+// Returns all packages in dependency order (dependencies before dependents)
+// try_add_import_path_check reproduces the body of C++'s try_add_import_path
+// (src/parser.cpp:6289-6382) that is NOT about queueing work: the classification of the import
+// path and the seven diagnostics that come out of it. It answers true when the path is a
+// directory the reference would have turned into a package.
+//
+// C++ Reference, in order, after the imported_files dedup at the top:
+//
+//	Array<FileInfo> list = {};
+//	ReadDirectoryError rd_err = read_directory(path, &list);
+//	switch (rd_err) {
+//	case ReadDirectory_InvalidPath: syntax_error(pos, "Invalid path: %.*s", LIT(rel_path)); return nullptr;
+//	case ReadDirectory_NotExists:   syntax_error(pos, "Path does not exist: %.*s", LIT(rel_path)); return nullptr;
+//	case ReadDirectory_Permission:  syntax_error(pos, "Unknown error whilst reading path %.*s", LIT(rel_path)); return nullptr;
+//	case ReadDirectory_NotDir:      syntax_error(pos, "Expected a directory for a package, got a file: %.*s", LIT(rel_path)); return nullptr;
+//	case ReadDirectory_Empty:       syntax_error(pos, "Empty directory: %.*s", LIT(rel_path)); return nullptr;
+//	case ReadDirectory_Unknown:     syntax_error(pos, "Unknown error whilst reading path %.*s", LIT(rel_path)); return nullptr;
+//	}
+//	if (string_ends_with(path, str_lit(".odin"))) {
+//		error(pos, "'import' declarations cannot import directories with a .odin extension/suffix");
+//		return nullptr;
+//	}
+//	... count files_with_ext / files_to_reserve ...
+//	if (files_with_ext == 0 || files_to_reserve == 1) { ERROR_BLOCK(); ... return nullptr; }
+//
+// LEDGER #1256. THE PORT HAD NONE OF THIS. package_resolver's import walk read
+//     if resolve_ok && !(child_fullpath in loaded) { if os.is_dir(child_fullpath) { queue } }
+// so every unusable import path was DROPPED IN SILENCE and whatever the checker later said
+// about the missing package -- "Unable to find package: %s", or on some paths nothing at all --
+// stood in for the reference's diagnostic. Measured before the fix:
+//
+//	./nope        oracle  Syntax Error: Path does not exist: ./nope
+//	              port    Error: Unable to find package: ./nope
+//	./empty       oracle  Syntax Error: Empty directory: ./empty
+//	              port    NOTHING AT ALL -- the package parsed to zero files and checked clean
+//	./sub.odin/   oracle  Syntax Error: Empty directory: ./sub.odin
+//	              port    Error: Import name 'sub.odin' is not a valid identifier  (+ Suggestion)
+//	./other.odin  oracle  Syntax Error: Expected a directory for a package, got a file: ./other.odin
+//	              port    Error: Unable to find package: ./other.odin
+//
+// Three things are wrong in every row: the KIND (these are syntax_error, so "Syntax Error:" and
+// a single `^` from an empty end position, not "Error:" and error_node's `^~~~^`), the TEXT, and
+// -- for ./empty -- the very existence of a rejection.
+//
+// CLASSIFICATION. C++'s read_directory is opendir + readdir (src/path.cpp:407-476) and derives
+// its error from errno: ENOENT -> NotExists, EACCES -> Permission, ENOTDIR -> NotDir, anything
+// else -> Unknown; then, after skipping "." and "..", an entry count of zero -> Empty. The two
+// arms that survive as distinct enum values but NOT as distinct output are Permission and
+// Unknown -- both print "Unknown error whilst reading path %s" -- so the port does not need to
+// separate them, and os.exists/os.is_dir cover the other three without errno plumbing.
+// InvalidPath is produced only by the Windows implementation (src/path.cpp:330) and has no
+// POSIX counterpart, which is why there is no arm for it here.
+@(private = "file")
+try_add_import_path_check :: proc(path: string, rel_path: string, pos: tokenizer.Pos, allocator: runtime.Allocator) -> bool {
+	FILE_EXT :: ".odin"
+
+	if !os.exists(path) {
+		syntax_error_pos(pos, "Path does not exist: %s", rel_path)
+		return false
+	}
+	if !os.is_dir(path) {
+		syntax_error_pos(pos, "Expected a directory for a package, got a file: %s", rel_path)
+		return false
+	}
+
+	dir, open_err := os.open(path)
+	if open_err != nil {
+		syntax_error_pos(pos, "Unknown error whilst reading path %s", rel_path)
+		return false
+	}
+	defer os.close(dir)
+
+	entries, read_err := os.read_directory(dir, -1, allocator)
+	if read_err != nil {
+		syntax_error_pos(pos, "Unknown error whilst reading path %s", rel_path)
+		return false
+	}
+
+	if len(entries) == 0 {
+		syntax_error_pos(pos, "Empty directory: %s", rel_path)
+		return false
+	}
+
+	// NOTE the order: the reference tests the .odin suffix AFTER read_directory, so an EMPTY
+	// directory named `x.odin` reports "Empty directory", not the suffix message. Witness
+	// wit_imp259/c_dir_dot_odin pins that.
+	//
+	// This one is `error`, not `syntax_error` (src/parser.cpp:6354) -- the only member of the
+	// group that is.
+	if strings.has_suffix(path, FILE_EXT) {
+		error_pos(pos, "'import' declarations cannot import directories with a .odin extension/suffix")
+		return false
+	}
+
+	// C++ Reference: src/parser.cpp:6358-6382.
+	//
+	//	isize files_with_ext = 0;
+	//	isize files_to_reserve = 1; // always reserve 1
+	//	for (FileInfo fi : list) {
+	//		String name = fi.name;
+	//		String ext = path_extension(name);
+	//		if (ext == FILE_EXT && !fi.is_dir)                            files_with_ext += 1;
+	//		if (ext == FILE_EXT && !is_excluded_target_filename(name))    files_to_reserve += 1;
+	//	}
+	//
+	// The two counters differ on purpose: the first asks whether the directory holds any .odin
+	// file at all, the second whether any of them survives target exclusion. `files_to_reserve`
+	// starts at 1, so `== 1` means none did.
+	files_with_ext := 0
+	files_to_reserve := 1 // always reserve 1
+	for fi in entries {
+		name := fi.name
+		if !strings.has_suffix(name, FILE_EXT) {
+			continue
+		}
+		if fi.type != .Directory {
+			files_with_ext += 1
+		}
+		if !is_excluded_target_filename(name) {
+			files_to_reserve += 1
+		}
+	}
+
+	if files_with_ext == 0 || files_to_reserve == 1 {
+		begin_error_block()
+		defer end_error_block()
+
+		if files_with_ext != 0 {
+			syntax_error_pos(pos, "Directory contains no .odin files for the specified platform: %s", rel_path)
+		} else {
+			syntax_error_pos(pos, "Empty directory that contains no .odin files: %s", rel_path)
+		}
+		if .Test in build_context.command_kind {
+			error_line("\tSuggestion: Make an .odin file that imports packages to test and use the `-all-packages` flag.")
+		}
+		return false
+	}
+
+	return true
+}
+
+load_package_with_dependencies :: proc(
+	root_path: string,
+	info: ^Checker_Info,
+	allocator := context.allocator,
+) -> (result: Package_Load_Result, ok: bool) {
+	result.packages = make([dynamic]^ast.Package, allocator)
+
+	// Track loaded packages by filesystem path to avoid duplicates
+	loaded := make(map[string]^ast.Package)
+	defer delete(loaded)
+
+	// C++ `Parser.imported_files` (src/parser.hpp) -- the set try_add_import_path consults and
+	// updates before it classifies anything. Distinct from `loaded`, which records only the
+	// packages that went on to parse. Seeded below with the runtime and the root, exactly as
+	// C++ seeds it by routing both through try_add_import_path (src/parser.cpp:7465, :7468).
+	attempted := make(map[string]bool)
+	defer delete(attempted)
+
+	// Queue of packages to load (with both import and filesystem paths)
+	to_load := make([dynamic]Package_To_Load, allocator)
+	defer delete(to_load)
+
+	// Start with root package
+	root_fullpath, root_err := filepath.abs(root_path)
+	if root_err != nil {
+		return result, false
+	}
+
+	// C++ Reference: parser.cpp:7099 - `p->init_fullpath = init_fullpath;`
+	//
+	// This is the ONLY thing that identifies the init package, and it is set here rather than
+	// during checking for a reason C++ shares: it must hold the path the caller ASKED for, not
+	// a path derived from whatever got loaded. create_scope_from_package tests
+	// `pkg.fullpath == info.init_fullpath || pkg.kind == .Init` (scope.odin, C++ checker.cpp:268)
+	// and needs the answer before any scope exists.
+	//
+	// Set UNCONDITIONALLY and BEFORE loading, as C++ does. Both matter:
+	//   * the `.Init` kind stamped below cannot cover the case where the requested package IS
+	//     base/runtime -- the runtime seed is dequeued first and the root entry is then skipped
+	//     by the already-loaded guard, so the package keeps kind `.Runtime`. C++ has the same
+	//     hole and plugs it with exactly this fullpath comparison; that is why checker.cpp:268
+	//     is a disjunction rather than a kind test.
+	//   * a root that fails to load leaves `result.root` nil, but the requested path is still
+	//     the init path. Deriving this from a loaded package instead would lose that.
+	info.init_fullpath = root_fullpath
+
+	// base:runtime is queued BEFORE the root, and therefore loaded first.
+	//
+	// C++ Reference: src/parser.cpp:7062-7071. The comment there is "Add these packages
+	// serially and then process them parallel", and runtime is the first thing added -
+	// ahead of the init package, ahead of core:testing, ahead of every extra package -
+	// with an explicit Package_Runtime kind.
+	//
+	// Ordering is not cosmetic. The kind is what lets the file parse at all: `package runtime`
+	// is otherwise rejected as a reserved name, so if the root or a dependency reached
+	// base/runtime through the ordinary import-following path below it would be stamped
+	// .Normal and every one of its files would fail to parse. Seeding it here is the only
+	// point at which the loader knows this directory is the runtime.
+	//
+	// This also makes `check_package_from_path("<odin>/base/runtime")` work: the root's
+	// fullpath collides with the seed, the seed wins because it is dequeued first, and the
+	// root is then skipped by the `already loaded` guard - so runtime is checked as itself,
+	// with the right kind, rather than as an ordinary package that cannot parse.
+	if runtime_fullpath, runtime_ok := resolve_import_path(RUNTIME_IMPORT_PATH, "", allocator); runtime_ok {
+		// A missing ODIN_ROOT leaves resolve_import_path unable to answer, and a wrong one
+		// leaves it answering with a directory that is not there. Neither is worth a
+		// diagnostic here - the checker already degrades to "no runtime types" in that case,
+		// and the C++ compiler's compiler_error() is not available to a library.
+		if os.is_dir(runtime_fullpath) {
+			append(&to_load, Package_To_Load{
+				import_path = RUNTIME_IMPORT_PATH,
+				fullpath    = runtime_fullpath,
+				kind        = .Runtime,
+			})
+			attempted[runtime_fullpath] = true
+		}
+	}
+
+	// Root package has empty import path (it's the target, not an import)
+	//
+	// The kind is `.Init`, matching C++ parser.cpp:7098:
+	//     try_add_import_path(p, init_fullpath, init_fullpath, init_pos, Package_Init);
+	// It used to be `.Normal`, which made `pkg.kind == .Init` unsatisfiable port-wide and left
+	// the whole entry-point surface dead (#589) -- check_entry_point returns early on
+	// `init_scope == nil`, so info.entry_point was never written and C++'s "no main" diagnostic
+	// had no counterpart. The runtime seed above is dequeued first and is unaffected.
+	append(&to_load, Package_To_Load{import_path = "", fullpath = root_fullpath, kind = .Init})
+	attempted[root_fullpath] = true
+
+	// Process queue
+	for len(to_load) > 0 {
+		pkg_to_load := pop_front(&to_load)
+		pkg_path := pkg_to_load.fullpath
+		import_path := pkg_to_load.import_path
+
+		// Skip if already loaded
+		if pkg_path in loaded {
+			continue
+		}
+
+		// Parse the package, skipping any file that does not belong to the target
+		// #180: route parser diagnostics into the checker's collector.
+		//
+		// The port already had the entire syntax-error path -- syntax_error_va with the
+		// "Syntax Error: " prefix, the same collector, the same limit latching -- and
+		// syntax_error_pos has EXACTLY the parser's Error_Handler signature. Nothing ever
+		// installed it, so every parser diagnostic went to default_error_handler, which
+		// fmt.eprintf's straight to stderr: uncounted (errors=0), unsorted, unlabelled, and
+		// printed before the harness header rather than through the collector.
+		//
+		// C++ has no such split -- syntax_error and error share error.cpp's machinery and
+		// both land in the same sorted, counted stream.
+		syntax_parser := parser.default_parser()
+		syntax_parser.err = syntax_error_pos
+		// t204: the WARNING channel had the identical gap and outlived the `err` fix above.
+		// syntax_warning_pos already existed with exactly the parser's Warning_Handler signature;
+		// nothing installed it, so parser warnings fell through to parser.default_parser()'s
+		// default_warning_handler -- a bare fmt.eprintf that renders
+		//     main.odin(3:14): Warning: ...
+		// where the reference's syntax_warning renders
+		//     main.odin(3:14) Syntax Warning: ...
+		// (different prefix AND a spurious colon), uncounted and outside the sorted collector.
+		//
+		// Two parser warnings reach this today: the `#align requires parentheses` family added
+		// this tick (witness wit_pmisc/pm_align) and `#field_align has been deprecated in favour
+		// of #min_field_align`, which has been mis-rendering all along with no witness to show it.
+		syntax_parser.warn = syntax_warning_pos
+		// #307: the parser package has no continuation-line channel of its own, so the driver
+		// supplies one -- same arrangement as `err` above. The block pair is what makes the
+		// continuation ATTACH: error_line_va only appends while an error value is live, and
+		// syntax_error_va pops one per call, so without the bracket the Suggestion under
+		// "Expected a package declaration ..." fell through to a bare stderr write and came
+		// out ahead of the sorted stream.
+		syntax_parser.err_verbose     = syntax_error_with_verbose_va
+		syntax_parser.err_line        = error_line
+		syntax_parser.err_block_begin = begin_error_block
+		syntax_parser.err_block_end   = end_error_block
+		// #322: the span-carrying channel, for the parser diagnostics C++ anchors to a NODE
+		// rather than a token. syntax_error_va already takes (pos, end) and renders the caret
+		// across the range -- the parser simply had no way to reach it.
+		syntax_parser.err_range       = syntax_error_va
+		// The "Error: " channel. src/parser.cpp calls the CHECKER's error() at two asm sites
+		// (:2506 and :2701) rather than syntax_error(), so those two diagnostics carry no
+		// "Syntax Error" prefix. error_va already has the (pos, end) shape; the parser simply
+		// had no way to reach it. See parser.Plain_Error_Handler.
+		syntax_parser.err_plain       = error_va
+		// #390: the parser's `#define` Suggestion quotes the user's macro body back at them,
+		// which needs expr_to_string. C++'s parser calls the checker's printer directly; this
+		// package split forbids that, so the driver injects the same printer rather than the
+		// parser growing a second one.
+		syntax_parser.expr_str        = expr_to_string
+	// The asm-template grammar rejects any target but amd64 (src/parser.cpp:2782-2784),
+	// which the reference reads from build_context.metrics.arch. core/odin/parser is
+	// standalone, so the driver hands it the architecture; leaving it .Unknown suppresses
+	// the check, which is what a parser with no configured target should do.
+	syntax_parser.target_arch     = odin_arch_from_target_arch(build_context.metrics.arch)
+		// #209: file_allow_newline needs build_context.strict_style and the build-level vet
+		// flags. The parser package has no build context of its own, so the driver supplies
+		// them -- without this every file parses as if -strict-style were off.
+		syntax_parser.strict_style = build_context.strict_style
+		syntax_parser.vet_flags = transmute(ast.Vet_Flags)build_context.vet_flags
+		// #211: parse_do_body reads this; build_context.disallow_do was stored but never read.
+		syntax_parser.disallow_do = build_context.disallow_do
+		// The parser's statement loops stop here instead of exiting the process the way C++'s
+		// syntax_error does at the same cap. See parser.error_limit_reached.
+		syntax_parser.max_error_count = build_context.max_error_count
+		pkg, parse_ok := parse_package_for_target(pkg_path, pkg_to_load.kind, &syntax_parser)
+		if !parse_ok || pkg == nil {
+			result.parse_errors += 1
+			continue
+		}
+
+		// Register the package
+		loaded[pkg_path] = pkg
+		append(&result.packages, pkg)
+		result.total_files += len(pkg.files)
+
+		// Register in info.packages for the checker using the IMPORT path
+		// The checker looks up packages by their import path (like "core:fmt")
+		if info != nil {
+			// Register by import path if we have one.
+			//
+			// A relative spelling (`./x`, `../x`) is deliberately NOT registered: it is not a
+			// globally unique key, so two packages in different directories importing the
+			// same literal text would collide on whichever was loaded first and the second
+			// would silently resolve to the wrong package. Relative imports are found through
+			// the fullpath key below, via lookup_imported_package. C++ has no equivalent
+			// hazard because determine_path_from_string (src/parser.cpp:6236) resolves the
+			// path before it ever becomes a key.
+			if len(import_path) > 0 &&
+			   !strings.has_prefix(import_path, "./") &&
+			   !strings.has_prefix(import_path, "../") {
+				register_package(info, import_path, pkg)
+			}
+			// Also register by fullpath as a fallback
+			register_package(info, pkg_path, pkg)
+
+			// This is the analogue of get_runtime_package (src/checker.cpp:899), which finds
+			// the runtime by looking its path up in info->packages and asserts it is there.
+			// The lookup is done here, once, at the moment the package is registered, rather
+			// than repeated on every call - but the property it establishes is the same one:
+			// info.runtime_package is a package that was really parsed, not a synthesized
+			// stand-in. check_files' register_packages_from_files sets it too, from the same
+			// .Runtime kind; both agree because there is only ever one such package.
+			if pkg.kind == .Runtime {
+				info.runtime_package = pkg
+			}
+		}
+
+		// Find and queue all imports
+		//
+		// LEDGER #459 (task #335). This walk decides the order imports are QUEUED, hence the order
+		// packages are loaded and REGISTERED, hence pkg.id -- which #452 now assigns from
+		// registration order and topological_sort_packages uses as its tiebreak. pkg.files is a
+		// map (#345, an ARRAY in C++), so a raw walk here is address-seeded (#437) and injects that
+		// nondeterminism straight into package_order.
+		//
+		// LEDGER #429 SORTED THIS EXACT SITE AND MEASURED NOTHING -- correctly, at the time:
+		// nothing consumed registration order yet. #452 created the consumer, which made a filed
+		// null result stale. Re-tested and landed on that basis, not on the old reasoning.
+		for file in sorted_files(pkg.files) {
+			for decl in file.decls {
+				if import_decl, is_import := decl.derived.(^ast.Import_Decl); is_import {
+					child_import_path := import_decl.fullpath
+
+					// Strip quotes from the import path (parser may include them)
+					// This ensures consistency between registration and lookup
+					stripped_path := child_import_path
+					if len(stripped_path) >= 2 && stripped_path[0] == '"' {
+						stripped_path = stripped_path[1:len(stripped_path) - 1]
+					}
+
+					// C++ parser.cpp:6236 rewrote the collection before the path was ever
+					// resolved, so the loader must see `base:` here too -- otherwise
+					// `import "core:runtime"` resolves to ODIN_ROOT/core/runtime, which does not
+					// exist, and the package is never queued at all. NO DIAGNOSTIC IS EMITTED ON
+					// THIS PATH: the loader walks each import decl once per PACKAGE load, so
+					// warning here would double-report. check_add_import_decl owns the message.
+					//
+					// C++ passes `original_string` -- the import text AS WRITTEN -- as
+					// try_add_import_path's rel_path (src/parser.cpp:6719), and every one of
+					// that function's diagnostics prints rel_path rather than the resolved
+					// path. Captured here, before the rewrite below.
+					original_import_text := stripped_path
+
+					stripped_path, _ = normalize_deprecated_core_collection(stripped_path, allocator)
+					child_import_path = stripped_path
+
+					// Skip reserved/builtin packages - they're handled by the compiler
+					if is_reserved_package(stripped_path) {
+						continue
+					}
+
+					child_fullpath, resolve_ok := resolve_import_path(child_import_path, package_base_dir(pkg_path), allocator)
+					if !resolve_ok {
+						// The collection could not be named at all. That is
+						// determine_path_from_string's territory in the reference
+						// (src/parser.cpp:6512) and check_add_import_decl's here; it is not
+						// try_add_import_path's, and diagnosing it twice would double-report.
+						continue
+					}
+
+					// C++ Reference: determine_path_from_string (src/parser.cpp:6608-6626).
+					// It returns FALSE for each of these, so parse_setup_file_decls does
+					// `continue` (src/parser.cpp:6708-6712) and try_add_import_path is never
+					// reached -- no path diagnostic is produced for them, and the message they
+					// DO get belongs to check_add_import_decl on this side:
+					//
+					//	import ":foo"        -> "Expected a collection name"
+					//	import "system:foo"  -> "The library collection 'system' is restrict for 'foreign import'"
+					//	import "bogus:foo"   -> "Unknown library collection: 'bogus'"
+					//
+					// LEDGER #1256, second correction. Without this guard the classifier below
+					// answered all three with "Syntax Error: Path does not exist: <path>" and,
+					// because it is a syntax error, BAILED BEFORE CHECKING -- so the correct
+					// diagnostic never ran. Two of the three were already right before #1256
+					// and would have been regressions; `bogus:foo` and the leading colon are
+					// pinned by wit_bh206/h_coll_unknown and wit_bi213/i_leading_colon.
+					//
+					// The reserved names (`builtin`, `intrinsics`) need no arm here: the
+					// is_reserved_package test above already continued for the collection
+					// spellings, and the bare and `core:`-prefixed ones are handled by
+					// check_add_import_decl, measured unchanged by this work.
+					if len(stripped_path) > 0 && stripped_path[0] == ':' {
+						continue
+					}
+					if coll, _ := split_import_collection(stripped_path); coll != "" {
+						if coll == "system" {
+							continue
+						}
+						if _, found := find_library_collection_path(coll); !found {
+							continue
+						}
+					}
+
+					// C++ Reference: src/parser.cpp:6292-6296 -- try_add_import_path opens with
+					//
+					//	MUTEX_GUARD_BLOCK(&p->imported_files_mutex) {
+					//		if (string_set_update(&p->imported_files, path)) {
+					//			return nullptr;
+					//		}
+					//	}
+					//
+					// keyed on the RESOLVED path and populated BEFORE any classification, so a
+					// path that fails is diagnosed exactly once per compilation no matter how
+					// many files import it. `loaded` cannot serve as that key: it holds only
+					// packages that PARSED, so a failing path was retried by every importer.
+					if child_fullpath in attempted {
+						continue
+					}
+					attempted[child_fullpath] = true
+
+					if !try_add_import_path_check(child_fullpath, original_import_text, import_decl.import_tok.pos, allocator) {
+						continue
+					}
+
+					// Use the stripped (unquoted) path for registration
+					// This matches how check_import_export looks up packages
+					append(&to_load, Package_To_Load{
+						import_path = stripped_path,
+						fullpath    = child_fullpath,
+					})
+				}
+			}
+		}
+	}
+
+	// #588. Look the requested package up by its normalised absolute path. Done here rather than
+	// in each consumer: `loaded` is keyed by exactly the path filepath.abs produced above, so
+	// no caller has to redo that normalisation (and get symlinks or trailing separators subtly
+	// wrong in its own way).
+	result.root = loaded[root_fullpath]
+
+	ok = result.parse_errors == 0
+	return result, ok
+}
+
+// with_trailing_separator returns `path` guaranteed to end in a path separator, allocating a copy
+// only when one has to be added.
+//
+// ODIN_ROOT ENDS WITH A SEPARATOR. C++ guarantees it structurally: internal_odin_root_dir walks
+// back from the end of the executable's path to the last '/' or '\\' and BREAKS on it
+// (build_settings.cpp:1219-1225), so the separator is the final character it keeps. User code
+// relies on this -- vendor/miniaudio/common.odin:16 writes
+//     ODIN_ROOT + "vendor/miniaudio/src/build_miniaudio.sh"
+// with no separator of its own. Without this the port produced ".../dev/odinvendor/miniaudio/...",
+// which is not merely a cosmetic difference in a diagnostic: any #exists or #load built the same
+// way resolves to the wrong path. LEDGER #363.
+@(private = "file")
+with_trailing_separator :: proc(path: string, allocator: runtime.Allocator) -> string {
+	if len(path) == 0 {
+		return path
+	}
+	if path[len(path) - 1] == '/' || path[len(path) - 1] == '\\' {
+		return path
+	}
+	joined, err := strings.concatenate({path, "/"}, allocator)
+	if err != nil {
+		return path
+	}
+	return joined
+}
+
+// init_odin_root_from_env initializes ODIN_ROOT from environment if not set
+// Falls back to auto-detection from current working directory
+// Uses heap allocator to ensure the string persists across temp allocator resets
+// (STRANDED above a different procedure until #734 -- another procedure was inserted between
+//  this doc comment and the definition it documents.)
+init_odin_root_from_env :: proc() {
+	if len(build_context.ODIN_ROOT) == 0 {
+		// ALWAYS the heap. ODIN_ROOT is cached in a process-lifetime global, so its storage must
+		// outlive every caller, full stop -- not merely outlive the one caller-allocator this code
+		// happens to recognise.
+		//
+		// This used to read `context.allocator`, redirecting to the heap only when it could see
+		// that the caller had installed context.temp_allocator. That test names ONE bad allocator
+		// and trusts every other. The Odin test runner hands each test a per-task allocator which
+		// it recycles when the slot is reused -- not the temp allocator, so the old guard did not
+		// fire, and ODIN_ROOT became garbage between tests. The symptom was not a crash but 37
+		// spurious "Unable to find package: core:fmt" diagnostics on the SECOND package check in a
+		// process, which reads like a checker defect and is not one. LEDGER #358.
+		persistent_allocator := runtime.heap_allocator()
+
+		if odin_root := os.get_env("ODIN_ROOT", persistent_allocator); len(odin_root) > 0 {
+			build_context.ODIN_ROOT = with_trailing_separator(odin_root, persistent_allocator)
+			return
+		}
+
+		// NO CWD WALK-UP. #898 REMOVED a fallback that searched the current working directory and
+		// its parents (depth 10) for `base/runtime`.
+		//
+		// It was introduced so tests could run without ODIN_ROOT being set -- the library
+		// conforming to its harnesses rather than the other way round -- and it had two properties
+		// a library must not have. It made the checker's answer depend on the caller's CWD, which
+		// is ambient, mutable, and unrelated to where the standard library lives: the SAME file
+		// checked from inside the Odin tree passed and from /tmp failed. And when it failed it
+		// failed SILENTLY, leaving t_context nil so that `context.allocator` was reported as
+		// "Cannot use a selector expression on nil-value expression" -- an accusation against
+		// valid source for what is purely an environment problem. LEDGER #897.
+		//
+		// The root now comes from Session_Options.odin_root or from ODIN_ROOT, and a failure to
+		// resolve it is REPORTED (Package_Check_Result.odin_root_not_found) rather than absorbed.
+		// The reference compiler's third mechanism -- deriving the root from its own executable's
+		// path -- is not available to a library, since that path belongs to the host application.
+	}
+}
+
+// Package_Check_Result is the outcome of check_package_from_path.
+//
+// The failure modes are kept separate on purpose. A package that could not be loaded at
+// all must never be indistinguishable from a package that loaded cleanly and produced N
+// diagnostics, so a load failure is reported through `load_ok` rather than being folded
+// into `check_errors`. For the same reason a run that was cut short by the error cap is
+// reported through `limit_reached` rather than looking like an ordinary failed check.
+Package_Check_Result :: struct {
+	// ok is true only when the package loaded, every file parsed, the checker ran to
+	// completion and reported no diagnostics. It is the "this package is clean" flag.
+	ok:            bool,
+
+	// load_ok reports whether the package was actually located, parsed and handed to the
+	// checker: the loader returned success AND the load produced at least one file.
+	//
+	// The zero-file case matters because `check_files` over an empty file list trivially
+	// returns true - a path that resolves nowhere would otherwise look like a clean pass.
+	load_ok:       bool,
+
+	// check_ok is the raw result of check_files. It is only meaningful when at least one
+	// file was loaded; with no files the checker is never invoked and this stays false.
+	check_ok:      bool,
+
+	// parse_errors counts packages (root or dependency) that failed to parse.
+	parse_errors:  int,
+
+	// check_errors is the number of diagnostics the checker reported.
+	//
+	// When `limit_reached` is set this is a floor, not a total: it counts what was recorded
+	// before the cap tripped, and every diagnostic after that was dropped.
+	check_errors:  int,
+
+	// limit_reached reports that checking was abandoned because more than
+	// build_context.max_error_count errors were produced.
+	//
+	// This is a third outcome, distinct from both "clean" and "checked and found N errors":
+	// the checker stopped partway, so `check_errors` is truncated and the absence of a
+	// diagnostic proves nothing about the code. The C++ compiler expresses this by calling
+	// exit(1); as a library we cannot, so it is surfaced here instead. See
+	// CPP_DEVIATIONS.md [EMBED-1].
+	limit_reached: bool,
+
+	// check_warnings is the number of those diagnostics that were warnings rather than errors.
+	// Like check_errors, it is a floor when `limit_reached` is set.
+	check_warnings: int,
+
+	// odin_root_not_found reports that neither Session_Options.odin_root nor the ODIN_ROOT
+	// environment variable produced a usable root, so `base:runtime` was never seeded.
+	//
+	// THIS IS A PRECONDITION FAILURE, NOT A RESULT ABOUT THE SOURCE, and it must be read before
+	// any diagnostic is believed. Without runtime there is no `Context` type, so `t_context` stays
+	// nil and every `context.x` selector reports "Cannot use a selector expression on nil-value
+	// expression" -- a language-level complaint about perfectly valid code, and only the first of
+	// an unbounded family of them. The preload types go the same way.
+	//
+	// Same shape and same reasoning as `limit_reached` above: the reference compiler expresses
+	// this by calling compiler_error("Unable to find The 'base:runtime' package. Is the ODIN_ROOT
+	// set up correctly?") and stopping; as a library we cannot exit the host process, so it is
+	// surfaced here instead. LEDGER #897/#898.
+	odin_root_not_found: bool,
+
+	// diagnostics are the diagnostics themselves, OWNED BY THIS RESULT.
+	//
+	// check_errors without these is a number the caller cannot act on. The global error
+	// collector that produced them is a singleton bounded by init_error_collector /
+	// destroy_error_collector, and check_package_from_path owns that whole lifetime - so by the
+	// time this result exists, the collector is already gone. Rather than leave the count
+	// pointing at freed storage, ownership of the list is transferred here (see
+	// take_error_values: a detach, not a copy), which also means results for different packages
+	// coexist instead of clobbering one shared buffer.
+	//
+	// Free with destroy_package_check_result; print with print_package_diagnostics. Each
+	// Error_Value.msg is its own allocation, so deleting the array alone leaks every message.
+	// Allocated from the `allocator` passed to check_package_from_path.
+	diagnostics:   [dynamic]Error_Value,
+
+	// total_files is the number of files loaded across the package and its dependencies.
+	total_files:   int,
+}
+
+// destroy_package_check_result frees the diagnostics owned by a Package_Check_Result.
+//
+// Safe on a zero-valued result and idempotent, so it can be deferred immediately after the
+// call to check_package_from_path regardless of which failure path was taken.
+destroy_package_check_result :: proc(result: ^Package_Check_Result) {
+	destroy_error_values(&result.diagnostics)
+}
+
+// print_package_diagnostics prints the diagnostics a check produced, in the same format and
+// with the same sorting/merging as print_all_errors.
+//
+// This is the entry point an embedder should use. It reads the result's own list, so it stays
+// valid after check_package_from_path has returned and torn the global collector down, and it
+// prints nothing when there is nothing to print. The list is mutated in place (sorted, and
+// same-position diagnostics merged), so repeated calls print the merged form.
+print_package_diagnostics :: proc(result: ^Package_Check_Result) {
+	print_error_values(&result.diagnostics)
+}
+
+// check_package_from_path is a convenience function that loads and checks a package
+// This handles all the setup needed to check real code
+//
+// The returned result OWNS its diagnostics and must be freed with
+// destroy_package_check_result. It is deliberately self-contained: this procedure owns the
+// whole lifetime of the global error collector, so once it returns, nothing about the run is
+// readable through the global collector any more - which is why `check_errors` travels with the
+// diagnostics it counts rather than merely counting them. To print them, call
+// print_package_diagnostics(&result); print_all_errors() reads the (already destroyed) global
+// collector and is not applicable here.
+//
+//	res := checker.check_package_from_path(path)
+//	defer checker.destroy_package_check_result(&res)
+//	if res.check_errors > 0 {
+//		checker.print_package_diagnostics(&res)
+//	}
+// check_package_from_path checks a package and returns ONLY diagnostics and counts. The checked
+// model is created and destroyed inside the call.
+//
+// Callers that need the model to outlive the call (a backend, a language server) want
+// session_check_package instead -- see the Session block at the end of this file. This proc is
+// now a thin wrapper over it, so the two can never drift.
+// `opts` mirrors session_check_package (#590). This is the OTHER public entry point and it had the
+// same gap: it reads the process-global build_context directly, so a consumer checking a LIBRARY had
+// no way to say so. #589 made that fatal -- every no-main package started reporting an undefined
+// entry point, including this repo's own test suite (#593).
+//
+// Same save/restore, and for the same measured reason: the global is shared with anything else in
+// the process, so applying an option to it and walking away alters behaviour behind the caller's
+// back (#321/#368).
+check_package_from_path :: proc(path: string, opts := Session_Options{}, allocator := context.allocator) -> (result: Package_Check_Result) {
+	c: ^Checker
+	cf: []^ast.File
+
+	ensure_build_context_initialized()
+	saved_no_entry_point := build_context.no_entry_point
+	build_context.no_entry_point = opts.no_entry_point
+	defer build_context.no_entry_point = saved_no_entry_point
+
+	// An explicit root wins over the environment, and is applied the same save/set/restore way as
+	// no_entry_point above. ODIN_ROOT is a process-lifetime global, so the restore matters: two
+	// consecutive checks with different roots must not leak into one another.
+	saved_odin_root := build_context.ODIN_ROOT
+	if opts.odin_root != "" {
+		build_context.ODIN_ROOT = with_trailing_separator(opts.odin_root, runtime.heap_allocator())
+	}
+	defer build_context.ODIN_ROOT = saved_odin_root
+
+	result, c, cf, _ = _check_package(path, allocator)
+	// Ownership stays here, exactly as before: the model dies with the call.
+	destroy_checker(c)
+	free(c, allocator)
+	delete(cf, allocator)
+	return
+}
+
+// _check_package is the driving sequence, shared by check_package_from_path and
+// session_check_package. It does NOT destroy the checker -- the caller owns `c` and must call
+// destroy_checker + free on it.
+//
+// The error collector's lifetime stays wholly inside this proc: harvest_check_diagnostics
+// detaches the diagnostics onto `result` (take_error_values is a detach, not a copy) before
+// destroy_error_collector frees the collector, so a surviving checker does not need a surviving
+// collector.
+@(private = "file")
+// project_name_from_path derives ODIN_BUILD_PROJECT_NAME the way the reference does.
+//
+// LEDGER #1211. C++ build_settings.cpp:2290-2293:
+//     String build_project_name = last_path_element(bc->build_paths[BuildPath_Main_Package].basename);
+//     GB_ASSERT(build_project_name.len > 0);
+//     bc->ODIN_BUILD_PROJECT_NAME = build_project_name;
+// where BuildPath_Main_Package is path_from_string(init_filename).
+//
+// MEASURED on the reference rather than derived from that code, because Path's basename/name split
+// is easy to get backwards: a directory, that same directory with a trailing separator, and a
+// `-file` path INSIDE it all yield the same answer -- the containing directory's base name.
+//     ./odin check .../strs            -> PROJ=strs
+//     ./odin check .../strs/           -> PROJ=strs
+//     ./odin check .../strs/main.odin -file -> PROJ=strs
+//
+// The absolute-path step is not decoration. filepath.base returns "" for a path with a trailing
+// separator and "." for ".", so deriving the name from the caller's spelling gives a different
+// answer for three spellings of one directory -- and this value decides which FILES ARE IN THE
+// PACKAGE, so that would be a source of nondeterminism, not just a wrong string.
+project_name_from_path :: proc(path: string, allocator := context.allocator) -> string {
+	if len(path) == 0 {
+		return ""
+	}
+	abs, abs_err := os.get_absolute_path(path, allocator)
+	if abs_err != nil {
+		abs = path
+	}
+	dir := abs
+	if !os.is_dir(dir) {
+		dir = filepath.dir(dir)
+	}
+	for len(dir) > 1 && (dir[len(dir)-1] == '/' || dir[len(dir)-1] == '\\') {
+		dir = dir[:len(dir)-1]
+	}
+	name := filepath.base(dir)
+	if name == "." || name == "/" || name == "\\" {
+		return ""
+	}
+	// Cloned from the CALLER's allocator, not a temp one: add_global_string_constant publishes this
+	// into the builtin scope, and a session hands that scope back to the caller and outlives this
+	// procedure. C++ uses permanent_allocator() here for the same reason.
+	return strings.clone(name, allocator)
+}
+
+_check_package :: proc(path: string, allocator := context.allocator) -> (result: Package_Check_Result, checker: ^Checker, checked_files: []^ast.File, root: ^ast.Package) {
+	// Initialize ODIN_ROOT from environment if needed
+	init_odin_root_from_env()
+	init_default_library_collections() // t207: ODIN_ROOT is known here; C++ main.cpp:3814
+
+	// LEDGER #1211. ODIN_BUILD_PROJECT_NAME was DECLARED (build_settings.odin:396, with the correct
+	// description "Odin main/initial package's directory name") and NEVER WRITTEN, so it was "" for
+	// every check. That is not only a wrong constant: current_build_target passes it as
+	// Build_Target.project_name, and match_build_tags decides `#+build-project-name` from it, so
+	// every file carrying that tag was mis-filtered. See the escape-hatch note in
+	// core/odin/parser/file_tags.odin for why the symptom was silence rather than an error.
+	//
+	// Saved and restored for the same reason as ODIN_ROOT and no_entry_point above: build_context is
+	// a process global shared with anything else in the process, and two consecutive checks of
+	// DIFFERENT packages must not inherit one another's project name (#321/#358/#368).
+	saved_project_name := build_context.ODIN_BUILD_PROJECT_NAME
+	build_context.ODIN_BUILD_PROJECT_NAME = project_name_from_path(path, allocator)
+	defer build_context.ODIN_BUILD_PROJECT_NAME = saved_project_name
+
+	// Recorded BEFORE anything else runs, because everything after it is unreliable without a
+	// root. See the field's own comment: this is a precondition failure, not a finding about the
+	// source, and the diagnostics produced in this state accuse valid code. LEDGER #897/#898.
+	result.odin_root_not_found = len(build_context.ODIN_ROOT) == 0
+
+	// Initialize error collector FIRST - needed by checker initialization.
+	//
+	// It is given the same allocator as everything else here, because the diagnostics it
+	// allocates are handed to the caller on `result.diagnostics` - they must come from the
+	// allocator the caller passed in, not from whatever context.allocator happened to be.
+	init_error_collector(1000, allocator = allocator)
+	defer destroy_error_collector()
+
+	// NOTE: the harvest below is deliberately NOT written as a `defer`, even though a defer
+	// would cover both return paths for free. Odin rejects assignments to a named return value
+	// inside a defer ("Assignments to named return values within 'defer' will not affect the
+	// value that is returned") - but that check only fires on the bare identifier, so
+	// `result.check_errors = ...` inside a defer compiles and is then silently discarded. Every
+	// return path calls harvest_check_diagnostics explicitly instead.
+
+	// Create checker.
+	//
+	// HEAP, not stack. It used to be `c := &Checker{}`, and the comment on the dump-model defer
+	// below explained that this was why no pointer to it could be handed back. A session needs
+	// exactly that pointer, so the Checker is now allocated from the caller's allocator and
+	// returned. Ownership passes to the caller: destroy_checker + free.
+	c := new(Checker, allocator)
+	checker = c
+	init_checker(c, allocator)
+
+	// LEDGER #418. Emit the model dump if -dump-model was requested. It is a defer so that all
+	// three return paths are covered and a future early-return cannot silently skip it.
+	//
+	// This proc no longer destroys the checker, so the ordering hazard the original comment
+	// described (register after the destroy defer so it unwinds first) is gone -- the model is
+	// alive for the whole of this proc and beyond it. The model is now reachable from the caller
+	// too, via the returned `checker`; it is still NOT on Package_Check_Result, because that
+	// result is returned by value from a proc whose checker the wrapper immediately destroys.
+	defer if len(build_context.dump_model_path) > 0 {
+		dump_model(c, build_context.dump_model_path)
+	}
+	// LEDGER #480. Same hook, same reason -- see dump_doc's own header for why the doc FLAG BITS
+	// need a gate of their own.
+	defer if len(build_context.dump_doc_path) > 0 {
+		dump_doc(c, build_context.dump_doc_path)
+	}
+	// t243t. Same hook, same lifetime reason. This one must run AFTER the dependency-set walk
+	// (check_files.odin:348) has completed, which it does: these defers unwind at the end of
+	// the whole check, and generate_minimum_dependency_set_internal has its own trailing
+	// barrier (check_files.odin:349) so min_dep_count is settled and not racing.
+	defer if len(build_context.dump_mindep_path) > 0 {
+		dump_mindep(c, build_context.dump_mindep_path)
+	}
+
+	// NOTE(#279 part 2): set_error_collector_info(&c.info) belongs here and is NOT yet wired.
+	// Wiring it was TRIED and MEASURED on 2026-08-03 and is net-negative as things stand:
+	//   for it     -- it makes the source-line/caret display live (a full port of C++
+	//                 error.cpp:282-516 that is currently dead code, because
+	//                 set_error_collector_info at error.odin:188 has NO caller anywhere), and it
+	//                 restores the "Suggestion: Did you mean '[3]int'?" line that the
+	//                 same-position merge currently swallows.
+	//   against    -- corpus went 55 FULL-MATCH / 0 DIFFER  ->  53 / 2. Probes matcnt2 and p_cte3,
+	//                 both SYNTAX-error probes, gained a spurious "\t( empty line )" before each
+	//                 diagnostic. Cause: parse-stage positions do not resolve through
+	//                 info.files (error.odin:531), so get_file_line_as_string returns "" and
+	//                 show_error_on_line takes C++'s genuine empty-line branch
+	//                 (error.odin:649-654, faithful to error.cpp:294).
+	// RESOLVED: parse-stage positions are now resolvable. register_source_file publishes each
+	// file at creation (package_resolver.odin, in collect_package_for_target) -- with its source
+	// attached and before it is parsed -- into a global path-keyed registry that
+	// get_file_line_as_string consults when info.files misses. That is what C++ does
+	// (parser.cpp:57 reads a global ast-file table, not the checker's Info), so the source-line
+	// and caret display can now be switched on.
+	set_error_collector_info(&c.info)
+
+	// Load package and dependencies.
+	//
+	// `loader_ok` must not be discarded: it is false both when a package failed to parse
+	// (which also shows up in `parse_errors`) and when the root path could not be resolved
+	// at all - and that second case leaves `parse_errors` at 0 with an empty package list.
+	load_result, loader_ok := load_package_with_dependencies(path, &c.info, allocator)
+	root = load_result.root   // #588: the requested package, resolved by the loader
+	result.parse_errors = load_result.parse_errors
+	result.total_files = load_result.total_files
+
+	// Collect all files from all packages (even if some failed to parse)
+	files := make([dynamic]^ast.File, allocator)
+
+	// Packages come from load_result.packages, which is an ordered slice, but the files within
+	// each were iterated as a MAP - so the flat list handed to check_files was
+	// (deterministic package order) x (hash file order).
+	//
+	// C++ never builds a flat list: check_parsed_files walks packages, each holding pkg->files,
+	// an array that check_create_file_scopes sorts by basename (checker.cpp:6052, called from
+	// check_parsed_files at checker.cpp:7677). Sorting the inner loop reproduces that shape --
+	// packages in load order, files sorted within - without interleaving packages, which is what
+	// sorting the flat list by basename would have done.
+	//
+	// NOTE on scope: the SAME map iteration in the loader above (the import-discovery loop) is
+	// deliberately left alone. That code runs before any checking, and its C++ counterpart is in
+	// the parser, which sees pkg->files in raw readdir order - the sort has not happened yet.
+	// Sorting there would diverge from C++ rather than match it.
+	for pkg in load_result.packages {
+		for file in sorted_files(pkg.files) {
+			append(&files, file)
+		}
+	}
+	// Published here, after the list is complete, so every return path below carries it.
+	// Ownership passes to the caller along with `checker`.
+	checked_files = files[:]
+
+	result.load_ok = loader_ok && len(files) > 0
+
+	if len(files) == 0 {
+		// Nothing was loaded, so there is nothing to check. Do NOT fall through to
+		// check_files: it returns true for an empty file list, which would report a
+		// non-existent or unreadable package as a clean pass.
+		//
+		// The loader can still have reported diagnostics, so this path harvests them too - a
+		// result must be self-contained however it was reached.
+		harvest_check_diagnostics(&result)
+		return
+	}
+
+	// C++ Reference: src/main.cpp:4257-4260.
+	//
+	//     if (any_errors()) { print_all_errors(); return 1; }
+	//     checker->parser = parser;
+	//     init_checker(checker);
+	//     ...
+	//     check_parsed_files(checker);
+	//
+	// C++ NEVER type-checks a program whose parse produced diagnostics -- it prints and
+	// exits between the two phases. The port checked anyway, running semantic analysis over
+	// an AST it already knew was malformed and emitting cascade diagnostics C++ never
+	// produces (probe eb4: C++ 1 syntax error, the port that plus 7 invented semantic ones).
+	//
+	// error_count() is exactly C++'s any_errors() now that #180 routes parser diagnostics
+	// through the same collector; before that wiring this gate could not have been written,
+	// because the syntax errors were not in any count the checker could see.
+	//
+	// The library deviation from CPP_DEVIATIONS.md [EMBED-1] still applies: C++ exits the
+	// process here, we return a populated result instead.
+	if error_count() > 0 {
+		harvest_check_diagnostics(&result)
+		return
+	}
+
+	// Run the checker.
+	//
+	// The error-limit signal travels out of the checker on the global error collector, the
+	// same channel `check_errors` and the diagnostics already use - it is written by error_va
+	// on whichever thread trips the cap and read here after every worker has been joined.
+	result.check_ok = check_files(c, files[:])
+
+	harvest_check_diagnostics(&result)
+	return
+}
+
+// harvest_check_diagnostics moves everything the run produced off the global error collector
+// and onto the result, then derives `ok`.
+//
+// It must run while the collector is still alive - i.e. before `destroy_error_collector`, which
+// frees every Error_Value.msg - which is why check_package_from_path calls it on each return
+// path rather than leaving the counts for the caller to read afterwards. The counts are read
+// before take_error_values, since taking the values zeroes them.
+@(private = "file")
+harvest_check_diagnostics :: proc(result: ^Package_Check_Result) {
+	result.check_errors = error_count()
+	result.check_warnings = warning_count()
+	result.limit_reached = error_limit_reached()
+	result.diagnostics = take_error_values()
+
+	// A truncated run is never "ok": check_files bailed out at a phase boundary, so most of
+	// the package was never looked at.
+	result.ok = result.load_ok && result.check_ok && !result.limit_reached &&
+		result.check_errors == 0 && result.parse_errors == 0
+}
+
+// ======================================================================================
+// SESSION -- keep the checked model alive past the call
+// ======================================================================================
+//
+// WHY THIS EXISTS. check_package_from_path returns diagnostics and counts; the model it built
+// (entities, types, scopes) is destroyed inside the call. Both consumers now in view need the
+// model to outlive it: a backend walks every entity once, a language server queries it by
+// position and re-checks on edit. Before this, a consumer had to reproduce the driving sequence
+// itself -- every piece of it is exported -- which works but means the sequence exists in two
+// places and silently diverges when it changes.
+//
+// This is PHASE 1 of two. The API surface here is the one we want AFTER the process globals are
+// removed (task #566); only the PRECONDITIONS below differ. Phase 2 deletes preconditions, not
+// signatures, so nothing written against this needs revisiting.
+//
+// PRECONDITIONS -- all three are consequences of process-global state, and all three go away
+// with #566:
+//
+//   1. ONE LIVE SESSION PER PROCESS. destroy_checker calls reset_runtime_type_globals, which
+//      un-publishes the runtime type globals (t_type_info and ~40 siblings). Those are resolved
+//      out of the owning checker's scopes and allocated from its allocator, so the reset is
+//      mandatory -- but it means destroying session A nils the type universe session B is
+//      mid-check against. Enforced below, loudly, rather than left to corrupt silently.
+//
+//   2. ONE BUILD CONFIGURATION PER PROCESS. `build_context` is a package-level global
+//      (build_settings.odin:502, mirroring C++ build_settings.cpp:621). Two sessions cannot
+//      target different platforms or carry different -define / vet flags.
+//
+//   3. session_destroy INVALIDATES the shared runtime type globals, so any ^Type reached through
+//      a session must not be used after that session is destroyed.
+//
+// NOT a precondition: the error collector. Its lifetime is wholly inside _check_package --
+// diagnostics are DETACHED onto the result (take_error_values) before the collector is torn
+// down, so a live session does not hold it open.
+
+// Session owns a checked model. Create with session_check_package, release with session_destroy.
+Session :: struct {
+	// checker is the model: entities, types, scopes. Valid until session_destroy.
+	checker: ^Checker,
+
+	// result carries the same payload check_package_from_path returns -- diagnostics (owned) and
+	// the four-state outcome. Read `ok` / `load_ok` / `check_ok` / `limit_reached` together:
+	//
+	//   load_ok == false                     -> no model; read nothing else
+	//   check_ok && !limit_reached && ok     -> model present and clean
+	//   check_ok == false, limit_reached==false -> model present, contains errors; usable
+	//   limit_reached == true                -> model PARTIAL. Checking was abandoned at
+	//                                           max_error_count, so check_errors is a floor and
+	//                                           the ABSENCE of a diagnostic proves nothing. A
+	//                                           language server must not render this as a
+	//                                           complete diagnostic set; a backend must refuse.
+	result: Package_Check_Result,
+
+	// packages in load order (deterministic), files in the order check_files saw them:
+	// packages in load order, and within each package sorted by BASENAME -- which is what C++
+	// does (check_create_file_scopes, checker.cpp:6052). Do not re-sort by fullpath; that is a
+	// different order.
+	packages: []^ast.Package,
+	files:    []^ast.File,
+
+	// root is the package `session_check_package` was ASKED for.
+	//
+	// NOT `packages[0]`. Packages are in LOAD order, and base:runtime is seeded ahead of the root,
+	// so index 0 is the runtime whenever a runtime directory can be resolved. That is the normal
+	// case -- it does NOT require ODIN_ROOT to be set in the environment, because the build context
+	// derives a root of its own. Measured on this tree: `packages[0].name == "runtime"` both with
+	// ODIN_ROOT set and with it unset.
+	//
+	// Consumers that must act on exactly the requested package should use this: a backend emitting
+	// one object per package and not walking dependencies; a language server scoping diagnostics to
+	// the open package and not surfacing core:'s.
+	//
+	// Why a field and not a note telling callers to be careful: `packages[0]` is a perfectly valid
+	// ^ast.Package pointing at the WRONG package, so no type, assertion or verifier can reject it.
+	// The error surfaces later, as unrelated failures inside code the consumer never meant to touch.
+	// Requested by the mir agent after exactly that: mirc restricted lowering to packages[0], which
+	// was green across a whole test suite and still false.
+	//
+	// nil if loading failed (`result.load_ok == false`) or the root path could not be resolved.
+	root: ^ast.Package,
+
+	allocator: runtime.Allocator,
+}
+
+// live_sessions guards precondition 1. It counts only EXPLICIT sessions --
+// check_package_from_path does not go through it, so the existing (possibly concurrent) callers
+// of that entry point are unaffected. Deleted by #566.
+@(private = "file")
+live_sessions: int
+@(private = "file")
+live_sessions_mutex: sync.Mutex
+
+// Session_Options carries facts about the BUILD that the checker cannot infer from the source.
+//
+// A struct rather than loose parameters so that the next such flag costs no signature change, and
+// so callers name what they are asserting at the call site.
+Session_Options :: struct {
+	// no_entry_point: do not require an entry point procedure. The equivalent of the reference
+	// compiler's `-no-entry-point`.
+	//
+	// THIS IS THE NORMAL CASE FOR A LIBRARY CONSUMER, and the reason this struct exists.
+	// Whether a `main` is required is a property of what is being BUILT, not of the source: a
+	// backend emitting one object per package, a language server opening a library, and a
+	// documentation tool all check packages that are not programs. The caller is the only party
+	// that knows which it has, so the checker cannot infer it and must be told.
+	//
+	// Requested by the mirc agent (#590) as a direct consequence of #589. Before #589 the whole
+	// entry-point surface was dead, so a library checked clean by accident; making it live turned
+	// every `package lib` with no `main` into an error, and there was no way to say "library".
+	//
+	// The alternative -- have the consumer notice the only diagnostic is the missing entry point
+	// and ignore it -- was rejected for two reasons worth recording, because they will come up
+	// again for the next flag. It would match on a MESSAGE (diagnostics carry no stable code, so
+	// the filter is a string comparison against English prose that is free to change), and it
+	// inverts responsibility: the caller would be suppressing a diagnostic it provoked by failing
+	// to state a fact it already knew.
+	no_entry_point: bool,
+
+	// odin_root is the directory containing `base/` and `core/` -- the equivalent of the
+	// reference compiler's ODIN_ROOT. Empty means "fall back to the ODIN_ROOT environment
+	// variable".
+	//
+	// THE CALLER IS THE ONLY PARTY THAT RELIABLY KNOWS THIS, for the same reason it is the only
+	// party that knows `no_entry_point`. The reference compiler derives it from its own
+	// executable's path (`/proc/self/exe` and friends, build_settings.cpp internal_odin_root_dir),
+	// which is exactly the one trick a LIBRARY cannot use: `/proc/self/exe` is the HOST
+	// application's path, not this package's. A language server, a backend and a documentation
+	// tool all embed this checker and none of them live next to `base/runtime`.
+	//
+	// The environment variable remains as a fallback because it is an Odin-wide convention that
+	// the reference compiler honours too -- not because anything in-tree depends on it. What was
+	// REMOVED in #898 is a third mechanism: a walk up from the current working directory looking
+	// for `base/runtime`. That existed so tests could run without setting ODIN_ROOT, which is the
+	// library conforming to its harnesses rather than the other way round, and it made the
+	// checker's answer depend on the caller's CWD -- ambient state that has nothing to do with
+	// where the standard library lives. It failed silently and produced language-level
+	// diagnostics about valid code. LEDGER #897/#898.
+	odin_root: string,
+}
+
+// session_check_package checks a package and hands back the model, alive.
+//
+// Returns ok=false and a nil session if a session is already live (see precondition 1) -- it
+// does NOT panic, because a library must not kill its host (CPP_DEVIATIONS.md [EMBED-1]).
+// A false return here means "refused", not "the package is bad": a package that fails to load or
+// fails to check still returns a live session, and `result` says which.
+//
+// `opts` defaults to the zero value, which is the PROGRAM configuration (an entry point IS
+// required) -- matching the reference compiler, whose default is to require `main` and whose flag
+// is the opt-OUT. Existing callers are unaffected by the parameter's addition.
+session_check_package :: proc(
+	path: string,
+	opts := Session_Options{},
+	allocator := context.allocator,
+) -> (s: ^Session, ok: bool) {
+	sync.lock(&live_sessions_mutex)
+	if live_sessions > 0 {
+		sync.unlock(&live_sessions_mutex)
+		return nil, false
+	}
+	live_sessions += 1
+	sync.unlock(&live_sessions_mutex)
+
+	// build_context is a process GLOBAL (build_settings.odin), not per-checker.
+	//
+	// WHAT THE RESTORE PROTECTS, measured rather than assumed. It is NOT the next session: the
+	// assignment below runs on ENTRY, so a later session_check_package overwrites whatever was
+	// left behind and gets its own options either way (verified -- a library session followed by a
+	// program session still reports the missing entry point with the restore removed).
+	//
+	// It protects readers that are NOT sessions, and there are two:
+	//   * check_package_from_path, which does not go through session_check_package and reads the
+	//     global directly;
+	//   * the host itself, which may have set the global for its own purposes.
+	// With the restore removed, a host that sets no_entry_point = true and then runs ONE session
+	// with different options finds its own global silently flipped to false (measured:
+	// before=true after=false). That is the defect class of #321/#368 -- a session leaving process
+	// globals altered behind the caller's back.
+	//
+	// Safe to touch the global at all only because live_sessions serialises explicit sessions: the
+	// refusal above guarantees no other session is running concurrently.
+	//
+	// ensure_build_context_initialized runs FIRST. It is a no-op once a target is set, but if the
+	// caller never initialised one it populates the whole struct -- so reading the previous value
+	// before that call would save a zero that is not the real default.
+	ensure_build_context_initialized()
+	saved_no_entry_point := build_context.no_entry_point
+	build_context.no_entry_point = opts.no_entry_point
+	defer build_context.no_entry_point = saved_no_entry_point
+
+	result, c, cf, root := _check_package(path, allocator)
+
+	s = new(Session, allocator)
+	s.checker = c
+	s.result = result
+	s.files = cf
+	s.root = root
+	s.allocator = allocator
+	if c != nil {
+		s.packages = c.info.packages_ordered[:]
+	}
+	return s, true
+}
+
+// session_destroy releases the model. After this the session's entities, types and scopes are
+// gone, AND the shared runtime type globals have been reset (precondition 3).
+session_destroy :: proc(s: ^Session) {
+	if s == nil {
+		return
+	}
+	allocator := s.allocator
+	if s.checker != nil {
+		destroy_checker(s.checker)
+		free(s.checker, allocator)
+	}
+	destroy_package_check_result(&s.result)
+	delete(s.files, allocator)
+	free(s, allocator)
+
+	sync.lock(&live_sessions_mutex)
+	if live_sessions > 0 {
+		live_sessions -= 1
+	}
+	sync.unlock(&live_sessions_mutex)
+}

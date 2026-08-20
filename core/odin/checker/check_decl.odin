@@ -700,7 +700,23 @@ check_entity_decl :: proc(ctx: ^Checker_Context, e: ^Entity, d: ^Decl_Info, name
 		case .Procedure:
 			check_proc_decl(&c, e, d)
 		case .Proc_Group:
-			check_proc_group_decl(&c, e, d)
+			// C++ Reference: src/check_decl.cpp:2196-2202 --
+			//     case Entity_ProcGroup:
+			//         if (e->ProcGroup.is_asm_group) { check_asm_group_decl(&c, e, d); }
+			//         else                           { check_proc_group_decl(&c, e, d); }
+			// An asm template group reuses Entity_ProcGroup wholesale; the flag set by
+			// collect_entities is the only thing separating the two.
+			if pge, ok := &e.variant.(Entity_Proc_Group); ok && pge.is_asm_group {
+				check_asm_group_decl(&c, e, d)
+			} else {
+				check_proc_group_decl(&c, e, d)
+			}
+
+		case .Asm_Template:
+			// C++ Reference: src/check_decl.cpp:2204-2206 --
+			//     case Entity_AsmTemplate:
+			//         check_asm_template_from_entity(&c, e, d);
+			check_asm_template_from_entity(&c, e, d)
 		}
 
 		// C++ Reference: check_decl.cpp:1960
@@ -1824,6 +1840,181 @@ check_proc_group_decl :: proc(ctx: ^Checker_Context, pg_entity: ^Entity, d: ^Dec
 	check_objc_methods(ctx, pg_entity, &ac)
 }
 
+// check_asm_group_decl resolves an `asm template group` -- `g :: asm { a, b, c }`.
+//
+// C++ Reference: src/check_decl.cpp:1988-2117.
+//
+// This is check_proc_group_decl with four substitutions, and it is a SEPARATE procedure in the
+// reference rather than a flag on the existing one, so it is a separate procedure here too:
+//   * the member kind test is `e->kind != Entity_AsmTemplate` instead of the
+//     Variable-of-proc-type / Procedure pair,
+//   * every diagnostic says "asm template" where the other says "procedure",
+//   * `both_have_where_clauses` is declared and then never assigned -- the reference carries
+//     an explicit comment, "NOTE(bill): asm template do not have `where` clauses", so the
+//     whole proc_lit/where_token probe that check_proc_group_decl runs is ABSENT. Note this is
+//     only about the MEMBERS' own where clauses; a `member where COND` filter on the group's
+//     argument list is still honoured, by the identical Binary_Expr unwrap below.
+//   * ProcOverload_CallingConvention is commented out in BOTH, identically.
+// Everything else -- the t_invalid pre-set against cycles, the duplicate set, the j/k pair
+// walk, the error block, the attribute and objc-method tail -- is the same code.
+check_asm_group_decl :: proc(ctx: ^Checker_Context, asm_entity: ^Entity, d: ^Decl_Info) {
+	// C++ Reference: src/check_decl.cpp:1989-1991
+	assert(asm_entity.kind == .Proc_Group)
+	pge := &asm_entity.variant.(Entity_Proc_Group)
+	proc_group_name := asm_entity.token.text
+
+	// C++ Reference: src/check_decl.cpp:1993 -- `ast_node(pg, AsmGroup, d->init_expr)`, whose
+	// macro body is a GB_ASSERT on the node kind. There is no "expected an asm group literal"
+	// diagnostic to fall back on, because collect_entities only sets is_asm_group after it has
+	// already matched ^ast.Asm_Group. An unchecked assert here is the reference's behaviour.
+	pg := d.init_expr.derived.(^ast.Asm_Group)
+
+	// C++ Reference: src/check_decl.cpp:1995
+	entities := make([dynamic]^Entity, 0, len(pg.args), ctx.checker.allocator)
+
+	// C++ Reference: src/check_decl.cpp:1997-1999
+	// NOTE(bill): This must be set here to prevent cycles in checking if someone
+	// places the entity within itself
+	set_entity_type(asm_entity, t_invalid)
+
+	// C++ Reference: src/check_decl.cpp:2001-2002
+	entity_set := make(map[^Entity]bool, allocator = context.temp_allocator)
+	defer delete(entity_set)
+
+	// C++ Reference: src/check_decl.cpp:2004-2042
+	for arg_ in pg.args {
+		arg := arg_
+		e: ^Entity = nil
+		o := Operand{}
+
+		// C++ Reference: src/check_decl.cpp:2008-2022 -- the `member where COND` filter.
+		if be, is_be := arg.derived.(^ast.Binary_Expr); is_be && be.op.kind == .Where {
+			cond := Operand{}
+			check_expr(ctx, &cond, be.right)
+			if cond.mode != .Invalid {
+				is_bool_const := false
+				if cond.mode == .Constant && is_type_boolean(cond.type) {
+					if _, bok := cond.value.(bool); bok {
+						is_bool_const = true
+					}
+				}
+				if !is_bool_const {
+					error(arg, "Expected a constant binary expression for the 'where' clause")
+				} else if b, _ := cond.value.(bool); !b {
+					continue
+				}
+			}
+			arg = be.left
+		}
+
+		// C++ Reference: src/check_decl.cpp:2024-2028
+		if _, ok := arg.derived.(^ast.Ident); ok {
+			e = check_ident(ctx, &o, arg, nil, nil, true)
+		} else if _, ok2 := arg.derived.(^ast.Selector_Expr); ok2 {
+			e = check_selector(ctx, &o, arg, nil)
+		}
+
+		// C++ Reference: src/check_decl.cpp:2029-2032 -- the node-kind name comes from
+		// ast_strings, i.e. ast_kind_string here. See the note in check_proc_group_decl.
+		if e == nil {
+			error(arg, "Expected a valid entity name in asm template group, got %s", ast_kind_string(arg))
+			continue
+		}
+
+		// C++ Reference: src/check_decl.cpp:2033-2036
+		if e.kind != .Asm_Template {
+			error(arg, "Expected an asm template")
+			continue
+		}
+
+		// C++ Reference: src/check_decl.cpp:2038-2041
+		if e in entity_set {
+			error(arg, "Previous use of `%s` in asm template group", e.token.text)
+			continue
+		}
+		entity_set[e] = true
+		append(&entities, e)
+	}
+
+	// C++ Reference: src/check_decl.cpp:2046-2113
+	for j in 0 ..< len(entities) {
+		p := entities[j]
+		if entity_type(p) == t_invalid {
+			// NOTE(bill): This invalid overload has already been handled
+			continue
+		}
+
+		if .Disabled in p.flags {
+			continue
+		}
+
+		name := p.token.text
+
+		for k in j + 1 ..< len(entities) {
+			q := entities[k]
+			assert(p != q)
+
+			is_invalid := false
+			pos := q.token.pos
+
+			if entity_type(q) == nil || entity_type(q) == t_invalid {
+				continue
+			}
+
+			// C++ Reference: src/check_decl.cpp:2070 -- ERROR_BLOCK(), so that the
+			// "previous asm template at" continuation attaches to the error above it.
+			begin_error_block()
+			defer end_error_block()
+
+			if .Disabled in q.flags {
+				continue
+			}
+
+			// C++ Reference: src/check_decl.cpp:2076-2079. `both_have_where_clauses` is
+			// declared false and never written -- see the header note.
+			kind := are_proc_types_overload_safe(entity_type(p), entity_type(q))
+			both_have_where_clauses := false
+
+			if !both_have_where_clauses {
+				#partial switch kind {
+				case .Identical:
+					error(p.token, "Overloaded asm template '%s' has the same type as another asm template in the asm template group '%s'", name, proc_group_name)
+					is_invalid = true
+
+				case .Param_Variadic:
+					error(p.token, "Overloaded asm template '%s' has the same type as another asm template in the asm template group '%s'", name, proc_group_name)
+					is_invalid = true
+
+				case .Result_Count, .Result_Types:
+					error(p.token, "Overloaded asm template '%s' has the same parameters but different results in the asm template group '%s'", name, proc_group_name)
+					is_invalid = true
+
+				case .Polymorphic:
+					break
+
+				case .Param_Count, .Param_Types, .Target_Features:
+					// This is okay :)
+					break
+				}
+			}
+
+			// C++ Reference: src/check_decl.cpp:2108-2111
+			if is_invalid {
+				pos_str := token_pos_to_string(pos)
+				error_line("\tprevious asm template at %s\n", pos_str)
+				set_entity_type(q, t_invalid)
+			}
+		}
+	}
+
+	pge.procs = entities
+
+	// C++ Reference: src/check_decl.cpp:2115-2117 -- the SAME proc_group_attribute table.
+	ac := Attribute_Context{}
+	check_decl_attributes(ctx, d.attributes, &ac, .Proc_Group, asm_entity.token.pos)
+	check_objc_methods(ctx, asm_entity, &ac)
+}
+
 // check_feature_flags retrieves opt-in feature flags for the current context
 // C++ Reference: checker.cpp:559-592
 check_feature_flags :: proc(ctx: ^Checker_Context, node: ^ast.Node) -> Opt_In_Feature_Flag {
@@ -2201,10 +2392,32 @@ check_foreign_import_fullpaths :: proc(ctx: ^Checker_Context) {
 				continue
 			}
 
-			// C++ requires constant string values (line 5415-5420)
+			// C++ Reference: src/checker.cpp:5776-5782 --
+			//
+			//     if (op.mode != Addressing_Constant && op.value.kind != ExactValue_String) {
+			//         gbString s = expr_to_string(op.expr);
+			//         error(fp_node, "Expected a constant string value, got '%s'", s);
+			//         gb_string_free(s);
+			//         continue;
+			//     }
+			//
+			// #1268. Two things the port had wrong here. The MESSAGE was invented -- "Expected a
+			// constant string value for library path" appears nowhere in src/ -- and the reference
+			// quotes the offending EXPRESSION back at the user, which is the whole point of the
+			// diagnostic when the path is a name rather than a literal. MEASURED on
+			// `v := "lib.a"; foreign import lib { v }`:
+			//     oracle  Expected a constant string value, got 'v'
+			//     port    Expected a constant string value for library path
+			//
+			// The CONDITION is an AND, and that is deliberate enough to copy verbatim rather than
+			// "correct": a non-constant operand whose exact value is nonetheless a string passes
+			// this gate and is caught by the is_type_string test below instead. Narrowing it to
+			// `o.mode != .Constant`, as the port did, rejects strictly more than the reference.
 			if o.mode != .Constant {
-				error_node(fp_expr, "Expected a constant string value for library path")
-				continue
+				if _, is_string := o.value.(string); !is_string {
+					error_node(fp_expr, "Expected a constant string value, got '%s'", expr_to_string(fp_expr))
+					continue
+				}
 			}
 
 			if !is_type_string(o.type) {
@@ -2224,85 +2437,54 @@ check_foreign_import_fullpaths :: proc(ctx: ^Checker_Context) {
 
 			file_str = strings.trim_space(file_str)
 
-			// Validate library path not empty (C++ line 5423)
-			if len(file_str) == 0 {
-				error_node(fp_expr, "Foreign library path cannot be empty")
-				continue
-			}
-
-			// Resolve path (C++ line 5425-5431)
+			// C++ Reference: src/checker.cpp:5789-5798 --
+			//     String file_str = op.value.value_string;
+			//     file_str = string_trim_whitespace(file_str);
+			//     String fullpath = file_str;
+			//     if (!is_arch_wasm() || string_ends_with(file_str, str_lit(".o"))) {
+			//         String foreign_path = {};
+			//         bool ok = determine_path_from_string(nullptr, decl, base_dir, file_str,
+			//                                              &foreign_path, /*use error not syntax_error*/true);
+			//         if (ok) { fullpath = foreign_path; }
+			//     }
+			//     array_add(&fullpaths, fullpath);
+			//
+			// #1269. What stood here was an inline re-implementation of determine_path_from_string
+			// that got seven of twelve probe inputs wrong (probe_fimp269, enumerated in that
+			// procedure's header) and carried three messages that appear nowhere in src/. It is
+			// replaced by a call to the real thing.
+			//
+			// THREE DETAILS THAT ARE EASY TO LOSE AND ARE NOT DECORATION:
+			//
+			//  * `nullptr` for the mutex. That is not "no locking needed"; determine_path_from_string
+			//    reads it as "this is the semantics stage" and enables its Windows drive-letter
+			//    branch on the strength of it.
+			//
+			//  * ON FAILURE THE RAW STRING IS STILL APPENDED. `fullpath` is initialised to file_str
+			//    and only overwritten when ok, and the array_add is unconditional -- so a path that
+			//    was just rejected still reaches the extension check below and can produce a SECOND
+			//    diagnostic. The block this replaces used `continue`, which suppressed it.
+			//
+			//  * THE WASM GUARD. On a wasm target the path is left completely alone unless it ends
+			//    in ".o" -- no resolution and, more visibly, none of the diagnostics. The port had
+			//    no such guard, so it reported path errors on wasm that the reference does not.
+			//    Not currently reachable from the corpus (every cell is linux_amd64) and therefore
+			//    unmeasured here; it is ported because leaving it out would be a silent difference
+			//    that only a cross-target sweep could ever find.
 			fullpath := file_str
-
-			// A `system:` library is named, not located - see below. Tracked separately so
-			// the path normalisation at the end of the loop leaves it alone.
-			is_system_library := false
-
-			// Check for special collections (e.g., "system:library")
-			// C++ Reference: determine_path_from_string in build_settings.cpp
-			colon_idx := strings.index_byte(file_str, ':')
-			if colon_idx > 0 {
-				collection_name := file_str[:colon_idx]
-
-				// Has a colon - could be collection path or Windows drive letter
-				// Windows drive letters are single character (e.g., "C:\path")
-				if colon_idx == 1 && len(file_str) > 2 && file_str[2] == '\\' {
-					// Windows absolute path with drive letter - not a collection
-					fullpath = file_str
-				} else if collection_name == "system" {
-					// The 'system' collection is reserved for 'foreign import' and is
-					// deliberately NOT resolved against a directory: what follows the colon
-					// is a system library name handed to the linker as-is ("system:c" ->
-					// -lc), so there is nothing on disk to look up and no base_dir to join
-					// against. Resolving it would both fabricate a bogus path and, since
-					// library_collections is currently never populated, report every
-					// `foreign import "system:..."` in core and vendor (321 of them) as an
-					// unknown collection.
-					// C++ Reference: parser.cpp determine_path_from_string - `if
-					// (collection_name == "system") { *path = file_str; return true; }`,
-					// guarded so that only Ast_ForeignImportDecl may use it.
-					is_system_library = true
-					fullpath = file_str[colon_idx + 1:]
-				} else {
-					// Collection path format: "collection:path/to/lib"
-					lib_path := file_str[colon_idx + 1:]
-
-					// Look up collection path
-					if collection_path, found := find_library_collection_path(collection_name); found {
-						// Join collection path with library path
-						joined, join_err := filepath.join({collection_path, lib_path}, context.temp_allocator)
-						if join_err != nil {
-							error_node(fp_expr, "Failed to resolve foreign library path '%s'", file_str)
-							continue
-						}
-						fullpath = joined
-					} else {
-						// Unknown collection - report error but continue with original path
-						// C++ Reference: parser.cpp:6253 -- note the COLON after "collection".
-						error_node(fp_expr, "Unknown library collection: '%s'", collection_name)
-						fullpath = file_str
-					}
+			if !is_arch_wasm() || strings.has_suffix(file_str, ".o") {
+				if foreign_path, path_ok := determine_path_from_string(
+					ctx.info,
+					nil,
+					lib.decl,
+					base_dir,
+					file_str,
+					true,
+					context.temp_allocator,
+				); path_ok {
+					fullpath = foreign_path
 				}
-			} else if len(base_dir) > 0 && !filepath.is_abs(file_str) {
-				// Relative path - resolve relative to source file
-				joined, join_err := filepath.join({base_dir, file_str}, context.temp_allocator)
-				if join_err != nil {
-					error_node(fp_expr, "Failed to resolve foreign library path '%s'", file_str)
-					continue
-				}
-				fullpath = joined
 			}
-
-			// Normalize path (convert to absolute if possible)
-			// C++ uses determine_path_from_string (line 5427-5430)
-			if !is_system_library && !strings.contains(fullpath, ":") && !filepath.is_abs(fullpath) && len(base_dir) > 0 {
-				joined, join_err := filepath.join({base_dir, fullpath}, context.temp_allocator)
-				if join_err != nil {
-					error_node(fp_expr, "Failed to resolve foreign library path '%s'", file_str)
-					continue
-				}
-				fullpath = joined
-			}
-
 			append(&fullpaths, strings.clone(fullpath, ctx.checker.allocator))
 		}
 
@@ -2314,7 +2496,13 @@ check_foreign_import_fullpaths :: proc(ctx: ^Checker_Context) {
 
 			// C++ rejects .c, .cpp, .cxx, .h, .hpp, .hxx
 			if ext_lower == ".c" || ext_lower == ".cpp" || ext_lower == ".cxx" || ext_lower == ".h" || ext_lower == ".hpp" || ext_lower == ".hxx" {
-				error_node(decl, "With 'foreign import', you cannot import a %s file/directory, you must precompile the library and link against that", ext)
+				// C++ Reference: src/checker.cpp:5813 -- `error(fl->token, ...)`, the TOKEN
+				// overload, anchored at the `foreign` keyword. The port used error_node(decl),
+				// which spans the whole declaration. Same line and column, different caret:
+				//     oracle  ^
+				//     port    ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~^
+				// #1268, witness wit_fimp268/{c_ext,h_ext}.
+				error_token(decl.foreign_tok, "With 'foreign import', you cannot import a %s file/directory, you must precompile the library and link against that", ext)
 				break
 			}
 		}

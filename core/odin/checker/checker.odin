@@ -404,6 +404,10 @@ Entity_Procedure :: ast.Entity_Procedure
 // Entity_Proc_Group is re-declared from ast.Entity_Proc_Group
 Entity_Proc_Group :: ast.Entity_Proc_Group
 
+// Entity_Asm_Template is re-declared from ast.Entity_Asm_Template
+// C++ Reference: src/entity.cpp:163-199 -- Entity.AsmTemplate
+Entity_Asm_Template :: ast.Entity_Asm_Template
+
 // Entity_Builtin is re-declared from ast.Entity_Builtin
 Entity_Builtin :: ast.Entity_Builtin
 
@@ -1068,8 +1072,53 @@ Checker_Info :: struct {
 	// Package decl_info storage - EXTERNAL MAP REQUIRED
 	// NOTE: Cannot use pkg.decl_info because ast.Package.decl_info has type ^ast.Decl_Info,
 	// while checker defines its own ^Decl_Info type. External map required until type unification.
-	// C++ Reference: parser.hpp:213 - pkg->decl_info
+	// C++ Reference: parser.hpp:214 - pkg->decl_info
 	// See package_helpers.odin for usage in get/set_package_decl_info
+	//
+	// LEDGER #1209: THIS MAP IS NEVER WRITTEN, AND THAT IS A DISPOSITIONED DIVERGENCE, NOT A TODO.
+	//
+	// C++ populates the field for EVERY package, in the first phase of check_parsed_files:
+	//     src/checker.cpp:7690-7693
+	//         AstPackage *p = c->parser->packages[i];
+	//         Scope *scope = create_scope_from_package(&c->builtin_ctx, p);
+	//         p->decl_info = make_decl_info(scope, c->builtin_ctx.decl);
+	// create_package_scopes (check_files.odin) is the port's analogue of that exact loop and
+	// mirrors every other line of it -- the scope, the init_package/init_scope pair -- but not
+	// this one. set_package_decl_info consequently has ZERO callers, get_package_decl_info always
+	// returns nil, and add_curr_ast_file (check_global_init.odin:661) always leaves ctx.decl nil
+	// where C++ leaves the package's Decl_Info.
+	//
+	// WHY IT IS NOT WIRED UP: the value is a WRITE-ONLY SINK in the reference. `pkg->decl_info`
+	// has exactly one writer (checker.cpp:7693) and exactly one reader (checker.cpp:1702,
+	// `ctx->decl = file->pkg->decl_info`), so everything it ever receives is unreachable:
+	//   * As ctx->decl during the file-context phases it is the `d` argument of add_dependency
+	//     and add_type_info_dependency, i.e. edges land in the package Decl_Info's deps and
+	//     type_info_deps. Nothing traverses those. The minimum-dependency walk
+	//     (add_dependency_to_set) follows entity decl_infos only, and the package Decl_Info is
+	//     no entity's decl_info.
+	//   * As the `parent` of every file-scope Decl_Info it feeds add_deps_from_child_to_parent,
+	//     which copies INTO the parent -- into the same unread sets.
+	//   * The two `decl->parent->entity` tests (check_decl.cpp:2284, checker.cpp:6765/6803) are
+	//     false for it regardless: a package Decl_Info carries no entity.
+	//   * The next_child/next_sibling chain it roots is walked only from c->nested_proc_lits and
+	//     from entity decl_infos (checker.cpp:7559,7585) -- never from a package Decl_Info.
+	// So wiring it in would add an allocation per package and two mutex round-trips per top-level
+	// declaration to fill sets that are never read.
+	//
+	// WHAT STANDS IN FOR IT: C++'s add_dependency (checker.cpp:874) does NOT null-check `d` -- it
+	// dereferences `&d->deps` unconditionally, and relies on this assignment to guarantee ctx->decl
+	// is non-nil wherever it is reachable. The port instead guards at the two call sites
+	// (entity_helpers.odin:792 and :835, `if ctx.decl == nil { return }`). Those guards are exactly
+	// equivalent, because the ONLY contexts in which the port's ctx.decl is nil are the ones where
+	// C++'s would be this sink: reset_checker_context (check_import_export.odin:1053) clears it and
+	// add_curr_ast_file leaves it nil; every other assignment in the checker stores a real decl.
+	// Dropping an edge on the floor and recording it into an unread set are the same outcome.
+	//
+	// THE COUPLING TO #1210. Because file-scope decls get parent == nil here, they leave
+	// add_deps_from_child_to_parent at its nil check -- which is why that function's scope guard
+	// was measured unreachable (see check_proc.odin). Anyone who reverses this decision MUST keep
+	// #1210's guard removal, or top-level decls would acquire a Pkg-scoped parent, the guard would
+	// start firing, and the port would diverge from a reference that propagates unconditionally.
 	package_decl_infos:                           map[^ast.Package]^Decl_Info,
 
 	// AST node to scope mapping - EXTERNAL MAP REQUIRED

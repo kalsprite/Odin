@@ -2027,6 +2027,7 @@ big_int_from_string :: proc(s: string) -> (dst: big.Int, success: bool) {
 	}
 
 	i := 0
+	digit_count := 0
 	for ; i < len(text); i += 1 {
 		r := text[i]
 
@@ -2049,6 +2050,8 @@ big_int_from_string :: proc(s: string) -> (dst: big.Int, success: bool) {
 				success = false
 			}
 			break
+		} else {
+			digit_count += 1
 		}
 
 		digit: big.Int
@@ -2061,6 +2064,14 @@ big_int_from_string :: proc(s: string) -> (dst: big.Int, success: bool) {
 		if big.int_add(&dst, &dst, &digit) != nil {
 			return dst, false
 		}
+	}
+	// LEDGER #1207. A base prefix followed by nothing but digit separators -- `0x_`, `0b_`,
+	// `0o_` -- consumed no digits at all, so the loop left dst at its initial 0 and reported
+	// success. C++ used to accept it too; PR #7370 (big_int.cpp:245, landed in 1a808b4a4)
+	// added this counter, and the port followed. Note the placement: C++ RETURNS here, BEFORE
+	// the exponent branch, so `0d_e5` is rejected even though its exponent is well formed.
+	if digit_count == 0 {
+		return dst, false
 	}
 	if i < len(text) && (text[i] == 'e' || text[i] == 'E') {
 		i += 1

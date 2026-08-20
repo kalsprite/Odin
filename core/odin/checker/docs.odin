@@ -41,6 +41,14 @@ print_entity_kind_ordering := [Entity_Kind]int {
 	.Nil          = -1, // C++ line 13
 	.Label        = -1, // C++ line 14
 	.Package_Name = -1, // Added for completeness
+	// C++ has NO entry for this. src/docs.cpp:3 dimensions the array [Entity_Count], which
+	// is 12 (src/entity.cpp:25) because ENTITY_KINDS ends in AsmTemplate, but the
+	// initialiser lists only eleven -- so C++ ZERO-FILLS this slot. 0 is Constant's
+	// ordering, and only NEGATIVE orderings are suppressed, so the reference PRINTS asm
+	// templates, tied with constants. Reproduced rather than corrected: it is cosmetic, not
+	// a crash, so the reference is the contract. Filed as
+	// UPSTREAM-UNFILED-odin-doc-prints-a-blank-category-header-for-asm-templates.md
+	.Asm_Template = 0,
 }
 
 // print_entity_names defines display names for entity kinds
@@ -58,6 +66,11 @@ print_entity_names := [Entity_Kind]string {
 	.Nil          = "", // C++ line 26
 	.Label        = "", // C++ line 27
 	.Package_Name = "", // Added for completeness
+	// Also absent from C++'s table and zero-filled there -- but in C++ the element type is
+	// `char const *`, so the zero is a NULL POINTER, and src/docs.cpp:300 then evaluates
+	// print_doc_line(1, "%s", nullptr). That is undefined behaviour; measured, it renders
+	// as nothing, which is what "" reproduces here. See the filing named above.
+	.Asm_Template = "",
 }
 
 // C++ Reference: docs.cpp cmp_entities_for_printing

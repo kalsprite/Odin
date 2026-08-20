@@ -1531,11 +1531,156 @@ matrix_type_stride_in_elems :: proc(t: ^Type) -> int {
 	return stride / elem_size
 }
 
+// ============================================================================
+// Type_Path -- the SIZE/ALIGNMENT recursion guard
+// ============================================================================
+//
+// C++ Reference: src/types.cpp:865-931. This is a SECOND, entirely separate cycle detector
+// from the one in checker.cpp (`CheckerTypePath` / check_type_path_push), which the port
+// already has as Checker_Type_Path. checker.cpp's guards DECLARATION checking and produces
+//     Illegal declaration cycle of `X`
+// whereas this one guards type_size_of_internal / type_align_of_internal themselves and
+// produces
+//     Illegal type declaration cycle of `X`
+// -- note the extra word. The two messages are one word apart and they are not the same
+// mechanism; grepping for the shorter one finds the wrong thing.
+//
+// The reference's own comment above the struct (src/types.cpp:864) wonders whether this code
+// should be removed "since type cycle checking is handled much earlier on". IT IS NOT DEAD.
+// A polymorphic struct instantiated with the type that encloses it slips past checker.cpp's
+// detector and reaches here:
+//
+//     T :: struct($V: typeid) { p: V }
+//     A :: struct { x: T(A) }
+//
+// The oracle reports the cycle and exits 1. The port, having no guard at this level at all,
+// recursed until the stack ran out and exited 139 -- SIGSEGV, with a gdb backtrace consisting
+// of nothing but `checker::type_align_of` frames repeated to the frame limit. NINE
+// neighbouring shapes (direct self-reference, mutual recursion, array element, #soa, union
+// variant, matrix element, `using`, `distinct`, and an enum whose member is size_of of the
+// enclosing struct) are all caught earlier by Checker_Type_Path and already agreed between
+// the arms; only the polymorphic-instantiation family reaches this code. LEDGER #1260.
+//
+// NO MUTEX. C++'s TypePath carries a RecursiveMutex, but every TypePath is a local created at
+// the type_size_of / type_align_of entry point and destroyed on the way out, so it is never
+// shared between threads and the lock is vestigial. The `.Failure` flag written below IS a
+// shared write, and it is a shared write in the reference too (`e->type->failure = true`).
+Type_Path :: struct {
+	path:    [dynamic]^Entity,
+	failure: bool,
+}
+
+// C++ Reference: src/types.cpp:934-935 -- `#define FAILURE_SIZE 0` / `FAILURE_ALIGNMENT 0`.
+// Both are zero, and both are returned into arithmetic that then uses them as a divisor, so
+// every caller below checks `path.failure` before using the value rather than trusting it.
+FAILURE_SIZE      :: 0
+FAILURE_ALIGNMENT :: 0
+
+// C++ Reference: src/types.cpp:881-897 type_path_print_illegal_cycle.
+//
+// The three-part shape is the reference's: the headline at the cycle's entry entity, then one
+// "\tX refers to" per entity from that index onward, then a bare "\tX" for the entry again.
+// Most of that is invisible on a short cycle -- print_all_errors merges neighbouring errors at
+// identical positions, so the headline, the first "refers to" and the trailing line collapse
+// into a single block at the entry entity's token, and only entities at OTHER positions show.
+type_path_print_illegal_cycle :: proc(tp: ^Type_Path, start_index: int) {
+	assert(tp != nil)
+	assert(start_index < len(tp.path))
+	e := tp.path[start_index]
+	assert(e != nil)
+	error_token(e.token, "Illegal type declaration cycle of `%s`", e.token.text)
+	// NOTE(bill): Print cycle, if it's deep enough
+	for j in start_index ..< len(tp.path) {
+		ej := tp.path[j]
+		error_token(ej.token, "\t%s refers to", ej.token.text)
+	}
+	// NOTE(bill): This will only print if the path count > 1
+	error_token(e.token, "\t%s", e.token.text)
+	tp.failure = true
+	if e.type != nil {
+		e.type.flags += {.Failure}
+		if bt := base_type(e.type); bt != nil {
+			bt.flags += {.Failure}
+		}
+	}
+}
+
+// C++ Reference: src/types.cpp:900-921 type_path_push.
+//
+// Only NAMED types are recorded. An unnamed type has no entity to compare against and cannot
+// close a cycle on its own -- every cycle passes through at least one type name. Note that the
+// reference APPENDS even when it has just reported a cycle, and that is kept: the appended
+// entity is what the "refers to" walk of a subsequent report would print.
+type_path_push :: proc(tp: ^Type_Path, t: ^Type) -> bool {
+	assert(tp != nil)
+	if t == nil || t.kind != .Named {
+		return false
+	}
+	named, ok := t.variant.(Type_Named)
+	if !ok || named.type_name == nil {
+		return false
+	}
+	e := named.type_name
+	for p, i in tp.path {
+		if p == e {
+			type_path_print_illegal_cycle(tp, i)
+		}
+	}
+	append(&tp.path, e)
+	return true
+}
+
+// C++ Reference: src/types.cpp:923-931 type_path_pop.
+type_path_pop :: proc(tp: ^Type_Path) {
+	if tp != nil && len(tp.path) > 0 {
+		pop(&tp.path)
+	}
+}
+
 // type_size_of returns the size of a type in bytes
 // (This header was STRANDED above a different procedure until #732 -- another procedure had
 //  been inserted between the doc comment and the definition it documents. Its citation was
 //  stale too and has been resolved BY NAME.)
 type_size_of :: proc(t: ^Type) -> int {
+	if t == nil {
+		return 0
+	}
+	// C++ Reference: src/types.cpp:4297 type_size_of -- the public entry point creates the
+	// TypePath, calls the internal, and frees it. The reference also has a Type_Basic fast
+	// path and a `cached_size` short-circuit here; the port caches neither, so neither is
+	// reproduced (adding a cache would be a behaviour change of its own, not a port of this).
+	path: Type_Path
+	defer delete(path.path)
+	return type_size_of_internal(t, &path)
+}
+
+// C++ Reference: src/types.cpp:4628 type_size_of_internal.
+type_size_of_internal :: proc(t: ^Type, path: ^Type_Path) -> int {
+	if t == nil {
+		return 0
+	}
+	// C++ Reference: src/types.cpp:4629-4631 -- `if (t->failure) return FAILURE_SIZE;`.
+	if .Failure in t.flags {
+		return FAILURE_SIZE
+	}
+	// C++ Reference: src/types.cpp:4634-4642, `case Type_Named`. The push happens HERE, on the
+	// NAMED node, BEFORE base_type() strips it -- and base_type is the very first thing the
+	// port's body used to do. A named type is the only thing that can close a cycle, so
+	// stripping it first removes the only evidence the guard has to work with. This is the
+	// whole of #1260: the arms below were fine, the entry point was where the guard belonged.
+	if t.kind == .Named {
+		named := t.variant.(Type_Named)
+		pushed := type_path_push(path, t)
+		if path.failure {
+			return FAILURE_SIZE
+		}
+		size := type_size_of_internal(named.base, path)
+		if pushed {
+			type_path_pop(path)
+		}
+		return size
+	}
+
 	bt := base_type(t)
 	if bt == nil {
 		return 0
@@ -1591,7 +1736,7 @@ type_size_of :: proc(t: ^Type) -> int {
 
 	case .Array:
 		arr := bt.variant.(Type_Array)
-		return int(arr.count) * type_size_of(arr.elem)
+		return int(arr.count) * type_size_of_internal(arr.elem, path)
 
 	case .Enumerated_Array:
 		// C++ Reference: types.cpp, type_size_of_internal, `case Type_EnumeratedArray`:
@@ -1616,8 +1761,14 @@ type_size_of :: proc(t: ^Type) -> int {
 		if earr.count == 0 {
 			return 0
 		}
-		elem_align := type_align_of(earr.elem)
-		elem_size := type_size_of(earr.elem)
+		elem_align := type_align_of_internal(earr.elem, path)
+		// C++ Reference: src/types.cpp:4824-4826 -- the reference re-checks path->failure after
+		// every alignment query and returns FAILURE_SIZE rather than using the result. That is
+		// not defensive style: FAILURE_ALIGNMENT is 0 and the very next statement divides by it.
+		if path.failure {
+			return FAILURE_SIZE
+		}
+		elem_size := type_size_of_internal(earr.elem, path)
 		// align_formula(size, align) inlined as elsewhere in this file (see the .Struct and
 		// .Union arms): result = size + align - 1; result -= result % align.
 		stride := elem_size + elem_align - 1
@@ -1663,9 +1814,9 @@ type_size_of :: proc(t: ^Type) -> int {
 		fcda := bt.variant.(Type_Fixed_Capacity_Dynamic_Array)
 		int_size := int(build_context.int_size)
 
-		fcda_align := max(int_size, type_align_of(fcda.elem))
+		fcda_align := max(int_size, type_align_of_internal(fcda.elem, path))
 
-		size := type_size_of(fcda.elem) * int(fcda.capacity)
+		size := type_size_of_internal(fcda.elem, path) * int(fcda.capacity)
 		old_size := size
 		// align_formula(size, int_size), inlined as elsewhere in this file.
 		size = (size + int_size - 1) - ((size + int_size - 1) % int_size)
@@ -1699,7 +1850,13 @@ type_size_of :: proc(t: ^Type) -> int {
 		// C++ Reference: types.cpp type_size_of_internal
 		if struc.is_raw_union {
 			count := len(struc.fields)
-			align := type_align_of(bt)
+			align := type_align_of_internal(bt, path)
+		// C++ Reference: src/types.cpp:4824-4826 -- the reference re-checks path->failure after
+		// every alignment query and returns FAILURE_SIZE rather than using the result. That is
+		// not defensive style: FAILURE_ALIGNMENT is 0 and the very next statement divides by it.
+		if path.failure {
+			return FAILURE_SIZE
+		}
 			max_size := 0
 			for i in 0 ..< count {
 				// Read the field type via entity_type().
@@ -1715,7 +1872,7 @@ type_size_of :: proc(t: ^Type) -> int {
 				// one of the two made `struct { a: int, b: int }` measure 8 instead of 16
 				// while type_offset_of returned the correct offset 8, because the two helpers
 				// were reading different halves of the same split.
-				field_size := type_size_of(entity_type(struc.fields[i]))
+				field_size := type_size_of_internal(entity_type(struc.fields[i]), path)
 				if max_size < field_size {
 					max_size = field_size
 				}
@@ -1732,14 +1889,20 @@ type_size_of :: proc(t: ^Type) -> int {
 			return 0
 		}
 
-		align := type_align_of(bt)
+		align := type_align_of_internal(bt, path)
+		// C++ Reference: src/types.cpp:4824-4826 -- the reference re-checks path->failure after
+		// every alignment query and returns FAILURE_SIZE rather than using the result. That is
+		// not defensive style: FAILURE_ALIGNMENT is 0 and the very next statement divides by it.
+		if path.failure {
+			return FAILURE_SIZE
+		}
 
 		// Calculate offset of last field + its size
 		// C++ Reference: types.cpp type_size_of_internal
 		last_field_offset := type_offset_of(bt, i64(count - 1))
 		// See the note in the raw_union arm above: struct field types live on the variant,
 		// so read them through entity_type().
-		last_field_size := type_size_of(entity_type(struc.fields[count - 1]))
+		last_field_size := type_size_of_internal(entity_type(struc.fields[count - 1]), path)
 		size := int(last_field_offset) + last_field_size
 
 		// Align final struct size to struct alignment
@@ -1760,13 +1923,13 @@ type_size_of :: proc(t: ^Type) -> int {
 	// C++ Reference: types.cpp type_size_of_internal, case Type_Enum.
 	case .Enum:
 		en := bt.variant.(Type_Enum)
-		return type_size_of(en.base_type)
+		return type_size_of_internal(en.base_type, path)
 
 	// C++ Reference: types.cpp type_size_of_internal, case Type_BitSet.
 	case .Bit_Set:
 		bs := bt.variant.(Type_Bit_Set)
 		if bs.underlying != nil {
-			return type_size_of(bs.underlying)
+			return type_size_of_internal(bs.underlying, path)
 		}
 		bits := bs.upper - bs.lower + 1
 		switch {
@@ -1782,7 +1945,7 @@ type_size_of :: proc(t: ^Type) -> int {
 	// C++ Reference: types.cpp type_size_of_internal, case Type_SimdVector.
 	case .Simd_Vector:
 		sv := bt.variant.(Type_Simd_Vector)
-		return int(sv.count) * type_size_of(sv.elem)
+		return int(sv.count) * type_size_of_internal(sv.elem, path)
 
 	// C++ Reference: types.cpp type_size_of_internal, case Type_Union.
 	case .Union:
@@ -1790,11 +1953,17 @@ type_size_of :: proc(t: ^Type) -> int {
 		if len(un.variants) == 0 {
 			return 0
 		}
-		align := type_align_of(bt)
+		align := type_align_of_internal(bt, path)
+		// C++ Reference: src/types.cpp:4824-4826 -- the reference re-checks path->failure after
+		// every alignment query and returns FAILURE_SIZE rather than using the result. That is
+		// not defensive style: FAILURE_ALIGNMENT is 0 and the very next statement divides by it.
+		if path.failure {
+			return FAILURE_SIZE
+		}
 
 		max_variant := 0
 		for variant_type in un.variants {
-			vs := type_size_of(variant_type)
+			vs := type_size_of_internal(variant_type, path)
 			if max_variant < vs {
 				max_variant = vs
 			}
@@ -1829,7 +1998,7 @@ type_size_of :: proc(t: ^Type) -> int {
 	// C++ Reference: types.cpp type_size_of_internal, case Type_BitField.
 	case .Bit_Field:
 		bf := bt.variant.(Type_Bit_Field)
-		return type_size_of(bf.backing_type)
+		return type_size_of_internal(bf.backing_type, path)
 
 	// C++ Reference: types.cpp type_size_of_internal, case Type_Proc — a procedure VALUE
 	// is a pointer.
@@ -1843,9 +2012,15 @@ type_size_of :: proc(t: ^Type) -> int {
 		if count == 0 {
 			return 0
 		}
-		align := type_align_of(bt)
+		align := type_align_of_internal(bt, path)
+		// C++ Reference: src/types.cpp:4824-4826 -- the reference re-checks path->failure after
+		// every alignment query and returns FAILURE_SIZE rather than using the result. That is
+		// not defensive style: FAILURE_ALIGNMENT is 0 and the very next statement divides by it.
+		if path.failure {
+			return FAILURE_SIZE
+		}
 		last_offset := type_offset_of(bt, i64(count - 1))
-		size := int(last_offset) + type_size_of(entity_type(tup.variables[count - 1]))
+		size := int(last_offset) + type_size_of_internal(entity_type(tup.variables[count - 1]), path)
 		if align > 0 {
 			size = (size + align - 1) - ((size + align - 1) % align)
 		}

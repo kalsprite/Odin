@@ -1,5 +1,6 @@
 package checker
 
+import "core:fmt"
 import "core:math/big"
 import "core:odin/ast"
 import "core:odin/tokenizer"
@@ -476,6 +477,37 @@ write_expr_to_string :: proc(builder: ^strings.Builder, node: ^ast.Node, shortha
 		} else {
 			strings.write_string(builder, " ---")
 		}
+		// C++ Reference: src/check_expr.cpp:13106-13110, the tail of the same case:
+		//     // NOTE(tf2spi):
+		//     // Two proc literals with the same signature output the same expr above
+		//     // which poses challenges for name canonicalization. Include the below
+		//     // discriminator with the file ID and offset to help with this.
+		//     TokenPos pos = ast_token(node).pos;
+		//     str = gb_string_append_fmt(str, " /* %d!%d */", pos.file_id, pos.offset);
+		//
+		// #1270. This is NOT cosmetic even though it looks it. `type_canonical_name` and the
+		// polymorphic-instantiation naming both key off this string, so without the
+		// discriminator two DISTINCT proc literals with the same signature canonicalise to the
+		// same name -- witness wit_proclitcanon243/collide, which is what the C++ comment above
+		// is describing.
+		//
+		// The port has no node.file_id (core:odin/parser leaves ast.Node.file_id at zero), but
+		// the tokenizer stamps every position with the owning file's PATH, and
+		// lookup_source_file is keyed by exactly that -- the same substitution
+		// get_file_from_node already makes, and for the same reason. ast.File.id is assigned by
+		// collect_package_for_target (#1270); see next_file_id there for why the numbering
+		// lines up with the reference's.
+		//
+		// A node whose file is not in the registry prints 0, which is also what the reference
+		// prints for a synthesised node: TokenPos zero-initialises file_id.
+		{
+			pl_file := lookup_source_file(derived.pos.file)
+			pl_file_id := 0
+			if pl_file != nil {
+				pl_file_id = pl_file.id
+			}
+			fmt.sbprintf(builder, " /* %d!%d */", pl_file_id, derived.pos.offset)
+		}
 
 	case ^ast.Proc_Group:
 		strings.write_string(builder, "proc{")
@@ -486,6 +518,150 @@ write_expr_to_string :: proc(builder: ^strings.Builder, node: ^ast.Node, shortha
 			write_expr_to_string(builder, arg, shorthand)
 		}
 		strings.write_rune(builder, '}')
+
+	// C++ Reference: src/check_expr.cpp:13088-13095, the sibling of the Proc_Group arm above.
+	// #1242: without it an asm group rendered as nothing at all in every diagnostic that
+	// interpolates an expression, e.g. "Invalid declaration value ''".
+	case ^ast.Asm_Group:
+		strings.write_string(builder, "asm{")
+		for arg, i in derived.args {
+			if i > 0 {
+				strings.write_string(builder, ", ")
+			}
+			write_expr_to_string(builder, arg, shorthand)
+		}
+		strings.write_rune(builder, '}')
+
+	// C++ Reference: src/check_expr.cpp:13661-13714. #1242: SEVEN more asm arms were absent, so
+	// every asm node other than a group rendered as "(BadExpr)" in any interpolated diagnostic --
+	// e.g. `X :: 1 + asm(){nop;}` reported "Invalid declaration value '1 + (BadExpr)'" where the
+	// reference reports "'1 + asm(){nop}'".
+	//
+	// Note there is deliberately NO ^ast.Asm_Directive arm: the reference has none either
+	// (grep case_ast_node(.*AsmDirective in src/check_expr.cpp finds nothing), so a directive in
+	// instruction position renders as the empty string on both sides.
+	case ^ast.Asm_Template:
+		strings.write_string(builder, "asm")
+		if pt, is_pt := derived.signature.derived.(^ast.Proc_Type); is_pt {
+			strings.write_string(builder, "(")
+			write_expr_to_string(builder, pt.params, shorthand)
+			strings.write_string(builder, ")")
+			if pt.results != nil {
+				strings.write_string(builder, " -> ")
+
+				// C++ Reference: :13672-13681 -- parenthesise the results only when at least
+				// one result field is NAMED.
+				parens_needed := false
+				if fl, is_fl := pt.results.derived.(^ast.Field_List); is_fl {
+					for field in fl.list {
+						f := field.derived.(^ast.Field)
+						if len(f.names) != 0 {
+							parens_needed = true
+							break
+						}
+					}
+				}
+
+				if parens_needed {
+					strings.write_rune(builder, '(')
+				}
+				write_expr_to_string(builder, pt.results, shorthand)
+				if parens_needed {
+					strings.write_rune(builder, ')')
+				}
+			}
+		}
+
+		if len(derived.specs) > 0 {
+			strings.write_rune(builder, '[')
+			for spec, j in derived.specs {
+				if j > 0 {
+					strings.write_string(builder, ", ")
+				}
+				write_expr_to_string(builder, spec, shorthand)
+			}
+			strings.write_rune(builder, ']')
+		}
+		strings.write_rune(builder, '{')
+		for instr, j in derived.instructions {
+			if j > 0 {
+				strings.write_string(builder, "; ")
+			}
+			write_expr_to_string(builder, instr, shorthand)
+			if _, is_label := instr.derived.(^ast.Asm_Label_Decl); is_label {
+				strings.write_string(builder, ":")
+			}
+		}
+		strings.write_rune(builder, '}')
+
+	// C++ Reference: src/check_expr.cpp:13717-13720. Note the reference prints only `name` and
+	// DROPS the `.flag` suffix, so `%rax.foo` renders as `%rax`. Reproduced.
+	case ^ast.Asm_Register:
+		strings.write_string(builder, "%")
+		strings.write_string(builder, derived.name.text)
+
+	// C++ Reference: src/check_expr.cpp:13722-13736.
+	case ^ast.Asm_Spec:
+		if derived.name != nil {
+			write_expr_to_string(builder, derived.name, shorthand)
+			if derived.tied_name != nil {
+				strings.write_string(builder, " -> ")
+				write_expr_to_string(builder, derived.tied_name, shorthand)
+			}
+		}
+		if derived.type != nil {
+			strings.write_string(builder, ": ")
+			write_expr_to_string(builder, derived.type, shorthand)
+		}
+		if derived.value != nil {
+			strings.write_string(builder, " = ")
+			write_expr_to_string(builder, derived.value, shorthand)
+		}
+
+	// C++ Reference: src/check_expr.cpp:13738-13745.
+	case ^ast.Asm_Clobber:
+		strings.write_string(builder, "#")
+		strings.write_string(builder, derived.name.text)
+		if derived.value != nil {
+			strings.write_string(builder, " ")
+			write_expr_to_string(builder, derived.value, shorthand)
+		}
+
+	// C++ Reference: src/check_expr.cpp:13747-13750.
+	case ^ast.Asm_Label_Decl:
+		strings.write_string(builder, ".")
+		write_expr_to_string(builder, derived.name, shorthand)
+
+	// C++ Reference: src/check_expr.cpp:13752-13763.
+	case ^ast.Asm_Instruction:
+		write_expr_to_string(builder, derived.name, shorthand)
+		for operand, j in derived.operands {
+			if j == 0 {
+				strings.write_string(builder, " ")
+			} else {
+				strings.write_string(builder, ", ")
+			}
+			write_expr_to_string(builder, operand, shorthand)
+		}
+
+	// C++ Reference: src/check_expr.cpp:13765-13784. `segment_override` and `type` are NOT
+	// printed by the reference; only base, index, scale and disp are.
+	case ^ast.Asm_Memory_Operand:
+		strings.write_string(builder, "[")
+		write_expr_to_string(builder, derived.base, shorthand)
+		if derived.index != nil {
+			strings.write_string(builder, " + ")
+			write_expr_to_string(builder, derived.index, shorthand)
+			if derived.scale != nil {
+				strings.write_string(builder, "*")
+				write_expr_to_string(builder, derived.scale, shorthand)
+			}
+		}
+		if derived.disp != nil {
+			strings.write_string(builder, " + ")
+			write_expr_to_string(builder, derived.disp, shorthand)
+		}
+		strings.write_string(builder, "]")
 
 	// ===== Ellipsis =====
 	case ^ast.Ellipsis:

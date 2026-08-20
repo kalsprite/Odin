@@ -207,6 +207,39 @@ clone_node :: proc(node: ^Node) -> ^Node {
 			r.constraints_string = clone(r.constraints_string)
 			r.asm_string         = clone(r.asm_string)
 
+		// C++ Reference: src/parser.cpp:240-241 clones AsmGroup.args; the remaining eight
+		// nodes are cloned field-by-field the same way every other expression is.
+		case ^Asm_Group:
+			r.args = clone(r.args)
+		case ^Asm_Template:
+			r.signature    = clone(r.signature)
+			r.specs        = clone(r.specs)
+			r.clobbers     = clone(r.clobbers)
+			r.instructions = clone(r.instructions)
+		case ^Asm_Register:
+			// empty -- tokens only
+		case ^Asm_Spec:
+			r.name      = clone(r.name)
+			r.tied_name = clone(r.tied_name)
+			r.type      = clone(r.type)
+			r.value     = clone(r.value)
+		case ^Asm_Clobber:
+			r.value = clone(r.value)
+		case ^Asm_Label_Decl:
+			r.name = clone(r.name)
+		case ^Asm_Instruction:
+			r.name     = clone(r.name)
+			r.operands = clone(r.operands)
+		case ^Asm_Memory_Operand:
+			r.segment_override = clone(r.segment_override)
+			r.base             = clone(r.base)
+			r.index            = clone(r.index)
+			r.scale            = clone(r.scale)
+			r.disp             = clone(r.disp)
+			r.type             = clone(r.type)
+		case ^Asm_Directive:
+			r.operands = clone(r.operands)
+
 		case ^Bad_Stmt:
 			// empty
 		case ^Empty_Stmt:

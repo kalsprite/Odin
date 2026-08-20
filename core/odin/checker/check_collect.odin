@@ -1401,6 +1401,35 @@ check_collect_value_decl :: proc(ctx: ^Checker_Context, decl: ^ast.Stmt) {
 					error(name, "Procedure groups are not allowed within a foreign block")
 				}
 
+			} else if _, is_ag := init.derived.(^ast.Asm_Group); is_ag {
+				// C++ Reference: src/checker.cpp:5070-5075. An `asm { ... }` group reuses the
+				// PROC GROUP entity and marks itself with is_asm_group -- it does not get an
+				// entity kind of its own, unlike a bare asm template below.
+				e = alloc_entity_proc_group(d.scope, token, nil)
+				pg_variant := &e.variant.(Entity_Proc_Group)
+				pg_variant.is_asm_group = true
+				if fl != nil {
+					error(name, "Asm template groups are not allowed within a foreign block")
+				}
+
+			} else if _, is_at := init.derived.(^ast.Asm_Template); is_at {
+				// C++ Reference: src/checker.cpp:5076-5087.
+				//
+				// The struct-scope rejection uses `continue`, NOT a fallthrough: C++ abandons
+				// the whole loop iteration, so no entity is allocated and none of the
+				// visibility / foreign-block / 'using' handling below runs for this name.
+				if .Type in ctx.scope.flags {
+					error(name, "Asm templates are not allowed within a struct")
+					continue
+				}
+				e = alloc_entity_asm_template(d.scope, token, nil, init)
+				if fl != nil {
+					error(name, "Asm templates are not allowed within a foreign block")
+				}
+				// C++ line 5086. Unlike the proc-group arms, this one records the initialiser
+				// on the DeclInfo -- check_asm_template_from_entity reads it back from there.
+				d.init_expr = init
+
 			} else {
 				// C++ line 4718-4719: Constant
 				e = alloc_entity_constant(d.scope, token, nil, Exact_Value{})

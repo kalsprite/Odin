@@ -1207,8 +1207,14 @@ populate_builtin_package_scope :: proc(c: ^Checker, allocator := context.allocat
 
 	// ODIN_VERSION_HASH
 	// C++ Reference: checker.cpp init_universal - the GIT_SHA the compiler was built with, empty
-	// when it was not defined. The checker is not built with one, so it is always empty.
-	add_global_string_constant(builtin_scope, "ODIN_VERSION_HASH", "", allocator)
+	// when it was not defined.
+	//
+	// LEDGER #1211. This was hardcoded "" on the reasoning that "the checker is not built with
+	// one". That is true of a -D define and false of what actually matters: the port is compiled
+	// BY an Odin compiler, and that compiler publishes its own ODIN_VERSION_HASH into the universe
+	// scope, so the value is available here at the port's compile time. Forwarding it is the exact
+	// analogue of C++ baking in GIT_SHA, and built from this checkout the two agree.
+	add_global_string_constant(builtin_scope, "ODIN_VERSION_HASH", ODIN_VERSION_HASH, allocator)
 
 	// __ODIN_LLVM_F16_SUPPORTED
 	// C++ Reference: checker.cpp init_universal

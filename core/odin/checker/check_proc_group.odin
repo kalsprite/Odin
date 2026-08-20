@@ -719,11 +719,29 @@ check_call_parameter_mixture :: proc(args: []^ast.Expr, context_name: string, al
 		return true
 	}
 
+	// A NIL ARGUMENT IS REACHABLE HERE, and dereferencing it is a SEGFAULT the reference shares.
+	// parse_atom_expr returns nullptr with no diagnostic when f->allow_type is set
+	// (src/parser.cpp:3663-3665) and parse_call_expr appends it unconditionally, so `Foo(..)` in
+	// a type position hands this function a one-element slice whose only element is nil.
+	// src/check_expr.cpp:8674 then does `args[0]->kind` and dies -- MEASURED: `v: Foo(..)` with
+	// `Foo :: struct($T: typeid)` segfaults the reference, thread 3, in
+	// check_call_parameter_mixture, and segfaulted the port at the identical line for the
+	// identical reason. Filed upstream; a reference QUIRK is the contract but a reference CRASH is
+	// not, so the port answers the question the reference was trying to ask: a nil argument is not
+	// a `field = value`, which is what its kind test would have concluded had it been able to run.
+	is_field_value_arg :: proc(arg: ^ast.Expr) -> bool {
+		if arg == nil {
+			return false
+		}
+		_, ok := arg.derived.(^ast.Field_Value)
+		return ok
+	}
+
 	// C++ lines 8528-8538
 	if allow_mixed {
 		was_named := false
 		for arg in args {
-			_, is_named := arg.derived.(^ast.Field_Value)
+			is_named := is_field_value_arg(arg)
 			if was_named && !is_named {
 				error_node(arg, "Non-named parameter is not allowed to follow named parameter i.e. 'field = value' in a %s", context_name)
 				success = false
@@ -735,9 +753,9 @@ check_call_parameter_mixture :: proc(args: []^ast.Expr, context_name: string, al
 	}
 
 	// C++ lines 8539-8549
-	_, first_is_field_value := args[0].derived.(^ast.Field_Value)
+	first_is_field_value := is_field_value_arg(args[0])
 	for arg in args {
-		_, is_field_value := arg.derived.(^ast.Field_Value)
+		is_field_value := is_field_value_arg(arg)
 		mix := is_field_value != first_is_field_value
 		if mix {
 			error_node(arg, "Mixture of 'field = value' and value elements in a %s is not allowed", context_name)
@@ -1388,6 +1406,42 @@ check_call_arguments_internal :: proc(
 			error(call_ce.ellipsis.pos, "Cannot use '..' in call to a non-variadic procedure: '%s'", callee_name)
 		}
 		data.error = true
+	}
+
+	// THE AMBIGUOUS-POLYMORPHIC-VARIADIC GATE. C++ Reference: src/check_expr.cpp:7074-7086.
+	//
+	//     if (variadic) {
+	//         Entity *var_entity = pt->params->Tuple.variables[pt->variadic_index];
+	//         Type *slice = var_entity->type;
+	//         Type *elem = base_type(slice)->Slice.elem;
+	//         if (is_type_polymorphic(elem)) {
+	//             if (show_error) {
+	//                 error(call, "Ambiguous call to a polymorphic variadic procedure with no variadic input %s", type_to_string(final_proc_type));
+	//             }
+	//             err = CallArgumentError_AmbiguousPolymorphicVariadic;
+	//         }
+	//
+	// The twin of the block in check_expr.odin's check_call_arguments_basic. Both are needed:
+	// the port carries TWO transcriptions of C++'s single check_call_arguments_internal, and a
+	// proc GROUP whose members include a polymorphic variadic reaches only this one. That is not
+	// an inference -- cell k_procgroup passed through the other copy's fix silently and only
+	// closed once this was added, which is exactly what it was written to discriminate.
+	//
+	// See the companion comment in check_expr.odin for why the message's "with no variadic
+	// input" does not mean the slot is empty. LEDGER #1244.
+	if pt.variadic && pt.variadic_index >= 0 && pt.params != nil {
+		if vparams, vok := pt.params.variant.(Type_Tuple);
+		   vok && int(pt.variadic_index) < len(vparams.variables) {
+			vslice := base_type(entity_type(vparams.variables[pt.variadic_index]))
+			if vslice != nil {
+				if vs, vs_ok := vslice.variant.(Type_Slice); vs_ok && is_type_polymorphic(vs.elem) {
+					if show_error {
+						error_node(call_node, "Ambiguous call to a polymorphic variadic procedure with no variadic input %s", type_to_string(specialized_proc_type))
+					}
+					data.error = true
+				}
+			}
+		}
 	}
 
 	// Match positional arguments
