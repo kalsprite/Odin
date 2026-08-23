@@ -976,8 +976,7 @@ check_asm_immediate_value_fits :: proc(ev: Exact_Value, bits: i32, needed_: ^i32
 		return false
 
 	case complex128, string, quaternion256, Exact_Value_Pointer, Exact_Value_Compound,
-	     Exact_Value_Procedure, Exact_Value_Typeid, Exact_Value_String16,
-	     Exact_Value_Variant:
+	     Exact_Value_Procedure, Exact_Value_Typeid, Exact_Value_String16:
 		// falls through to the shared tail below
 
 	case:

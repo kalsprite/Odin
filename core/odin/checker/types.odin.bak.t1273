@@ -717,70 +717,6 @@ is_type_raw_union :: proc(t: ^Type) -> bool {
 	return s.is_raw_union
 }
 
-// #1273. is_type_constant_type_for_unions -- src/types.cpp:2689-2721. A SECOND, LOOSER
-// constant-type predicate that the merge introduced alongside constant union variants, used only
-// to decide whether a union may hold a constant.
-//
-// It is NOT is_type_constant_type with extra arms bolted on; the two differ in both directions and
-// every difference below is deliberate and reproduced verbatim:
-//
-//   * .Struct and .Fixed_Capacity_Dynamic_Array are accepted HERE and rejected by
-//     is_type_constant_type. That is the point of the predicate: a union variant may be an
-//     aggregate whose leaves are all constants, even though such an aggregate is not itself a
-//     "constant type" anywhere else in the checker.
-//   * .Union recurses into is_type_union_constantable, so a union of unions is decided.
-//   * .Simd_Vector and .Matrix are accepted by is_type_constant_type and are ABSENT here, so a
-//     union with a `#simd[4]f32` or a `matrix[2,2]f32` variant is NOT constantable. Nothing in the
-//     reference marks this as intentional and it may well be an oversight there, but a reference
-//     quirk is the contract; it is recorded rather than corrected.
-//   * The .Array and .Enumerated_Array arms call is_type_constant_type on the ELEMENT, not this
-//     proc -- so `[4]SomeStruct` is rejected while `SomeStruct` alone is accepted. The
-//     .Fixed_Capacity_Dynamic_Array arm, immediately below them, DOES recurse into this proc. The
-//     inconsistency is the reference's, at src/types.cpp:2702-2707.
-is_type_constant_type_for_unions :: proc(t: ^Type) -> bool {
-	ct := core_type(t)
-	if ct == nil {
-		return false
-	}
-
-	#partial switch ct.kind {
-	case .Basic:
-		basic := ct.variant.(Type_Basic)
-		if basic.kind == .Typeid {
-			return true
-		}
-		return (basic.flags & BASIC_FLAG_CONSTANT_TYPE) != {}
-
-	case .Bit_Set:
-		return true
-
-	case .Proc:
-		return true
-
-	case .Array:
-		return is_type_constant_type(ct.variant.(Type_Array).elem)
-
-	case .Enumerated_Array:
-		return is_type_constant_type(ct.variant.(Type_Enumerated_Array).elem)
-
-	case .Fixed_Capacity_Dynamic_Array:
-		return is_type_constant_type_for_unions(ct.variant.(Type_Fixed_Capacity_Dynamic_Array).elem)
-
-	case .Struct:
-		for field in ct.variant.(Type_Struct).fields {
-			if !is_type_constant_type_for_unions(field.type) {
-				return false
-			}
-		}
-		return true
-
-	case .Union:
-		return is_type_union_constantable(ct)
-	}
-
-	return false
-}
-
 // is_type_union_constantable checks if union can appear in constant expressions
 // C++ Reference: types.cpp:2516-2532
 is_type_union_constantable :: proc(t: ^Type) -> bool {
@@ -796,13 +732,14 @@ is_type_union_constantable :: proc(t: ^Type) -> bool {
 		return true
 	}
 
-	// #1273. src/types.cpp:2723-2736 has ONE loop over the variants and no single-variant special
-	// case; the port's separate `len == 1` branch was equivalent and is dropped so the two read the
-	// same. The predicate is now is_type_constant_type_for_unions, not is_type_constant_type --
-	// that is the behaviour change, and it WIDENS what may be constant: a union whose variant is a
-	// struct of constants is now constantable where before it was not.
+	// Single-variant unions are constantable if the variant is constantable
+	if len(u.variants) == 1 {
+		return is_type_constant_type(u.variants[0])
+	}
+
+	// Multi-variant unions are constantable if all variants are constantable
 	for v in u.variants {
-		if !is_type_constant_type_for_unions(v) {
+		if !is_type_constant_type(v) {
 			return false
 		}
 	}
@@ -822,10 +759,9 @@ is_type_raw_union_constantable :: proc(t: ^Type) -> bool {
 		return false
 	}
 
-	// All fields must be constantable. src/types.cpp:2744-2748 -- also moved to the for_unions
-	// predicate by the merge. The loop's result is dead either way; see the return below.
+	// All fields must be constantable
 	for field in s.fields {
-		if !is_type_constant_type_for_unions(field.type) {
+		if !is_type_constant_type(field.type) {
 			return false
 		}
 	}
@@ -1346,86 +1282,6 @@ core_type :: proc(t: ^Type) -> ^Type {
 // core_array_type combines core_type and base_array_type in a loop
 // Unwraps nested array-like types until reaching the core element
 // C++ Reference: types.cpp:1798-1811
-// LEDGER #1273. core_broadcastable_elem_type -- src/types.cpp:1954-1959, added by the 2026-08-19
-// master merge along with the constant-union-variant feature:
-//
-//	gb_internal Type *core_broadcastable_elem_type(Type *t) {
-//		while (is_type_array(t)) { t = base_array_type(t); }
-//		return t;
-//	}
-//
-// NOT the same thing as core_array_type immediately below, and the difference is load-bearing.
-// core_array_type unwraps Array, Enumerated_Array, Simd_Vector AND Matrix; this one unwraps only
-// what `is_type_array` accepts. The merge introduced it to replace three open-coded copies of
-// exactly this loop in check_expr.cpp, so reproducing the loop rather than reusing core_array_type
-// is what keeps the port on the same set of types the reference is on.
-core_broadcastable_elem_type :: proc(t: ^Type) -> ^Type {
-	result := t
-	for is_type_array(result) {
-		result = base_array_type(result)
-	}
-	return result
-}
-
-// union_is_variant_of -- src/types.cpp. The port had no counterpart; check_builtin's
-// type_is_variant_of open-codes the same walk. #1273 needs it as a predicate, so it is named here
-// and the builtin is deliberately left alone -- unifying them is a separate change with its own
-// measurement, and this one already has enough moving parts.
-union_is_variant_of :: proc(u: ^Type, v: ^Type) -> bool {
-	bt := base_type(u)
-	if bt == nil {
-		return false
-	}
-	un, is_union := bt.variant.(Type_Union)
-	if !is_union {
-		return false
-	}
-	for vt in un.variants {
-		if union_variant_index_types_equal(v, vt) {
-			return true
-		}
-	}
-	return false
-}
-
-// type_conversion_is_variant -- src/types.cpp:3619-3634.
-//
-//	dst = base_type(core_broadcastable_elem_type(dst));
-//	if (dst == nullptr) { return false; }
-//	switch (dst->kind) {
-//	case Type_Union:
-//		if (union_is_variant_of(dst, src)) { return true; }
-//		if (dst->Union.variants.count == 1) {
-//			return type_conversion_is_variant(dst->Union.variants[0], src);
-//		}
-//		return false;
-//	}
-//	return false;
-//
-// NOTE the recursion is guarded on `variants.count == 1`, not on "is a union": a SINGLE-variant
-// union is transparent for this purpose and a multi-variant one is not. That asymmetry runs through
-// the whole feature -- convert_to_typed and check_call_arguments_internal both pass
-// `allow_unions = variants.count == 1` for the same reason -- and it is why probe_uvar's g_single
-// cell (`S :: union { int }`) already behaved differently from a_cast_const before any of this.
-type_conversion_is_variant :: proc(dst: ^Type, src: ^Type) -> bool {
-	d := base_type(core_broadcastable_elem_type(dst))
-	if d == nil {
-		return false
-	}
-	#partial switch d.kind {
-	case .Union:
-		if union_is_variant_of(d, src) {
-			return true
-		}
-		un := d.variant.(Type_Union)
-		if len(un.variants) == 1 {
-			return type_conversion_is_variant(un.variants[0], src)
-		}
-		return false
-	}
-	return false
-}
-
 core_array_type :: proc(t: ^Type) -> ^Type {
 	result := t
 	for {

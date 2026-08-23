@@ -990,7 +990,36 @@ skip_possible_newline :: proc(p: ^Parser) -> bool {
 	return false
 }
 
-skip_possible_newline_for_literal :: proc(p: ^Parser) -> bool {
+// #1285. C++ Reference: src/parser.cpp:1676-1701 --
+//
+//	gb_internal bool skip_possible_newline_for_literal(AstFile *f, bool ignore_strict_style=false) {
+//		...
+//		switch (next.kind) {
+//		case Token_OpenBrace:
+//		case Token_else:
+//			if (build_context.strict_style && !ignore_strict_style) {
+//				syntax_error(next, "With '-strict-style' the attached brace style (1TBS) is enforced");
+//			}
+//			/*fallthrough*/
+//		case Token_where:
+//			advance_token(f);
+//			return true;
+//		}
+//
+// The port had NEITHER the parameter NOR the diagnostic, so `-strict-style` enforced its
+// semicolon rules (parser.odin:1738) and its checker-side rules (check_stmt.odin:2585, 3103)
+// but silently accepted Allman braces -- the single most visible thing the flag exists for.
+// Witness $S/phase2/wit_1tbs1285.
+//
+// THE FALLTHROUGH IS LOAD-BEARING AND IS WHY .Where IS NOW A SEPARATE ARM. C++ puts
+// Token_where AFTER the diagnostic and falls into it, so a `where` on its own line is skipped
+// WITHOUT being reported; the port had all three kinds in one arm, and collapsing them here
+// would have started reporting `where`.
+//
+// `p.strict_style` alone, not `file_allow_newline`'s `strict_style || .Style in vet_flags`:
+// C++ reads build_context.strict_style directly at this site and does not consult the vet
+// flags, and the two are wired separately (package_resolver.odin:1315).
+skip_possible_newline_for_literal :: proc(p: ^Parser, ignore_strict_style := false) -> bool {
 	if .Optional_Semicolons not_in p.flags {
 		return false
 	}
@@ -1000,7 +1029,13 @@ skip_possible_newline_for_literal :: proc(p: ^Parser) -> bool {
 		next := peek_token(p)
 		if curr_pos.line+1 >= next.pos.line {
 			#partial switch next.kind {
-			case .Open_Brace, .Else, .Where:
+			case .Open_Brace, .Else:
+				if p.strict_style && !ignore_strict_style {
+					error(p, next.pos, "With '-strict-style' the attached brace style (1TBS) is enforced")
+				}
+				advance_token(p)
+				return true
+			case .Where:
 				advance_token(p)
 				return true
 			}
@@ -1010,6 +1045,78 @@ skip_possible_newline_for_literal :: proc(p: ^Parser) -> bool {
 	return false
 }
 
+
+// parse_enforce_tabs is C++ src/parser.cpp:6048-6079.
+//
+// #1287. THE PORT HAD NO -vet-tabs AT ALL. ast.Vet_Flag_Bit.Tabs existed (ast.odin:80), the
+// driver forwarded it (package_resolver.odin:1316), and NOTHING EVER READ IT -- so `-vet-tabs`
+// was accepted and silently did nothing. A whole flag, not a missing message.
+//
+// C++ verbatim:
+//
+//	Token prev = f->prev_token;
+//	Token curr = f->curr_token;
+//	if (prev.pos.line < curr.pos.line) {
+//		u8 *start = f->tokenizer.start+prev.pos.offset;
+//		u8 *end   = f->tokenizer.start+curr.pos.offset;
+//		u8 *it = end;
+//		while (it > start) { if (*it == '\n') { it++; break; } it--; }
+//		isize len = end-it;
+//		for (isize i = 0; i < len; i++) {
+//			if (it[i] == '/') break;              // ignore comments
+//			if (it[i] == ' ') { syntax_error(curr, "..."); break; }
+//		}
+//	}
+//
+// THREE DETAILS THAT ARE EASY TO GET WRONG AND ARE NOT SIMPLIFICATIONS:
+//  * The backward scan starts AT `end` and dereferences it before decrementing, so it reads the
+//    first byte of the CURRENT token. For the EOF token that byte is one past the source in Odin
+//    terms; C++ reads its NUL terminator there. `it < len(src)` reproduces that -- a NUL is not
+//    a newline, so the scan just keeps walking back, which is what C++ does.
+//  * If no newline is found the scan stops AT `start`, i.e. the span examined begins at the
+//    previous token's own first byte. That is C++'s behaviour and not an off-by-one to "fix".
+//  * The '/' arm breaks out of the WHOLE scan, not just that byte: a line whose indentation is
+//    followed by a comment is exempt entirely, including spaces before the comment.
+//
+// It reports through the file-COUNTING error routine, as C++'s syntax_error(Token) does.
+parse_enforce_tabs :: proc(p: ^Parser) {
+	if .Tabs not_in file_vet_flags(p) {
+		return
+	}
+
+	prev := p.prev_tok
+	curr := p.curr_tok
+	if prev.pos.line >= curr.pos.line {
+		return
+	}
+
+	src := p.tok.src
+	start := prev.pos.offset
+	end   := curr.pos.offset
+	if start < 0 || end < start || end > len(src) {
+		return
+	}
+
+	it := end
+	for it > start {
+		if it < len(src) && src[it] == '\n' {
+			it += 1
+			break
+		}
+		it -= 1
+	}
+
+	for i in it..<end {
+		if src[i] == '/' {
+			// ignore comments
+			break
+		}
+		if src[i] == ' ' {
+			error(p, curr.pos, "With '-vet-tabs', tabs must be used for indentation")
+			break
+		}
+	}
+}
 
 next_token0 :: proc(p: ^Parser) -> bool {
 	// C++ Reference: src/parser.cpp next_token0 -- `f->curr_token = f->tokens[++f->curr_token_index]`.
@@ -1854,6 +1961,9 @@ parse_stmt_list :: proc(p: ^Parser) -> []^ast.Stmt {
 	    p.curr_tok.kind != .Close_Brace &&
 	    p.curr_tok.kind != .EOF &&
 	    !error_limit_reached(p)  {
+		// #1287. C++ Reference: src/parser.cpp:6088 -- first statement of the loop body.
+		parse_enforce_tabs(p)
+
 		stmt := parse_stmt(p)
 		if stmt != nil {
 			if _, ok := stmt.derived.(^ast.Empty_Stmt); !ok {
@@ -1896,7 +2006,12 @@ parse_when_stmt :: proc(p: ^Parser) -> ^ast.When_Stmt {
 	p.expr_level = prev_level
 
 	if cond == nil {
-		error(p, p.curr_tok.pos, "expected a condition for when statement")
+		// #1286. C++ Reference: src/parser.cpp:5245-5247 -- "Expected condition for when
+		// statement". The port wrote "expected a condition ...": lower-case, and with an
+		// article the reference does not have. Dead on both sides in practice (parse_expr
+		// yields a Bad_Expr, not nil, so `if {}` / `when {}` stop at "Expected an operand" --
+		// probe tp2 matched byte-for-byte), but an invented string is still an invented string.
+		error(p, p.curr_tok.pos, "Expected condition for when statement")
 	}
 	// C++ Reference: src/parser.cpp:4874-4875 -- the flag covers the body AND the else chain,
 	// and is saved/restored rather than simply cleared so that nested `when`s behave.
@@ -1910,7 +2025,17 @@ parse_when_stmt :: proc(p: ^Parser) -> ^ast.When_Stmt {
 		body = parse_block_stmt(p, true)
 	}
 
-	skip_possible_newline_for_literal(p)
+	// #1285. C++ Reference: src/parser.cpp:5257-5261 --
+	//     bool ignore_strict_style = false;
+	//     if (token.pos.line == ast_end_token(body).pos.line) { ignore_strict_style = true; }
+	//     skip_possible_newline_for_literal(f, ignore_strict_style);
+	// A `when` written entirely on one line may put its `else` on the next without being
+	// reported. p.prev_tok is exactly ast_end_token(body): both parse_block_stmt and
+	// parse_do_body return with the body's last token just consumed, and using the TOKEN's
+	// start line rather than the node's end position matters for a final token that itself
+	// spans lines (a raw string literal).
+	ignore_strict_style := tok.pos.line == p.prev_tok.pos.line
+	skip_possible_newline_for_literal(p, ignore_strict_style)
 	if p.curr_tok.kind == .Else {
 		else_tok := expect_token(p, .Else)
 		#partial switch p.curr_tok.kind {
@@ -1987,7 +2112,9 @@ parse_if_stmt :: proc(p: ^Parser) -> ^ast.If_Stmt {
 	p.allow_in_expr = prev_allow_in_expr
 
 	if cond == nil {
-		error(p, p.curr_tok.pos, "expected a condition for if statement")
+		// #1286. C++ Reference: src/parser.cpp:5177-5179 -- "Expected condition for if
+		// statement"; see the `when` twin below for the full note.
+		error(p, p.curr_tok.pos, "Expected condition for if statement")
 
 	}
 	if allow_token(p, .Do) {
@@ -1999,7 +2126,10 @@ parse_if_stmt :: proc(p: ^Parser) -> ^ast.If_Stmt {
 
 	else_tok := p.curr_tok.pos
 
-	skip_possible_newline_for_literal(p)
+	// #1285. C++ Reference: src/parser.cpp:5187-5191 -- the `if` twin of the `when` exemption
+	// above, same shape, same reason.
+	ignore_strict_style := tok.pos.line == p.prev_tok.pos.line
+	skip_possible_newline_for_literal(p, ignore_strict_style)
 	if p.curr_tok.kind == .Else {
 		else_tok := expect_token(p, .Else)
 		#partial switch p.curr_tok.kind {
@@ -2389,7 +2519,26 @@ parse_attribute :: proc(p: ^Parser, tok: tokenizer.Token, open_kind, close_kind:
 		if d.docs == nil { d.docs = docs }
 		append(&d.attributes, attribute)
 	case:
-		error(p, decl.pos, "expected a value or foreign declaration after an attribute")
+		// #1284. C++ Reference: src/parser.cpp:5704 --
+		//     syntax_error(decl, "Expected a value or foreign declaration after an attribute, got %.*s",
+		//                  LIT(ast_strings[decl->kind]));
+		//
+		// The port's line diverged in THREE ways at once, which is why no single check caught it:
+		//   1. lower-case "expected" where every other diagnostic in both compilers capitalises;
+		//   2. the ", got %s" tail was absent, so the message never said WHAT was found;
+		//   3. it used the position-only `error`, giving a one-column caret, where C++ uses
+		//      syntax_error(Ast*) and spans the node.
+		// Witness $S/phase2/wit_attrdecl1284/a_when: `@(private)` then `when true {}` --
+		//   oracle  (3:1) Expected a value or foreign declaration after an attribute, got when statement
+		//                 when true { ...
+		//                 ^~~~~~~~~~~ ...
+		//   port    (3:1) expected a value or foreign declaration after an attribute
+		//                 when true {
+		//                 ^
+		// ast.node_kind_string is the port's ast_strings table and is already used by the six
+		// other parser diagnostics that interpolate a node kind (parser.odin:716, 4158, 4997,
+		// 5013, 5026, 5053, 5068); this site was simply missed.
+		error_node(p, decl, "Expected a value or foreign declaration after an attribute, got %s", ast.node_kind_string(decl))
 		free(attribute)
 		delete(elems)
 	}
@@ -3728,9 +3877,23 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 	allow_typeid_token := .Typeid_Token in allowed_flags
 	allow_poly_names := allow_typeid_token
 
+	// #1287. C++ Reference: src/parser.cpp:4868 --
+	//     bool is_signature = (allowed_flags & FieldFlag_Signature) == FieldFlag_Signature;
+	// A PROCEDURE SIGNATURE IS EXEMPT from -vet-tabs, because its parameters are routinely
+	// wrapped and aligned with spaces. The mask spelled here is Field_Flags_Signature_Params
+	// rather than the reference's FieldFlag_Signature because the port folded C++'s separate
+	// `allow_typeid_token` bool into the flag set; the two agree at every one of the six
+	// parse_field_list call sites, and handle_field above already derives is_signature the
+	// same way.
+	is_signature := (allowed_flags & ast.Field_Flags_Signature_Params) == ast.Field_Flags_Signature_Params
+
 	for p.curr_tok.kind != follow &&
 	    p.curr_tok.kind != .Colon &&
 	    p.curr_tok.kind != .EOF {
+		// #1287. C++ Reference: src/parser.cpp:4873 -- `if (!is_signature) parse_enforce_tabs(f);`
+		if !is_signature {
+			parse_enforce_tabs(p)
+		}
 		prefix_flags := parse_field_prefixes(p)
 		param := parse_var_type(p, allowed_flags & {.Typeid_Token, .Ellipsis})
 		if _, ok := param.derived.(^ast.Ellipsis); ok {
@@ -3822,6 +3985,10 @@ parse_field_list :: proc(p: ^Parser, follow: tokenizer.Token_Kind, allowed_flags
 			    p.curr_tok.kind != .EOF &&
 			    p.curr_tok.kind != .Semicolon {
 				docs = p.lead_comment
+				// #1287. C++ Reference: src/parser.cpp:4995 -- same exemption, second loop.
+				if !is_signature {
+					parse_enforce_tabs(p)
+				}
 				set_flags = parse_field_prefixes(p)
 				names = parse_ident_list(p, allow_poly_names)
 
@@ -5240,7 +5407,11 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 		}
 		body: ^ast.Stmt
 
-		skip_possible_newline_for_literal(p)
+		// #1285. C++ Reference: src/parser.cpp:3032 --
+		//     skip_possible_newline_for_literal(f, where_token.kind == Token_where);
+		// A procedure literal that carried a `where` clause is EXEMPT from the 1TBS complaint,
+		// because the clause legitimately puts the brace on its own line.
+		skip_possible_newline_for_literal(p, where_token.kind == .Where)
 
 		if allow_token(p, .Undef) {
 			body = nil
@@ -5630,6 +5801,8 @@ parse_operand :: proc(p: ^Parser, lhs: bool) -> ^ast.Expr {
 
 		variants: [dynamic]^ast.Expr
 		for p.curr_tok.kind != .Close_Brace && p.curr_tok.kind != .EOF {
+			// #1287. C++ Reference: src/parser.cpp:2399 -- first statement of the loop body.
+			parse_enforce_tabs(p)
 			type := parse_type(p)
 			if _, ok := type.derived.(^ast.Bad_Expr); !ok {
 				append(&variants, type)
@@ -6406,6 +6579,10 @@ parse_enum_field_list :: proc(p: ^Parser) -> []^ast.Expr {
 	for p.curr_tok.kind != .Close_Brace && p.curr_tok.kind != .EOF {
 		// C++ line 2023: CommentGroup *docs = f->lead_comment;  -- read BEFORE the element.
 		docs := p.lead_comment
+
+		// #1287. C++ Reference: src/parser.cpp:2098 -- after the lead comment is read, before
+		// the element is parsed.
+		parse_enforce_tabs(p)
 
 		// C++ Reference: parser.cpp:2034-2043 -- name, then an OPTIONAL `= value`, and the pair
 		// is wrapped in ONE ast_enum_field_value REGARDLESS of whether a value was present. The

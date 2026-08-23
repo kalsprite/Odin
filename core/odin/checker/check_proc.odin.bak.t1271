@@ -2488,12 +2488,6 @@ type_align_of_internal :: proc(t: ^Type, path: ^Type_Path) -> int {
 	// and the exact sibling of #113 (type_align_of ignored struct alignment directives).
 	case .Bit_Field:
 		bf := bt.variant.(Type_Bit_Field)
-		// #1271, src/types.cpp:4478-4480. The alignment mirror of the size guard in
-		// types.odin's own .Bit_Field arm; both tail calls spin on a self-referential backing
-		// type and BOTH are on the path `BF :: bit_field BF { a: u8 | 3 }` takes.
-		if bt == bf.backing_type {
-			return FAILURE_ALIGNMENT
-		}
 		return type_align_of_internal(bf.backing_type, path)
 
 	case .Struct:
@@ -2590,10 +2584,6 @@ type_align_of_internal :: proc(t: ^Type, path: ^Type_Path) -> int {
 
 	case .Enum:
 		enum_type := bt.variant.(Type_Enum)
-		// #1271, src/types.cpp:4497-4499.
-		if bt == enum_type.base_type {
-			return FAILURE_ALIGNMENT
-		}
 		return type_align_of_internal(enum_type.base_type, path)
 
 	case .Bit_Set:

@@ -180,39 +180,6 @@ check_builtin_procedure :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		}
 	}
 
-	// #1279. src/check_builtin.cpp:2921-2927, MISSING FROM THE PORT ENTIRELY:
-	//
-	//	if (BuiltinProc__atomic_begin < id && id < BuiltinProc__atomic_end) {
-	//		if (build_context.metrics.arch == TargetArch_riscv64) {
-	//			if (!check_target_feature_is_enabled(str_lit("a"), nullptr)) {
-	//				error(call, "missing required target feature \"a\" for atomics, enable it by "
-	//				      "setting a different -microarch or explicitly adding it through -target-features");
-	//			}
-	//		}
-	//	}
-	//
-	// riscv64 makes atomics an OPTIONAL extension ("a"), so on a riscv64 target with a microarch
-	// that does not include it, every intrinsics.atomic_* call must be rejected. The port accepted
-	// them all. Invisible to the corpus because every cell is graded on linux_amd64; this is a
-	// CROSS-TARGET gap, and it is the second one found by auditing rather than by sweeping.
-	//
-	// The reference brackets the range with __atomic_begin/__atomic_end sentinels. `Builtin_Proc_Id`
-	// is in core/odin/ast and is PUBLIC (#868), so adding sentinels to it is a breaking change for
-	// no benefit; the two endpoints name the same closed range. They are adjacent in the enum
-	// (semantic_types.odin: Atomic_Type_Is_Lock_Free .. Atomic_Compare_Exchange_Weak_Explicit) and
-	// must stay adjacent -- a new atomic intrinsic added anywhere but inside that run would fall
-	// outside this test, exactly as it would fall outside the reference's sentinels.
-	//
-	// NOTE the reference does NOT return or set the operand invalid: it reports and carries on into
-	// the switch, so the builtin is still checked and any further diagnostic still appears.
-	if id >= .Atomic_Type_Is_Lock_Free && id <= .Atomic_Compare_Exchange_Weak_Explicit {
-		if build_context.metrics.arch == .Riscv64 {
-			if !target_feature_is_enabled("a", enabled_target_features()) {
-				error_node(call, "missing required target feature \"a\" for atomics, enable it by setting a different -microarch or explicitly adding it through -target-features")
-			}
-		}
-	}
-
 	// Step 4: Dispatch to per-builtin handler
 	// C++ ref: check_builtin.cpp check_builtin_procedure_directive (main switch)
 	result := false
@@ -1767,18 +1734,8 @@ check_builtin_objc_send :: proc(ctx: ^Checker_Context, operand: ^Operand, call: 
 		x: Operand
 		check_expr(ctx, &x, call.args[i])
 		if is_type_untyped(x.type) {
-			// #1277. src/check_builtin.cpp:379. THREE divergences on one line:
-			//   1. the builtin name was HARDCODED where the reference passes builtin_name;
-			//   2. the ", got %s of type %s" clause was dropped entirely, so the diagnostic
-			//      named neither the offending expression nor its type;
-			//   3. the port RETURNED here. The reference does not: it reports and keeps
-			//      walking the argument list, so a call with two untyped arguments produces
-			//      TWO diagnostics and the remaining arguments are still recorded into
-			//      param_types. Returning made the port emit one diagnostic and abandon the
-			//      rest of the builtin's checking, which suppresses whatever else was wrong.
-			expr_str := expr_to_string(x.expr)
-			defer delete(expr_str)
-			error_node(x.expr, "'%s' expects typed parameters, got %s of type %s", builtin_name, expr_str, type_to_string(x.type))
+			error_node(x.expr, "'objc_send' expects typed parameters")
+			return false
 		}
 	}
 
@@ -1998,11 +1955,7 @@ check_builtin_objc_block :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		case .Value, .Variable, .Constant:
 			// OK
 		case:
-			// #1277. src/check_builtin.cpp:500 -- the ", but got %s of type %s" clause was
-			// dropped. The `return false` here IS the reference's; only the text diverged.
-			cap_expr_str := expr_to_string(x.expr)
-			defer delete(cap_expr_str)
-			error_node(x.expr, "'%s' capture arguments must be values, but got %s of type %s", builtin_name, cap_expr_str, type_to_string(x.type))
+			error_node(x.expr, "'%s' capture arguments must be values", builtin_name)
 			return false
 		}
 	}
@@ -2351,15 +2304,8 @@ check_builtin_objc_super :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 	}
 
 	if superclass_type == nil {
-		// #1278. The port's text here was INVENTED -- "'%s' type has no @(objc_superclass=...)
-		// attribute defined". src/check_builtin.cpp:730 reads:
-		//     error(operand->expr, "'%.*s' target object '%s' does not have an Objective-C "
-		//           "superclass. One must be set via the @(objc_superclass) attribute",
-		//           LIT(builtin_name), t);
-		// where t is type_to_string(obj_type). So the reference NAMES THE TARGET TYPE and the
-		// port did not; there was no way for a user to tell which object was at fault in a
-		// nested call. Found by msgaudit against the whole port directory.
-		error_node(operand.expr, "'%s' target object '%s' does not have an Objective-C superclass. One must be set via the @(objc_superclass) attribute", builtin_name, type_to_string(obj_type))
+		// No superclass defined - this is an error for objc_super
+		error_node(operand.expr, "'%s' type has no @(objc_superclass=...) attribute defined", builtin_name)
 		return false
 	}
 
@@ -2783,22 +2729,9 @@ check_builtin_complex :: proc(ctx: ^Checker_Context, operand: ^Operand, call: ^a
 		panic("Invalid float type for complex")
 	}
 
-	// #1274. src/check_builtin.cpp:3146-3151 -- the merge REPLACED check_is_castable_to here.
-	// Upstream's own note, verbatim:
-	//
-	//	// Only a complex hint of the same element type, or context-typing an untyped constant.
-	//	// Castability is the rule for a conversion the programmer wrote; used here it adopted any
-	//	// castable hint, which silently narrowed f64 to f32 and left the value with no element type
-	//	// at all when the hint was `any` or a union
-	//
-	// So the hint is now adopted in exactly two situations: the operand is still UNTYPED and the
-	// hint is complex (context-typing, the ambiguity the hint exists to resolve), or the operand is
-	// already typed and the hint is the SAME complex type after coring (a no-op that keeps a named
-	// complex type's name). Everything else -- an `any` hint, a union hint, a complex128 operand
-	// with a complex64 hint -- is now ignored and the width computed from the arguments stands.
-	if type_hint != nil && is_type_complex(type_hint) &&
-	   (is_type_untyped(operand.type) ||
-	    are_types_identical(core_type(operand.type), core_type(type_hint))) {
+	// Apply type hint if compatible
+	// C++ Reference: check_builtin.cpp:3146-3148
+	if type_hint != nil && check_is_castable_to(ctx, operand, type_hint) {
 		operand.type = type_hint
 	}
 
@@ -3976,31 +3909,6 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 				}
 			}
 		}
-
-		// C++ Reference: check_builtin.cpp:2801-2810 -- record the SITE.
-		//
-		// Placement is C++'s: AFTER the config-scope lookup above. That matters for exactly one
-		// field and it is easy to get backwards -- `default_value` is `def.value`, the DEFAULT
-		// operand, NOT the override. The lookup writes `operand`, never `def`, so a `-define:` in
-		// force does not change what is recorded. Recording the override here would make
-		// -show-defineables print the current build's values instead of the source's defaults, and
-		// would make the dedup below compare the wrong thing.
-		//
-		// UNCONDITIONAL, unlike the `#defined` arm: `#config` has already REJECTED a non-Ident
-		// first argument, so there is no selector case to skip.
-		if ctx.checker != nil {
-			defineable := Defineable{
-				name          = config_name,
-				default_value = default_op.value,
-				pos           = arg0_ident.pos,
-			}
-			if ctx.decl != nil {
-				defineable.docs = ctx.decl.docs
-			}
-			sync.mutex_lock(&ctx.checker.info.defineables_mutex)
-			append(&ctx.checker.info.defineables, defineable)
-			sync.mutex_unlock(&ctx.checker.info.defineables_mutex)
-		}
 		return true
 	}
 
@@ -4043,29 +3951,6 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 		operand.type = t_untyped_bool
 		operand.mode = .Constant
 		operand.value = check_identifier_exists(ctx.scope, arg)
-
-		// C++ Reference: check_builtin.cpp:2748-2757 -- record the SITE, with C++'s own comment:
-		//     // If the arg is a selector expression we don't add it, `-define` only allows
-		//     // identifiers.
-		// So the SELECTOR form of `#defined` is deliberately not a defineable, and a
-		// `-define:` can never satisfy it. Reproduced exactly, guard and all.
-		//
-		// `default_value` is `exact_value_bool(false)` -- there is no default argument to read,
-		// and false is what the directive answers for an undefined name. `docs` is explicitly
-		// nullptr in C++ here, unlike the `#config` arm which reads c->decl; not an oversight to
-		// tidy, since `#defined` is only legal inside a procedure body where there is no
-		// declaration doc comment to attach.
-		if ident, ident_ok := arg.derived.(^ast.Ident); ident_ok && ctx.checker != nil {
-			defineable := Defineable{
-				name          = ident.name,
-				default_value = exact_value_bool(false),
-				pos           = ident.pos,
-				docs          = nil,
-			}
-			sync.mutex_lock(&ctx.checker.info.defineables_mutex)
-			append(&ctx.checker.info.defineables, defineable)
-			sync.mutex_unlock(&ctx.checker.info.defineables_mutex)
-		}
 		return true
 	}
 
@@ -4267,26 +4152,16 @@ check_builtin_procedure_directive :: proc(ctx: ^Checker_Context, operand: ^Opera
 
 		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive. One form only, always carrying the value;
 		// the port had three branches and two of them dropped the message.
-		// LEDGER #1290. C++ check_builtin.cpp:2716 wraps BOTH the panic line and its "Called
-		// within" continuation in `if (!build_context.ignore_panic)`. The port emitted them
-		// unconditionally, so `-internal-ignore-panic` was inert.
-		//
-		// The guard covers ONLY the diagnostics. The two earlier rejections in this arm (wrong
-		// argument count, non-constant-string argument) are outside it and still fire, and the
-		// operand is still invalidated below -- so the flag suppresses the report without
-		// turning `#panic` into a no-op.
-		if !build_context.ignore_panic {
-			msg_str, _ := msg_op.value.(string)
-			error(call_expr, "Compile time panic: %s", msg_str)
+		msg_str, _ := msg_op.value.(string)
+		error(call_expr, "Compile time panic: %s", msg_str)
 
-			// C++ Reference: check_builtin.cpp check_builtin_procedure_directive -- same continuation as #assert.
-			// NOTE: no `delete` on the type_to_string result. type_to_string does not always
-			// return freshly-allocated storage, and freeing it aborts with
-			// "free(): invalid pointer" (LEDGER tasks 192 and 231).
-			if ctx.proc_name != "" {
-				sig := type_to_string(ctx.curr_proc_sig)
-				error_line("\tCalled within '%s' :: %s\n", ctx.proc_name, sig)
-			}
+		// C++ Reference: check_builtin.cpp check_builtin_procedure_directive -- same continuation as #assert.
+		// NOTE: no `delete` on the type_to_string result. type_to_string does not always
+		// return freshly-allocated storage, and freeing it aborts with
+		// "free(): invalid pointer" (LEDGER tasks 192 and 231).
+		if ctx.proc_name != "" {
+			sig := type_to_string(ctx.curr_proc_sig)
+			error_line("\tCalled within '%s' :: %s\n", ctx.proc_name, sig)
 		}
 
 		// #panic diverges (never returns)
@@ -5166,15 +5041,10 @@ check_builtin_quaternion :: proc(ctx: ^Checker_Context, operand: ^Operand, call:
 		panic("Invalid type")
 	}
 
-	// C++ Reference: check_builtin.cpp:3763-3768. This is the LEGITIMATE use of the type_hint tail:
+	// C++ Reference: check_builtin.cpp:3763-3765. This is the LEGITIMATE use of the type_hint tail:
 	// for a CONSTRUCTOR the hint resolves a genuine width ambiguity. The same tail on the ACCESSORS
 	// (real/imag, jmag/kmag) is upstream #646, where there is no ambiguity to resolve.
-	//
-	// #1274: narrowed by the merge exactly as the complex constructor above was; upstream's comment
-	// there is "see the note in BuiltinProc_complex". Same two admissible situations.
-	if type_hint != nil && is_type_quaternion(type_hint) &&
-	   (is_type_untyped(operand.type) ||
-	    are_types_identical(core_type(operand.type), core_type(type_hint))) {
+	if type_hint != nil && check_is_castable_to(ctx, operand, type_hint) {
 		operand.type = type_hint
 	}
 
@@ -9468,20 +9338,7 @@ check_builtin_soa_copy_from_slice :: proc(ctx: ^Checker_Context, operand: ^Opera
 		return false
 	}
 	if !is_type_integer(offset.type) {
-		// #1275. src/check_builtin.cpp:5365. THREE divergences in one line, all fixed together:
-		//   1. the error NODE was array_ptr.expr, i.e. argument 0, for a complaint about
-		//      argument 1 -- the caret pointed at the array, not the offset;
-		//   2. the two format arguments were SWAPPED, so it printed the array's TYPE where the
-		//      builtin's NAME belongs and vice versa;
-		//   3. the type it reported was array_ptr.type, not offset.type -- the wrong operand
-		//      entirely, so even unswapped it would have named the array's type.
-		// The reference had defect 2 as well, as a `%.*s`/String mismatch (undefined behaviour,
-		// part of the typo aggregate filed upstream); the master merge at ed9a7e563 fixed it
-		// there, which is what exposed 1 and 3 here. Reference before/after and the port:
-		//   ref pre   error(offset.expr, "... for '%.*s', got %s", s, LIT(builtin_name))  [UB]
-		//   ref post  error(offset.expr, "... for '%.*s', got %s", LIT(builtin_name), s)
-		//   port      error(array_ptr.expr, ..., type_to_string(array_ptr.type), builtin_name)
-		error_node(offset.expr, "Expected an integer as the offset for '%s', got %s", builtin_name, type_to_string(offset.type))
+		error_node(array_ptr.expr, "Expected an integer as the offset for '%s', got %s", type_to_string(array_ptr.type), builtin_name)
 		return false
 	}
 

@@ -321,78 +321,9 @@ is_exact_value_zero :: proc(v: Exact_Value) -> bool {
 		return len(val) == 0
 	case Exact_Value_Pointer:
 		return val.address == 0
-
-	// #1273. src/check_expr.cpp:13013-13020:
-	//	case ExactValue_Variant:
-	//		if (v.value_variant == nullptr) { return true; }
-	//		if (v.value_variant->tav.mode != Addressing_Constant) { return false; }
-	//		return is_exact_value_zero(v.value_variant->tav.value);
-	// A variant is zero when the expression it wraps is a constant AND that constant is zero. A
-	// non-constant expression is NOT zero -- note the asymmetry with the nil case above it, which
-	// IS zero. Both are the reference's.
-	case Exact_Value_Variant:
-		if val.expr == nil {
-			return true
-		}
-		if val.expr.tav.mode != .Constant {
-			return false
-		}
-		return is_exact_value_zero(val.expr.tav.value)
-
-	// #1276. The four arms below and the tail's polarity were MISSING. src/check_expr.cpp:
-	// 12969 String16, 12991 Compound, 13009 Procedure, 13011 Typeid, 13022 `return true`. The port
-	// had none of them and fell through to `return false`, so it answered "not zero" for every one
-	// of those kinds where the reference answers on the value's own terms.
-	//
-	// NOT MEASURABLE, and recorded as such rather than claimed as a fix. Every reader in BOTH
-	// compilers gates on the kind before asking:
-	//   src/check_stmt.cpp:2814,2822   `... .kind == ExactValue_Integer && is_exact_value_zero(...)`
-	//   src/check_expr.cpp:5287        `is_exact_value_zero(..) && (kind == Integer || kind == Float)`
-	//   check_stmt.odin:1999           gated on big.Int
-	//   check_expr.odin:5263           convert_untyped_error, reached only for UNTYPED operands,
-	//                                  and none of these four kinds is ever untyped
-	//   check_expr.odin:2091           `is_constant_zero`, a nested helper that is never called
-	// So no witness can separate the two compilers here today. It is ported because
-	// core/odin/checker is a library and the predicate is public: a caller outside the checker's
-	// own gating would get the wrong answer, and "unreachable from inside" is not the same as
-	// "unreachable".
-	case Exact_Value_String16:
-		return val.len == 0
-
-	case Exact_Value_Compound:
-		// src/check_expr.cpp:12991-13007. A compound is zero when it is nil, or has no elements,
-		// or EVERY element is a constant that is itself zero. A non-constant element makes the
-		// whole thing non-zero -- the same asymmetry the Variant arm above has.
-		if val.expr == nil {
-			return true
-		}
-		cl, is_cl := val.expr.derived.(^ast.Comp_Lit)
-		if !is_cl {
-			// The reference's ast_node() macro asserts the kind. The port cannot assert without
-			// aborting the host, so a non-Comp_Lit payload is treated as the empty case.
-			return true
-		}
-		for elem in cl.elems {
-			if elem.tav.mode != .Constant {
-				return false
-			}
-			if !is_exact_value_zero(elem.tav.value) {
-				return false
-			}
-		}
-		return true
-
-	case Exact_Value_Procedure:
-		return val.expr == nil
-
-	case Exact_Value_Typeid:
-		return val.type == nil
 	}
 
-	// src/check_expr.cpp:13022 -- the reference's tail is `return true`, not false. With every arm
-	// above present it is unreachable in both compilers; the polarity is matched anyway so that a
-	// kind added later defaults the same way on both sides.
-	return true
+	return false
 }
 
 // ======================================================================================
@@ -768,13 +699,6 @@ exact_value_order :: proc(v: Exact_Value) -> Exact_Value_Order {
 	case Exact_Value_Compound:
 		// C++ line 665: Compound returns 0 (same as Invalid)
 		return .Invalid
-
-	// #1273. src/exact_value.cpp:701-704 -- Variant joins Invalid and Compound at order 0. That
-	// is what makes match_exact_values dispatch to the Variant arm rather than promoting: a value
-	// of order 0 is never the promotion target, so the pair is always resolved by unwrapping the
-	// variant instead.
-	case Exact_Value_Variant:
-		return .Invalid
 	}
 
 	// Should not reach here
@@ -887,15 +811,6 @@ match_exact_values :: proc(x, y: ^Exact_Value) {
 		return
 	}
 
-	// #1273. src/exact_value.cpp:791-794 -- the Variant arm is the LAST case of the switch and
-	// returns rather than falling through to the compiler_error below it. Placed here for the same
-	// reason: everything above has already established that x is not one of the promotable kinds.
-	if xv, x_is_variant := x^.(Exact_Value_Variant); x_is_variant {
-		_ = xv
-		match_exact_values_variant(x, y)
-		return
-	}
-
 	// C++ line 752: Should not reach here with correct logic
 }
 
@@ -1000,11 +915,6 @@ hash_exact_value :: proc(v: Exact_Value) -> uintptr {
 	case Exact_Value_Typeid:
 		// C++ line 99-101: Hash typeid using pointer
 		res = uintptr(val.type) & 0x7fffffff
-
-	// #1273. src/exact_value.cpp:123-125 -- ptr_map_hash_key on the wrapped expression, the same
-	// treatment Compound and Procedure get.
-	case Exact_Value_Variant:
-		res = uintptr(val.expr) & 0x7fffffff
 	}
 
 	// C++ line 105: Mask to ensure positive value
@@ -1516,57 +1426,6 @@ compare_exact_values_compound_lit_cpp :: proc(op: tokenizer.Token_Kind, x, y: Ex
 	return test
 }
 
-// match_exact_values_variant -- src/check_expr.cpp:13056-13067.
-//
-//	GB_ASSERT(x->kind == ExactValue_Variant);
-//	while (x->value_variant != nullptr && x->value_variant->tav.mode == Addressing_Constant) {
-//		*x = x->value_variant->tav.value;
-//	}
-//	while (y->kind == ExactValue_Variant && y->value_variant != nullptr &&
-//	       y->value_variant->tav.mode == Addressing_Constant) {
-//		*y = y->value_variant->tav.value;
-//	}
-//	match_exact_values(x, y);
-//
-// NOTE THE ASYMMETRY, which is the reference's and is reproduced deliberately: x's loop does NOT
-// re-test that x is still a Variant, so it unwraps once and then continues only while the value it
-// landed on is itself a Variant carrying a constant -- which the `x->value_variant` read makes
-// well-defined only because the union's arms are the same size. y's loop tests the kind on every
-// iteration. In practice both terminate at the first non-Variant, and the port's tagged union
-// forces the kind test on both sides, so the port cannot reproduce the difference even in
-// principle; recording it because it is the kind of thing that looks like a port slip later.
-@(private = "file")
-match_exact_values_variant :: proc(x, y: ^Exact_Value) {
-	for {
-		v, is_variant := x^.(Exact_Value_Variant)
-		if !is_variant || v.expr == nil || v.expr.tav.mode != .Constant {
-			break
-		}
-		x^ = v.expr.tav.value
-	}
-	for {
-		v, is_variant := y^.(Exact_Value_Variant)
-		if !is_variant || v.expr == nil || v.expr.tav.mode != .Constant {
-			break
-		}
-		y^ = v.expr.tav.value
-	}
-	match_exact_values(x, y)
-}
-
-// compare_exact_values_variant -- src/check_expr.cpp:13049-13054. Compares the two wrapped
-// expressions' constant values. Reached only from compare_exact_values' Variant arm, which has
-// already established that BOTH sides are Variants.
-@(private = "file")
-compare_exact_values_variant :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value_Variant) -> bool {
-	lhs := x.expr
-	rhs := y.expr
-	if lhs == nil || rhs == nil {
-		return false
-	}
-	return compare_exact_values(op, lhs.tav.value, rhs.tav.value)
-}
-
 compare_exact_values :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value) -> bool {
 	// C++ line 951: Promote values to common type
 	x_promoted := x
@@ -1806,24 +1665,6 @@ compare_exact_values :: proc(op: tokenizer.Token_Kind, x, y: Exact_Value) -> boo
 		case .Not_Eq:
 			return val.expr != y_proc.expr
 		}
-
-	// #1273. src/exact_value.cpp:1144-1152:
-	//	case ExactValue_Variant:
-	//		if (op != Token_CmpEq && op != Token_NotEq) { return false; }
-	//		if (x.kind != y.kind) { return op == Token_NotEq; }
-	//		return compare_exact_values_variant(op, x, y);
-	// Only equality is defined, and a MISMATCHED KIND is not an error -- it answers the question
-	// directly, `!=` being true and `==` false. That differs from every other arm here, which
-	// returns false for a mismatch regardless of the operator.
-	case Exact_Value_Variant:
-		if op != .Cmp_Eq && op != .Not_Eq {
-			return false
-		}
-		y_variant, y_ok := y_promoted.(Exact_Value_Variant)
-		if !y_ok {
-			return op == .Not_Eq
-		}
-		return compare_exact_values_variant(op, val, y_variant)
 	}
 
 	// C++ line 1060: Invalid comparison panic
@@ -1959,13 +1800,6 @@ exact_value_compound :: proc(node: ^ast.Expr) -> Exact_Value {
 // C++ Reference: exact_value.cpp:176-180
 exact_value_procedure :: proc(node: ^ast.Expr) -> Exact_Value {
 	return Exact_Value_Procedure{expr = node}
-}
-
-// exact_value_variant creates a variant exact value -- a constant that has been converted to a
-// union type, holding the expression that produced it.
-// C++ Reference: src/exact_value.cpp:213-217.
-exact_value_variant :: proc(node: ^ast.Expr) -> Exact_Value {
-	return Exact_Value_Variant{expr = node}
 }
 
 // exact_value_pointer creates a pointer exact value
@@ -2736,12 +2570,6 @@ write_exact_value_to_string :: proc(buf: ^strings.Builder, v: Exact_Value, strin
 		write_expr_to_string(buf, val.expr, false)
 
 	case Exact_Value_Procedure:
-		write_expr_to_string(buf, val.expr, false)
-
-	// #1273. src/exact_value.cpp:1218-1219 -- a variant prints as the expression it wraps, NOT as
-	// the union type it was converted to. So a diagnostic naming such a constant shows the
-	// original literal, which is what the user wrote.
-	case Exact_Value_Variant:
 		write_expr_to_string(buf, val.expr, false)
 	}
 }

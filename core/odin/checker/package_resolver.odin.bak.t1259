@@ -693,56 +693,6 @@ collect_package_for_target :: proc(path: string, kind: ast.Package_Kind = .Norma
 			syntax_error_pos(pos, "Files cannot start with '_', got '%s'", fullpath)
 		}
 
-		// LEDGER #1259b. THE PER-FILE READ-FAILURE TAXONOMY. src/parser.cpp:7360-7384:
-		//
-		//	case ParseFile_WrongExtension: "...; invalid file extension: File must have the extension '.odin'"
-		//	case ParseFile_InvalidFile:    "...; invalid file or cannot be found"
-		//	case ParseFile_Permission:     "...; file permissions problem"
-		//	case ParseFile_NotFound:       "...; file cannot be found ('%s')"      <- names the FULLPATH too
-		//	case ParseFile_InvalidToken:   "...; invalid token found in file"      <- already ported, #650
-		//	case ParseFile_EmptyFile:      "...; file contains no tokens"          <- DEAD CODE, see below
-		//	case ParseFile_FileTooLarge:   "...; file is too large, exceeds maximum file size of 2 GiB"
-		//
-		// and the `%s` is `fi.name`, the BASENAME -- not the path. Measured: `b.odin`, not the
-		// absolute path the port had available.
-		//
-		// The port did none of this. os.read_entire_file failing produced a bare `return` out of
-		// collect_package_for_target, which abandoned THE WHOLE PACKAGE in silence -- one
-		// unreadable file and the other twenty were never loaded, never checked, and nothing said
-		// so. The reference reports the one file and carries on with the rest.
-		//
-		// WHICH ARM FIRES IS MEASURED, NOT DERIVED. A chmod-000 file reports
-		//	Syntax Error: Failed to parse file: b.odin; invalid file or cannot be found
-		// i.e. InvalidFile, NOT Permission -- init_tokenizer_from_fullpath does not surface EACCES
-		// distinctly on this platform, so it lands in init_ast_file's `default:` arm
-		// (src/parser.cpp:6130). Deriving "permissions problem" from the name of the enum value
-		// would have been wrong.
-		//
-		// ParseFile_EmptyFile's switch arm is unreachable: the `if (err == ParseFile_EmptyFile)`
-		// above the switch already consumed that value. Recorded so it is not ported as live code.
-		//
-		// POSITION: the same mechanism as report_underscore_filename above, and it renders the same
-		// internally-inconsistent way. MEASURED both sides:
-		//	root package        Syntax Error: Failed to parse file: b.odin; ...        (zero pos, no header)
-		//	imported package    sub/z.odin(3:1) Syntax Error: Failed to parse file: z.odin; ...
-		//	                    ^I( empty line )
-		// -- the header names the NEW file at the IMPORT declaration's line:column, and the source
-		// line is rendered from the importer's offset applied to the new file.
-		report_parse_file_failure :: proc(import_pos: tokenizer.Pos, fullpath: string) {
-			pos := import_pos
-			pos.file = fullpath
-			name := filepath.base(fullpath)
-			// NotFound is split out because the reference's message names the fullpath as well as
-			// the basename. It is not reachable through the glob that produced `fullpath` -- the
-			// file existed a moment ago -- but it is reachable through a race, and the two arms
-			// print different text, so collapsing them would be a guess rather than a port.
-			if !os.exists(fullpath) {
-				syntax_error_pos(pos, "Failed to parse file: %s; file cannot be found ('%s')", name, fullpath)
-				return
-			}
-			syntax_error_pos(pos, "Failed to parse file: %s; invalid file or cannot be found", name)
-		}
-
 	pkg = ast.new(ast.Package, NO_POS, NO_POS)
 	pkg.fullpath = pkg_path
 	pkg.kind = kind
@@ -761,24 +711,13 @@ collect_package_for_target :: proc(path: string, kind: ast.Package_Kind = .Norma
 
 		fullpath, fullpath_err := os.get_absolute_path(match, context.allocator)
 		if fullpath_err != nil {
-			// #1259b. NO REFERENCE COUNTERPART -- read_directory hands C++ a fullpath directly, so
-			// it never resolves one and cannot fail here. Reported through the same arm anyway
-			// rather than left as the bare `return` this was: abandoning the entire package in
-			// silence is the one behaviour that is certainly wrong, and "invalid file or cannot be
-			// found" is what the reference says for every open failure it CAN see. `match` is used
-			// for the name because fullpath was never produced.
-			report_parse_file_failure(import_pos, match)
-			continue
+			return
 		}
 
 		src, src_err := os.read_entire_file(fullpath, context.allocator)
 		if src_err != nil {
-			// #1259b: report the file and CONTINUE with the rest of the package, which is what
-			// process_imported_file does -- it returns the error for THAT file, and the other
-			// files of the package are separate work items.
-			report_parse_file_failure(import_pos, fullpath)
 			delete(fullpath)
-			continue
+			return
 		}
 		if strings.trim_space(string(src)) == "" {
 			// #1258, emit site 1 of 2: an empty file IS reported. See report_underscore_filename.
@@ -1185,61 +1124,15 @@ load_package_with_dependencies :: proc(
 		}
 	}
 
-	// LEDGER #1259. THE ROOT PATH WAS NEVER VALIDATED. #1256 gave the port
-	// try_add_import_path_check and wired it into the IMPORT walk only, but the reference does not
-	// have two paths here: parse_packages routes the runtime seed, the init package, core:testing
-	// and every extra package through the SAME try_add_import_path (src/parser.cpp:7465, :7468,
-	// :7474, :7488). So a root directory that is empty, or holds no .odin files, or holds only
-	// files excluded for this target, or is itself named `*.odin`, is rejected by the reference and
-	// was checked in SILENCE by the port -- it loaded zero files from the root, checked base:runtime
-	// alone, and reported success. MEASURED on the oracle, all four arms, all at rc=1:
+	// Root package has empty import path (it's the target, not an import)
 	//
-	//	<dir> empty                 Syntax Error: Empty directory: <abs>
-	//	<dir> only a.txt            Syntax Error: Empty directory that contains no .odin files: <abs>
-	//	<dir> only a_windows.odin   Syntax Error: Directory contains no .odin files for the specified platform: <abs>
-	//	<dir> named `x.odin`        Error: 'import' declarations cannot import directories with a .odin extension/suffix
-	//
-	// rel_path is the FULL path here, not a spelling the user typed: the reference passes
-	// init_fullpath as BOTH arguments (`try_add_import_path(p, init_fullpath, init_fullpath, ...)`),
-	// which is why the oracle prints an absolute path in the three arms that name one, even when the
-	// command line said `.`. The import walk passes the import string instead, which is why THOSE
-	// diagnostics echo what was written in the source. Both are reproduced by passing the same
-	// argument the reference passes at each site.
-	//
-	// THE SINGLE-FILE BYPASS IS NOT OPTIONAL. src/parser.cpp:6306-6319:
-	//     // NOTE(bill): Single file initial package
-	//     if (kind == Package_Init && !path_is_directory(path) && string_ends_with(path, FILE_EXT)) {
-	//         ... parser_add_file_to_process(p, pkg, fi, pos); return pkg;
-	//     }
-	// It sits AHEAD of read_directory, so a `-file` root never reaches any of the checks above.
-	// Without it this change would reject every one of the 1855 `-file` cells in the corpus with
-	// "Expected a directory for a package, got a file". The condition is reproduced exactly,
-	// including the `kind == Init` clause -- an ordinary IMPORT of a .odin file is still an error,
-	// and wit_imp259 already pins that.
-	//
-	// A ZERO POSITION, because the reference builds one: `TokenPos init_pos = {};` at
-	// src/parser.cpp:7457, shared by all four seed sites. That is what makes these render with no
-	// `file(line:col)` prefix.  Spelled `tokenizer.Pos{}` rather than the
-	// file-local NO_POS alias, which is declared inside collect_package_for_target and is not in
-	// scope here.
-	//
-	// ON FAILURE the reference returns nullptr from try_add_import_path and parse_packages CARRIES
-	// ON -- the runtime seed was queued first and is still processed. So the root is simply not
-	// queued here; it is not an early return.
-	root_is_single_file := !os.is_dir(root_fullpath) && strings.has_suffix(root_fullpath, ".odin")
-	if root_is_single_file || try_add_import_path_check(root_fullpath, root_fullpath, tokenizer.Pos{}, allocator) {
-		// Root package has empty import path (it's the target, not an import)
-		//
-		// The kind is `.Init`, matching C++ parser.cpp:7098:
-		//     try_add_import_path(p, init_fullpath, init_fullpath, init_pos, Package_Init);
-		// It used to be `.Normal`, which made `pkg.kind == .Init` unsatisfiable port-wide and left
-		// the whole entry-point surface dead (#589) -- check_entry_point returns early on
-		// `init_scope == nil`, so info.entry_point was never written and C++'s "no main" diagnostic
-		// had no counterpart. The runtime seed above is dequeued first and is unaffected.
-		append(&to_load, Package_To_Load{import_path = "", fullpath = root_fullpath, kind = .Init})
-	}
-	// Marked attempted either way: the reference's imported_files set is updated at the TOP of
-	// try_add_import_path, before any of the checks, so a rejected path is never retried.
+	// The kind is `.Init`, matching C++ parser.cpp:7098:
+	//     try_add_import_path(p, init_fullpath, init_fullpath, init_pos, Package_Init);
+	// It used to be `.Normal`, which made `pkg.kind == .Init` unsatisfiable port-wide and left
+	// the whole entry-point surface dead (#589) -- check_entry_point returns early on
+	// `init_scope == nil`, so info.entry_point was never written and C++'s "no main" diagnostic
+	// had no counterpart. The runtime seed above is dequeued first and is unaffected.
+	append(&to_load, Package_To_Load{import_path = "", fullpath = root_fullpath, kind = .Init})
 	attempted[root_fullpath] = true
 
 	// Process queue
@@ -1974,19 +1867,6 @@ _check_package :: proc(path: string, allocator := context.allocator) -> (result:
 	// same channel `check_errors` and the diagnostics already use - it is written by error_va
 	// on whichever thread trips the cap and read here after every worker has been joined.
 	result.check_ok = check_files(c, files[:])
-
-	// LEDGER #1297. C++ Reference: main.cpp:4357-4360 --
-	//     check_parsed_files(checker);
-	//     if (!build_context.ignore_unused_defineables) {
-	//         check_defines(&build_context, checker);
-	//     }
-	// IMMEDIATELY after checking and BEFORE print_all_errors, so the warning joins the same
-	// batch as everything else rather than trailing it. `odin check . -define:X=1` on a package
-	// that never says `#config(X, ...)` prints this with no other flags, so its absence was a
-	// divergence on ordinary input, not a flag-gated one.
-	if !build_context.ignore_unused_defineables {
-		check_defines(&c.info)
-	}
 
 	harvest_check_diagnostics(&result)
 	return

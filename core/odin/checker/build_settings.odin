@@ -476,6 +476,20 @@ Build_Context :: struct {
 	json_errors:                        bool,
 	has_ansi_terminal_colours:          bool,
 	ignore_lazy:                        bool,
+	// LEDGER #1290. C++: build_settings.cpp:571, set by `-internal-ignore-panic` (main.cpp:1765)
+	// and read at check_builtin.cpp:2716 to SUPPRESS "Compile time panic" and its "Called
+	// within" continuation -- while still invalidating the operand, so `#panic` keeps diverging
+	// and the surrounding code keeps checking. The port had no field, so the flag was inert and
+	// the diagnostic was unconditional. Registered for Command_all (main.cpp:749), so it is a
+	// valid `odin check` flag and the axis is corpus-measurable.
+	ignore_panic:                       bool,
+	// LEDGER #1297. C++: build_settings.cpp:533 `bool ignore_unused_defineables;`, set by
+	// `-ignore-unused-defineables` (main.cpp:1068-1070) and read at main.cpp:4358 to skip
+	// check_defines() entirely. The two sibling fields C++ declares beside it --
+	// show_defineables and export_defineables_file -- drive PRINTERS in main.cpp; this one gates
+	// a DIAGNOSTIC that `odin check` emits with no flags at all, which is why it is here and they
+	// are not.
+	ignore_unused_defineables:          bool,
 	// dynamic_map_calls selects which runtime helpers a map get/set registers.
 	// C++: build_settings.cpp:603, set ONLY by -dynamic-map-calls (main.cpp:1589), so the DEFAULT
 	// (false) is the branch that uses map_desired_position / __dynamic_map_check_grow etc.
@@ -491,6 +505,16 @@ Build_Context :: struct {
 	no_rtti:                            bool,
 	source_code_location_info:          Source_Code_Location_Info,
 	max_error_count:                    int,
+	// LEDGER #1289. C++: build_settings.cpp:597, set by `-did-you-mean-limit:N` (main.cpp:1424-
+	// 1435) and READ at check_expr.cpp:157 to bound the "Suggestion: Did you mean?" block. The
+	// port had no field at all and hard-coded DID_YOU_MEAN_LIMIT at the one read site, so the
+	// flag was silently inert. Unlike `-source-code-locations:` this one IS registered for
+	// Command__does_check (main.cpp:671), so `odin check -did-you-mean-limit:2` is a valid
+	// oracle command line and the axis is corpus-measurable through a cell's flags.txt.
+	//
+	// Zero means "not set"; the default is applied in init_build_context below, mirroring
+	// main.cpp:2024's `if (build_context.did_you_mean_limit == 0) ... = DEFAULT`.
+	did_you_mean_limit:                 int,
 
 	// Target features (CPU feature sets)
 	strict_target_features:             bool,
@@ -1190,6 +1214,19 @@ init_build_context :: proc(cross_target: ^Target_Metrics = nil, subtarget: Subta
 	// C++: build_settings.cpp:1718-1720
 	if bc.max_error_count <= 0 {
 		bc.max_error_count = DEFAULT_MAX_ERROR_COLLECTOR_COUNT
+	}
+
+	// LEDGER #1289. C++: main.cpp:2024 --
+	//     if (build_context.did_you_mean_limit == 0) build_context.did_you_mean_limit = DEFAULT_DID_YOU_MEAN_LIMIT;
+	// Note the test is `== 0`, NOT `<= 0`, and it lives in the driver rather than in
+	// init_build_context. The distinction is not reachable from a command line -- the flag
+	// parser (main.cpp:1428-1433) already replaces any non-positive N with the default after
+	// printing "%s expected a positive non-zero number, got %s" -- but it is reachable from a
+	// library embedder that assigns the field directly, so the `== 0` is reproduced exactly and
+	// a deliberately negative limit stays negative (which check_did_you_mean_print's `limit > 0`
+	// guard then reads as "no limit").
+	if bc.did_you_mean_limit == 0 {
+		bc.did_you_mean_limit = DID_YOU_MEAN_LIMIT
 	}
 
 	// Default host platform detection

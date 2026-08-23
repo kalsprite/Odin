@@ -690,10 +690,7 @@ type_has_nil :: proc(t: ^Type) -> bool {
 //   MAXIMUM_TYPE_DISTANCE = auto_cast or very permissive conversion
 //
 // C++ Reference: check_expr.cpp:667-989
-// #1273. `allow_unions` -- src/check_expr.cpp:692. Added by the merge to stop a union from being
-// reached through another union's variant list. It is defaulted TRUE, so every existing caller is
-// unaffected; the only site that passes FALSE is the multi-variant loop below.
-check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, type: ^Type, allow_array_programming := true, allow_unions := true) -> i64 {
+check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, type: ^Type, allow_array_programming := true) -> i64 {
 	// Note: c can be nil for simple type checks
 	if c == nil {
 		assert(operand.mode == .Value)
@@ -948,7 +945,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 	}
 
 	// C++ Reference: check_expr.cpp check_distance_between_types
-	if is_type_union(dst) && allow_unions {
+	if is_type_union(dst) {
 		union_type := dst.variant.(Type_Union)
 		for vt in union_type.variants {
 			if are_types_identical(vt, s) {
@@ -976,11 +973,7 @@ check_distance_between_types :: proc(c: ^Checker_Context, operand: ^Operand, typ
 			prev_lowest_score: i64 = -1
 			lowest_score: i64 = -1
 			for vt in union_type.variants {
-				// #1273. src/check_expr.cpp:920 passes allow_unions=FALSE here and ONLY here. The
-				// single-variant branch above it still passes true (src/check_expr.cpp:912), so a
-				// single-variant union whose variant is itself a union still resolves; a
-				// multi-variant one does not. That asymmetry is the reference's.
-				score := check_distance_between_types(c, operand, vt, allow_array_programming, false)
+				score := check_distance_between_types(c, operand, vt, allow_array_programming)
 				if score >= 0 {
 					if lowest_score < 0 {
 						lowest_score = score

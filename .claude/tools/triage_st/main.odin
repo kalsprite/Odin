@@ -4,6 +4,7 @@ import "core:fmt"
 import "core:os"
 import "core:odin/checker"
 import "core:strconv"
+import "core:strings"
 
 main :: proc() {
 	args := os.args
@@ -122,6 +123,21 @@ main :: proc() {
 			// semicolon" on `strict_style || .Semicolon in vet_flags`, and only the strict_style
 			// half was reachable from this harness.
 			checker.build_context.vet_flags |= {.Semicolon}
+		case "-vet-tabs":
+			// t1287. Third of the same family. parse_enforce_tabs (parser.odin) is gated on
+			// ast.Vet_Flag_Bit.Tabs and NOTHING in the port read that bit until #1287, so this
+			// case is what makes "With '-vet-tabs', tabs must be used for indentation"
+			// measurable at all. Without it the flag became a phantom package.
+			checker.build_context.vet_flags |= {.Tabs}
+		case "-internal-ignore-lazy":
+			// #1291. C++ main.cpp:1759, registered for Command_all (main.cpp:747). Suppresses the
+			// `#+lazy` file tag, so every entity in a lazy file is checked eagerly.
+			checker.build_context.ignore_lazy = true
+		case "-internal-ignore-panic":
+			// #1290. C++ main.cpp:1765, registered for Command_all (main.cpp:749) so `odin check`
+			// takes it. Suppresses "Compile time panic" and its "Called within" continuation
+			// without changing whether #panic is accepted.
+			checker.build_context.ignore_panic = true
 		case "-strict-style":
 			checker.build_context.strict_style = true
 		case "-json-errors":
@@ -139,6 +155,63 @@ main :: proc() {
 			// Handled in the default arm rather than as its own case because it carries a value.
 			if len(a) > 8 && a[:8] == "-target:" {
 				// Already consumed by the pre-scan above; swallow it so it is not read as a path.
+			} else if len(a) > 11 && a[:11] == "-microarch:" {
+				// #1279. Also consumed by a pre-scan, and it was NOT swallowed here -- so
+				// `-microarch:rocket-rv64` was appended to `paths` and the harness then tried to
+				// check a package by that name, printing a phantom
+				//     ### -microarch:rocket-rv64 files=0 errors=0 ...
+				// unit. Harmless in isolation but it inflates the unit count of any cross-target
+				// sweep that passes the flag, which is exactly the sweep it exists for. Found
+				// while witnessing the riscv64 atomics gate.
+			} else if len(a) > 17 && a[:17] == "-target-features:" {
+				// #1279. NEW. The oracle's driver refuses a riscv64 build whose microarch lacks
+				// "f"/"m" BEFORE the checker runs, so reaching the atomics gate on the oracle side
+				// needs `-target-features:f,d,m,c`. That validation is driver-level and is
+				// deliberately not modelled here (same reasoning as -no-rtti above), but the
+				// harness must still be able to EXPRESS what the oracle is given, or the two arms
+				// cannot be handed the same command line.
+				//
+				// Written to target_features_string, which is resolve_target_features' input, not
+				// to target_features_set -- writing the resolved set directly would bypass the
+				// '+'/'-' handling and the microarch defaults it is merged with.
+				checker.build_context.target_features_string = a[17:]
+			} else if len(a) > 20 && a[:20] == "-did-you-mean-limit:" {
+				// #1289. C++ main.cpp:1424-1435. Carries a value, so it lives in the default arm.
+				//
+				// C++ replaces a non-positive N with DEFAULT_DID_YOU_MEAN_LIMIT after printing
+				//     %s expected a positive non-zero number, got %s
+				// and keeps going -- exactly the shape -thread-count: has below. The message is
+				// driver output and is not modelled here; the CLAMP is, because it decides how
+				// many suggestion lines the checker prints, which is graded output.
+				n, ok := strconv.parse_int(a[20:])
+				if !ok || n <= 0 {
+					n = 10 // DEFAULT_DID_YOU_MEAN_LIMIT, build_settings.cpp:12
+				}
+				checker.build_context.did_you_mean_limit = n
+			} else if len(a) > 23 && a[:23] == "-source-code-locations:" {
+				// #1288. C++ main.cpp:1599-1611. Carries a value, so it lives in the default arm.
+				//
+				// This flag is registered for run/build/test ONLY (main.cpp:718,
+				// Command__does_build), so `odin check` REFUSES it -- which is why the whole
+				// `-source-code-locations:` axis was invisible to a corpus whose every cell is an
+				// `odin check`. The oracle arm of its witness has to use `odin build`, and the
+				// port arm uses this case.
+				//
+				// The reference's driver rejects an unrecognised value with
+				//     -source-code-locations:<string> options are 'normal', 'obfuscated',
+				//     'filename', and 'none'
+				// and sets bad_flags. That is argument validation, not semantic analysis, so it is
+				// deliberately not modelled here -- same reasoning as -target-features: above.
+				// An unrecognised value therefore leaves the mode at its default, Normal.
+				// C++ uses str_eq_ignore_case, so `-source-code-locations:FILENAME` is accepted;
+				// equal_fold is the same comparison.
+				v := a[23:]
+				switch {
+				case strings.equal_fold(v, "normal"):     checker.build_context.source_code_location_info = .Normal
+				case strings.equal_fold(v, "obfuscated"): checker.build_context.source_code_location_info = .Obfuscated
+				case strings.equal_fold(v, "filename"):   checker.build_context.source_code_location_info = .Filename
+				case strings.equal_fold(v, "none"):       checker.build_context.source_code_location_info = .None
+				}
 			} else if len(a) > 14 && a[:14] == "-thread-count:" {
 				// t211. C++ main.cpp:1076-1086 parses this into build_context.thread_count, which
 				// init_build_context otherwise defaults to the logical core count. Carries a value,
@@ -173,6 +246,10 @@ main :: proc() {
 					fmt.eprintf("triage_st: -define %v: %s\n", derr, detail)
 					os.exit(2)
 				}
+			} else if a == "-ignore-unused-defineables" {
+				// t1297. Gates check_defines(), which is now called from
+				// check_package_from_path exactly where main.cpp:4358 calls it.
+				checker.build_context.ignore_unused_defineables = true
 			} else if len(a) > 13 && a[:13] == "-dump-mindep:" {
 				// t243t. The minimum dependency set -- the only instrument that can grade a
 				// dep-set fix. MUST be run with -no-threads to be deterministic.

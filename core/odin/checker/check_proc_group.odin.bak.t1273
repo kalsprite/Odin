@@ -485,8 +485,7 @@ get_procedure_param_count_excluding_defaults :: proc(proc_type: ^Type, total_cou
 
 // check_is_assignable_to_with_score checks assignability and returns a match score
 // Reference: check_expr.cpp:1005-1034
-// #1273: `allow_unions` forwarded to check_distance_between_types -- src/check_expr.cpp:1038,1048.
-check_is_assignable_to_with_score :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: ^Type, score: ^i64 = nil, is_variadic := false, allow_array_programming := true, allow_unions := true) -> bool {
+check_is_assignable_to_with_score :: proc(ctx: ^Checker_Context, operand: ^Operand, target_type: ^Type, score: ^i64 = nil, is_variadic := false, allow_array_programming := true) -> bool {
 	if ctx == nil {
 		assert(operand.mode == .Value)
 	}
@@ -506,7 +505,7 @@ check_is_assignable_to_with_score :: proc(ctx: ^Checker_Context, operand: ^Opera
 	// later without weakening the assignability test now. LEDGER #386.
 
 	// Calculate type distance
-	distance := check_distance_between_types(ctx, operand, target_type, allow_array_programming, allow_unions)
+	distance := check_distance_between_types(ctx, operand, target_type, allow_array_programming)
 	if distance >= 0 {
 		if score != nil {
 			score^ = assign_score_function(distance, is_variadic)

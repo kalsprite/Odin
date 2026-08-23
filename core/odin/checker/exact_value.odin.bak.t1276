@@ -338,61 +338,9 @@ is_exact_value_zero :: proc(v: Exact_Value) -> bool {
 			return false
 		}
 		return is_exact_value_zero(val.expr.tav.value)
-
-	// #1276. The four arms below and the tail's polarity were MISSING. src/check_expr.cpp:
-	// 12969 String16, 12991 Compound, 13009 Procedure, 13011 Typeid, 13022 `return true`. The port
-	// had none of them and fell through to `return false`, so it answered "not zero" for every one
-	// of those kinds where the reference answers on the value's own terms.
-	//
-	// NOT MEASURABLE, and recorded as such rather than claimed as a fix. Every reader in BOTH
-	// compilers gates on the kind before asking:
-	//   src/check_stmt.cpp:2814,2822   `... .kind == ExactValue_Integer && is_exact_value_zero(...)`
-	//   src/check_expr.cpp:5287        `is_exact_value_zero(..) && (kind == Integer || kind == Float)`
-	//   check_stmt.odin:1999           gated on big.Int
-	//   check_expr.odin:5263           convert_untyped_error, reached only for UNTYPED operands,
-	//                                  and none of these four kinds is ever untyped
-	//   check_expr.odin:2091           `is_constant_zero`, a nested helper that is never called
-	// So no witness can separate the two compilers here today. It is ported because
-	// core/odin/checker is a library and the predicate is public: a caller outside the checker's
-	// own gating would get the wrong answer, and "unreachable from inside" is not the same as
-	// "unreachable".
-	case Exact_Value_String16:
-		return val.len == 0
-
-	case Exact_Value_Compound:
-		// src/check_expr.cpp:12991-13007. A compound is zero when it is nil, or has no elements,
-		// or EVERY element is a constant that is itself zero. A non-constant element makes the
-		// whole thing non-zero -- the same asymmetry the Variant arm above has.
-		if val.expr == nil {
-			return true
-		}
-		cl, is_cl := val.expr.derived.(^ast.Comp_Lit)
-		if !is_cl {
-			// The reference's ast_node() macro asserts the kind. The port cannot assert without
-			// aborting the host, so a non-Comp_Lit payload is treated as the empty case.
-			return true
-		}
-		for elem in cl.elems {
-			if elem.tav.mode != .Constant {
-				return false
-			}
-			if !is_exact_value_zero(elem.tav.value) {
-				return false
-			}
-		}
-		return true
-
-	case Exact_Value_Procedure:
-		return val.expr == nil
-
-	case Exact_Value_Typeid:
-		return val.type == nil
 	}
 
-	// src/check_expr.cpp:13022 -- the reference's tail is `return true`, not false. With every arm
-	// above present it is unreachable in both compilers; the polarity is matched anyway so that a
-	// kind added later defaults the same way on both sides.
-	return true
+	return false
 }
 
 // ======================================================================================

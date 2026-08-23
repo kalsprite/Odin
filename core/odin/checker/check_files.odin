@@ -610,8 +610,42 @@ register_packages_from_files :: proc(c: ^Checker, files: []^ast.File) {
 			case .Public:
 				// no flag
 			}
+			// LEDGER #1291. C++ parser.cpp:7202-7208 does NOT set AstFile_IsLazy
+			// unconditionally -- it has two guards, and the port had neither:
+			//
+			//     } else if (lc == "lazy") {
+			//         if (build_context.ignore_lazy) {
+			//             // Ignore
+			//         } else if (f->pkg->kind == Package_Init && build_context.command_kind == Command_doc) {
+			//             // Ignore
+			//         } else {
+			//             f->flags |= AstFile_IsLazy;
+			//         }
+			//
+			// build_context.ignore_lazy is `-internal-ignore-lazy` (main.cpp:1759), registered
+			// for Command_all (main.cpp:747) so `odin check` takes it. The port DECLARED the
+			// field (build_settings.odin:478) and never read it -- the same declared-and-never-
+			// read shape as #1288 and #1289, found by the same build_context field audit.
+			//
+			// The second guard keeps `odin doc` from lazily skipping the init package, which
+			// would leave its entities undocumented. This port runs it against pkg.kind rather
+			// than is_package_init: C++ tests the KIND ALONE here, not the kind-or-fullpath
+			// disjunction that checker.cpp:267 uses, and build_infrastructure.odin:157 already
+			// records why the two are not interchangeable. package_resolver.odin:1239 seeds the
+			// root package with `.Init`, so the kind is available by the time this loop runs.
+			//
+			// LOCATION NOTE: C++ makes this decision in the PARSER, where the tag is consumed.
+			// The port's parser produces tags without interpreting them (file_tags.odin is a
+			// public-API tag reader, not a checker hook), so the decision lives here, at the one
+			// place the tag becomes a file flag. Same decision, same inputs, later.
 			if tags.lazy {
-				mark_file_lazy(&c.info, file)
+				if build_context.ignore_lazy {
+					// Ignore
+				} else if pkg.kind == .Init && .Doc in build_context.command_kind {
+					// Ignore
+				} else {
+					mark_file_lazy(&c.info, file)
+				}
 			}
 			if tags.no_instrumentation {
 				disable_file_instrumentation(&c.info, file)

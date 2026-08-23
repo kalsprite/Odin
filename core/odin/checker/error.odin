@@ -2510,14 +2510,23 @@ check_did_you_mean_print :: proc(results: []Distance_And_Target, prefix := "") {
 	if len(results) == 0 {
 		return
 	}
+	// LEDGER #1289. C++ check_expr.cpp:157 reads `build_context.did_you_mean_limit` here; the
+	// port read the CONSTANT, so `-did-you-mean-limit:N` changed nothing. DID_YOU_MEAN_LIMIT
+	// survives as the default the field is initialised to (init_build_context), which is where
+	// C++ puts it too -- the constant is the default, not the limit.
+	limit := build_context.did_you_mean_limit
+	if limit == 0 {
+		// Reachable only when a library embedder never ran init_build_context.
+		limit = DID_YOU_MEAN_LIMIT
+	}
 	error_line("\tSuggestion: Did you mean?\n")
 	count := 0
 	for r in results {
 		error_line("\t\t%s%s\n", prefix, r.target)
 		count += 1
-		if DID_YOU_MEAN_LIMIT > 0 && count == DID_YOU_MEAN_LIMIT {
+		if limit > 0 && count == limit {
 			// NOTE: C++ omits the trailing newline on this line specifically.
-			error_line("\t\t... and %d more ...", len(results) - DID_YOU_MEAN_LIMIT)
+			error_line("\t\t... and %d more ...", len(results) - limit)
 			break
 		}
 	}

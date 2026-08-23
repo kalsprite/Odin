@@ -119,7 +119,6 @@ Exact_Value_Compound :: ast.Exact_Value_Compound
 Exact_Value_Procedure :: ast.Exact_Value_Procedure
 Exact_Value_Typeid :: ast.Exact_Value_Typeid
 Exact_Value_String16 :: ast.Exact_Value_String16
-Exact_Value_Variant :: ast.Exact_Value_Variant
 
 // Exact_Value is re-declared from ast.Exact_Value
 // The canonical definition lives in core/odin/ast/semantic_types.odin
@@ -139,29 +138,6 @@ Expr_Info :: struct {
 Raddbg_Type_View :: struct {
 	type: ^Type, // C++ line 437: Type *type
 	view: string, // C++ line 438: String view
-}
-
-// Defineable is one `#config(NAME, default)` or `#defined(NAME)` SITE recorded during checking.
-// C++ Reference: checker.hpp:685-694 (struct Defineable).
-//
-// It is a record of what the SOURCE offers to be defined, not of what was defined -- the two are
-// compared afterwards by check_defines, which warns about a `-define:` that no site asks for. One
-// entry per site, so the same NAME appearing in three files produces three entries; the dedup that
-// sort_defineables_and_remove_duplicates performs is by POSITION, not by name.
-//
-// `default_value` is the DEFAULT, never the override. In C++ this is `def.value` -- the operand for
-// the second argument -- captured before the config-scope lookup can replace `operand`, so a
-// `-define:` in force does not change what is recorded here. For `#defined` there is no default
-// argument at all and C++ records `exact_value_bool(false)`.
-//
-// The two `_str` fields C++ carries (default_value_str, pos_str) are NOT reproduced: they are
-// computed by temp_alloc_defineable_strings only when -show-defineables or -export-defineables is
-// in play, i.e. they are formatting state for a driver this library does not have.
-Defineable :: struct {
-	name:          string,
-	default_value: Exact_Value,
-	pos:           tokenizer.Pos,
-	docs:          ^ast.Comment_Group,
 }
 
 // Load_File_Tier represents the level of file information cached
@@ -1042,12 +1018,6 @@ Checker_Info :: struct {
 	// unguarded shared-container write corrupting the heap.
 	objc_class_name_mutex:                        sync.Mutex,
 	objc_class_names:                             map[string]bool,
-	// C++ Reference: checker.hpp:731-732 -- `BlockingMutex defineables_mutex; Array<Defineable> defineables;`
-	// Written from check_builtin's `#config` and `#defined` arms, which run on checker worker
-	// threads, so the mutex is not decoration. A plain [dynamic] append races on the backing
-	// pointer exactly the way #141 did.
-	defineables_mutex:                            sync.Mutex,
-	defineables:                                  [dynamic]Defineable,
 	objc_method_mutex:                            sync.Mutex, // C++ line 513: Thread-safe access to objc_method_implementations
 	objc_method_implementations:                  map[^Type][dynamic]Objc_Method_Data, // C++ line 514: Type -> method data array
 	all_procedures_queue:                         queue.MPSC_Queue(^Proc_Info), // C++ line 520

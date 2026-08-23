@@ -52,17 +52,33 @@ import "core:odin/checker"
 main :: proc() {
 	args := os.args
 	if len(args) < 3 {
-		fmt.eprintln("usage: triage_docbin write <package-path> <out.odin-doc>")
+		fmt.eprintln("usage: triage_docbin write <package-path> <out.odin-doc> [-internal-ignore-panic]")
 		fmt.eprintln("       triage_docbin dump  <file.odin-doc>")
 		os.exit(2)
 	}
 	switch args[1] {
 	case "write":
-		if len(args) != 4 {
-			fmt.eprintln("triage_docbin: write takes <package-path> <out.odin-doc>")
+		// #1293. The optional trailing flag mirrors the reference's `-internal-ignore-panic`, and
+		// exists because three real packages in the sweep list -- core/path, core/odin/format,
+		// core/odin/printer -- are `#panic` stubs. Without it the ORACLE cannot document them
+		// either, so docbin.sh counted them REF-NODOC and graded nothing. They are not a limit of
+		// the reference, they are a limit of the harness. Accepted as a positional flag rather
+		// than parsed generally: this tool has exactly two subcommands and one flag, and a real
+		// flag parser here would be more code than the thing it configures.
+		ignore_panic := false
+		switch len(args) {
+		case 4:
+		case 5:
+			if args[4] != "-internal-ignore-panic" {
+				fmt.eprintfln("triage_docbin: write: unknown flag %s", args[4])
+				os.exit(2)
+			}
+			ignore_panic = true
+		case:
+			fmt.eprintln("triage_docbin: write takes <package-path> <out.odin-doc> [-internal-ignore-panic]")
 			os.exit(2)
 		}
-		write_doc(args[2], args[3])
+		write_doc(args[2], args[3], ignore_panic)
 	case "dump":
 		if len(args) != 3 {
 			fmt.eprintln("triage_docbin: dump takes <file.odin-doc>")
@@ -79,11 +95,12 @@ main :: proc() {
 // WRITE SIDE
 // ======================================================================================
 
-write_doc :: proc(path: string, out: string) {
+write_doc :: proc(path: string, out: string, ignore_panic := false) {
 	checker.ensure_build_context_initialized()
 	checker.build_context.no_entry_point = true
 	checker.build_context.command_kind = {.Doc}
 	checker.build_context.cmd_doc_flags = {.Doc_Format}
+	checker.build_context.ignore_panic = ignore_panic
 
 	checker.init_odin_root_from_env()
 

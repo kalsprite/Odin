@@ -6,6 +6,7 @@ import "core:fmt"
 import "core:math/big"
 import "core:mem"
 import "core:odin/ast"
+import "core:odin/tokenizer"
 import "core:sync"
 import "core:time"
 /*
@@ -81,6 +82,8 @@ init_checker_info :: proc(info: ^Checker_Info, allocator := context.allocator) {
 	info.entities = make([dynamic]^Entity, allocator)
 	info.all_procedures = make([dynamic]^Proc_Info, allocator)
 	info.raddbg_type_views = make([dynamic]Raddbg_Type_View, allocator)
+	// C++ Reference: checker.cpp:1617 `array_init(&i->defineables, a);`
+	info.defineables = make([dynamic]Defineable, allocator)
 	info.required_foreign_imports_through_force = make([dynamic]^Entity, allocator)
 	info.testing_procedures = make([dynamic]^Entity, allocator)
 	info.init_procedures = make([dynamic]^Entity, allocator)
@@ -159,6 +162,7 @@ destroy_checker_info :: proc(info: ^Checker_Info) {
 	delete(info.entities)
 	delete(info.all_procedures)
 	delete(info.raddbg_type_views)
+	delete(info.defineables) // C++ checker.cpp:1656 `array_free(&i->defineables)`
 	delete(info.required_foreign_imports_through_force)
 	delete(info.testing_procedures)
 	delete(info.init_procedures)
@@ -446,6 +450,47 @@ populate_config_package_scope :: proc(info: ^Checker_Info) -> (had_double_declar
 	}
 
 	return had_double_declaration
+}
+
+// check_defines warns about every `-define:NAME=VALUE` that no `#config`/`#defined` site in the
+// project ever asks for.
+// C++ Reference: main.cpp:2124-2148 (check_defines), called from main.cpp:4358-4360 as
+//     if (!build_context.ignore_unused_defineables) { check_defines(&build_context, checker); }
+//
+// WHY THIS LIVES IN THE CHECKER LIBRARY AND NOT IN A DRIVER. It reads `info.defineables`, which
+// only exists because checking populated it, and it emits a DIAGNOSTIC -- it is not output
+// formatting like -show-defineables. `odin check .` prints it with no flags at all, so a port that
+// omits it diverges on ordinary input: measured at t1297, `odin check . -define:OTHER=1` on a
+// package that never mentions OTHER prints the warning and the port printed nothing.
+//
+// THE GUARD IS THE CALLER'S. C++ tests build_context.ignore_unused_defineables at the call site,
+// not inside; reproduced here so a caller that wants the data without the diagnostic has the same
+// shape available.
+//
+// ORDER. C++ iterates `bc->defined_values`, a PtrMap, so with two unused defines the two warnings
+// come out in an unspecified order on BOTH sides. That is a reference property, not a port choice.
+check_defines :: proc(info: ^Checker_Info) {
+	for name in build_context.defined_values {
+		found := false
+		for &def in info.defineables {
+			if def.name == name {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
+
+		// C++ wraps this in ERROR_BLOCK() so the warning and its Suggestion cannot be split by
+		// another thread's diagnostic, and anchors it at `nullptr` -- no file, no line.
+		begin_error_block()
+		warning(tokenizer.Pos{}, "given -define:%s is unused in the project", name)
+		if !global_ignore_warnings() {
+			error_line("\tSuggestion: use the -show-defineables flag for an overview of the possible defines\n")
+		}
+		end_error_block()
+	}
 }
 
 // Global_Enum_Value is one member of a synthesized universe-scope enum.

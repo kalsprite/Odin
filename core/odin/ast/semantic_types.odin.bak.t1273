@@ -264,26 +264,6 @@ Exact_Value_String16 :: struct {
 	len:  int,
 }
 
-// Exact_Value_Variant represents a constant that has been converted to a UNION type, holding the
-// expression whose own type-and-value carries the underlying constant.
-//
-// LEDGER #1273. Added upstream on 2026-08-19 as `ExactValue_Variant` (src/exact_value.cpp:32).
-// `V :: U(1)` with `U :: union { int, f32 }` is now a legal constant declaration, and the value it
-// declares is not the integer 1 -- it is "the union U holding the expression `1`". Everything that
-// consumes a constant value therefore needs an arm for it: comparison, zero-testing, matching and
-// printing all reach through `expr.tav.value` rather than reading a payload directly.
-//
-// The reference additionally carries a `Type *variant_type` field on ExactValue ITSELF, alongside
-// the union rather than inside any one arm (src/exact_value.cpp:72), written at
-// check_expr.cpp:12875 for values of ANY kind. It is deliberately NOT reproduced here. Its only
-// readers in the whole compiler are llvm_backend_const.cpp:807-826 -- there is no reader anywhere
-// in the checker -- so it cannot affect semantic analysis, and modelling it would mean turning this
-// public union into a struct wrapping a union, which is a breaking change to core:odin/ast (#868)
-// bought for no observable behaviour.
-Exact_Value_Variant :: struct {
-	expr: ^Expr,
-}
-
 // Exact_Value represents compile-time constant values
 Exact_Value :: union {
 	bool,
@@ -297,7 +277,6 @@ Exact_Value :: union {
 	Exact_Value_Procedure,
 	Exact_Value_Typeid,
 	Exact_Value_String16,
-	Exact_Value_Variant,
 }
 
 // ============================================================================

@@ -717,70 +717,6 @@ is_type_raw_union :: proc(t: ^Type) -> bool {
 	return s.is_raw_union
 }
 
-// #1273. is_type_constant_type_for_unions -- src/types.cpp:2689-2721. A SECOND, LOOSER
-// constant-type predicate that the merge introduced alongside constant union variants, used only
-// to decide whether a union may hold a constant.
-//
-// It is NOT is_type_constant_type with extra arms bolted on; the two differ in both directions and
-// every difference below is deliberate and reproduced verbatim:
-//
-//   * .Struct and .Fixed_Capacity_Dynamic_Array are accepted HERE and rejected by
-//     is_type_constant_type. That is the point of the predicate: a union variant may be an
-//     aggregate whose leaves are all constants, even though such an aggregate is not itself a
-//     "constant type" anywhere else in the checker.
-//   * .Union recurses into is_type_union_constantable, so a union of unions is decided.
-//   * .Simd_Vector and .Matrix are accepted by is_type_constant_type and are ABSENT here, so a
-//     union with a `#simd[4]f32` or a `matrix[2,2]f32` variant is NOT constantable. Nothing in the
-//     reference marks this as intentional and it may well be an oversight there, but a reference
-//     quirk is the contract; it is recorded rather than corrected.
-//   * The .Array and .Enumerated_Array arms call is_type_constant_type on the ELEMENT, not this
-//     proc -- so `[4]SomeStruct` is rejected while `SomeStruct` alone is accepted. The
-//     .Fixed_Capacity_Dynamic_Array arm, immediately below them, DOES recurse into this proc. The
-//     inconsistency is the reference's, at src/types.cpp:2702-2707.
-is_type_constant_type_for_unions :: proc(t: ^Type) -> bool {
-	ct := core_type(t)
-	if ct == nil {
-		return false
-	}
-
-	#partial switch ct.kind {
-	case .Basic:
-		basic := ct.variant.(Type_Basic)
-		if basic.kind == .Typeid {
-			return true
-		}
-		return (basic.flags & BASIC_FLAG_CONSTANT_TYPE) != {}
-
-	case .Bit_Set:
-		return true
-
-	case .Proc:
-		return true
-
-	case .Array:
-		return is_type_constant_type(ct.variant.(Type_Array).elem)
-
-	case .Enumerated_Array:
-		return is_type_constant_type(ct.variant.(Type_Enumerated_Array).elem)
-
-	case .Fixed_Capacity_Dynamic_Array:
-		return is_type_constant_type_for_unions(ct.variant.(Type_Fixed_Capacity_Dynamic_Array).elem)
-
-	case .Struct:
-		for field in ct.variant.(Type_Struct).fields {
-			if !is_type_constant_type_for_unions(field.type) {
-				return false
-			}
-		}
-		return true
-
-	case .Union:
-		return is_type_union_constantable(ct)
-	}
-
-	return false
-}
-
 // is_type_union_constantable checks if union can appear in constant expressions
 // C++ Reference: types.cpp:2516-2532
 is_type_union_constantable :: proc(t: ^Type) -> bool {
@@ -796,13 +732,14 @@ is_type_union_constantable :: proc(t: ^Type) -> bool {
 		return true
 	}
 
-	// #1273. src/types.cpp:2723-2736 has ONE loop over the variants and no single-variant special
-	// case; the port's separate `len == 1` branch was equivalent and is dropped so the two read the
-	// same. The predicate is now is_type_constant_type_for_unions, not is_type_constant_type --
-	// that is the behaviour change, and it WIDENS what may be constant: a union whose variant is a
-	// struct of constants is now constantable where before it was not.
+	// Single-variant unions are constantable if the variant is constantable
+	if len(u.variants) == 1 {
+		return is_type_constant_type(u.variants[0])
+	}
+
+	// Multi-variant unions are constantable if all variants are constantable
 	for v in u.variants {
-		if !is_type_constant_type_for_unions(v) {
+		if !is_type_constant_type(v) {
 			return false
 		}
 	}
@@ -822,10 +759,9 @@ is_type_raw_union_constantable :: proc(t: ^Type) -> bool {
 		return false
 	}
 
-	// All fields must be constantable. src/types.cpp:2744-2748 -- also moved to the for_unions
-	// predicate by the merge. The loop's result is dead either way; see the return below.
+	// All fields must be constantable
 	for field in s.fields {
-		if !is_type_constant_type_for_unions(field.type) {
+		if !is_type_constant_type(field.type) {
 			return false
 		}
 	}
