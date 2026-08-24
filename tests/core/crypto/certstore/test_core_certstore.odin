@@ -25,6 +25,10 @@ EC_LEAF := #load("../x509/testdata/chain_ec_leaf.der")
 EC_OTHER_ROOT := #load("../x509/testdata/chain_ec_other_root.der")
 ED_ROOT := #load("../x509/testdata/chain_ed_root.der")
 SELF_SIGNED_EE := #load("../x509/testdata/ec.der")
+// A root whose own validity window ran out in 2015, and a leaf it signed
+// that is still valid.
+EC_EXPIRED_ROOT := #load("../x509/testdata/chain_ec_expired_root.der")
+EC_EXP_LEAF := #load("../x509/testdata/chain_ec_expleaf.der")
 
 // 2027-01-01Z: inside every fixture's validity window.
 CHAIN_NOW :: i64(1798761600)
@@ -577,4 +581,237 @@ test_system_roots :: proc(t: ^testing.T) {
 			)
 		}
 	}
+}
+
+// ---- file adders -----------------------------------------------------
+//
+// ODIN_ROOT is a compile-time constant with a trailing separator, so the
+// fixtures the rest of this file #loads can also be reached by path
+// without the test needing to know its own working directory.
+
+TESTDATA :: ODIN_ROOT + "tests/core/crypto/x509/testdata/"
+
+@(test)
+test_add_anchor_file :: proc(t: ^testing.T) {
+	p: certstore.Pool
+	defer certstore.destroy(&p)
+	if !_init(t, &p) {
+		return
+	}
+
+	// A bare DER file, recognised by its leading 0x30 rather than by its
+	// extension.
+	r, err := certstore.add_anchor_file(&p, TESTDATA + "chain_ec_root.der")
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, r.seen, 1)
+	testing.expect_value(t, r.added, 1)
+	testing.expect_value(t, r.source, TESTDATA + "chain_ec_root.der")
+	testing.expect_value(t, certstore.anchor_count(&p), 1)
+
+	// Screening applies on this path too.
+	r2, err2 := certstore.add_anchor_file(&p, TESTDATA + "ec.der")
+	testing.expect_value(t, err2, nil)
+	testing.expect_value(t, r2.rejected, 1)
+	testing.expect_value(t, r2.added, 0)
+
+	// And the same file through the explicit door is accepted.
+	r3, err3 := certstore.add_self_signed_anchor_file(&p, TESTDATA + "ec.der")
+	testing.expect_value(t, err3, nil)
+	testing.expect_value(t, r3.added, 1)
+	testing.expect_value(t, certstore.anchor_count(&p), 2)
+
+	// A path that is not there is an error rather than an empty report:
+	// a caller who named a file deserves to be told it was not read.
+	_, nerr := certstore.add_anchor_file(&p, TESTDATA + "does_not_exist.der")
+	testing.expect_value(t, nerr, _s(.Path_Error))
+}
+
+// ---- verification options --------------------------------------------
+
+@(test)
+test_required_eku :: proc(t: ^testing.T) {
+	p: certstore.Pool
+	defer certstore.destroy(&p)
+	if !_init(t, &p) {
+		return
+	}
+
+	certstore.add_anchor_der(&p, EC_ROOT)
+	certstore.add_intermediate_der(&p, EC_INTER)
+
+	leaf, _ := x509.parse(EC_LEAF)
+	defer x509.destroy(&leaf)
+
+	// The leaf carries serverAuth only.
+	chain, err := certstore.verify(
+		&p,
+		&leaf,
+		certstore.Verify_Options {
+			current_time = _now(),
+			dns_name = "leaf.example.com",
+			required_eku = x509.EKU_Bit.Client_Auth,
+		},
+	)
+	delete(chain)
+	testing.expect_value(t, err, _x(.Incompatible_Usage))
+}
+
+@(private = "file")
+_reject_everything :: proc(chain: []^x509.Certificate) -> x509.Error {
+	return .Unknown_Authority if len(chain) > 0 else .None
+}
+
+@(private = "file")
+_accept :: proc(chain: []^x509.Certificate) -> x509.Error {
+	return .None
+}
+
+@(test)
+test_constraint_hook :: proc(t: ^testing.T) {
+	// The hook a CRL check or a pinning policy plugs into. A rejection
+	// here has to free the chain it was handed, which the test runner's
+	// allocator tracking is what actually checks.
+	p: certstore.Pool
+	defer certstore.destroy(&p)
+	if !_init(t, &p) {
+		return
+	}
+
+	certstore.add_anchor_der(&p, EC_ROOT)
+	certstore.add_intermediate_der(&p, EC_INTER)
+
+	leaf, _ := x509.parse(EC_LEAF)
+	defer x509.destroy(&leaf)
+
+	opts := certstore.Verify_Options {
+		current_time = _now(),
+		dns_name     = "leaf.example.com",
+		constraint   = _reject_everything,
+	}
+	chain, err := certstore.verify(&p, &leaf, opts)
+	delete(chain)
+	testing.expect_value(t, err, _x(.Unknown_Authority))
+
+	opts.constraint = _accept
+	chain2, err2 := certstore.verify(&p, &leaf, opts)
+	defer delete(chain2)
+	testing.expect_value(t, err2, nil)
+	testing.expect_value(t, len(chain2), 3)
+}
+
+@(test)
+test_views :: proc(t: ^testing.T) {
+	p: certstore.Pool
+	defer certstore.destroy(&p)
+	if !_init(t, &p) {
+		return
+	}
+
+	certstore.add_anchor_der(&p, EC_ROOT)
+	certstore.add_intermediate_der(&p, EC_INTER)
+	certstore.add_intermediate_der(&p, EC_LEAF)
+
+	as, aerr := certstore.anchors(&p)
+	testing.expect_value(t, aerr, nil)
+	testing.expect_value(t, len(as), 1)
+
+	is, ierr := certstore.intermediates(&p)
+	testing.expect_value(t, ierr, nil)
+	testing.expect_value(t, len(is), 2)
+
+	// A deny removes an entry from the view without removing it from the
+	// pool: count is unchanged, the view shrinks.
+	testing.expect_value(t, certstore.deny_cert(&p, EC_LEAF), nil)
+	is2, ierr2 := certstore.intermediates(&p)
+	testing.expect_value(t, ierr2, nil)
+	testing.expect_value(t, len(is2), 1)
+	testing.expect_value(t, certstore.count(&p), 3)
+}
+
+@(test)
+test_deny_cert_id :: proc(t: ^testing.T) {
+	// Denying by identifier, for a caller holding a pin rather than the
+	// certificate itself.
+	p: certstore.Pool
+	defer certstore.destroy(&p)
+	if !_init(t, &p) {
+		return
+	}
+
+	certstore.add_anchor_der(&p, EC_ROOT)
+	testing.expect_value(t, certstore.deny_cert_id(&p, certstore.cert_id(EC_ROOT)), nil)
+
+	as, aerr := certstore.anchors(&p)
+	testing.expect_value(t, aerr, nil)
+	testing.expect_value(t, len(as), 0)
+	testing.expect_value(t, certstore.anchor_count(&p), 1) // still stored
+}
+
+@(test)
+test_expired_anchor_stores_but_does_not_verify :: proc(t: ^testing.T) {
+	// Two separate questions, deliberately answered in two places.
+	// Screening asks whether a certificate is the KIND of thing that may
+	// be an anchor, and says nothing about time; x509 validates the
+	// anchor's own validity window during the search, matching Go and
+	// OpenSSL. So an expired root goes into the pool and then fails to
+	// terminate a chain.
+	p: certstore.Pool
+	defer certstore.destroy(&p)
+	if !_init(t, &p) {
+		return
+	}
+
+	_, added, err := certstore.add_anchor_der(&p, EC_EXPIRED_ROOT)
+	testing.expect_value(t, err, nil)
+	testing.expect(t, added, "an expired CA is still a CA")
+
+	leaf, _ := x509.parse(EC_EXP_LEAF)
+	defer x509.destroy(&leaf)
+
+	chain, verr := certstore.verify(&p, &leaf, certstore.Verify_Options{current_time = _now()})
+	delete(chain)
+	testing.expect_value(t, verr, _x(.Unknown_Authority))
+}
+
+@(test)
+test_verify_tls_empty_peer :: proc(t: ^testing.T) {
+	p: certstore.Pool
+	defer certstore.destroy(&p)
+	if !_init(t, &p) {
+		return
+	}
+	certstore.add_anchor_der(&p, EC_ROOT)
+
+	vc, err := certstore.verify_tls(&p, nil, "leaf.example.com", _now())
+	certstore.chain_destroy(&vc)
+	testing.expect_value(t, err, _x(.Malformed))
+	testing.expect_value(t, len(vc.chain), 0)
+}
+
+@(test)
+test_pem_bundle_skips_other_blocks :: proc(t: ^testing.T) {
+	// A real bundle carries more than certificates. Anything that is not
+	// a CERTIFICATE block is skipped without being counted, because it
+	// was never a candidate.
+	p: certstore.Pool
+	defer certstore.destroy(&p)
+	if !_init(t, &p) {
+		return
+	}
+
+	key_pem := pem.encode(pem.LABEL_PRIVATE_KEY, []byte{0x01, 0x02, 0x03, 0x04})
+	defer delete(key_pem)
+	root_pem := pem.encode(pem.LABEL_CERTIFICATE, EC_ROOT)
+	defer delete(root_pem)
+
+	bundle := make([dynamic]byte)
+	defer delete(bundle)
+	append(&bundle, ..key_pem)
+	append(&bundle, '\n')
+	append(&bundle, ..root_pem)
+
+	r, err := certstore.add_anchors_pem(&p, bundle[:])
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, r.seen, 1)
+	testing.expect_value(t, r.added, 1)
 }
