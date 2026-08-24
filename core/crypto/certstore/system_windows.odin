@@ -44,8 +44,15 @@ _load_store :: proc(
 	// to release on an early return.
 	ctx: ^win.CERT_CONTEXT
 	for {
+		// SetLastError first: the end-of-store signal is a GetLastError
+		// value, and reading a stale one from some earlier call would turn
+		// a finished store into a failed load.
+		win.SetLastError(0)
 		ctx = win.CertEnumCertificatesInStore(h, ctx)
 		if ctx == nil {
+			if e := win.GetLastError(); e != 0 && e != win.CRYPT_E_NOT_FOUND {
+				return Store_Error.System_Store_Failed
+			}
 			break
 		}
 
@@ -65,20 +72,38 @@ _load_store :: proc(
 
 // _deny_store puts every certificate in a named store onto the deny list
 // without storing any of it.
+//
+// Every failure here is fatal to the load, which is not how the rest of
+// this file treats a missing store. Reading a distrust list is the one
+// operation whose failure GRANTS trust: an unreadable Disallowed store
+// silently becomes an empty one, and every certificate the machine's
+// administrator revoked comes back. A caller who would rather have the
+// roots without the distrust can load the ROOT store itself.
+//
+// The Disallowed store is opened, not created-if-absent by us: system
+// stores under CERT_SYSTEM_STORE_CURRENT_USER are registry-backed and
+// open successfully when empty, so a nil handle means the store could not
+// be reached rather than that nothing has been distrusted.
 @(private)
 _deny_store :: proc(p: ^Pool, name: win.LPCWSTR) -> Error {
 	h := win.CertOpenSystemStoreW(nil, name)
 	if h == nil {
-		// A machine with no Disallowed store is not an error: it means
-		// nothing has been distrusted.
-		return nil
+		return Store_Error.System_Store_Failed
 	}
 	defer win.CertCloseStore(h, 0)
 
 	ctx: ^win.CERT_CONTEXT
 	for {
+		win.SetLastError(0)
 		ctx = win.CertEnumCertificatesInStore(h, ctx)
 		if ctx == nil {
+			// A Disallowed store that cannot be enumerated is a failure
+			// and not an empty deny list. Failing to read a distrust list
+			// and carrying on as though it were empty is the one error
+			// here that grants trust.
+			if e := win.GetLastError(); e != 0 && e != win.CRYPT_E_NOT_FOUND {
+				return Store_Error.System_Store_Failed
+			}
 			break
 		}
 		der := ctx.pbCertEncoded[:ctx.cbCertEncoded]

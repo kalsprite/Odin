@@ -60,7 +60,11 @@ load_system_roots :: proc(p: ^Pool) -> (r: Load_Report, err: Error) {
 			}
 			return r, ferr
 		}
-		if sub.added > 0 {
+		// The test is `seen`, not `added`. A bundle whose certificates
+		// this pool already holds is still the bundle: testing `added`
+		// would make a second load_system_roots on the same pool walk
+		// past every candidate and end in .No_System_Store.
+		if sub.seen > 0 {
 			r = sub
 			r.source = path
 			p.from_system = true
@@ -76,7 +80,7 @@ load_system_roots :: proc(p: ^Pool) -> (r: Load_Report, err: Error) {
 			}
 			return r, derr
 		}
-		if sub.added > 0 {
+		if sub.seen > 0 {
 			r = sub
 			r.source = dir
 			p.from_system = true
@@ -155,6 +159,16 @@ _scan_dir :: proc(p: ^Pool, dir: string, r: ^Load_Report, scratch: ^virtual.Aren
 		   ferr != nil && !_unreadable(ferr) {
 			return ferr
 		}
+	}
+
+	// The iterator records an I/O failure rather than raising it, so
+	// ignoring it here would mean a truncated directory read reported as a
+	// complete one -- an anchor set that is quietly short. Report it as
+	// unreadable, which sends the search on to the next candidate; the
+	// certificates already stored stay stored, and this scan's counts are
+	// discarded with the error.
+	if _, ierr := os.read_directory_iterator_error(&it); ierr != nil {
+		return Store_Error.Path_Error
 	}
 	return nil
 }

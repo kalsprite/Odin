@@ -568,6 +568,8 @@ test_system_roots :: proc(t: ^testing.T) {
 			r.denied,
 		)
 
+		before := certstore.count(&p)
+
 		// Every anchor the pool would actually offer survived screening.
 		as, aerr := certstore.anchors(&p)
 		testing.expect_value(t, aerr, nil)
@@ -580,6 +582,18 @@ test_system_roots :: proc(t: ^testing.T) {
 				"no anchor carries an uninterpreted critical extension",
 			)
 		}
+
+		// Loading twice is not an error. The Unix path decides it has
+		// found the right bundle on `seen` rather than on `added`, so a
+		// bundle whose certificates the pool already holds still counts
+		// as the bundle; testing `added` would send the search past every
+		// candidate and end in .No_System_Store on the second call.
+		r2, err2 := certstore.load_system_roots(&p)
+		testing.expect_value(t, err2, nil)
+		testing.expect_value(t, r2.source, r.source)
+		testing.expect_value(t, r2.seen, r.seen)
+		testing.expect_value(t, r2.added, 0)
+		testing.expect_value(t, certstore.count(&p), before)
 	}
 }
 
